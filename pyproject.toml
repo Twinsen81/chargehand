@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chargehand"
+dynamic = ["version"]
+description = "Label an issue, get a supervised Claude Code session in a fresh git worktree on your own machine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Evgenii Plokhov" }]
+keywords = ["claude", "claude-code", "coding-agent", "automation", "worktree", "linear", "github", "cli"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Build Tools",
+]
+# Runtime dependencies: standard library only (tomllib, sqlite3, urllib, argparse, subprocess).
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Twinsen81/chargehand"
+Repository = "https://github.com/Twinsen81/chargehand"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+chargehand = "chargehand.cli:main"
+
+[tool.hatch.version]
+path = "src/chargehand/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chargehand"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/chargehand",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
