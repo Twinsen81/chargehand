@@ -1,0 +1,49 @@
+# chargehand — machine configuration
+#
+# Everything specific to this machine lives here. Nothing in this file belongs in a
+# repository: a repository contributes only its own .chargehand.toml.
+#
+# Copy to ~/.config/chargehand/config.toml and edit.
+
+poll_interval_secs = 180
+
+# Launch throttle: how many runs may be actively working at once. Blocked runs do not
+# hold a slot — a run waiting overnight for an answer would otherwise stall the queue.
+max_concurrent = 2
+
+# Working + blocked. Bounds how many sessions can wake at once when you answer a batch
+# of questions.
+max_open_attempts = 4
+
+# Watchdog. Background sessions have no spend cap, so the limits are wall-clock.
+max_run_hours = 6
+hard_stop_hours = 10
+
+worktree_root = "~/chargehand-worktrees"
+
+# Warn when the worktree root's filesystem drops below this.
+min_free_disk_gb = 30
+
+[notify]
+# Receives CHARGEHAND_ISSUE, CHARGEHAND_STATE, CHARGEHAND_URL, CHARGEHAND_ROUTE and
+# CHARGEHAND_DETAIL as environment variables. The payload carries no issue text and no
+# agent output, because it usually crosses a third-party relay.
+command = "~/.config/chargehand/notify.sh"
+
+# Queue labels. These are the default names; change them to match your tracker.
+[labels]
+queued = "chargehand"
+running = "chargehand-running"
+blocked = "chargehand-blocked"
+
+[[route]]
+name = "my-app"
+repo = "~/code/my-app"
+tracker = { type = "linear", team = "ABC", state = "Todo" }
+# Optional per-route cap, applied on top of the global max_concurrent.
+# max_concurrent = 1
+
+# The Linear API key is read from $CHARGEHAND_LINEAR_API_KEY, then from an optional
+# api_key_command, then from the login keychain:
+#
+#   security add-generic-password -s chargehand-linear -a "$USER" -w 'lin_api_...'

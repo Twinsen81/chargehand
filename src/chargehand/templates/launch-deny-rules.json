@@ -1,0 +1,11 @@
+{
+  "//": "Deny rules chargehand passes to every session it launches. A guardrail, not a sandbox: sessions run as the operator's user. Running agents under a separate user account is the stronger option.",
+  "permissions": {
+    "deny": [
+      "Bash(chargehand:*)",
+      "Bash(claude stop:*)",
+      "Bash(claude rm:*)",
+      "Bash(claude respawn:*)"
+    ]
+  }
+}

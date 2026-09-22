@@ -45,15 +45,22 @@ public location.
   carries the queue label. On a public tracker, only people with triage rights can do
   either. chargehand never picks up unassigned or unlabelled work.
 - **Issue text never enters the launch prompt.** The prompt carries only the issue
-  identifier and URL; the agent fetches the issue itself. Claude Code's auto-mode
+  identifier and URL; the agent fetches the issue itself. Where a tracker builds its
+  URLs from the issue title — Linear appends a slug — the adapter shortens the URL to
+  its identifier form first, so the title does not ride along into the prompt or into
+  a notification. Claude Code's auto-mode
   classifier trusts user messages and does not see tool results, so this keeps
   attacker-controlled text on the untrusted side of that boundary.
 - **Auto permission mode by default.** Sessions run behind Claude Code's safety classifier,
-  which blocks, among others, download-and-execute, data exfiltration, force pushes, and
-  destroying files that predate the session, and falls back to a permission prompt when it
-  cannot approve. Auto mode reduces risk; it is not a guarantee. `bypassPermissions` is an
-  explicit opt-in intended for a dedicated machine, user account, or VM. Repository deny
-  rules apply in every mode.
+  which is documented as blocking, among others, download-and-execute, data exfiltration,
+  force pushes, and destroying files that predate the session, and which falls back to a
+  permission prompt when it cannot approve. Treat that list as a description of intent
+  rather than a specification: in our own testing the classifier approved deleting a
+  git-tracked file that predated the session, and explained itself with "Allowed by auto
+  mode classifier". It weighs context we cannot see, and it is not a boundary you can
+  reason about precisely. Auto mode reduces risk; it is not a guarantee. `bypassPermissions`
+  is an explicit opt-in intended for a dedicated machine, user account, or VM. Repository
+  deny rules apply in every mode, and they are the control you can actually predict.
 - **No server.** chargehand opens no port. It is steered by a CLI, remotely over SSH. There
   is no token to leak and no browser-borne attack surface (CSRF, DNS rebinding, XSS).
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
@@ -67,9 +74,12 @@ public location.
   the chargehand CLI and for stopping, removing, or respawning other sessions.
 - **One writer of side effects.** Mutating commands record a request; only the periodic
   tick acts on it. Control actions cannot race a launch in progress.
-- **Minimal notifications.** A notification carries the issue identifier, the state, and
-  the issue URL — never question text or code — because it usually crosses a third-party
-  relay.
+- **Minimal notifications.** A notification carries the issue identifier, the state, the
+  issue URL, and a short reason chargehand itself writes — never question text, agent
+  output, issue titles, a status file's `stop_reason`, or a setup script's output —
+  because it usually crosses a third-party relay. Stripping terminal escapes would not
+  make that text safe to forward; it is kept local instead, in the ledger, and reached
+  through `status --verbose` and `logs`.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 ### Known limits
