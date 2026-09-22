@@ -38,12 +38,47 @@ DEFAULT_LABELS = {
 
 # Runner-launched sessions run as the operator's user, so nothing stops them calling
 # the control plane. These are a guardrail, not a sandbox.
+#
+# Every pattern leads with `*` rather than anchoring on the program name. A Bash rule
+# matches the command text Claude Code writes, so an anchored `Bash(chargehand:*)`
+# stops `chargehand cancel X` and not `/usr/local/bin/chargehand cancel X` or
+# `sh -c 'chargehand cancel X'`. A leading wildcard matches anywhere in the text and
+# covers all three. It does not make the rule a boundary: a session that means to get
+# past it can still split the name across quotes, build it at runtime, or shell out
+# from a script. The rules stop the careless path, not a determined one.
+#
+# `claude kill` is `claude stop` under its documented alias, so denying one without the
+# other leaves the same capability reachable by a different word.
 DEFAULT_DENY_RULES = (
-    "Bash(chargehand:*)",
-    "Bash(claude stop:*)",
-    "Bash(claude rm:*)",
-    "Bash(claude respawn:*)",
+    "Bash(*chargehand *)",
+    "Bash(*claude stop*)",
+    "Bash(*claude kill*)",
+    "Bash(*claude rm*)",
+    "Bash(*claude respawn*)",
+    "Bash(*claude agents*)",
+    # A session that starts a second session without these rules has escaped all of
+    # them, so the flags that would do it are denied too.
+    "Bash(*dangerously-skip-permissions*)",
+    "Bash(*bypassPermissions*)",
 )
+
+_DENY_RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_*]*(\(.*\))?$")
+
+
+def validate_deny_rule(rule: str) -> None:
+    """Reject a rule Claude Code would not accept, at read time.
+
+    A settings payload that fails validation is dropped silently in a non-interactive
+    run, and every session chargehand starts is non-interactive. One typo in this list
+    would therefore launch sessions with no deny rules at all and say nothing, so the
+    shape is checked here where it can still be reported.
+    """
+    if not rule or rule != rule.strip() or not _DENY_RULE.fullmatch(rule):
+        raise ConfigError(
+            f"config.deny_rules: {rule!r} is not a permission rule; expected a tool name "
+            f"such as 'Bash' or a scoped rule such as 'Bash(*claude stop*)'"
+        )
+
 
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
@@ -290,6 +325,8 @@ class MachineConfig:
         deny = data.get("deny_rules", list(DEFAULT_DENY_RULES))
         if not isinstance(deny, list) or any(not isinstance(rule, str) for rule in deny):
             raise ConfigError("config.deny_rules: expected a list of strings")
+        for rule in deny:
+            validate_deny_rule(rule)
 
         max_concurrent = _as_int(data.get("max_concurrent", 2), "config.max_concurrent", minimum=0)
         max_open = _as_int(data.get("max_open_attempts", 4), "config.max_open_attempts", minimum=0)

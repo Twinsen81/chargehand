@@ -59,8 +59,9 @@ public location.
   git-tracked file that predated the session, and explained itself with "Allowed by auto
   mode classifier". It weighs context we cannot see, and it is not a boundary you can
   reason about precisely. Auto mode reduces risk; it is not a guarantee. `bypassPermissions`
-  is an explicit opt-in intended for a dedicated machine, user account, or VM. Repository
-  deny rules apply in every mode, and they are the control you can actually predict.
+  is an explicit opt-in intended for a dedicated machine, user account, or VM. Deny rules
+  apply in every mode, including `bypassPermissions`, and unlike the classifier they are
+  deterministic - but see below for what they are deterministic *about*.
 - **No server.** chargehand opens no port. It is steered by a CLI, remotely over SSH. There
   is no token to leak and no browser-borne attack surface (CSRF, DNS rebinding, XSS).
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
@@ -70,8 +71,19 @@ public location.
   holds the operator's permissions. The shipped skill reads only `status --json`, and every
   mutating command sits behind a Claude Code *ask* rule, which prompts in every permission
   mode. `discard` additionally requires `--yes` and refuses when commits are unpushed.
-- **Agents cannot steer the runner.** Sessions that chargehand launches get deny rules for
-  the chargehand CLI and for stopping, removing, or respawning other sessions.
+- **Agents are discouraged from steering the runner.** Sessions that chargehand launches
+  get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
+  other sessions, and for the flags that would start a fresh session without these rules.
+  Read that as a guardrail and not as a boundary. A Claude Code `Bash` rule matches the
+  command text the model writes, not the program it ends up running, which its
+  documentation states plainly: such a rule "isn't a security boundary around the
+  program". chargehand's patterns therefore lead with a wildcard so that an absolute path
+  to the binary and a `sh -c '...'` wrapper are covered as well as the bare name, which
+  closes the forms a session reaches by accident. It does not close the forms a session
+  reaches on purpose: text assembled at runtime, a name split across quotes, a copy of the
+  binary under another name, or a script that calls the API directly all still get through,
+  and no list of patterns can change that. The boundary is the operating system, not the
+  rule list; see the first known limit below.
 - **One writer of side effects.** Mutating commands record a request; only the periodic
   tick acts on it. Control actions cannot race a launch in progress.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
@@ -87,6 +99,11 @@ public location.
 - Sessions run as the operator's macOS user. Deny rules are a guardrail, not a sandbox: a
   session that escapes them can do what the operator can do. Run agents under a separate
   macOS user, or on a machine that holds nothing else, when that matters.
+- Nothing stops a session from reaching the control plane if it sets out to. The deny
+  rules are verified rather than assumed - `probes/deny_rules.py` runs each form against a
+  real Claude Code install and reports which were refused - but what they are verified to
+  do is refuse a list of spellings. Treat a run that is misbehaving as able to cancel its
+  siblings, and reach for a separate user account when that is not acceptable.
 - Prompt injection through issue text is mitigated, not eliminated. Draft pull requests and
   human review remain the final gate; chargehand never merges.
 - The machine running chargehand holds tracker credentials and an authenticated Claude Code
