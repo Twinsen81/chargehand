@@ -317,6 +317,30 @@ class ClaudeCLI:
         args.append(prompt)
         return self._run(args, cwd=worktree, timeout=timeout_secs)
 
+    def one_shot(
+        self,
+        prompt: str,
+        *,
+        cwd: Path,
+        permission_mode: str,
+        settings: Mapping[str, Any] | None = None,
+        env: Mapping[str, str] | None = None,
+        extra_args: Sequence[str] = (),
+        timeout_secs: float = 180.0,
+    ) -> CommandResult:
+        """Run one non-interactive turn and return when it ends.
+
+        Not used by the tick, which only ever starts background sessions. This is the
+        shape the deny-rule probe needs: a single turn whose exit is observable, so a
+        refusal can be attributed to the settings the turn was given.
+        """
+        args = ["-p", "--permission-mode", permission_mode]
+        if settings is not None:
+            args += ["--settings", json.dumps(settings, sort_keys=True)]
+        args += list(extra_args)
+        args.append(prompt)
+        return self._run(args, cwd=cwd, timeout=timeout_secs, check=False, env=env)
+
     def find_session(
         self,
         sessions: Sequence[Session],

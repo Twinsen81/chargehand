@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from chargehand import ledger as ledger_mod
-from chargehand.config import RepoConfig
+from chargehand.config import DEFAULT_DENY_RULES, RepoConfig
 from chargehand.ledger import LAST_STEP
 
 
@@ -48,8 +48,7 @@ def test_the_launch_passes_the_permission_mode_and_deny_rules(harness):
     assert argv[argv.index("--permission-mode") + 1] == "auto"
     assert argv[argv.index("-n") + 1] == "ABC-1"
     settings = json.loads(argv[argv.index("--settings") + 1])
-    assert "Bash(chargehand:*)" in settings["permissions"]["deny"]
-    assert "Bash(claude stop:*)" in settings["permissions"]["deny"]
+    assert set(DEFAULT_DENY_RULES) <= set(settings["permissions"]["deny"])
 
 
 def test_deny_rules_can_be_left_out_of_the_launch(harness):

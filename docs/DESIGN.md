@@ -289,8 +289,13 @@ chargehand tick                     # run a tick now
   `status --json`, and every mutating command sits behind a Claude Code *ask* rule, which
   prompts in every permission mode.
 - **Agents versus the control plane.** Sessions run as the same user, so they could call the
-  CLI or stop other sessions. Sessions that chargehand launches get deny rules for both.
-  Running agents under a separate user is the stronger option.
+  CLI, stop other sessions, or start a session without any of these restrictions. Launched
+  sessions get deny rules for all three. A `Bash` rule matches command text rather than the
+  program behind it, so every pattern leads with a wildcard to cover an absolute path and a
+  `sh -c '...'` wrapper alongside the bare name; `probes/deny_rules.py` checks each form
+  against a real install. That makes the rules a guardrail against the careless path and
+  not a boundary against a deliberate one. Running agents under a separate user is the
+  stronger option.
 - **Optional later:** a read-only, loopback-only status page with no mutating endpoints.
 
 ## 8. Lease pool (deferred, optional)
@@ -399,11 +404,21 @@ fault injection after every launch step, before any expensive real run.
 - Do commands started by Claude Code's shell tool run in their own process group? That decides
   how pool-aware scripts isolate the group the reaper signals.
 
-Settled by inspecting Claude Code 2.1.270, and by running background sessions against
-2.1.278:
+Settled by inspecting Claude Code 2.1.270, and by running background sessions and the
+deny-rule probe against 2.1.278:
 
 - `claude --bg` does accept `--settings` with a JSON string, so the deny rules for
   runner-launched sessions are passed per launch rather than living in user settings.
+  Settings that fail validation are dropped silently in a non-interactive run, so the
+  payload is built rather than templated and the probe is what confirms it arrived.
+- A `Bash` deny rule matches the command text after Claude Code splits compound commands
+  and strips a fixed wrapper list. It does not follow the program: an anchored
+  `Bash(chargehand:*)` misses `/usr/local/bin/chargehand cancel X` and
+  `sh -c 'chargehand cancel X'`. A leading `*` matches anywhere in the text and covers
+  both. `claude kill` is `claude stop` under an alias and needs its own pattern. Every
+  form in `probes/deny_rules.py` was refused with the shipped rules and ran without
+  them, so the rules do reach a background launch and do bite. What they bite is a list
+  of spellings, which is the distinction `SECURITY.md` keeps.
 - `claude agents --json --all` prints a bare JSON array. A background entry carries `id`,
   `sessionId`, `name`, `cwd`, `pid`, `kind`, a millisecond `startedAt`, and both `state`
   and `status`.
