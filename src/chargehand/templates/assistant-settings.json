@@ -1,0 +1,20 @@
+{
+  "//": "Drop these into the settings of the Claude Code session you drive chargehand from (not the runner's). Reading is allowed; every mutating command asks, which prompts in every permission mode including auto and bypassPermissions.",
+  "permissions": {
+    "allow": [
+      "Bash(chargehand status:*)",
+      "Bash(chargehand logs:*)"
+    ],
+    "ask": [
+      "Bash(chargehand cancel:*)",
+      "Bash(chargehand stop:*)",
+      "Bash(chargehand continue:*)",
+      "Bash(chargehand retry:*)",
+      "Bash(chargehand discard:*)",
+      "Bash(chargehand pause:*)",
+      "Bash(chargehand resume:*)",
+      "Bash(chargehand install:*)",
+      "Bash(chargehand tick:*)"
+    ]
+  }
+}

@@ -1,6 +1,8 @@
 # chargehand — design
 
-**Status:** design. The repository is a scaffold; nothing described here is implemented yet.
+**Status:** the runner and the control surface are implemented and tested against a fake
+Claude Code and a fake tracker; the lease pool is a no-op and the `github` and `command`
+adapters are not written. Nothing here has been run unattended on a dedicated machine yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -90,7 +92,7 @@ the verify-by-re-read after every write.
 
 | Adapter | Notes |
 |---|---|
-| `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. |
+| `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. |
 | `github` | Through the `gh` CLI, so there is no token handling. No workflow states: the trigger is label + assignee + open. |
 | `command` | The escape hatch: you configure `list`, `mark`, `get`, and `whoami` commands that print a small JSON contract. |
 
@@ -130,13 +132,18 @@ Repository layer — `.chargehand.toml`, checked in:
 base = "origin/main"
 setup = "scripts/setup_worktree.sh {worktree}"
 prompt = "/work-issue {issue}"      # or just "{issue}"
-permission_mode = "auto"
+permission_mode = "auto"            # auto | manual | acceptEdits | dontAsk | plan | bypassPermissions
 status_file = "/tmp/chargehand/{issue}/status.json"   # optional, see "Supervision"
+branch_prefix = "chargehand/"       # the placeholder branch each run starts on
 ```
 
-Template variables are `{issue}`, `{url}`, `{worktree}`, and `{branch}`. There is deliberately
-no `{title}` or `{body}`: the prompt is a trusted user message, so issue text must reach the
-agent as a tool result it fetches itself, never inlined.
+Template variables are `{issue}`, `{url}`, `{worktree}`, `{branch}`, and `{repo}`. There is
+deliberately no `{title}` or `{body}`: the prompt is a trusted user message, so issue text must
+reach the agent as a tool result it fetches itself, never inlined. A configured template that
+names any other variable is a configuration error, not a literal.
+
+A command template is split into arguments *before* its variables are substituted, and nothing
+is run through a shell, so a value containing spaces or shell metacharacters stays one argument.
 
 ## 5. Launch sequence
 
@@ -163,7 +170,10 @@ idempotent, and the row's `step` advances after each one.
 4. Run the repository's setup script in the worktree. Failure marks the attempt failed.
 5. Start the background session, named after the issue, in the configured permission mode.
    Starting inside a linked worktree means Claude Code does not create one of its own.
-6. Record the session ids. `state = running`.
+6. Find the new session in the listing by name or working directory and record its ids.
+   `state = running`. Looking it up rather than scraping the launch output is what makes
+   this step idempotent: a tick that died between starting the session and recording it
+   adopts the session it already started instead of starting a second one.
 
 ### Reconciliation (start of every tick)
 
@@ -182,7 +192,15 @@ interrupted launch, not a concurrent one.
   unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
-survives reboots.
+survives reboots. A partial unique index over non-terminal rows makes two live attempts for
+one issue impossible at the database level rather than by a check the caller might skip. The
+queue status last *verified* on the tracker is stored separately from the attempt's own
+state, so a write that could not be confirmed is retried on the next tick instead of being
+assumed to have landed.
+
+launchd will not run two instances of one job, but `chargehand tick` is also a command, so
+the tick takes an exclusive file lock rather than assuming it is alone. The kernel releases
+that lock when its holder dies, so a killed tick needs no recovery.
 
 ## 6. Supervision, notifications, questions
 
@@ -197,19 +215,32 @@ agent view is open in a terminal, which a headless machine cannot guarantee.
 | `done` | The turn finished | read the status file if configured, then notify |
 | `failed` / `stopped` | Error or stopped | notify, mark blocked |
 
-`done` is ambiguous: a session that asked its question as plain text and ended its turn also
-reads `done`. A repository can disambiguate with the **status-file protocol** — whatever the
-prompt runs writes a small JSON file at its yield points and when it finishes:
+Those states are read from a `state` field, which a background entry carries alongside a
+coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
+that finished reports `state: done` with `status: idle`, while a session that asked a
+question and ended its turn reports `state: blocked` with the same `status: idle`. Reading
+`status` would call the second one finished and clear its label while it was still waiting.
+
+That also means `done` is less ambiguous than it first appears: Claude Code distinguishes
+"ended its turn having finished" from "ended its turn having asked something". The runner
+still treats a bare `done` conservatively, because that distinction has been observed rather
+than promised, and because it says nothing about *how* a run finished.
+
+A repository disambiguates that with the **status-file protocol**: whatever the prompt runs
+writes a small JSON file at its yield points and when it finishes.
 
 ```json
-{ "state": "needs-input | complete | aborted", "stop_reason": "…", "pr_url": "…" }
+{ "state": "needs-input | complete | aborted", "stop_reason": "...", "pr_url": "..." }
 ```
 
-Without a status file, `done` means "finished or waiting — go look".
+The file is what separates a run that succeeded from one that gave up, and it is where a
+pull-request URL comes from. Without it, `done` means "finished or waiting, go look".
 
 **Notifications** run a command you configure: a push service, email, anything. The payload
-is only the issue identifier, the state, and the issue URL, because it usually crosses a
-third-party relay. Worst-case latency is one poll interval.
+is only the issue identifier, the state, the issue URL, and a short reason the runner itself
+writes, because it usually crosses a third-party relay. Nothing authored by an agent, a
+setup script, or the tracker goes into it; that stays local and is reached through
+`status --verbose` and `logs`. Worst-case latency is one poll interval.
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude
@@ -244,8 +275,11 @@ chargehand tick                     # run a tick now
 ```
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
-  tracker. It records the request in the ledger, kick-starts the tick, and waits for the tick
-  to apply it. A `cancel` therefore cannot race a launch in progress.
+  tracker. It records the request in the ledger, kick-starts the scheduled tick when that job
+  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome. A
+  `cancel` therefore cannot race a launch in progress. Reconciliation runs *before* recorded
+  requests, so a cancel issued during a launch acts on a session that is known rather than
+  leaving one that the dying tick had already started running unsupervised.
 - **Untrusted text.** Issue titles and agent output are attacker-influenced, so `status` and
   `watch` omit free text by default; titles need `--verbose`, output needs `logs`. Everything
   printed is stripped of terminal control sequences.
@@ -289,6 +323,24 @@ The first releases ship a no-op pool so the runner can be proven on its own.
 - **Resource kinds are configuration, not code:** a kind declares how to `discover` its
   instances and what to run `on_acquire` (reset) and `on_void` (kill). Counted kinds — build
   slots, ports, GPUs — need no hooks. Presets can ship for common cases.
+- **Some resources come in pairs.** A device is often only useful together with something
+  scarcer that lives on it — a signed-in test account, a provisioning profile, a licence
+  seat — and a run needs to be told which one it got. Treating that as an attribute of the
+  device is wrong as soon as the same account exists on two devices: the two device leases
+  are independent, so two runs acquire them and then trample each other's shared state.
+  Paired things are therefore leased in their own right, and a request for "a device with
+  one" is a single joint acquire that picks the pair under the same lock, so two runs can
+  never half-acquire and deadlock.
+- **Discovery is a human gate that defaults to closed.** `discover` enumerates what is
+  attached, asks which instances may be used for testing, and writes an inventory file.
+  Anything outside a configured pattern starts unselected: a machine with test devices on
+  it usually also has something personal signed in, and including that by mistake hands an
+  unattended agent real credentials, while excluding a test resource by mistake costs one
+  re-scan. Re-running `discover` merges, so a re-scan can never silently widen access.
+- **The inventory is policy, not a cache.** What is actually on a device drifts, so
+  `acquire` re-reads it and grants from the intersection of "permitted" and "present now".
+  The pool stores identifiers — never credentials; the point of a signed-in device is that
+  the run does not need the password.
 - **Build slots** are the memory bound described under "Launch sequence": a build acquires a slot when it starts and
   releases it when it ends, so direct build invocations are covered too.
 
@@ -319,13 +371,20 @@ The first releases ship a no-op pool so the runner can be proven on its own.
 
 ## 11. Roadmap
 
+Done:
+
 - Runner with a no-op pool: configuration, the `linear` adapter, ledger-first launch,
   reconciliation, label lifecycle, state diffing, the control CLI, the launchd job.
 - Control surface: `watch`, `logs`, request plumbing through the tick, output sanitizing,
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
+- `init`, `doctor`, `install`, and the bundled templates.
+
+Next:
+
+- Run it unattended on a dedicated machine against a real tracker.
 - The lease pool and its presets.
-- `github` and `command` adapters, `init` / `doctor` / `install`, packaging, first release.
+- `github` and `command` adapters, packaging, first release.
 - Optional: the read-only status page, agents under a separate user.
 
 Acceptance for the runner is tested against a throwaway repository and a cheap prompt, with
@@ -333,10 +392,25 @@ fault injection after every launch step, before any expensive real run.
 
 ## 12. Open questions
 
-- Does `claude respawn` continue an interrupted turn by itself, or wait for a prompt?
+- Does `claude respawn` continue an interrupted turn by itself, or wait for a prompt? That
+  decides what `continue` does after a `stop`.
 - Will Claude Code offer a scriptable way to send a message to a background session? That
-  would allow a `reply` command.
-- Does `claude --bg` accept per-launch settings, so deny rules can be passed at launch rather
-  than living in user settings?
+  would allow a `reply` command. Until then, answering a question means attaching.
 - Do commands started by Claude Code's shell tool run in their own process group? That decides
   how pool-aware scripts isolate the group the reaper signals.
+
+Settled by inspecting Claude Code 2.1.270, and by running background sessions against
+2.1.278:
+
+- `claude --bg` does accept `--settings` with a JSON string, so the deny rules for
+  runner-launched sessions are passed per launch rather than living in user settings.
+- `claude agents --json --all` prints a bare JSON array. A background entry carries `id`,
+  `sessionId`, `name`, `cwd`, `pid`, `kind`, a millisecond `startedAt`, and both `state`
+  and `status`.
+- `id` is the short id that `--bg` prints, and it is what `attach`, `logs`, `stop` and `rm`
+  take. `sessionId` is a UUID and is not interchangeable with it. Interactive entries carry
+  only `sessionId`.
+- The observed vocabulary is `working`, `done` and `blocked` from `state`, and `busy`,
+  `idle` and `waiting` from `status`. A permission prompt reads `blocked` with
+  `waitingFor: "permission prompt"`; a question asked in plain text reads `blocked` with no
+  `waitingFor` at all.

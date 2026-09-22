@@ -1,0 +1,32 @@
+# chargehand — repository configuration
+#
+# Checked in. Holds what the repository owns; machine details stay in
+# ~/.config/chargehand/config.toml.
+
+# The branch each run starts from.
+base = "origin/main"
+
+# Optional. Run in the fresh worktree before the session starts. A non-zero exit fails
+# the attempt loudly rather than starting a session in a half-prepared tree.
+# setup = "scripts/setup_worktree.sh {worktree}"
+
+# What the session is asked to do: a slash command, a skill, or a plain instruction.
+#
+# Available variables: {issue} {url} {worktree} {branch} {repo}
+#
+# There is deliberately no {title} and no {body}. The launch prompt is a trusted user
+# message, so issue text has to reach the agent as a tool result it fetches itself.
+prompt = "{issue}"
+
+# auto (default) runs behind Claude Code's safety classifier and falls back to a
+# permission prompt, which chargehand surfaces as "blocked". bypassPermissions is a
+# deliberate opt-in for a dedicated machine, user account, or VM.
+permission_mode = "auto"
+
+# Optional. `done` is ambiguous — a session that asked its question as plain text and
+# ended its turn also reads done. Write {"state": "needs-input|complete|aborted",
+# "stop_reason": "...", "pr_url": "..."} at every yield point to disambiguate.
+# status_file = "/tmp/chargehand/{issue}/status.json"
+
+# Placeholder branch each run starts on. Whatever the prompt runs may rename it.
+branch_prefix = "chargehand/"
