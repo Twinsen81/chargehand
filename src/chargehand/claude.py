@@ -38,6 +38,7 @@ import re
 import shutil
 import subprocess
 import time
+import unicodedata
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -376,11 +377,114 @@ class ClaudeCLI:
     def remove(self, session_id: str) -> CommandResult:
         return self._run(["rm", session_id], timeout=60, check=False)
 
+    def config_file(self) -> Path:
+        """Where Claude Code keeps the per-project state the trust flag lives in."""
+        override = os.environ.get("CLAUDE_CONFIG_DIR")
+        root = Path(override).expanduser() if override else Path(os.path.expanduser("~"))
+        return root / ".claude.json"
+
+    def is_trusted(self, worktree: Path) -> bool:
+        projects = (self._read_config() or {}).get("projects")
+        if not isinstance(projects, dict):
+            return False
+        return any(
+            isinstance(projects.get(name), Mapping)
+            and projects[name].get("hasTrustDialogAccepted") is True
+            for name in _trust_keys(worktree)
+        )
+
+    def trust_worktree(self, worktree: Path) -> bool:
+        """Mark *worktree* as trusted, so a background session may start in it.
+
+        Claude Code refuses to start a background session in a directory nobody has
+        accepted a trust dialog for. A runner can never answer that dialog, and every
+        run it makes is a worktree that has just been created, so without this no launch
+        would ever succeed. The refusal names the alternative itself: set
+        ``projects[<path>].hasTrustDialogAccepted`` in its configuration file.
+
+        Granting it here adds no authority. The operator already decided the repository
+        is trusted when they wrote the route, and the worktree is a checkout of that
+        repository which the runner made a moment ago.
+
+        Returns True when the flag is set afterwards. A configuration file that cannot
+        be parsed is left alone: overwriting Claude Code's own state on a guess would
+        cost far more than the launch that is about to fail with a clear message.
+        """
+        path = self.config_file()
+        data = self._read_config()
+        if data is None:
+            return False
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            return False
+        changed = False
+        for name in _trust_keys(worktree):
+            entry = projects.get(name)
+            if not isinstance(entry, dict):
+                entry = {}
+                projects[name] = entry
+            if entry.get("hasTrustDialogAccepted") is not True:
+                entry["hasTrustDialogAccepted"] = True
+                changed = True
+        if not changed:
+            return True
+        return _write_json_atomically(path, data)
+
+    def _read_config(self) -> dict[str, Any] | None:
+        path = self.config_file()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def logs(self, session_id: str, *, lines: int = 200) -> str:
         result = self._run(["logs", session_id], timeout=60, check=False)
         output = result.stdout or result.stderr
         tail = output.splitlines()[-lines:]
         return "\n".join(tail)
+
+
+def _trust_keys(worktree: Path) -> list[str]:
+    """Every spelling of *worktree* the trust lookup might use.
+
+    A path can reach Claude Code as written, as its realpath, or with its unicode
+    normalized differently, and the lookup is a dictionary key rather than a path
+    comparison. Setting all of them costs nothing and avoids a refusal that would look
+    like the flag had not been written at all.
+    """
+    spellings = [str(worktree)]
+    try:
+        spellings.append(str(worktree.resolve()))
+    except OSError:
+        pass
+    for spelling in list(spellings):
+        spellings.append(unicodedata.normalize("NFC", spelling))
+    seen: list[str] = []
+    for spelling in spellings:
+        if spelling not in seen:
+            seen.append(spelling)
+    return seen
+
+
+def _write_json_atomically(path: Path, data: Mapping[str, Any]) -> bool:
+    """Replace *path* in one step, so an interrupted write cannot truncate it.
+
+    The file belongs to Claude Code and holds state the runner did not author, so a
+    half-written one would be worse than the launch failure this is trying to prevent.
+    """
+    temporary = path.with_name(f"{path.name}.chargehand.tmp")
+    try:
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def _resolve(path: Path) -> str:

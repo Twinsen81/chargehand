@@ -232,3 +232,35 @@ def test_a_re_armed_issue_launches_once_the_worktree_is_gone(harness):
     report = harness.next_tick()
 
     assert report.launched == ["ABC-1"]
+
+
+def test_the_launch_marks_its_worktree_as_a_trusted_workspace(harness):
+    """Without this no launch can succeed: Claude Code refuses an untrusted directory."""
+    harness.board.add("ABC-1")
+
+    harness.tick()
+
+    worktree = harness.worktree_root / "ABC-1"
+    assert harness.runner.claude.is_trusted(worktree) is True
+
+
+def test_a_launch_still_happens_when_trust_cannot_be_recorded(harness, monkeypatch):
+    """The refusal is Claude Code's to make. A warning is more use than a skipped run."""
+    monkeypatch.setattr(type(harness.runner.claude), "trust_worktree", lambda self, path: False)
+    harness.board.add("ABC-1")
+
+    report = harness.tick()
+
+    assert report.launched == ["ABC-1"]
+    assert any("trusted workspace" in warning for warning in report.warnings)
+
+
+def test_trust_is_not_recorded_when_the_operator_turned_it_off(harness, monkeypatch):
+    from dataclasses import replace
+
+    harness.runner.config = replace(harness.runner.config, trust_worktrees=False)
+    harness.board.add("ABC-1")
+
+    harness.tick()
+
+    assert harness.runner.claude.is_trusted(harness.worktree_root / "ABC-1") is False

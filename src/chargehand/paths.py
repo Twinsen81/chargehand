@@ -60,6 +60,17 @@ def log_file() -> Path:
     return state_dir() / "chargehand.log"
 
 
+def is_default_instance() -> bool:
+    """Whether this process is the instance the scheduled job would run.
+
+    The LaunchAgent carries no path overrides, so it always runs the default
+    configuration and the default state directory. A process started with either
+    override is a different instance that happens to share the binary, and anything
+    it asks launchd to do would land on the other one's ledger.
+    """
+    return not (os.environ.get(CONFIG_ENV) or os.environ.get(STATE_DIR_ENV))
+
+
 def launch_agent_plist() -> Path:
     return _home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 

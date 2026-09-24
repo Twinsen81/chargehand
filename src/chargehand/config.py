@@ -269,6 +269,7 @@ class MachineConfig:
     labels: Labels = field(default_factory=lambda: Labels(**DEFAULT_LABELS))
     deny_rules: tuple[str, ...] = DEFAULT_DENY_RULES
     pass_deny_rules_at_launch: bool = True
+    trust_worktrees: bool = True
     claude_bin: str = "claude"
     git_bin: str = "git"
     source: Path | None = None
@@ -284,6 +285,7 @@ class MachineConfig:
         "worktree_root",
         "deny_rules",
         "pass_deny_rules_at_launch",
+        "trust_worktrees",
         "claude_bin",
         "git_bin",
         "notify",
@@ -360,6 +362,7 @@ class MachineConfig:
             labels=labels,
             deny_rules=tuple(deny),
             pass_deny_rules_at_launch=bool(data.get("pass_deny_rules_at_launch", True)),
+            trust_worktrees=bool(data.get("trust_worktrees", True)),
             claude_bin=_as_str(data.get("claude_bin", "claude"), "config.claude_bin"),
             git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
             source=source,

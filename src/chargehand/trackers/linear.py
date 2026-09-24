@@ -54,11 +54,15 @@ query Issue($id: String!) {
 
 _VIEWER_QUERY = "query { viewer { id name email } }"
 
+# `first` is a ceiling, not an expectation: with a team filter the answer is one label,
+# and without one a workspace can hold a great many with the same name. A full page is
+# treated as truncation rather than as a list to choose from.
+_LABEL_PAGE = 50
+
 _LABELS_QUERY = """
-query Labels($first: Int!, $after: String) {
-  issueLabels(first: $first, after: $after) {
-    nodes { id name }
-    pageInfo { hasNextPage endCursor }
+query Labels($filter: IssueLabelFilter!, $first: Int!) {
+  issueLabels(filter: $filter, first: $first) {
+    nodes { id name team { id key } }
   }
 }
 """
@@ -107,7 +111,7 @@ class LinearTracker(Tracker):
         self._state = options.get("state")
         self._project = options.get("project")
         self._api_key: str | None = None
-        self._label_ids: dict[str, str] | None = None
+        self._label_ids: dict[str, str] = {}
         self._viewer: str | None = None
 
     def describe(self) -> str:
@@ -288,36 +292,76 @@ class LinearTracker(Tracker):
             raise TrackerError(f"linear: no label configured for status {status.value}") from exc
 
     def _label_id(self, name: str) -> str:
-        if self._label_ids is None:
-            self._label_ids = self._fetch_label_ids()
-        try:
-            return self._label_ids[name.lower()]
-        except KeyError as exc:
+        """Resolve one label name, asking the tracker for that name only.
+
+        Enumerating the workspace instead would be both slower and wrong. A shared
+        workspace accumulates labels without bound - one observed here holds more than
+        fifteen thousand - so any fixed page budget silently stops short, and the labels
+        that fall outside it are reported as not existing at all. Since the listing comes
+        back newest first, the label that disappears is the one that has been in use
+        longest: the route would work for months and then fail every launch.
+        """
+        key = name.lower()
+        cached = self._label_ids.get(key)
+        if cached is not None:
+            return cached
+        # Narrow on the server where the route names a team. A shared workspace here holds
+        # 250 teams and 114 label names used by more than 25 of them, so asking for a name
+        # alone and taking what comes back would miss the one this route means.
+        label_filter: dict[str, Any] = {"name": {"eqIgnoreCase": name}}
+        if self._team:
+            label_filter["team"] = {"key": {"eq": self._team}}
+        nodes = (
+            self._post(_LABELS_QUERY, {"filter": label_filter, "first": _LABEL_PAGE}).get(
+                "issueLabels"
+            )
+            or {}
+        ).get("nodes", [])
+        candidates = [
+            node for node in nodes if str(node.get("name", "")).lower() == key and node.get("id")
+        ]
+        if len(nodes) >= _LABEL_PAGE:
+            raise TrackerError(
+                f"linear: more than {_LABEL_PAGE} labels are named '{name}'; set `team` on "
+                f"the route so the right one can be identified, or rename the label"
+            )
+        chosen = self._pick_label(name, candidates)
+        self._label_ids[key] = str(chosen["id"])
+        return self._label_ids[key]
+
+    def _pick_label(self, name: str, candidates: list[Mapping[str, Any]]) -> Mapping[str, Any]:
+        """A label name is unique per team, not per workspace.
+
+        Two teams may each own a label called `chargehand`, and writing the wrong one
+        would move an issue into a queue this route does not watch. The route's own team
+        wins; a workspace-level label is the fallback; anything still ambiguous is
+        reported rather than guessed at.
+        """
+        if not candidates:
             raise TrackerError(
                 f"linear: no label named '{name}' exists in this workspace; create it, or "
                 f"change the label names in the route configuration"
-            ) from exc
-
-    def _fetch_label_ids(self) -> dict[str, str]:
-        ids: dict[str, str] = {}
-        cursor: str | None = None
-        for _ in range(20):  # bounded: a workspace with 5000 labels is not a real case
-            page = self._post(_LABELS_QUERY, {"first": 250, "after": cursor}).get(
-                "issueLabels"
-            ) or {}
-            for node in page.get("nodes", []):
-                name = node.get("name")
-                if isinstance(name, str):
-                    ids.setdefault(name.lower(), str(node["id"]))
-            info = page.get("pageInfo") or {}
-            if not info.get("hasNextPage"):
-                break
-            cursor = info.get("endCursor")
-        return ids
+            )
+        if self._team:
+            for node in candidates:
+                if (node.get("team") or {}).get("key") == self._team:
+                    return node
+        workspace = [node for node in candidates if not node.get("team")]
+        if workspace:
+            return workspace[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        teams = ", ".join(
+            sorted(str((node.get("team") or {}).get("key") or "?") for node in candidates)
+        )
+        raise TrackerError(
+            f"linear: several teams have a label named '{name}' ({teams}) and none of them "
+            f"is this route's team; set `team` on the route, or rename the label"
+        )
 
     def refresh_labels(self) -> None:
         """Drop the per-tick label-id cache; labels can be created between ticks."""
-        self._label_ids = None
+        self._label_ids = {}
 
     @staticmethod
     def _canonical_url(url: object) -> str | None:

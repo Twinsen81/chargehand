@@ -1068,10 +1068,13 @@ class Runner:
             try:
                 tracker.mark(issue, Status.RUNNING)
             except AmbiguousWrite as exc:
-                # It may have landed. Stay at step 0 and let reconciliation settle it.
+                # It may have landed. Record why and stay at step 0, then let the caller
+                # decide what it costs. A resume hands its launch retry back, because an
+                # unverifiable write is a fact about the tracker and not a fault in this
+                # attempt: a tracker that answers a correct write with a stale read would
+                # otherwise fail a launch that never went wrong, in three ticks.
                 self.ledger.update(attempt, last_error=str(exc)[:500])
-                report.errors.append(f"{attempt.identifier}: {exc}")
-                return attempt
+                raise
             attempt = self.ledger.update(attempt, step=1, label_state=Status.RUNNING.value)
             self._check_crash(1, crash_after_step)
 
@@ -1159,6 +1162,16 @@ class Runner:
                 self._template_values(attempt),
                 where=f"{repo_config.source or 'repo config'}.prompt",
             )
+            # Claude Code will not start a background session in a directory nobody has
+            # accepted a trust dialog for, and every worktree here was made seconds ago.
+            # There is no dialog a runner can answer, so the flag is written instead.
+            if self.config.trust_worktrees and not self.claude.trust_worktree(
+                attempt.worktree_path
+            ):
+                report.warnings.append(
+                    f"{attempt.identifier}: could not record {attempt.worktree_path} as a "
+                    f"trusted workspace; the launch may be refused"
+                )
             settings = self._launch_settings()
             result = self.claude.launch(
                 worktree=attempt.worktree_path,

@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `probes/deny_rules.py`, which checks the launch-time deny rules against a real Claude
   Code install by running each attempt twice, with and without the rules, so a refusal
   can be told apart from a model that simply declined.
+- `probes/smoke_route.py`, which runs the whole sequence against a real tracker and real
+  Claude Code on a scratch repository: the launch, a crash after every launch step, label
+  writes that report failure after they have already been applied, each control command,
+  and what a session reports at the end of several shapes of turn. It runs as a throwaway
+  instance beside any real one, and a proxy in front of the tracker injects the write
+  faults, which cannot be provoked from outside.
+- `probes/assistant_rules.py`, which checks that the bundled assistant settings really
+  do gate every mutating command against a real Claude Code, in the spellings an
+  assistant produces by accident rather than by evasion.
 - Lease-pool interface with a no-op implementation, so the call sites exist before the
   pool does.
 - Starter templates: machine and repository configuration, a notification hook, the
@@ -37,8 +46,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code session.
 - Test suite built on a fake `claude` binary and an in-memory tracker, including
   fault injection after every launch step.
+- A launch records its worktree as a trusted workspace before starting a session in it.
+  Claude Code refuses to start a background session in a directory nobody has accepted a
+  trust dialog for, and every worktree the runner makes is seconds old, so without this
+  no launch succeeds at all. The flag is the one its own refusal names. A configuration
+  file that cannot be parsed is left alone and the launch proceeds with a warning; the
+  behaviour can be turned off with `trust_worktrees = false`.
+
+### Fixed
+
+- A control command no longer kick-starts the scheduled job unless this process is the
+  instance that job runs. The LaunchAgent carries no path overrides, so it always ticks
+  the default configuration and ledger: a second instance, which `CHARGEHAND_CONFIG`,
+  `CHARGEHAND_STATE_DIR` and `--config` all exist to allow, was asking launchd to run a
+  tick against somebody else's ledger and then waiting for a request that tick would
+  never see.
+- Label lookup narrows on the server when the route names a team, and refuses a full page
+  of results rather than choosing from a truncated one. Asking for a name alone is not
+  enough: a workspace measured here holds 250 teams and 114 label names used by more than
+  25 of them, so a queue label that is an ordinary word could not be resolved at all.
+- An ambiguous tracker write no longer spends one of an attempt's launch retries. The
+  attempt is held and retried, which is right, but a tracker that answers a correct write
+  with a stale read would previously fail a launch in three ticks with nothing wrong.
+  A plain tracker failure already handed the retry back; this makes the unverifiable case
+  behave the same way. Both were observed live.
+- The bundled assistant settings gate every mutating command in every spelling. They were
+  anchored on the program name, so `chargehand cancel X` prompted while
+  `/usr/local/bin/chargehand cancel X` and `sh -c 'chargehand cancel X'` ran without one.
+  Neither is an evasion: the first is what an assistant produces after running
+  `which chargehand`. This is the same hole the launch-time deny rules were fixed for, in
+  the list that guards the other direction. `uninstall` and `init` had no rule at all.
+- The launchd job's argument list is now complete in every case. Built without a console
+  script on `PATH`, which is what an unactivated virtual environment looks like, it named
+  the interpreter and then `tick`, so launchd would have tried to run a file called
+  `tick`. Only one caller happened to pass a correct list of its own.
+- The test suite no longer writes into Claude Code's own configuration file. A launch
+  marks its worktree trusted, so the suite had been adding an entry for every temporary
+  directory it ever created.
 
 ### Changed
+
+- The Linear adapter resolves a label by asking for that name, instead of enumerating the
+  workspace's labels and looking the name up in the result. Enumerating was bounded at
+  5,000 labels on the grounds that no real workspace has that many; a shared one measured
+  during acceptance holds more than 15,000, and the listing comes back newest first, so the
+  label that falls outside the window is whichever has been in use longest. A route would
+  have worked for months and then failed every launch with "no label named X exists". The
+  lookup is also team-aware now: label names are unique per team, not per workspace, so a
+  name that several teams use resolves to the route's own team or is reported rather than
+  guessed at. As a side effect a tick that writes a label makes two or three small requests
+  instead of twenty large ones.
 
 - The deny rules passed to launched sessions now lead with a wildcard instead of
   anchoring on the program name. A Claude Code `Bash` rule matches command text rather

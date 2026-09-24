@@ -17,10 +17,14 @@ set -euo pipefail
 title="chargehand: ${CHARGEHAND_ISSUE} ${CHARGEHAND_STATE}"
 body="${CHARGEHAND_DETAIL:-}${CHARGEHAND_URL:+ ${CHARGEHAND_URL}}"
 
+# As shipped this only prints, and the runner captures what the hook prints, so nothing
+# reaches you until you uncomment one of these. That is deliberate: a hook that reached a
+# third-party relay by default would be a surprise, not a convenience.
+#
 # Example: a push service.
 #   curl -fsS -H "Title: ${title}" -d "${body}" https://ntfy.sh/your-private-topic
 #
 # Example: a local notification while you are at the machine.
 #   osascript -e "display notification \"${body}\" with title \"${title}\""
 
-printf '%s — %s\n' "${title}" "${body}"
+printf '%s - %s\n' "${title}" "${body}"

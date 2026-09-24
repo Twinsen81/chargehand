@@ -1,8 +1,11 @@
 # chargehand — design
 
 **Status:** the runner and the control surface are implemented and tested against a fake
-Claude Code and a fake tracker; the lease pool is a no-op and the `github` and `command`
-adapters are not written. Nothing here has been run unattended on a dedicated machine yet.
+Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
+and real Claude Code on a scratch repository, including a crash after every launch step and a
+reboot that killed a session mid-turn; the lease pool is a no-op and the `github` and
+`command` adapters are not written. It has not yet been left running unattended for a
+working day.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -14,7 +17,7 @@ Goals:
   worktree, with a prompt your repository configured.
 - A crash, a reboot, or an ambiguous tracker write never strands an issue or leaves a session
   running unsupervised.
-- You learn when a run needs you, and you can see and steer everything from another machine.
+- You learn when a run needs you, and you can see and steer everything from one command.
 - Parallel runs share scarce local resources — devices, emulators, heavy builds — without
   trampling each other, and a dead run can never hold a resource forever.
 
@@ -45,7 +48,7 @@ Claude Code supervisor (background sessions, one per issue)
         ▼
 whatever the prompt produces — typically a draft pull request
 
-Operator: ssh + chargehand status|watch|cancel…  ·  Claude Code agent view for replies
+Operator: chargehand status|watch|cancel…  ·  Claude Code agent view for replies
 ```
 
 Components:
@@ -53,7 +56,7 @@ Components:
 | Component | Purpose |
 |---|---|
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised sessions |
-| Control CLI | See and steer the runner, locally or over SSH; no server |
+| Control CLI | See and steer the runner; no server |
 | Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
 | Lease pool — deferred; the first releases ship a no-op pool | Optional leases for devices, emulators, and build slots |
 
@@ -206,14 +209,14 @@ that lock when its holder dies, so a killed tick needs no recovery.
 
 **Session state** comes from `claude agents --json --all`, diffed against the ledger on every
 tick. A notification hook is not used: the relevant hook types fire only while Claude Code's
-agent view is open in a terminal, which a headless machine cannot guarantee.
+agent view is open in a terminal, which an unattended run cannot guarantee.
 
 | Session state | Meaning | Action |
 |---|---|---|
 | `working` | A turn is running | — |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
 | `done` | The turn finished | read the status file if configured, then notify |
-| `failed` / `stopped` | Error or stopped | notify, mark blocked |
+| `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -222,9 +225,15 @@ question and ended its turn reports `state: blocked` with the same `status: idle
 `status` would call the second one finished and clear its label while it was still waiting.
 
 That also means `done` is less ambiguous than it first appears: Claude Code distinguishes
-"ended its turn having finished" from "ended its turn having asked something". The runner
-still treats a bare `done` conservatively, because that distinction has been observed rather
-than promised, and because it says nothing about *how* a run finished.
+"ended its turn having finished" from "ended its turn having asked something". Across every
+run the smoke probe has observed, nothing that wanted input was reported `done`: not a
+direct question, not a flat statement that the session could not proceed, not a permission
+prompt. So a session that is waiting never has its label cleared. The converse does not
+hold. About one finished run in five reported `blocked` anyway, and the same prompt
+reported `done` the other four times. That is not confined to runs that hedged: a session
+told to write one file and stop has done it. `blocked` is therefore a reason to go and
+look rather than proof that anything is waiting, and a bare `done` still says nothing
+about *how* a run finished. The runner stays conservative on both counts.
 
 A repository disambiguates that with the **status-file protocol**: whatever the prompt runs
 writes a small JSON file at its yield points and when it finishes.
@@ -244,7 +253,7 @@ setup script, or the tracker goes into it; that stays local and is reached throu
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude
-Code's agent view (`ssh` to the machine, then `claude agents`). The session continues with
+Code's agent view (`claude agents`). The session continues with
 its full context, and the next tick flips the label back.
 
 **Watchdog.** Background sessions have no spend cap, so the runner enforces wall-clock limits:
@@ -254,11 +263,14 @@ notify after `max_run_hours`, stop the session after `hard_stop_hours`.
 session and its worktree are removed — never when commits are unpushed. Low disk space is
 reported.
 
-## 7. Control: a CLI over SSH, no server
+## 7. Control: a CLI, no server
 
-The runner usually lives on another machine, so it needs a control surface. The safest one
-adds nothing to the attack surface: a CLI reached over SSH, which the machine needs anyway.
-chargehand has no remote mode of its own; remote access is the operating system's job.
+The control surface is a CLI, and nothing else. There is no port, no token, and no browser
+to attack. chargehand runs on the machine you work on and is steered from a terminal on it.
+
+It is a plain CLI, so it also works over SSH if you want to reach the machine from
+elsewhere, but nothing depends on that and it is not part of what is tested. Reaching a
+machine remotely is the operating system's job, not this tool's.
 
 ```
 chargehand status [--json]          # queue, attempts, sessions, machine — no free text
@@ -283,11 +295,16 @@ chargehand tick                     # run a tick now
 - **Untrusted text.** Issue titles and agent output are attacker-influenced, so `status` and
   `watch` omit free text by default; titles need `--verbose`, output needs `logs`. Everything
   printed is stripped of terminal control sequences.
-- **An AI assistant as the interface.** Driving the CLI from a Claude Code session on your
-  working machine is convenient, and it is the one real risk of this design: status output
-  lands in a session that holds your permissions. The shipped skill therefore reads only
-  `status --json`, and every mutating command sits behind a Claude Code *ask* rule, which
-  prompts in every permission mode.
+- **An AI assistant as the interface.** Driving the CLI from a Claude Code session is
+  convenient, and it is the one real risk of this design: status output lands in a session
+  that holds your permissions. The shipped skill therefore reads only `status --json`, and
+  every mutating command sits behind a Claude Code *ask* rule, which prompts in every
+  permission mode including `bypassPermissions`. Those rules lead with a wildcard rather
+  than anchoring on the program name, for the same reason the launch-time deny rules do: a
+  rule matches the command text, so an anchored one gates `chargehand cancel X` and misses
+  both `/usr/local/bin/chargehand cancel X` and `sh -c 'chargehand cancel X'`.
+  `probes/assistant_rules.py` checks that against a real install, because the claim is
+  about Claude Code's matcher rather than about this tool.
 - **Agents versus the control plane.** Sessions run as the same user, so they could call the
   CLI, stop other sessions, or start a session without any of these restrictions. Launched
   sessions get deny rules for all three. A `Bash` rule matches command text rather than the
@@ -349,22 +366,24 @@ The first releases ship a no-op pool so the runner can be proven on its own.
 - **Build slots** are the memory bound described under "Launch sequence": a build acquires a slot when it starts and
   releases it when it ends, so direct build invocations are covered too.
 
-## 9. Running it on a headless Mac
+## 9. Leaving it running
 
-- A logged-in GUI session is required: Claude Code's credentials and tracker keys live in the
-  login keychain, and launchd agents run in that session.
-- With FileVault, a plain reboot stalls at the pre-boot unlock screen with no network. Use
-  `sudo fdesetup authrestart`.
-- Keep a laptop awake with the lid closed: `sudo pmset -a disablesleep 1`, on power.
-- Use key-only SSH. Screen Sharing covers the rare need for the GUI.
+- A logged-in session is required: Claude Code's credentials and tracker keys live in the
+  login keychain, and launchd agents run in that session. A locked screen is fine; a logged
+  out one is not.
 - launchd starts jobs with a minimal `PATH`; everything the tick shells out to must be
   reachable through the `PATH` set in the job definition.
+- Runs share the machine with you. Keep `max_concurrent` low until the lease pool exists,
+  because until then nothing stops two runs from reaching for the same device or emulator.
+- Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
+  next tick parks any run whose session is gone, so a restart costs progress but never
+  consistency.
 
 ## 10. Failure modes
 
 | Failure | Behavior |
 |---|---|
-| Machine reboots | Sessions show as failed and can be respawned from their saved state; the ledger survives; leases vanish together with the resources they described. |
+| Machine reboots | Observed: the ledger, the labels and the worktrees survive, the scheduled job runs a tick by itself, the killed session reads `failed`, and the run is parked as blocked with one attempt recorded. `continue` brings the session back but not the work it had running, so resuming is left to you. |
 | Tick crashes mid-launch, or a tracker write lands but reports failure | The ledger row came first; the next tick adopts, resumes, or fails the attempt loudly. |
 | Session process restarts mid-run | Background commands carry over and keep touching leases; the grace period keeps them valid. |
 | Agent hangs holding a resource | Idle expiry voids the lease; the reaper terminates its users; the watchdog later stops the session. |
@@ -387,18 +406,22 @@ Done:
 
 Next:
 
-- Run it unattended on a dedicated machine against a real tracker.
+- Run it unattended for a day against a real tracker.
 - The lease pool and its presets.
 - `github` and `command` adapters, packaging, first release.
 - Optional: the read-only status page, agents under a separate user.
 
-Acceptance for the runner is tested against a throwaway repository and a cheap prompt, with
-fault injection after every launch step, before any expensive real run.
+Acceptance for the runner runs against a throwaway repository and a cheap prompt, with fault
+injection after every launch step, before any expensive real run. `probes/smoke_route.py`
+drives the whole of it against a real tracker and real Claude Code. The reboot drill and the
+reboot drill stays manual, because a restart cannot be scripted from the machine under
+test.
 
 ## 12. Open questions
 
-- Does `claude respawn` continue an interrupted turn by itself, or wait for a prompt? That
-  decides what `continue` does after a `stop`.
+- Should a run that reports `working` with `status: idle` for long enough be treated as
+  stalled rather than healthy? A short window would misread the gap between two tool
+  calls; a long one is what the watchdog already does, only at `max_run_hours`.
 - Will Claude Code offer a scriptable way to send a message to a background session? That
   would allow a `reply` command. Until then, answering a question means attaching.
 - Do commands started by Claude Code's shell tool run in their own process group? That decides
@@ -429,3 +452,59 @@ deny-rule probe against 2.1.278:
   `idle` and `waiting` from `status`. A permission prompt reads `blocked` with
   `waitingFor: "permission prompt"`; a question asked in plain text reads `blocked` with no
   `waitingFor` at all.
+
+Settled by running the whole sequence against a real tracker and real Claude Code, with the
+smoke probe:
+
+- A background session started inside a linked worktree really does skip Claude Code's own
+  worktree isolation. The repository's worktree list is unchanged by the launch and the
+  session works in the tree it was given. The launch sequence depends on this; it was
+  documented but never verified, and an extra worktree would have meant every run working
+  somewhere the runner does not collect.
+- `claude respawn` continues the interrupted turn by itself rather than waiting for a
+  prompt: a session stopped mid-turn reports `working` again immediately after. So
+  `continue` needs nothing beyond the respawn.
+- Every launch step can be interrupted and resumed. Killing a launch after each of its
+  steps in turn left, each time, a row the next tick recognised, exactly one attempt per
+  issue, a label that matched how far the launch had got, no issue stranded under the
+  running label, and no session running outside the ledger.
+- A label write that reaches the tracker and then reports failure is accepted once the
+  re-read proves it landed; one that half-applies, and one whose verification read fails,
+  both hold the attempt where it was and settle on the following tick. The separation
+  between an attempt's state and the queue status last *verified* is what makes that work.
+- **Resolve a label by name, never by enumerating them.** A shared workspace accumulates
+  labels without bound (one measured here holds more than fifteen thousand), and the
+  listing comes back newest first. Any fixed page budget therefore stops short, and the
+  label it stops short of is whichever has been in use longest: a route would work for
+  months and then fail every launch with "no label named X exists". Label names are also
+  unique per team rather than per workspace, so a name has to be resolved against the
+  route's own team or reported as ambiguous.
+- A tracker takes a fraction of a second to make a newly labelled issue answerable by a
+  filtered query. Irrelevant at any sane poll interval, and the reason acceptance waits for
+  the queue rather than ticking the instant an issue is created.
+- **A session killed with the machine reads `failed`.** A background session interrupted
+  by a reboot survives in the listing with `state: failed`, no `status` and no `pid`, so
+  the runner parks the run as blocked and says so rather than treating it as finished.
+  The ledger, the label and the worktree all come through the restart intact, the
+  scheduled job runs a tick by itself, and the issue is not launched a second time.
+- **A reboot does not resume the work, and should not.** `continue` does bring the
+  session back, but `respawn` restores the conversation, not what the session had
+  running: a child process it started is gone with the machine. A session whose turn had
+  ended while it waited on that process comes back with nothing to wait for and no new
+  instruction, and then sits there reporting `working` with `status: idle`. Parking the
+  run as blocked and telling the operator is therefore the right default; resuming
+  automatically would put the running label back on an issue nothing is working on.
+- **`working` with `status: idle` is a stall, and the runner cannot currently tell.**
+  It reads `state` first, sees `working`, and reports a healthy run. Nothing catches it
+  until the watchdog fires at `max_run_hours`. The pair had not been observed before;
+  every earlier sample was `working`/`busy`, `done`/`idle`, `blocked`/`idle` or
+  `blocked`/`waiting`.
+- **A label write can report success and still be followed by a stale read.** Observed
+  twice against a real tracker. The write had landed; the verification read returned the
+  labels from before it. The attempt is left where it was and the next write settles it,
+  so nothing is lost, but the tick reports an error and exits non-zero for a write that
+  was in fact correct.
+- The control CLI works from a stripped environment (short `PATH`, no shell profile), and
+  the login keychain is still readable there, which is what the launchd job needs.
+  `claude` itself is not on a minimal `PATH`; `doctor` says so, and a tick refuses with the
+  fix in the message rather than failing obscurely.
