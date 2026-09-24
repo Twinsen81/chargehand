@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import plistlib
 import sys
@@ -156,6 +157,9 @@ def test_kickstart_does_not_kill_a_running_tick_by_default(monkeypatch):
 
 def test_a_control_command_never_forces_a_kickstart(monkeypatch, config_file, harness):
     forced = []
+    # The suite always runs as a second instance, which is now a reason not to kick the
+    # job at all. This test is about the `force` flag, so it takes that question away.
+    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
     monkeypatch.setattr(install, "is_loaded", lambda: True)
     monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
     monkeypatch.setattr(
@@ -169,6 +173,49 @@ def test_a_control_command_never_forces_a_kickstart(monkeypatch, config_file, ha
 
     assert forced, "the loaded job should have been kicked"
     assert all(not kwargs.get("force") for kwargs in forced)
+
+
+def test_a_second_instance_never_kickstarts_the_scheduled_job(monkeypatch, config_file, harness):
+    """The job runs the default configuration, whatever this process was pointed at.
+
+    Kick-starting it from a sandbox would tick somebody else's ledger: launching real
+    sessions for real queued issues, while this process waits for a request that tick
+    never sees.
+    """
+    monkeypatch.setattr(install, "is_loaded", lambda: True)
+    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr(
+        "chargehand.cli.install.kickstart",
+        lambda **kwargs: pytest.fail("a second instance kick-started the scheduled job"),
+    )
+    harness.board.add("ABC-1")
+    main(["--config", str(config_file), "tick"])
+
+    assert main(["--config", str(config_file), "cancel", "ABC-1", "--wait", "1"]) == EXIT_OK
+
+
+@pytest.mark.parametrize("override", [paths.CONFIG_ENV, paths.STATE_DIR_ENV])
+def test_a_path_override_makes_this_a_second_instance(monkeypatch, tmp_path, override):
+    from chargehand.cli import _runs_the_scheduled_job
+
+    args = argparse.Namespace(config=None)
+    monkeypatch.delenv(paths.CONFIG_ENV, raising=False)
+    monkeypatch.delenv(paths.STATE_DIR_ENV, raising=False)
+    assert _runs_the_scheduled_job(args) is True
+
+    monkeypatch.setenv(override, str(tmp_path / "elsewhere"))
+    assert _runs_the_scheduled_job(args) is False
+
+
+def test_pointing_at_another_config_makes_this_a_second_instance(monkeypatch, tmp_path):
+    """`--config` reaches the same place the environment variable does."""
+    from chargehand.cli import _runs_the_scheduled_job
+
+    monkeypatch.delenv(paths.CONFIG_ENV, raising=False)
+    monkeypatch.delenv(paths.STATE_DIR_ENV, raising=False)
+
+    assert _runs_the_scheduled_job(argparse.Namespace(config=None)) is True
+    assert _runs_the_scheduled_job(argparse.Namespace(config=str(tmp_path / "c.toml"))) is False
 
 
 def test_the_suite_is_insulated_from_a_real_launch_agent():

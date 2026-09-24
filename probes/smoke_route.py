@@ -62,10 +62,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from chargehand.claude import ClaudeCLI  # noqa: E402
+from chargehand.sanitize import one_line as sanitize_line  # noqa: E402
 from smoke_support import (  # noqa: E402
     SMOKE_LABELS,
+    is_sandbox,
     Fault,
     FaultProxy,
     IssueRef,
@@ -292,10 +297,12 @@ class Probe:
         indistinguishable from the next case's own stray, and would fail a check that has
         nothing wrong with it.
         """
+        if self.keep:
+            # The flag exists so a failed run can be picked over afterwards, and the
+            # worktree and its session are most of what there is to look at.
+            return
         if discard and self.sandbox.attempt(issue.identifier):
             self.sandbox.cli("discard", issue.identifier, "--yes", "--force", "--wait", "60")
-        if self.keep:
-            return
         self.admin.delete_issue(issue.id)
         self.issues = [entry for entry in self.issues if entry.id != issue.id]
         deadline = time.monotonic() + 30
@@ -752,25 +759,50 @@ class Probe:
 
         The question is about Claude Code's vocabulary, not about the tick, and going
         through the runner would need an issue per phrasing for no extra evidence.
+
+        Bypassing the runner means bypassing what the runner does for a launch, and one
+        of those things is now load-bearing: Claude Code refuses a background session in
+        a directory nobody has trusted, and these worktrees are seconds old. A refusal
+        here used to be invisible, because the launch output was discarded and the wait
+        that followed simply returned nothing.
         """
         worktree = self.sandbox.worktree_root / name
-        subprocess.run(
+        created = subprocess.run(
             ["git", "-C", str(self.sandbox.repo), "worktree", "add", "-b",
              f"chargehand/{name}", str(worktree), "origin/main"],
-            capture_output=True, check=False,
+            capture_output=True, text=True, check=False,
         )
         if not worktree.is_dir():
+            self.record("states", f"{name}: worktree", FAIL,
+                        sanitize_line(created.stderr or created.stdout))
             return None
-        subprocess.run(
+        if not ClaudeCLI().trust_worktree(worktree):
+            self.record("states", f"{name}: trusted workspace", FAIL,
+                        "could not record the worktree as trusted; the launch will be refused")
+            return None
+        launched = subprocess.run(
             ["claude", "--bg", "-n", name, "--permission-mode", mode, prompt],
             cwd=str(worktree), capture_output=True, text=True, timeout=300, check=False,
         )
+        if launched.returncode != 0:
+            self.record("states", f"{name}: launch", FAIL,
+                        sanitize_line(launched.stderr or launched.stdout))
+            return None
         return wait_for_session(worktree, ("done", "blocked", "failed"), timeout=300)
 
     def _summarise_states(self, section: str) -> None:
         ended = [s for s in self.session_samples if s["state"]]
         asked = [s for s in ended if s["expected"] == "blocked"]
         finished = [s for s in ended if s["expected"] == "done"]
+        # A sample with no state is excluded from the ratio, which is right, but a run
+        # where every sample is missing would then satisfy every assertion below on an
+        # empty set and report a clean pass having measured nothing.
+        self.expect(
+            section, "the vocabulary was observed at all", bool(asked) and bool(finished),
+            f"{len(asked)} run(s) that asked, {len(finished)} that finished, out of "
+            f"{len(self.session_samples)} started",
+            asked=len(asked), finished=len(finished), started=len(self.session_samples),
+        )
         misread_questions = [s for s in asked if s["state"] != "blocked"]
         misread_finishes = [s for s in finished if s["state"] != "done"]
         self.expect(
@@ -798,13 +830,16 @@ class Probe:
     # ----- teardown ---------------------------------------------------------
 
     def cleanup(self) -> dict[str, Any]:
+        if self.keep:
+            # Sessions included. `claude logs <id>` on a run that failed is usually the
+            # only place the reason survives, and removing them is not undoable.
+            return {"sessions_removed": [], "issues_deleted": [], "kept": True}
         removed = remove_sessions_under(self.sandbox.worktree_root)
         deleted = []
-        if not self.keep:
-            for issue in list(self.issues):
-                if self.admin.delete_issue(issue.id):
-                    deleted.append(issue.identifier)
-        return {"sessions_removed": removed, "issues_deleted": deleted, "kept": self.keep}
+        for issue in list(self.issues):
+            if self.admin.delete_issue(issue.id):
+                deleted.append(issue.identifier)
+        return {"sessions_removed": removed, "issues_deleted": deleted, "kept": False}
 
     # ----- reporting --------------------------------------------------------
 
@@ -885,7 +920,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="throwaway directory for the sandbox")
     parser.add_argument("--only", help=f"comma-separated subset of: {', '.join(SECTIONS)}")
     parser.add_argument("--keep", action="store_true",
-                        help="leave the issues, sessions and sandbox in place")
+                        help="leave everything behind to look at: issues, sessions, "
+                             "worktrees and the sandbox")
     parser.add_argument("--reuse", action="store_true",
                         help="reuse an existing sandbox directory instead of rebuilding it")
     parser.add_argument("--keychain-service", default="chargehand-linear")
@@ -913,6 +949,13 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.root).expanduser().resolve()
     if root.exists() and not args.reuse:
+        if not is_sandbox(root):
+            print(
+                f"{root} exists and was not built by this probe, so it will not be deleted. "
+                f"Point --root somewhere else, or remove it yourself if it really is scrap.",
+                file=sys.stderr,
+            )
+            return 2
         remove_sessions_under(root / "worktrees")
         shutil.rmtree(root)
     sandbox = Sandbox(

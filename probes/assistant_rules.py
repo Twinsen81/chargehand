@@ -297,6 +297,19 @@ def report(outcomes: list[Outcome]) -> int:
             f"command that is NOT GATED runs without the operator seeing it."
         )
         return 1
+    inconclusive = [o for o in outcomes if o.verdict == INCONCLUSIVE]
+    if inconclusive:
+        # Not a pass. The command never ran even when it was allowed outright, so its
+        # rule was never put to the question, and saying "every command prompted" would
+        # be claiming more than was observed.
+        print(
+            f"{len(inconclusive)} attempt(s) inconclusive: the command did not run even "
+            f"when allowed, so nothing can be credited to a rule. Either the model "
+            f"declined or the turn failed on its own. Re-run before trusting this."
+        )
+        for outcome in inconclusive:
+            print(f"  {outcome.attempt.name}: {outcome.notes[0] if outcome.notes else ''}")
+        return 1
     print("Every mutating command prompted, and every read ran without one.")
     return 0
 
@@ -312,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps([o.as_dict() for o in outcomes], indent=2))
         return 0 if all(
-            o.verdict not in (NOT_GATED, PROMPTED, BROKEN) for o in outcomes
+            o.verdict not in (NOT_GATED, PROMPTED, BROKEN, INCONCLUSIVE) for o in outcomes
         ) else 1
     return report(outcomes)
 

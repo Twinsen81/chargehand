@@ -332,13 +332,16 @@ def report(outcomes: list[Outcome]) -> int:
         return 1
     inconclusive = [o for o in outcomes if o.verdict == INCONCLUSIVE]
     if inconclusive:
+        # Not a pass. The refusal cannot be credited to a rule, so the claim this probe
+        # exists to make was not made for these attempts.
         print(
             f"{len(inconclusive)} attempt(s) inconclusive: nothing was recorded even without "
             f"the rules, so the refusal cannot be credited to one. Either the model declined "
-            f"or the command failed on its own."
+            f"or the command failed on its own. Re-run before trusting this."
         )
         for outcome in inconclusive:
             print(f"  {outcome.attempt.name}: {outcome.notes[0] if outcome.notes else ''}")
+        return 1
     print("Deny rules refused every attempt they were written for.")
     return 0
 
@@ -352,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     outcomes = run(claude_bin=args.claude_bin, timeout=args.timeout)
     if args.json:
         print(json.dumps([o.as_dict() for o in outcomes], indent=2))
-        return 1 if any(o.verdict == ALLOWED for o in outcomes) else 0
+        return 1 if any(o.verdict in (ALLOWED, INCONCLUSIVE) for o in outcomes) else 0
     return report(outcomes)
 
 

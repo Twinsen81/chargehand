@@ -462,6 +462,11 @@ class Sandbox:
         return self.root / "notifications.jsonl"
 
     @property
+    def marker_file(self) -> Path:
+        """Proof that this directory is a sandbox and not somebody's work."""
+        return self.root / ".chargehand-smoke-sandbox"
+
+    @property
     def env(self) -> dict[str, str]:
         return {
             **os.environ,
@@ -475,6 +480,11 @@ class Sandbox:
 
     def build(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        self.marker_file.write_text(
+            "Written by probes/smoke_route.py. Its presence is what allows this directory "
+            "to be deleted and rebuilt; without it the probe refuses to touch the path.\n",
+            encoding="utf-8",
+        )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.worktree_root.mkdir(parents=True, exist_ok=True)
@@ -740,6 +750,16 @@ def remove_sessions_under(root: Path, claude_bin: str = "claude") -> list[str]:
         subprocess.run([claude_bin, "rm", session_id], capture_output=True, check=False)
         removed.append(session_id)
     return removed
+
+
+def is_sandbox(root: Path) -> bool:
+    """Whether *root* is a directory a previous run of this probe built.
+
+    The probe deletes and rebuilds whatever `--root` names. A mistyped path would
+    otherwise take the answer with it, and this tool refuses to destroy unpushed work
+    everywhere else it might.
+    """
+    return (root / ".chargehand-smoke-sandbox").is_file()
 
 
 def keychain_key(service: str, account: str | None = None) -> str | None:

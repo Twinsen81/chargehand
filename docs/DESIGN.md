@@ -229,11 +229,11 @@ That also means `done` is less ambiguous than it first appears: Claude Code dist
 run the smoke probe has observed, nothing that wanted input was reported `done`: not a
 direct question, not a flat statement that the session could not proceed, not a permission
 prompt. So a session that is waiting never has its label cleared. The converse does not
-hold. One run in five that had finished its work and merely volunteered a caveat reported
-`blocked` anyway, and the same prompt reported `done` the other four times. `blocked` is
-therefore a reason to go and look rather than proof that anything is waiting, and a bare
-`done` still says nothing about *how* a run finished. The runner stays conservative on both
-counts.
+hold. About one finished run in five reported `blocked` anyway, and the same prompt
+reported `done` the other four times. That is not confined to runs that hedged: a session
+told to write one file and stop has done it. `blocked` is therefore a reason to go and
+look rather than proof that anything is waiting, and a bare `done` still says nothing
+about *how* a run finished. The runner stays conservative on both counts.
 
 A repository disambiguates that with the **status-file protocol**: whatever the prompt runs
 writes a small JSON file at its yield points and when it finishes.

@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A control command no longer kick-starts the scheduled job unless this process is the
+  instance that job runs. The LaunchAgent carries no path overrides, so it always ticks
+  the default configuration and ledger: a second instance, which `CHARGEHAND_CONFIG`,
+  `CHARGEHAND_STATE_DIR` and `--config` all exist to allow, was asking launchd to run a
+  tick against somebody else's ledger and then waiting for a request that tick would
+  never see.
+- Label lookup narrows on the server when the route names a team, and refuses a full page
+  of results rather than choosing from a truncated one. Asking for a name alone is not
+  enough: a workspace measured here holds 250 teams and 114 label names used by more than
+  25 of them, so a queue label that is an ordinary word could not be resolved at all.
 - An ambiguous tracker write no longer spends one of an attempt's launch retries. The
   attempt is held and retried, which is right, but a tracker that answers a correct write
   with a stale read would previously fail a launch in three ticks with nothing wrong.

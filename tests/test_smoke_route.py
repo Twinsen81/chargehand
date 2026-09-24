@@ -208,9 +208,17 @@ def test_the_notification_hook_records_what_the_runner_sends(sandbox):
 class StubAdmin:
     def __init__(self, running=()):
         self.running = list(running)
+        self.deleted = []
 
     def issues_with_label(self, team_id, label):
         return [{"identifier": name} for name in self.running]
+
+    def delete_issue(self, issue_id):
+        self.deleted.append(issue_id)
+        return True
+
+    def queue(self, team_key, label, state):
+        return []
 
 
 class StubSandbox:
@@ -360,3 +368,92 @@ def test_a_missing_credential_is_refused_before_anything_is_created(monkeypatch,
     assert "no API key" in capsys.readouterr().err
     assert not (tmp_path / "unused").exists()
 
+
+
+# ----- what the probe refuses to destroy ------------------------------------
+
+
+def test_a_built_sandbox_is_recognisable_as_one(sandbox):
+    assert sandbox.marker_file.is_file()
+    assert smoke_support.is_sandbox(sandbox.root) is True
+
+
+def test_a_directory_this_probe_did_not_build_is_not_a_sandbox(tmp_path):
+    someones_work = tmp_path / "code"
+    someones_work.mkdir()
+    (someones_work / "main.py").write_text("print('hello')\n")
+
+    assert smoke_support.is_sandbox(someones_work) is False
+
+
+def test_an_existing_directory_without_the_marker_is_refused(monkeypatch, capsys, tmp_path):
+    """`--root` is deleted and rebuilt, so a mistyped path would take the answer with it."""
+    monkeypatch.setattr(smoke_route, "keychain_key", lambda *a, **k: "lin_api_test")
+    someones_work = tmp_path / "code"
+    someones_work.mkdir()
+    (someones_work / "main.py").write_text("print('hello')\n")
+
+    assert smoke_route.main(["--team", "ABC", "--root", str(someones_work)]) == 2
+
+    assert "will not be deleted" in capsys.readouterr().err
+    assert (someones_work / "main.py").exists()
+
+
+# ----- --keep ---------------------------------------------------------------
+
+
+class RecordingSandbox(StubSandbox):
+    def __init__(self):
+        super().__init__([{"identifier": "ABC-1", "state": "running", "worktree": "/w/ABC-1"}])
+        self.commands = []
+
+    def attempt(self, identifier):
+        return self.rows[0]
+
+    def cli(self, *args, **kwargs):
+        self.commands.append(args)
+        return None
+
+
+def keeping_probe(keep):
+    probe = smoke_route.Probe(RecordingSandbox(), StubAdmin(), team="ABC", keep=keep)
+    probe.team_id = "team"
+    return probe
+
+
+def test_keep_leaves_the_worktree_and_its_session_alone():
+    """The flag exists for picking over a failed run, and that is what there is to see."""
+    probe = keeping_probe(True)
+
+    probe.teardown_issue(smoke_support.IssueRef("uuid", "ABC-1", "url"))
+
+    assert probe.sandbox.commands == []
+    assert probe.cleanup() == {"sessions_removed": [], "issues_deleted": [], "kept": True}
+
+
+def test_without_keep_the_worktree_is_discarded():
+    probe = keeping_probe(False)
+
+    probe.teardown_issue(smoke_support.IssueRef("uuid", "ABC-1", "url"))
+
+    assert any("discard" in command for command in probe.sandbox.commands)
+    assert probe.admin.deleted == ["uuid"]
+
+
+def test_the_probe_runs_as_a_script_outside_pytest():
+    """pytest puts `src` on the path for us; a probe run from a shell has to do it itself.
+
+    Without this the import error only appears when someone actually runs the probe,
+    which is exactly when they are trying to use it.
+    """
+    import subprocess
+    import sys as _sys
+
+    result = subprocess.run(
+        [_sys.executable, str(pathlib.Path(smoke_route.__file__)), "--help"],
+        capture_output=True, text=True, timeout=60,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--team" in result.stdout

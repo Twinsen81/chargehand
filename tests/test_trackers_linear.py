@@ -50,13 +50,16 @@ class StubTransport:
             self.calls.append("viewer")
             return {"viewer": {"email": "me@example.invalid"}}
         if "issueLabels" in query:
-            self.calls.append(f"labels:{variables['name']}")
-            wanted = variables["name"].lower()
-            return {
-                "issueLabels": {
-                    "nodes": [n for n in self.labels if n["name"].lower() == wanted],
-                }
-            }
+            label_filter = variables["filter"]
+            wanted = label_filter["name"]["eqIgnoreCase"].lower()
+            team = (label_filter.get("team") or {}).get("key", {}).get("eq")
+            self.calls.append(f"labels:{wanted}" + (f"@{team}" if team else ""))
+            nodes = [n for n in self.labels if n["name"].lower() == wanted]
+            if team is not None:
+                # The server narrows before it truncates, which is the whole point of
+                # sending the team: one match comes back instead of a page of them.
+                nodes = [n for n in nodes if (n.get("team") or {}).get("key") == team]
+            return {"issueLabels": {"nodes": nodes[: variables["first"]]}}
         if query.strip().startswith("query Queue"):
             self.calls.append("queue")
             wanted = variables["filter"]["labels"]["name"]["eq"]
@@ -263,7 +266,7 @@ def test_a_label_is_looked_up_by_name_not_by_enumerating_the_workspace(tracker_a
     tracker.mark(issue, Status.RUNNING)
 
     looked_up = [call for call in transport.calls if call.startswith("labels:")]
-    assert looked_up == ["labels:chargehand-running", "labels:chargehand"]
+    assert looked_up == ["labels:chargehand-running@ABC", "labels:chargehand@ABC"]
 
 
 def test_a_resolved_label_is_not_looked_up_twice(tracker_and_transport):
@@ -276,7 +279,13 @@ def test_a_resolved_label_is_not_looked_up_twice(tracker_and_transport):
     assert before == len([call for call in transport.calls if call.startswith("labels:")])
 
 
-def test_the_route_team_wins_when_two_teams_share_a_label_name(tracker_and_transport):
+def test_the_route_team_narrows_the_lookup_on_the_server(tracker_and_transport):
+    """A shared workspace holds more labels with one name than any page can carry.
+
+    Measured on a real one: 250 teams, and 114 label names used by more than 25 of them.
+    Asking for the name alone and choosing from what came back would miss the right
+    label for anyone whose queue label is an ordinary word.
+    """
     tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
     transport.labels.insert(
         0, {"id": "lbl-other", "name": "chargehand-running",
@@ -287,10 +296,42 @@ def test_the_route_team_wins_when_two_teams_share_a_label_name(tracker_and_trans
     tracker.mark(issue, Status.RUNNING)
 
     assert tracker._label_ids["chargehand-running"] == "lbl-r"
+    assert any(call.endswith("@ABC") for call in transport.calls)
+
+
+def test_a_full_page_of_labels_is_reported_rather_than_chosen_from(tracker_and_transport):
+    """Truncation is silent, and picking from a partial list is how the wrong one wins."""
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team=None)
+    from chargehand.trackers.linear import _LABEL_PAGE
+
+    transport.labels = [
+        {"id": f"lbl-{n}", "name": "chargehand-running", "team": {"id": f"t{n}", "key": f"T{n}"}}
+        for n in range(_LABEL_PAGE + 5)
+    ]
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+
+    with pytest.raises(TrackerError, match="more than"):
+        tracker.mark(issue, Status.RUNNING)
+
+
+def test_the_route_team_wins_among_whatever_came_back(tracker_and_transport):
+    """Belt and braces behind the server filter, tested where it is actually reachable.
+
+    The filter should make this moot. It is kept because writing the wrong team's label
+    moves an issue into a queue this route does not watch, which nothing downstream
+    would notice.
+    """
+    tracker, _ = tracker_and_transport({})
+    candidates = [
+        {"id": "lbl-other", "name": "chargehand-running", "team": {"id": "t-XYZ", "key": "XYZ"}},
+        {"id": "lbl-r", "name": "chargehand-running", "team": {"id": "t-ABC", "key": "ABC"}},
+    ]
+
+    assert tracker._pick_label("chargehand-running", candidates)["id"] == "lbl-r"
 
 
 def test_a_workspace_label_is_used_when_no_team_owns_the_name(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team=None)
     transport.labels = [
         {"id": "lbl-ws", "name": "chargehand-running", "team": None},
         *[n for n in transport.labels if n["name"] != "chargehand-running"],
@@ -303,7 +344,8 @@ def test_a_workspace_label_is_used_when_no_team_owns_the_name(tracker_and_transp
 
 
 def test_an_unresolvable_label_name_is_reported_rather_than_guessed(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team="NOPE")
+    """With no team on the route there is nothing to prefer, so the ambiguity is named."""
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team=None)
     transport.labels.insert(
         0, {"id": "lbl-other", "name": "chargehand-running",
             "team": {"id": "t-XYZ", "key": "XYZ"}}
@@ -311,6 +353,14 @@ def test_an_unresolvable_label_name_is_reported_rather_than_guessed(tracker_and_
     issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
 
     with pytest.raises(TrackerError, match="several teams"):
+        tracker.mark(issue, Status.RUNNING)
+
+
+def test_a_route_pointed_at_a_team_without_the_label_says_so(tracker_and_transport):
+    tracker, _ = tracker_and_transport({"ABC-1": ("chargehand",)}, team="NOPE")
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+
+    with pytest.raises(TrackerError, match="create it"):
         tracker.mark(issue, Status.RUNNING)
 
 

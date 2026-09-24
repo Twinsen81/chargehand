@@ -54,9 +54,14 @@ query Issue($id: String!) {
 
 _VIEWER_QUERY = "query { viewer { id name email } }"
 
+# `first` is a ceiling, not an expectation: with a team filter the answer is one label,
+# and without one a workspace can hold a great many with the same name. A full page is
+# treated as truncation rather than as a list to choose from.
+_LABEL_PAGE = 50
+
 _LABELS_QUERY = """
-query Labels($name: String!) {
-  issueLabels(filter: { name: { eqIgnoreCase: $name } }, first: 25) {
+query Labels($filter: IssueLabelFilter!, $first: Int!) {
+  issueLabels(filter: $filter, first: $first) {
     nodes { id name team { id key } }
   }
 }
@@ -300,12 +305,26 @@ class LinearTracker(Tracker):
         cached = self._label_ids.get(key)
         if cached is not None:
             return cached
-        nodes = (self._post(_LABELS_QUERY, {"name": name}).get("issueLabels") or {}).get(
-            "nodes", []
-        )
+        # Narrow on the server where the route names a team. A shared workspace here holds
+        # 250 teams and 114 label names used by more than 25 of them, so asking for a name
+        # alone and taking what comes back would miss the one this route means.
+        label_filter: dict[str, Any] = {"name": {"eqIgnoreCase": name}}
+        if self._team:
+            label_filter["team"] = {"key": {"eq": self._team}}
+        nodes = (
+            self._post(_LABELS_QUERY, {"filter": label_filter, "first": _LABEL_PAGE}).get(
+                "issueLabels"
+            )
+            or {}
+        ).get("nodes", [])
         candidates = [
             node for node in nodes if str(node.get("name", "")).lower() == key and node.get("id")
         ]
+        if len(nodes) >= _LABEL_PAGE:
+            raise TrackerError(
+                f"linear: more than {_LABEL_PAGE} labels are named '{name}'; set `team` on "
+                f"the route so the right one can be identified, or rename the label"
+            )
         chosen = self._pick_label(name, candidates)
         self._label_ids[key] = str(chosen["id"])
         return self._label_ids[key]

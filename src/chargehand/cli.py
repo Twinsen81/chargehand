@@ -368,6 +368,17 @@ def _wait_for_request(ledger: Ledger, request_id: int, timeout: float) -> dict |
     return ledger.get_request(request_id)
 
 
+def _runs_the_scheduled_job(args: argparse.Namespace) -> bool:
+    """Whether the loaded launchd job would tick *this* configuration and ledger.
+
+    The plist carries no path overrides, so the job always runs the default instance.
+    A process given `--config`, `CHARGEHAND_CONFIG` or `CHARGEHAND_STATE_DIR` is a
+    different instance sharing the binary, and kick-starting the job from it would run
+    a tick against a ledger it is not waiting on.
+    """
+    return paths.is_default_instance() and not args.config
+
+
 def _request(args: argparse.Namespace, kind: str, target: str | None = None, **extra) -> int:
     """Record a control request and let a tick apply it."""
     config = _load_config(args)
@@ -379,8 +390,13 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
 
         # Prefer the scheduled job when it is loaded: it runs inside the GUI session,
         # where the keychain and Claude Code's credentials are reachable.
+        #
+        # Only when this process is the instance that job runs, though. The plist carries
+        # no path overrides, so a second instance started with CHARGEHAND_CONFIG or
+        # CHARGEHAND_STATE_DIR would be kick-starting a tick against somebody else's
+        # ledger, and then waiting for a request that tick will never see.
         applied = None
-        if install.is_loaded():
+        if _runs_the_scheduled_job(args) and install.is_loaded():
             install.kickstart()
             applied = _wait_for_request(ledger, request_id, min(args.wait, 30.0))
         if applied is None or applied["applied_at"] is None:
