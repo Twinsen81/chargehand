@@ -62,7 +62,7 @@ public location.
   is an explicit opt-in intended for a dedicated machine, user account, or VM. Deny rules
   apply in every mode, including `bypassPermissions`, and unlike the classifier they are
   deterministic - but see below for what they are deterministic *about*.
-- **No server.** chargehand opens no port. It is steered by a CLI, remotely over SSH. There
+- **No server.** chargehand opens no port. It is steered by a CLI on the machine it runs on. There
   is no token to leak and no browser-borne attack surface (CSRF, DNS rebinding, XSS).
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles need `--verbose`; agent output needs `logs`. All

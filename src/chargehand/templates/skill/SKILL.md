@@ -1,6 +1,6 @@
 ---
 name: chargehand
-description: Inspect and steer a chargehand runner over SSH. Use when asked which runs are active or blocked, why a run is waiting, or to pause, cancel, stop, continue, retry, or discard a run.
+description: Inspect and steer a chargehand runner. Use when asked which runs are active or blocked, why a run is waiting, or to pause, cancel, stop, continue, retry, or discard a run.
 ---
 
 # chargehand
@@ -23,7 +23,7 @@ steers it.
 4. **`discard` destroys work.** It removes the session, the worktree, and the local
    branch. It refuses when commits are unpushed. Never pass `--force`.
 5. **You cannot answer a session's question from here.** A blocked run is answered in
-   Claude Code's own agent view on the runner: `ssh <runner> -t claude agents`.
+   Claude Code's own agent view: `claude agents`.
 
 ## Commands
 
@@ -41,8 +41,6 @@ chargehand retry <ISSUE>              # new attempt for a failed or cancelled on
 chargehand discard <ISSUE> --yes      # remove session, worktree, and branch
 chargehand tick                       # run a tick now
 ```
-
-Over SSH, prefix with `ssh <runner>`; `watch` needs `ssh -t <runner> chargehand watch`.
 
 ## Reading a status
 
