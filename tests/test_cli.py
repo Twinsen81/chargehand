@@ -192,7 +192,7 @@ def test_templates_can_be_listed_and_printed(capsys):
 
     assert main(["templates", "assistant-settings.json"]) == EXIT_OK
     settings = json.loads(capsys.readouterr().out)
-    assert "Bash(chargehand cancel:*)" in settings["permissions"]["ask"]
+    assert "Bash(*chargehand cancel *)" in settings["permissions"]["ask"]
     assert "Bash(chargehand status:*)" in settings["permissions"]["allow"]
 
 

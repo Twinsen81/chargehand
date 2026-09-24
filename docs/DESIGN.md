@@ -295,11 +295,16 @@ chargehand tick                     # run a tick now
 - **Untrusted text.** Issue titles and agent output are attacker-influenced, so `status` and
   `watch` omit free text by default; titles need `--verbose`, output needs `logs`. Everything
   printed is stripped of terminal control sequences.
-- **An AI assistant as the interface.** Driving the CLI from a Claude Code session on your
-  working machine is convenient, and it is the one real risk of this design: status output
-  lands in a session that holds your permissions. The shipped skill therefore reads only
-  `status --json`, and every mutating command sits behind a Claude Code *ask* rule, which
-  prompts in every permission mode.
+- **An AI assistant as the interface.** Driving the CLI from a Claude Code session is
+  convenient, and it is the one real risk of this design: status output lands in a session
+  that holds your permissions. The shipped skill therefore reads only `status --json`, and
+  every mutating command sits behind a Claude Code *ask* rule, which prompts in every
+  permission mode including `bypassPermissions`. Those rules lead with a wildcard rather
+  than anchoring on the program name, for the same reason the launch-time deny rules do: a
+  rule matches the command text, so an anchored one gates `chargehand cancel X` and misses
+  both `/usr/local/bin/chargehand cancel X` and `sh -c 'chargehand cancel X'`.
+  `probes/assistant_rules.py` checks that against a real install, because the claim is
+  about Claude Code's matcher rather than about this tool.
 - **Agents versus the control plane.** Sessions run as the same user, so they could call the
   CLI, stop other sessions, or start a session without any of these restrictions. Launched
   sessions get deny rules for all three. A `Bash` rule matches command text rather than the

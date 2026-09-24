@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and what a session reports at the end of several shapes of turn. It runs as a throwaway
   instance beside any real one, and a proxy in front of the tracker injects the write
   faults, which cannot be provoked from outside.
+- `probes/assistant_rules.py`, which checks that the bundled assistant settings really
+  do gate every mutating command against a real Claude Code, in the spellings an
+  assistant produces by accident rather than by evasion.
 - Lease-pool interface with a no-op implementation, so the call sites exist before the
   pool does.
 - Starter templates: machine and repository configuration, a notification hook, the
@@ -52,6 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An ambiguous tracker write no longer spends one of an attempt's launch retries. The
+  attempt is held and retried, which is right, but a tracker that answers a correct write
+  with a stale read would previously fail a launch in three ticks with nothing wrong.
+  A plain tracker failure already handed the retry back; this makes the unverifiable case
+  behave the same way. Both were observed live.
+- The bundled assistant settings gate every mutating command in every spelling. They were
+  anchored on the program name, so `chargehand cancel X` prompted while
+  `/usr/local/bin/chargehand cancel X` and `sh -c 'chargehand cancel X'` ran without one.
+  Neither is an evasion: the first is what an assistant produces after running
+  `which chargehand`. This is the same hole the launch-time deny rules were fixed for, in
+  the list that guards the other direction. `uninstall` and `init` had no rule at all.
 - The launchd job's argument list is now complete in every case. Built without a console
   script on `PATH`, which is what an unactivated virtual environment looks like, it named
   the interpreter and then `tick`, so launchd would have tried to run a file called

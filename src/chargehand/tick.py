@@ -1068,10 +1068,13 @@ class Runner:
             try:
                 tracker.mark(issue, Status.RUNNING)
             except AmbiguousWrite as exc:
-                # It may have landed. Stay at step 0 and let reconciliation settle it.
+                # It may have landed. Record why and stay at step 0, then let the caller
+                # decide what it costs. A resume hands its launch retry back, because an
+                # unverifiable write is a fact about the tracker and not a fault in this
+                # attempt: a tracker that answers a correct write with a stale read would
+                # otherwise fail a launch that never went wrong, in three ticks.
                 self.ledger.update(attempt, last_error=str(exc)[:500])
-                report.errors.append(f"{attempt.identifier}: {exc}")
-                return attempt
+                raise
             attempt = self.ledger.update(attempt, step=1, label_state=Status.RUNNING.value)
             self._check_crash(1, crash_after_step)
 

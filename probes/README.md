@@ -10,12 +10,13 @@ Run one after upgrading Claude Code, or when changing what the claim depends on.
 | Probe | Claim it checks | Last run |
 |---|---|---|
 | `deny_rules.py` | The deny rules passed at launch refuse the control plane, in every spelling a session might reach it through. | Claude Code 2.1.280: all ten attempts refused, control ran. |
+| `assistant_rules.py` | The bundled assistant settings gate every mutating command and leave the reads silent, in the spellings an assistant produces by accident. | Claude Code 2.1.281: every mutating command gated in all three spellings, both reads silent. |
 | `smoke_route.py` | The runner behaves against a real tracker and real Claude Code the way the test suite says it behaves against the fakes: launch, fault injection at every step, ambiguous tracker writes, the control commands, and what a session reports at the end of a turn. | Claude Code 2.1.280, Linear: 116 checks, none failed. |
 
 The parts of a probe that can be checked without a real install - the battery of cases,
-the model of the matcher, the verdict logic - are covered by `tests/test_deny_rules.py`
-and `tests/test_smoke_route.py`, so neither a rule list nor a fault plan can narrow
-silently between probe runs.
+the model of the matcher, the verdict logic - are covered by `tests/test_deny_rules.py`,
+`tests/test_assistant_rules.py` and `tests/test_smoke_route.py`, so neither a rule list nor a
+fault plan can narrow silently between probe runs.
 
 ## `smoke_route.py`
 

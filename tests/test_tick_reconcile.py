@@ -368,3 +368,58 @@ def test_an_unadoptable_orphan_is_reported_once_not_every_tick(harness):
     assert harness.notifications().count(("?", "orphan-session")) == 1
     # It stays visible in the tick's own output every time.
     assert any("no derivable issue" in warning for warning in report.warnings)
+
+
+def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monkeypatch):
+    """A tracker that cannot confirm a write is not the attempt's fault.
+
+    Observed live: a label write reported success and the verification read that
+    followed returned the labels from before it. The attempt is correctly held and
+    retried, but if each hold also spent one of its three launch retries, three of
+    these in a row would fail a launch in which nothing had gone wrong.
+    """
+    from chargehand.errors import AmbiguousWrite
+    from support import fake_tracker
+
+    harness.board.add("ABC-1")
+    with pytest.raises(LaunchAborted):
+        harness.tick(crash_after_step=0)
+    assert harness.attempt("ABC-1").launch_attempts == 1
+
+    unverifiable = {"value": True}
+    verified = fake_tracker.FakeTracker.mark
+
+    def cannot_confirm(self, issue, status):
+        if unverifiable["value"]:
+            raise AmbiguousWrite("fake: the re-read did not show the write")
+        return verified(self, issue, status)
+
+    monkeypatch.setattr(fake_tracker.FakeTracker, "mark", cannot_confirm)
+    for _ in range(harness.config.max_launch_attempts + 1):
+        harness.next_tick()
+
+    attempt = harness.attempt("ABC-1")
+    assert attempt.state == ledger_mod.LAUNCHING
+    assert attempt.launch_attempts == 1
+    assert "re-read" in (attempt.last_error or "")
+
+    unverifiable["value"] = False
+    harness.next_tick()
+
+    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.labels("ABC-1") == ("chargehand-running",)
+
+
+def test_an_unverifiable_label_write_on_a_fresh_launch_is_recorded(harness):
+    """The reason has to survive on the attempt, not only in the tick that saw it."""
+    harness.board.add("ABC-1")
+    harness.board.fail_next_write = "fake: 502, and the re-read could not confirm it"
+
+    report = harness.tick()
+
+    attempt = harness.attempt("ABC-1")
+    assert attempt.state == ledger_mod.LAUNCHING
+    assert attempt.step == 0
+    assert attempt.launch_attempts == 1
+    assert "could not confirm" in (attempt.last_error or "")
+    assert any("ABC-1" in error for error in report.errors)
