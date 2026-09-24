@@ -8,6 +8,7 @@ import time
 import pytest
 
 from chargehand import ledger as ledger_mod
+from chargehand.config import NotifyConfig
 from conftest import run_git
 
 
@@ -31,6 +32,30 @@ def test_a_blocked_session_marks_the_issue_blocked_and_notifies_once(harness):
 
     harness.next_tick()
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
+
+
+def test_a_notification_that_failed_is_sent_again_on_the_next_tick(harness, tmp_path):
+    """The first tick after a wake can run before the network is back."""
+    offline = tmp_path / "offline"
+    offline.touch()
+    hook = tmp_path / "notify.sh"
+    hook.write_text(f'#!/bin/sh\n[ -e "{offline}" ] && exit 1\nexit 0\n')
+    hook.chmod(0o755)
+    harness.notifier.config = NotifyConfig(command=str(hook))
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+
+    report = harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications().count(("ABC-1", "blocked")) == 2
+    assert any("ABC-1" in warning for warning in report.warnings)
+
+    offline.unlink()
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications().count(("ABC-1", "blocked")) == 3
 
 
 def test_answering_a_blocked_session_flips_the_label_back(harness):

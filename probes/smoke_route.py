@@ -61,6 +61,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -379,6 +380,11 @@ class Probe:
                     f"labels={self.labels_of(issue)}")
         states = [entry["state"] for entry in self.sandbox.notifications()]
         self.expect(section, "the operator was notified", bool(states), f"notifications={states}")
+        urls = [entry["url"] for entry in self.sandbox.notifications()
+                if entry["issue"] == issue.identifier]
+        self.expect(section, "the notification URL carries no title text",
+                    bool(urls) and all(_is_short_issue_url(u, issue.identifier) for u in urls),
+                    f"urls={urls}")
         self.assert_no_strays(section)
         self.teardown_issue(issue)
 
@@ -891,6 +897,15 @@ def _worktree_of(row: dict[str, Any]) -> Path | None:
     """`Path("")` is the current directory, which is a directory - and always exists."""
     worktree = row.get("worktree")
     return Path(worktree) if worktree else None
+
+
+def _is_short_issue_url(url: str | None, identifier: str) -> bool:
+    """Ends at the identifier, so no title slug, query or fragment can ride along."""
+    if not url:
+        return False
+    parts = urlsplit(url)
+    return (not parts.query and not parts.fragment
+            and parts.path.rstrip("/").endswith(f"/{identifier}"))
 
 
 def _sessions_under(root: Path) -> list[dict[str, Any]]:

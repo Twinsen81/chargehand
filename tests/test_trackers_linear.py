@@ -416,7 +416,7 @@ def test_the_api_key_is_read_from_the_environment(monkeypatch):
 
 
 def test_the_issue_url_drops_the_title_slug(tracker_and_transport):
-    """Linear's url ends in the title, hyphenated. That text must not travel with it."""
+    """A Linear URL can end in the title, hyphenated. That text must not travel with it."""
     tracker, transport = tracker_and_transport({})
     tracker._post = lambda q, v=None: {
         "issue": {

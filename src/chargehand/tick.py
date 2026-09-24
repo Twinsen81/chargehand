@@ -832,9 +832,12 @@ class Runner:
         self._sync_labels(attempt, context, report)
 
         if observed != attempt.notified_state and observed != claude_mod.WORKING:
-            self._notify(report, attempt.identifier, target_state, attempt.url, attempt.route,
-                         detail=detail)
-            attempt = self.ledger.update(attempt, notified_state=observed)
+            # Recorded only once delivered. A hook that failed, for example on the first
+            # tick after a wake while the network is still down, is run again on the next
+            # tick; otherwise the run would sit blocked with nobody told.
+            if self._notify(report, attempt.identifier, target_state, attempt.url,
+                            attempt.route, detail=detail):
+                attempt = self.ledger.update(attempt, notified_state=observed)
         elif observed == claude_mod.WORKING and attempt.notified_state != observed:
             attempt = self.ledger.update(attempt, notified_state=observed)
         return attempt
@@ -1357,17 +1360,22 @@ class Runner:
         route: str | None,
         *,
         detail: str | None = None,
-    ) -> None:
+    ) -> bool:
         """*detail* must be a phrase this module writes.
 
         A notification usually crosses a third-party relay, so nothing authored by an
         agent, a setup script, or the tracker belongs in it — not an issue title, not a
         session's `waitingFor`, not a status file's `stop_reason`, not a script's stderr.
         Those are kept in the ledger and reached through `status --verbose` and `logs`.
+
+        Returns False only when a configured command failed.
         """
         notification = Notification(issue=issue, state=state, url=url, route=route, detail=detail)
-        self.notifier.send(notification)
-        report.notified.append(f"{issue}: {state}")
+        if self.notifier.send(notification) or not self.notifier.enabled:
+            report.notified.append(f"{issue}: {state}")
+            return True
+        report.warnings.append(f"notification for {issue} ({state}) failed; see the log")
+        return False
 
 
 def run_tick(

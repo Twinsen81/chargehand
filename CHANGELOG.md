@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A notification that failed is sent again on the next tick. A session's new state was
+  recorded as notified whether or not the command succeeded, so one failed send, such as
+  the first tick after a wake while the network is still down, left a blocked run with
+  nobody told. One-time events (a failed launch, the watchdog, a cancel) are still sent
+  once, and a failed send now also appears as a warning in the tick's output.
 - A control command no longer kick-starts the scheduled job unless this process is the
   instance that job runs. The LaunchAgent carries no path overrides, so it always ticks
   the default configuration and ledger: a second instance, which `CHARGEHAND_CONFIG`,
@@ -85,6 +90,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory it ever created.
 
 ### Changed
+
+- The bundled notification hook has commented examples of a macOS notification and of an
+  email sent through an SMTP server with the password read from the login keychain, next to
+  the push service it had. The macOS example passes the values to AppleScript as arguments;
+  the previous one put them into the script text, where a quote would break it. Each
+  example records a failure instead of exiting, so one method that fails does not skip the
+  next one.
 
 - The Linear adapter resolves a label by asking for that name, instead of enumerating the
   workspace's labels and looking the name up in the result. Enumerating was bounded at
