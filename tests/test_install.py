@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import sys
 
 import pytest
 
@@ -23,6 +24,21 @@ def test_the_plist_runs_a_tick_on_a_timer_with_an_explicit_path():
     assert data["ProcessType"] == "Background"
     # launchd starts jobs with a minimal PATH, so the job carries its own.
     assert "/opt/homebrew/bin" in data["EnvironmentVariables"]["PATH"]
+
+
+def test_the_plist_can_always_be_run_by_launchd(monkeypatch):
+    """launchd has no shell and no PATH of its own, so the argv has to be complete.
+
+    The module form is what a virtual environment that was never activated falls back
+    to: neither `chargehand` nor its `python` is on PATH there, so naming the program
+    alone would produce `python tick`, which launchd would try to run as a file.
+    """
+    monkeypatch.setattr(install.shutil, "which", lambda name: None)
+    argv = install.build_plist()["ProgramArguments"]
+    assert argv == [sys.executable, "-m", "chargehand", "tick"]
+
+    monkeypatch.setattr(install.shutil, "which", lambda name: "/opt/bin/chargehand")
+    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/chargehand", "tick"]
 
 
 def test_the_plist_round_trips_through_plistlib(tmp_path):

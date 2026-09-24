@@ -158,6 +158,12 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.STATE_DIR_ENV, str(state))
     monkeypatch.setenv(paths.LOG_FILE_ENV, str(tmp_path / "chargehand.log"))
     monkeypatch.setenv(paths.CONFIG_ENV, str(tmp_path / "config.toml"))
+    # A launch marks its worktree as a trusted workspace, which means writing Claude
+    # Code's own configuration file. Without this the suite would fill the operator's
+    # real one with an entry per temporary directory it ever created.
+    claude_config = tmp_path / "claude-config"
+    claude_config.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config))
     fake_tracker.reset()
     yield state
     fake_tracker.reset()

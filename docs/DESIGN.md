@@ -1,8 +1,11 @@
 # chargehand — design
 
 **Status:** the runner and the control surface are implemented and tested against a fake
-Claude Code and a fake tracker; the lease pool is a no-op and the `github` and `command`
-adapters are not written. Nothing here has been run unattended on a dedicated machine yet.
+Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
+and real Claude Code on a scratch repository, including a crash after every launch step and a
+reboot that killed a session mid-turn; the lease pool is a no-op and the `github` and
+`command` adapters are not written. Nothing here has been run unattended on a dedicated
+machine yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -213,7 +216,7 @@ agent view is open in a terminal, which a headless machine cannot guarantee.
 | `working` | A turn is running | — |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
 | `done` | The turn finished | read the status file if configured, then notify |
-| `failed` / `stopped` | Error or stopped | notify, mark blocked |
+| `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -222,9 +225,15 @@ question and ended its turn reports `state: blocked` with the same `status: idle
 `status` would call the second one finished and clear its label while it was still waiting.
 
 That also means `done` is less ambiguous than it first appears: Claude Code distinguishes
-"ended its turn having finished" from "ended its turn having asked something". The runner
-still treats a bare `done` conservatively, because that distinction has been observed rather
-than promised, and because it says nothing about *how* a run finished.
+"ended its turn having finished" from "ended its turn having asked something". Across every
+run the smoke probe has observed, nothing that wanted input was reported `done`: not a
+direct question, not a flat statement that the session could not proceed, not a permission
+prompt. So a session that is waiting never has its label cleared. The converse does not
+hold. One run in five that had finished its work and merely volunteered a caveat reported
+`blocked` anyway, and the same prompt reported `done` the other four times. `blocked` is
+therefore a reason to go and look rather than proof that anything is waiting, and a bare
+`done` still says nothing about *how* a run finished. The runner stays conservative on both
+counts.
 
 A repository disambiguates that with the **status-file protocol**: whatever the prompt runs
 writes a small JSON file at its yield points and when it finishes.
@@ -392,13 +401,17 @@ Next:
 - `github` and `command` adapters, packaging, first release.
 - Optional: the read-only status page, agents under a separate user.
 
-Acceptance for the runner is tested against a throwaway repository and a cheap prompt, with
-fault injection after every launch step, before any expensive real run.
+Acceptance for the runner runs against a throwaway repository and a cheap prompt, with fault
+injection after every launch step, before any expensive real run. `probes/smoke_route.py`
+drives the whole of it against a real tracker and real Claude Code. The reboot drill and the
+leg over SSH from a second machine stay manual, because neither can be scripted from the
+machine under test.
 
 ## 12. Open questions
 
-- Does `claude respawn` continue an interrupted turn by itself, or wait for a prompt? That
-  decides what `continue` does after a `stop`.
+- Should a run that reports `working` with `status: idle` for long enough be treated as
+  stalled rather than healthy? A short window would misread the gap between two tool
+  calls; a long one is what the watchdog already does, only at `max_run_hours`.
 - Will Claude Code offer a scriptable way to send a message to a background session? That
   would allow a `reply` command. Until then, answering a question means attaching.
 - Do commands started by Claude Code's shell tool run in their own process group? That decides
@@ -429,3 +442,59 @@ deny-rule probe against 2.1.278:
   `idle` and `waiting` from `status`. A permission prompt reads `blocked` with
   `waitingFor: "permission prompt"`; a question asked in plain text reads `blocked` with no
   `waitingFor` at all.
+
+Settled by running the whole sequence against a real tracker and real Claude Code, with the
+smoke probe:
+
+- A background session started inside a linked worktree really does skip Claude Code's own
+  worktree isolation. The repository's worktree list is unchanged by the launch and the
+  session works in the tree it was given. The launch sequence depends on this; it was
+  documented but never verified, and an extra worktree would have meant every run working
+  somewhere the runner does not collect.
+- `claude respawn` continues the interrupted turn by itself rather than waiting for a
+  prompt: a session stopped mid-turn reports `working` again immediately after. So
+  `continue` needs nothing beyond the respawn.
+- Every launch step can be interrupted and resumed. Killing a launch after each of its
+  steps in turn left, each time, a row the next tick recognised, exactly one attempt per
+  issue, a label that matched how far the launch had got, no issue stranded under the
+  running label, and no session running outside the ledger.
+- A label write that reaches the tracker and then reports failure is accepted once the
+  re-read proves it landed; one that half-applies, and one whose verification read fails,
+  both hold the attempt where it was and settle on the following tick. The separation
+  between an attempt's state and the queue status last *verified* is what makes that work.
+- **Resolve a label by name, never by enumerating them.** A shared workspace accumulates
+  labels without bound (one measured here holds more than fifteen thousand), and the
+  listing comes back newest first. Any fixed page budget therefore stops short, and the
+  label it stops short of is whichever has been in use longest: a route would work for
+  months and then fail every launch with "no label named X exists". Label names are also
+  unique per team rather than per workspace, so a name has to be resolved against the
+  route's own team or reported as ambiguous.
+- A tracker takes a fraction of a second to make a newly labelled issue answerable by a
+  filtered query. Irrelevant at any sane poll interval, and the reason acceptance waits for
+  the queue rather than ticking the instant an issue is created.
+- **A session killed with the machine reads `failed`.** A background session interrupted
+  by a reboot survives in the listing with `state: failed`, no `status` and no `pid`, so
+  the runner parks the run as blocked and says so rather than treating it as finished.
+  The ledger, the label and the worktree all come through the restart intact, the
+  scheduled job runs a tick by itself, and the issue is not launched a second time.
+- **A reboot does not resume the work, and should not.** `continue` does bring the
+  session back, but `respawn` restores the conversation, not what the session had
+  running: a child process it started is gone with the machine. A session whose turn had
+  ended while it waited on that process comes back with nothing to wait for and no new
+  instruction, and then sits there reporting `working` with `status: idle`. Parking the
+  run as blocked and telling the operator is therefore the right default; resuming
+  automatically would put the running label back on an issue nothing is working on.
+- **`working` with `status: idle` is a stall, and the runner cannot currently tell.**
+  It reads `state` first, sees `working`, and reports a healthy run. Nothing catches it
+  until the watchdog fires at `max_run_hours`. The pair had not been observed before;
+  every earlier sample was `working`/`busy`, `done`/`idle`, `blocked`/`idle` or
+  `blocked`/`waiting`.
+- **A label write can report success and still be followed by a stale read.** Observed
+  twice against a real tracker. The write had landed; the verification read returned the
+  labels from before it. The attempt is left where it was and the next write settles it,
+  so nothing is lost, but the tick reports an error and exits non-zero for a write that
+  was in fact correct.
+- The control CLI works from a stripped environment (short `PATH`, no shell profile), and
+  the login keychain is still readable there, which is what the SSH and launchd paths need.
+  `claude` itself is not on a minimal `PATH`; `doctor` says so, and a tick refuses with the
+  fix in the message rather than failing obscurely.

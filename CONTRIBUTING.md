@@ -15,7 +15,8 @@ By contributing you agree your work is licensed under the project's
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-python3 -m pip install -e '.[test]'
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[test]'
 pytest -q
 ```
 

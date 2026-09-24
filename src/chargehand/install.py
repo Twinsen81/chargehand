@@ -50,7 +50,7 @@ def build_plist(
     job_path: str | None = None,
     log_path: Path | None = None,
 ) -> dict[str, object]:
-    argv = list(program) if program else [_chargehand_program(), "tick"]
+    argv = list(program) if program else chargehand_argv()
     extra_path = os.environ.get("PATH", "")
     return {
         "Label": paths.LAUNCHD_LABEL,
@@ -72,10 +72,19 @@ def _merge_path(base: str, extra: str) -> str:
     return ":".join(seen)
 
 
-def _chargehand_program() -> str:
-    """Prefer the installed console script; fall back to this interpreter's module form."""
+def chargehand_argv() -> list[str]:
+    """How launchd should invoke a tick, as a full argument list.
+
+    The console script when one is on PATH, and the module form otherwise. Both halves
+    matter: a virtual environment that was not activated puts neither `chargehand` nor
+    its `python` on PATH, so the interpreter running this call is the only reliable way
+    back to the package. Returning the whole argv rather than a program keeps the two
+    forms from being recombined wrongly by a caller.
+    """
     script = shutil.which("chargehand")
-    return script or sys.executable
+    if script:
+        return [script, "tick"]
+    return [sys.executable, "-m", "chargehand", "tick"]
 
 
 def write_plist(
@@ -86,9 +95,7 @@ def write_plist(
 ) -> Path:
     target = destination or paths.launch_agent_plist()
     target.parent.mkdir(parents=True, exist_ok=True)
-    program = _chargehand_program()
-    argv = [program, "tick"] if program != sys.executable else [program, "-m", "chargehand", "tick"]
-    data = build_plist(program=argv, interval_secs=interval_secs, job_path=job_path)
+    data = build_plist(interval_secs=interval_secs, job_path=job_path)
     with target.open("wb") as handle:
         plistlib.dump(data, handle)
     return target

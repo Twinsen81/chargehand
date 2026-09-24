@@ -6,11 +6,12 @@ session picks it up in a fresh git worktree on a machine you own.
 > **Status: pre-alpha.** The runner works end to end — configuration, the Linear
 > adapter, ledger-first launching, reconciliation, the label lifecycle, supervision,
 > the watchdog, garbage collection, and the control CLI — and is covered by a test
-> suite that fault-injects every launch step. It has not yet been run unattended
-> against a real tracker on a dedicated machine, the lease pool is a no-op, and the
-> `github` and `command` adapters are not written. Treat it as something to try on a
-> scratch repository, not something to leave running. The design is in
-> [docs/DESIGN.md](docs/DESIGN.md).
+> suite that fault-injects every launch step. The same sequence has been run once
+> against a real tracker and real Claude Code on a scratch repository. It has not yet
+> been run unattended on a dedicated machine, the reboot drill is untested, the lease
+> pool is a no-op, and the `github` and `command` adapters are not written. Treat it as
+> something to try on a scratch repository, not something to leave running. The design
+> is in [docs/DESIGN.md](docs/DESIGN.md).
 
 A *chargehand* is the worker in charge of a small crew. This tool is that for coding
 agents: it watches your issue tracker, starts one background session per issue, keeps
@@ -54,7 +55,9 @@ there is deliberately no server to expose.
 ## Trying it
 
 ```bash
-python3 -m pip install -e '.[test]'
+python3 -m venv ~/.venvs/chargehand          # a packaged python refuses a direct install
+~/.venvs/chargehand/bin/pip install -e .
+export PATH="$HOME/.venvs/chargehand/bin:$PATH"
 
 chargehand init --machine            # ~/.config/chargehand/config.toml
 chargehand init --repo ~/code/my-app # .chargehand.toml in the repository
@@ -64,7 +67,9 @@ chargehand status                    # what is running
 ```
 
 `chargehand install` writes the launchd job that runs the tick on a timer; it does not
-load it until you pass `--load`, or run the `launchctl bootstrap` line it prints.
+load it until you pass `--load`, or run the `launchctl bootstrap` line it prints. The job
+records an absolute path to the interpreter it was installed with, so it works whether or
+not the environment is on your shell's PATH.
 
 Steer it from another machine over SSH — `status`, `watch`, `logs`, `pause`, `cancel`,
 `stop`, `continue`, `retry`, `discard`. Answers to a session's questions go through
@@ -77,7 +82,8 @@ skill for driving this CLI from a Claude Code session.
 ## Development
 
 ```bash
-python3 -m pip install -e '.[test]'
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[test]'
 pytest -q
 ```
 

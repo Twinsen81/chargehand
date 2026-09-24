@@ -1159,6 +1159,16 @@ class Runner:
                 self._template_values(attempt),
                 where=f"{repo_config.source or 'repo config'}.prompt",
             )
+            # Claude Code will not start a background session in a directory nobody has
+            # accepted a trust dialog for, and every worktree here was made seconds ago.
+            # There is no dialog a runner can answer, so the flag is written instead.
+            if self.config.trust_worktrees and not self.claude.trust_worktree(
+                attempt.worktree_path
+            ):
+                report.warnings.append(
+                    f"{attempt.identifier}: could not record {attempt.worktree_path} as a "
+                    f"trusted workspace; the launch may be refused"
+                )
             settings = self._launch_settings()
             result = self.claude.launch(
                 worktree=attempt.worktree_path,

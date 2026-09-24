@@ -246,3 +246,112 @@ def test_every_observed_shape_parses_into_a_known_state(node):
     assert session.kind == "background"
     assert session.pid == node["pid"]
     assert 1790073000 < session.started_at < 1790075000
+
+
+# ----- workspace trust ------------------------------------------------------
+#
+# Claude Code refuses to start a background session in a directory nobody has accepted
+# a trust dialog for. Every worktree the runner makes is new, and no runner can answer
+# a dialog, so the launch writes the flag its refusal names. The file belongs to Claude
+# Code, which is why these tests are as much about what is *not* touched.
+
+
+def config_at(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    return tmp_path / ".claude.json"
+
+
+def test_the_trust_flag_is_written_for_a_worktree(tmp_path, monkeypatch):
+    path = config_at(tmp_path, monkeypatch)
+    worktree = tmp_path / "worktrees" / "ABC-1"
+    worktree.mkdir(parents=True)
+
+    assert ClaudeCLI().is_trusted(worktree) is False
+    assert ClaudeCLI().trust_worktree(worktree) is True
+
+    assert json.loads(path.read_text())["projects"][str(worktree)] == {
+        "hasTrustDialogAccepted": True
+    }
+    assert ClaudeCLI().is_trusted(worktree) is True
+
+
+def test_trusting_a_worktree_keeps_everything_else_in_the_file(tmp_path, monkeypatch):
+    path = config_at(tmp_path, monkeypatch)
+    path.write_text(
+        json.dumps(
+            {
+                "numStartups": 12,
+                "oauthAccount": {"emailAddress": "someone@example.invalid"},
+                "projects": {"/somewhere/else": {"hasTrustDialogAccepted": True, "x": 1}},
+            }
+        )
+    )
+    worktree = tmp_path / "ABC-1"
+    worktree.mkdir()
+
+    ClaudeCLI().trust_worktree(worktree)
+
+    data = json.loads(path.read_text())
+    assert data["numStartups"] == 12
+    assert data["oauthAccount"] == {"emailAddress": "someone@example.invalid"}
+    assert data["projects"]["/somewhere/else"] == {"hasTrustDialogAccepted": True, "x": 1}
+    assert data["projects"][str(worktree)]["hasTrustDialogAccepted"] is True
+
+
+def test_an_existing_project_entry_keeps_its_other_settings(tmp_path, monkeypatch):
+    path = config_at(tmp_path, monkeypatch)
+    worktree = tmp_path / "ABC-1"
+    worktree.mkdir()
+    path.write_text(
+        json.dumps({"projects": {str(worktree): {"allowedTools": ["Bash"],
+                                                 "hasTrustDialogAccepted": False}}})
+    )
+
+    ClaudeCLI().trust_worktree(worktree)
+
+    entry = json.loads(path.read_text())["projects"][str(worktree)]
+    assert entry == {"allowedTools": ["Bash"], "hasTrustDialogAccepted": True}
+
+
+def test_trusting_an_already_trusted_worktree_does_not_rewrite_the_file(tmp_path, monkeypatch):
+    path = config_at(tmp_path, monkeypatch)
+    worktree = tmp_path / "ABC-1"
+    worktree.mkdir()
+    ClaudeCLI().trust_worktree(worktree)
+    before = path.stat().st_mtime_ns
+
+    assert ClaudeCLI().trust_worktree(worktree) is True
+    assert path.stat().st_mtime_ns == before
+
+
+def test_a_configuration_file_that_cannot_be_parsed_is_left_alone(tmp_path, monkeypatch):
+    """Overwriting Claude Code's state on a guess costs more than a refused launch."""
+    path = config_at(tmp_path, monkeypatch)
+    path.write_text("{ this is not json")
+    worktree = tmp_path / "ABC-1"
+    worktree.mkdir()
+
+    assert ClaudeCLI().trust_worktree(worktree) is False
+    assert path.read_text() == "{ this is not json"
+
+
+def test_the_realpath_spelling_is_trusted_too(tmp_path, monkeypatch):
+    """The lookup is a dictionary key, so the path has to be recorded as it may arrive."""
+    path = config_at(tmp_path, monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    ClaudeCLI().trust_worktree(link)
+
+    projects = json.loads(path.read_text())["projects"]
+    assert str(link) in projects
+    assert str(real.resolve()) in projects
+
+
+def test_the_configuration_directory_can_be_relocated(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+    (tmp_path / "elsewhere").mkdir()
+
+    assert ClaudeCLI().config_file() == tmp_path / "elsewhere" / ".claude.json"

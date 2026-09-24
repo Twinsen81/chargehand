@@ -39,6 +39,10 @@ class StubTransport:
         self.fail_on: str | None = None
         self.failure: Exception | None = None
         self.mutation_lands = True
+        # Name, id and owning team, because a workspace can hold several labels with one
+        # name and the adapter has to pick the right one.
+        self.labels = [{"id": v, "name": k, "team": {"id": "t-ABC", "key": "ABC"}}
+                       for k, v in LABEL_IDS.items()]
 
     def __call__(self, query: str, variables=None):
         variables = variables or {}
@@ -46,11 +50,11 @@ class StubTransport:
             self.calls.append("viewer")
             return {"viewer": {"email": "me@example.invalid"}}
         if "issueLabels" in query:
-            self.calls.append("labels")
+            self.calls.append(f"labels:{variables['name']}")
+            wanted = variables["name"].lower()
             return {
                 "issueLabels": {
-                    "nodes": [{"id": v, "name": k} for k, v in LABEL_IDS.items()],
-                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [n for n in self.labels if n["name"].lower() == wanted],
                 }
             }
         if query.strip().startswith("query Queue"):
@@ -75,7 +79,7 @@ class StubTransport:
             adding = "issueAddLabel" in query
             self.calls.append("add" if adding else "remove")
             identifier = variables["id"].removeprefix("id-")
-            name = next(k for k, v in LABEL_IDS.items() if v == variables["labelId"])
+            name = next(n["name"] for n in self.labels if n["id"] == variables["labelId"])
             if self.mutation_lands:
                 current = list(self.issues[identifier])
                 if adding and name not in current:
@@ -239,11 +243,87 @@ def test_an_issue_deleted_mid_write_is_ambiguous(tracker_and_transport):
 
 def test_a_missing_label_names_the_fix(tracker_and_transport):
     tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
-    tracker._label_ids = {}
+    transport.labels = [n for n in transport.labels if n["name"] != "chargehand-running"]
     issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
 
     with pytest.raises(TrackerError, match="create it"):
         tracker.mark(issue, Status.RUNNING)
+
+
+def test_a_label_is_looked_up_by_name_not_by_enumerating_the_workspace(tracker_and_transport):
+    """A shared workspace holds more labels than any fixed page budget can walk.
+
+    Enumerating stops short and reports the labels beyond the cut as non-existent - and
+    because the listing comes back newest first, the one that disappears is whichever has
+    been in use longest. Asking for the name cannot go stale that way.
+    """
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+
+    tracker.mark(issue, Status.RUNNING)
+
+    looked_up = [call for call in transport.calls if call.startswith("labels:")]
+    assert looked_up == ["labels:chargehand-running", "labels:chargehand"]
+
+
+def test_a_resolved_label_is_not_looked_up_twice(tracker_and_transport):
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",), "ABC-2": ("chargehand",)})
+
+    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",)), Status.RUNNING)
+    before = len([call for call in transport.calls if call.startswith("labels:")])
+    tracker.mark(Issue(id="id-ABC-2", identifier="ABC-2", labels=("chargehand",)), Status.RUNNING)
+
+    assert before == len([call for call in transport.calls if call.startswith("labels:")])
+
+
+def test_the_route_team_wins_when_two_teams_share_a_label_name(tracker_and_transport):
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    transport.labels.insert(
+        0, {"id": "lbl-other", "name": "chargehand-running",
+            "team": {"id": "t-XYZ", "key": "XYZ"}}
+    )
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+
+    tracker.mark(issue, Status.RUNNING)
+
+    assert tracker._label_ids["chargehand-running"] == "lbl-r"
+
+
+def test_a_workspace_label_is_used_when_no_team_owns_the_name(tracker_and_transport):
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    transport.labels = [
+        {"id": "lbl-ws", "name": "chargehand-running", "team": None},
+        *[n for n in transport.labels if n["name"] != "chargehand-running"],
+    ]
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+
+    tracker.mark(issue, Status.RUNNING)
+
+    assert tracker._label_ids["chargehand-running"] == "lbl-ws"
+
+
+def test_an_unresolvable_label_name_is_reported_rather_than_guessed(tracker_and_transport):
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team="NOPE")
+    transport.labels.insert(
+        0, {"id": "lbl-other", "name": "chargehand-running",
+            "team": {"id": "t-XYZ", "key": "XYZ"}}
+    )
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+
+    with pytest.raises(TrackerError, match="several teams"):
+        tracker.mark(issue, Status.RUNNING)
+
+
+def test_refresh_labels_drops_the_cache(tracker_and_transport):
+    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",)), Status.RUNNING)
+    before = len([call for call in transport.calls if call.startswith("labels:")])
+
+    tracker.refresh_labels()
+    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand-running",)),
+                 Status.BLOCKED)
+
+    assert len([call for call in transport.calls if call.startswith("labels:")]) > before
 
 
 def test_a_completed_issue_reads_as_closed(tracker_and_transport):
