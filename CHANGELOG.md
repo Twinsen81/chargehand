@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and how to test the hook by hand. `init --machine` now says that the hook it writes
   only prints until a method is enabled, because a new setup otherwise notifies nobody
   and looks as if it works.
+- `doctor` resolves `claude` and `git` through the `PATH` in the installed launchd job
+  rather than through its own, and checks that the program the job runs still exists.
+  launchd gives a job only the `PATH` its definition sets, so a tool that resolved in the
+  shell running `doctor` could still be missing from the job. That showed up as a "not
+  found" inside a tick long after setup looked fine; a removed virtual environment showed
+  up as nothing at all, because launchd could not start the job and so nothing reached
+  its log. `install` reports the same problems when it writes the job.
 
 ### Fixed
 
@@ -114,6 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every line `chargehand tick` prints starts with the date and time. The scheduled job
   appends this output to its log, and without a time the log could not show whether ticks
   ran on schedule or when an error began. `--json` output is unchanged.
+- `install` suggests `launchctl kickstart` without `-k` to run a tick by hand. `-k` kills a
+  tick that is already running, which can abort a launch in the middle of a step.
 
 - The bundled notification hook has commented examples of a macOS notification and of an
   email sent through an SMTP server with the password read from the login keychain, next to

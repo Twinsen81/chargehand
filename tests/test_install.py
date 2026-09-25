@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import plistlib
 import sys
@@ -235,6 +236,96 @@ def test_a_control_command_falls_back_when_the_scheduled_job_never_applies_it(
 
     assert len(kicks) > 1
     assert capsys.readouterr().out == "pause: all routes paused\n"
+
+
+def _executable(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_doctor_checks_the_path_the_job_has_rather_than_its_own(tmp_path, harness):
+    """A tool that resolves in a shell but not under launchd fails inside a tick instead."""
+    bin_dir = tmp_path / "job-bin"
+    program = _executable(bin_dir / "chargehand")
+    claude = _executable(bin_dir / "chargehand-test-claude")
+    git = _executable(bin_dir / "chargehand-test-git")
+    config = dataclasses.replace(
+        harness.config, claude_bin="chargehand-test-claude", git_bin="chargehand-test-git"
+    )
+    job = {
+        "ProgramArguments": [str(program), "tick"],
+        "EnvironmentVariables": {"PATH": f"/usr/bin:/bin:{bin_dir}"},
+    }
+
+    checks = {check.name: check for check in install.job_checks(config, job)}
+    assert set(checks) == {"launchd PATH"}
+    assert checks["launchd PATH"].status == install.OK
+    assert str(claude) in checks["launchd PATH"].detail
+    assert str(git) in checks["launchd PATH"].detail
+
+    job["EnvironmentVariables"] = {"PATH": "/usr/bin:/bin"}
+    checks = {check.name: check for check in install.job_checks(config, job)}
+    assert checks["launchd PATH"].status == install.FAIL
+    assert "chargehand-test-claude, chargehand-test-git" in checks["launchd PATH"].detail
+
+    # A job that sets no PATH gets launchd's own, which has no room for either.
+    del job["EnvironmentVariables"]
+    checks = {check.name: check for check in install.job_checks(config, job)}
+    assert checks["launchd PATH"].status == install.FAIL
+
+
+def test_doctor_fails_a_job_whose_program_is_gone(tmp_path, harness):
+    """launchd cannot start it at all, so the job's log never says anything."""
+    job = {
+        "ProgramArguments": [str(tmp_path / "removed-venv" / "chargehand"), "tick"],
+        "EnvironmentVariables": {"PATH": "/usr/bin:/bin"},
+    }
+
+    checks = {check.name: check for check in install.job_checks(harness.config, job)}
+
+    assert checks["launchd program"].status == install.FAIL
+    assert "removed-venv" in checks["launchd program"].detail
+
+
+def test_doctor_reads_the_installed_job(monkeypatch, capsys, config_file, harness, tmp_path):
+    plist = install.write_plist(tmp_path / "job.plist", job_path=str(tmp_path / "empty"))
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
+    assert checks["launchd"]["status"] == install.WARN  # written, not loaded
+    assert checks["launchd PATH"]["status"] == install.FAIL
+    assert "git" in checks["launchd PATH"]["detail"]
+
+
+def test_doctor_reports_an_unreadable_job_definition(monkeypatch, capsys, config_file, harness, tmp_path):
+    plist = tmp_path / "job.plist"
+    plist.write_text("<?xml version='1.0'?><plist><dict><key>Label")
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    statuses = [c["status"] for c in json.loads(capsys.readouterr().out) if c["name"] == "launchd"]
+    assert install.FAIL in statuses
+
+
+def test_install_warns_when_the_job_cannot_reach_its_tools(monkeypatch, capsys, config_file, tmp_path):
+    plist = tmp_path / "LaunchAgents" / "job.plist"
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(install, "DEFAULT_JOB_PATH", str(tmp_path / "also-empty"))
+
+    assert main(["--config", str(config_file), "install"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert f"wrote {plist}" in captured.out
+    assert "warning: the job's PATH does not reach git" in captured.err
 
 
 def test_a_second_instance_never_kickstarts_the_scheduled_job(monkeypatch, config_file, harness):

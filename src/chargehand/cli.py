@@ -499,11 +499,14 @@ def cmd_install(args: argparse.Namespace) -> int:
     config = _load_config(args)
     plist = install.write_plist(interval_secs=args.interval or config.poll_interval_secs)
     _print(f"wrote {plist}")
+    for check in install.job_checks(config, install.installed_job(plist) or {}):
+        if check.status != install.OK:
+            print(f"warning: {check.detail}", file=sys.stderr)
     if not args.load:
         _print("")
         _print("Not loaded. To start it:")
         _print(f"  launchctl bootstrap {install.domain()} {plist}")
-        _print(f"  launchctl kickstart -k {install.service_target()}   # run a tick now")
+        _print(f"  launchctl kickstart {install.service_target()}   # run a tick now")
         _print("")
         _print("Re-run with --load to do that now.")
         return EXIT_OK
