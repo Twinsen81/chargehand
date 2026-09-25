@@ -175,6 +175,16 @@ def test_a_second_tick_cannot_run_while_one_holds_the_lock(capsys, config_file, 
     assert "another chargehand tick is running" in capsys.readouterr().err
 
 
+def test_a_request_is_reported_without_stray_spaces(capsys, config_file, harness):
+    assert run(["pause"], config_file) == EXIT_OK
+    assert run(["pause", "--no-wait"], config_file) == EXIT_OK
+
+    assert capsys.readouterr().out.splitlines() == [
+        "pause: all routes paused",
+        "recorded: pause",
+    ]
+
+
 def test_a_broken_config_is_reported_not_traced(capsys, tmp_path):
     bad = tmp_path / "bad.toml"
     bad.write_text("max_concurrent = 1\n")

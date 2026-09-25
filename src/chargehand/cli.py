@@ -39,6 +39,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REFUSED = 3
 
+# How long a control command waits for the scheduled job to apply its request, and how
+# often it kick-starts the job meanwhile.
+SCHEDULED_JOB_WAIT_SECS = 30.0
+KICKSTART_RETRY_SECS = 2.0
+
 log = logging.getLogger("chargehand")
 
 
@@ -68,6 +73,10 @@ def _runner(config: MachineConfig, ledger: Ledger) -> Runner:
 
 def _print(text: str = "") -> None:
     print(text)
+
+
+def _described(kind: str, target: str | None) -> str:
+    return f"{kind} {target}" if target else kind
 
 
 def _emit_json(payload: object) -> None:
@@ -368,6 +377,24 @@ def _wait_for_request(ledger: Ledger, request_id: int, timeout: float) -> dict |
     return ledger.get_request(request_id)
 
 
+def _apply_through_the_scheduled_job(ledger: Ledger, request_id: int, timeout: float) -> dict | None:
+    """Kick-start the loaded job until one of its ticks applies the request.
+
+    `launchctl kickstart` without `-k` does nothing while the job is already running, and
+    that tick may be past the point where it reads requests. A command issued while the
+    previous command's tick is still finishing lands in exactly that window, so asking once
+    would leave the request to an inline tick instead: outside the job's environment and
+    missing from its log.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        install.kickstart()
+        remaining = max(0.0, deadline - time.monotonic())
+        request = _wait_for_request(ledger, request_id, min(KICKSTART_RETRY_SECS, remaining))
+        if (request and request["applied_at"] is not None) or time.monotonic() >= deadline:
+            return request
+
+
 def _runs_the_scheduled_job(args: argparse.Namespace) -> bool:
     """Whether the loaded launchd job would tick *this* configuration and ledger.
 
@@ -385,7 +412,7 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
     with open_ledger() as ledger:
         request_id = ledger.record_request(kind, target, **extra)
         if args.no_wait:
-            _print(f"recorded: {kind} {target or ''}".rstrip())
+            _print(f"recorded: {_described(kind, target)}")
             return EXIT_OK
 
         # Prefer the scheduled job when it is loaded: it runs inside the GUI session,
@@ -397,8 +424,9 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
         # ledger, and then waiting for a request that tick will never see.
         applied = None
         if _runs_the_scheduled_job(args) and install.is_loaded():
-            install.kickstart()
-            applied = _wait_for_request(ledger, request_id, min(args.wait, 30.0))
+            applied = _apply_through_the_scheduled_job(
+                ledger, request_id, min(args.wait, SCHEDULED_JOB_WAIT_SECS)
+            )
         if applied is None or applied["applied_at"] is None:
             try:
                 with tick_lock(wait_secs=args.wait):
@@ -408,11 +436,11 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
             applied = _wait_for_request(ledger, request_id, args.wait)
 
     if applied is None or applied["applied_at"] is None:
-        _print(f"recorded: {kind} {target or ''} — the next tick will apply it".rstrip())
+        _print(f"recorded: {_described(kind, target)} — the next tick will apply it")
         return EXIT_OK
     message = sanitize.one_line(applied["message"] or "", limit=300)
     if applied["ok"]:
-        _print(f"{kind} {target or ''}: {message}".strip())
+        _print(f"{_described(kind, target)}: {message}")
         return EXIT_OK
     print(f"refused: {message}", file=sys.stderr)
     return EXIT_REFUSED

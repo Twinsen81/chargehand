@@ -188,6 +188,55 @@ def test_a_control_command_never_forces_a_kickstart(monkeypatch, config_file, ha
     assert all(not kwargs.get("force") for kwargs in forced)
 
 
+def test_a_control_command_keeps_asking_while_the_scheduled_job_is_busy(
+    monkeypatch, capsys, config_file, harness
+):
+    """launchd ignores a kickstart while the job runs, and that tick may be past requests.
+
+    A command issued while the previous command's tick was finishing used to ask once, wait
+    the full thirty seconds, and then apply the request in an inline tick: outside the job's
+    environment and missing from its log.
+    """
+    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("chargehand.cli.KICKSTART_RETRY_SECS", 0.05)
+    monkeypatch.setattr(
+        "chargehand.cli.tick_lock",
+        lambda **kwargs: pytest.fail("the command fell back to an inline tick"),
+    )
+    kicks = []
+
+    def kickstart(**kwargs):
+        kicks.append(kwargs)
+        # The first two arrive while the previous tick is still running.
+        if len(kicks) == 3:
+            harness.next_tick()
+
+    monkeypatch.setattr("chargehand.cli.install.kickstart", kickstart)
+
+    assert main(["--config", str(config_file), "pause"]) == EXIT_OK
+
+    assert len(kicks) == 3
+    assert capsys.readouterr().out == "pause: all routes paused\n"
+    assert harness.ledger.is_paused()
+
+
+def test_a_control_command_falls_back_when_the_scheduled_job_never_applies_it(
+    monkeypatch, capsys, config_file, harness
+):
+    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("chargehand.cli.KICKSTART_RETRY_SECS", 0.05)
+    monkeypatch.setattr("chargehand.cli.SCHEDULED_JOB_WAIT_SECS", 0.3)
+    kicks = []
+    monkeypatch.setattr("chargehand.cli.install.kickstart", lambda **kwargs: kicks.append(kwargs))
+
+    assert main(["--config", str(config_file), "pause"]) == EXIT_OK
+
+    assert len(kicks) > 1
+    assert capsys.readouterr().out == "pause: all routes paused\n"
+
+
 def test_a_second_instance_never_kickstarts_the_scheduled_job(monkeypatch, config_file, harness):
     """The job runs the default configuration, whatever this process was pointed at.
 

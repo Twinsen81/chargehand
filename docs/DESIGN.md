@@ -292,7 +292,12 @@ chargehand tick                     # run a tick now
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
   tracker. It records the request in the ledger, kick-starts the scheduled tick when that job
-  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome. A
+  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome.
+  launchd ignores a kick-start while a tick is running, and that tick can be past the point
+  where it reads requests, so the command repeats the kick-start until a tick applies the
+  request. launchd also starts a job at most once every ten seconds and holds a kick-start
+  back until then, so the second of two quick commands can take that long. The command runs
+  a tick itself only when the job has not applied the request within 30 seconds. A
   `cancel` therefore cannot race a launch in progress. Reconciliation runs *before* recorded
   requests, so a cancel issued during a launch acts on a session that is known rather than
   leaving one that the dying tick had already started running unsupervised.

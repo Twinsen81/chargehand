@@ -60,6 +60,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A control command issued while a tick is running is applied by the scheduled job. The
+  command kick-started the job once, and launchd ignores a kick-start while the job is
+  running; that tick could already be past the point where it reads requests. A command
+  issued right after another one, while the first one's tick was still finishing, waited
+  the full thirty seconds and then applied the request in a tick of its own, outside the
+  job's environment and missing from its log. Observed live with `cancel` followed by
+  `discard`, and again with `pause` followed by `resume`. The command now repeats the
+  kick-start every two seconds until a tick applies the request. launchd starts a job at
+  most once every ten seconds, so the second of two quick commands takes up to about that
+  long.
+- Control command output no longer has a space before the colon when there is no target,
+  as in `pause : all routes paused`.
 - A notification that failed is sent again on the next tick. A session's new state was
   recorded as notified whether or not the command succeeded, so one failed send, such as
   the first tick after a wake while the network is still down, left a blocked run with
