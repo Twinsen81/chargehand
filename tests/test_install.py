@@ -79,6 +79,19 @@ def test_init_machine_writes_a_config_and_a_notify_script(tmp_path, capsys):
     assert load_machine_config(target).routes
     assert (target.parent / "notify.sh").exists()
     assert (target.parent / "notify.sh").stat().st_mode & 0o111
+    assert "only prints until you enable a method" in capsys.readouterr().out
+
+
+def test_init_machine_keeps_an_existing_notify_script_and_says_nothing_about_it(
+    tmp_path, capsys
+):
+    target = tmp_path / "config.toml"
+    (tmp_path / "notify.sh").write_text("#!/bin/sh\nmy own hook\n")
+
+    assert main(["init", "--machine", "--output", str(target)]) == EXIT_OK
+
+    assert (tmp_path / "notify.sh").read_text() == "#!/bin/sh\nmy own hook\n"
+    assert "only prints" not in capsys.readouterr().out
 
 
 def test_init_machine_refuses_to_overwrite(tmp_path):

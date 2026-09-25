@@ -523,14 +523,21 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
         _print(f"wrote {target}")
         notify = target.parent / "notify.sh"
-        if not notify.exists():
+        wrote_notify = not notify.exists()
+        if wrote_notify:
             notify.write_text(
                 (paths.templates_dir() / "notify.sh").read_text(encoding="utf-8"), encoding="utf-8"
             )
             notify.chmod(0o755)
             _print(f"wrote {notify}")
         _print("")
-        _print("Edit it, then run `chargehand doctor`.")
+        _print(f"Edit {target.name}, then run `chargehand doctor`.")
+        if wrote_notify:
+            # The hook as shipped only prints, and the runner captures what it prints, so
+            # without this a new setup notifies nobody and looks as if it works.
+            _print(f"{notify.name} only prints until you enable a method in it: a macOS "
+                   "notification, email, or a push service. Its comments and the "
+                   "Notifications section of the README show how.")
         return EXIT_OK
 
     repo = Path(args.repo or ".").expanduser().resolve()

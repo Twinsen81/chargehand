@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no launch succeeds at all. The flag is the one its own refusal names. A configuration
   file that cannot be parsed is left alone and the launch proceeds with a warning; the
   behaviour can be turned off with `trust_worktrees = false`.
+- A README section on notifications: how to enable a method in the hook, how to set up
+  email with a mailbox used only for alerts and an app password in the login keychain,
+  and how to test the hook by hand. `init --machine` now says that the hook it writes
+  only prints until a method is enabled, because a new setup otherwise notifies nobody
+  and looks as if it works.
 
 ### Fixed
 
