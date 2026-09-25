@@ -111,6 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every line `chargehand tick` prints starts with the date and time. The scheduled job
+  appends this output to its log, and without a time the log could not show whether ticks
+  ran on schedule or when an error began. `--json` output is unchanged.
+
 - The bundled notification hook has commented examples of a macOS notification and of an
   email sent through an SMTP server with the password read from the login keychain, next to
   the push service it had. The macOS example passes the values to AppleScript as arguments;

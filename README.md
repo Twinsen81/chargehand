@@ -69,7 +69,8 @@ chargehand status                    # what is running
 `chargehand install` writes the launchd job that runs the tick on a timer; it does not
 load it until you pass `--load`, or run the `launchctl bootstrap` line it prints. The job
 records an absolute path to the interpreter it was installed with, so it works whether or
-not the environment is on your shell's PATH.
+not the environment is on your shell's PATH. Each tick appends timestamped lines to
+`~/Library/Logs/chargehand.log`.
 
 Steer it with `status`, `watch`, `logs`, `pause`, `cancel`, `stop`, `continue`, `retry`
 and `discard`. Answers to a session's questions go through Claude Code's own agent view

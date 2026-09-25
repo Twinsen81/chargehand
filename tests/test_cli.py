@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from chargehand import __version__, ledger as ledger_mod
 from chargehand.cli import EXIT_OK, EXIT_REFUSED, main
+
+STAMP = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
 
 
 def run(argv, config_file):
@@ -173,6 +176,26 @@ def test_a_second_tick_cannot_run_while_one_holds_the_lock(capsys, config_file, 
         assert run(["tick"], config_file) != EXIT_OK
 
     assert "another chargehand tick is running" in capsys.readouterr().err
+
+
+def test_every_line_a_tick_prints_says_when_it_was_written(capsys, config_file, harness, tmp_path):
+    """Under launchd this output is the job's log, the only record of when ticks ran."""
+    from chargehand.tick import tick_lock
+
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    run(["tick"], config_file)
+    with tick_lock():
+        run(["tick"], config_file)
+    bad = tmp_path / "bad.toml"
+    bad.write_text("max_concurrent = 1\n")
+    main(["--config", str(bad), "tick"])
+
+    out, err = capsys.readouterr()
+    assert re.fullmatch(f"{STAMP}launched: ABC-1\n{STAMP}nothing to do\n", out), out
+    assert re.fullmatch(
+        f"{STAMP}another chargehand tick is running\n{STAMP}chargehand: .*at least one.*\n", err
+    ), err
 
 
 def test_a_request_is_reported_without_stray_spaces(capsys, config_file, harness):

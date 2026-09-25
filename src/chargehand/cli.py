@@ -75,6 +75,10 @@ def _print(text: str = "") -> None:
     print(text)
 
 
+def _stamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _described(kind: str, target: str | None) -> str:
     return f"{kind} {target}" if target else kind
 
@@ -291,26 +295,32 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
-    config = _load_config(args)
-    with open_ledger() as ledger:
-        try:
-            with tick_lock(wait_secs=args.wait):
-                report = _runner(config, ledger).tick(crash_after_step=args.crash_after_step)
-        except TickBusy as exc:
-            print(f"{exc}", file=sys.stderr)
-            return EXIT_ERROR
+    # Every line is stamped. The scheduled job appends this output to its log, where a
+    # line that does not say when it was written cannot show whether ticks run on time or
+    # when an error began.
+    try:
+        config = _load_config(args)
+        with open_ledger() as ledger, tick_lock(wait_secs=args.wait):
+            report = _runner(config, ledger).tick(crash_after_step=args.crash_after_step)
+    except TickBusy as exc:
+        print(f"{_stamp()} {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except ChargehandError as exc:
+        print(f"{_stamp()} chargehand: {sanitize.one_line(str(exc), limit=500)}", file=sys.stderr)
+        return EXIT_ERROR
     if args.json:
         _emit_json(report.as_dict())
     else:
+        stamp = _stamp()
         for field in ("launched", "adopted", "resumed", "failed", "transitions", "requests",
                       "collected", "warnings", "errors"):
             for entry in getattr(report, field):
-                _print(f"{field[:-1] if field.endswith('s') else field}: "
+                _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
                        f"{sanitize.one_line(str(entry), limit=200)}")
         if not any(getattr(report, f) for f in ("launched", "adopted", "resumed", "failed",
                                                 "transitions", "requests", "collected",
                                                 "warnings", "errors")):
-            _print("nothing to do")
+            _print(f"{stamp} nothing to do")
     return EXIT_ERROR if report.errors else EXIT_OK
 
 
