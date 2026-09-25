@@ -365,12 +365,13 @@ class LinearTracker(Tracker):
 
     @staticmethod
     def _canonical_url(url: object) -> str | None:
-        """Drop the title slug from a Linear issue URL.
+        """Keep a Linear issue URL only up to its identifier.
 
-        Linear returns `/{workspace}/issue/{IDENTIFIER}/{slug-of-the-title}`. The slug is
-        the title, lowercased and hyphenated — so passing the URL through verbatim would
-        put issue text into the launch prompt and into notifications, both of which are
-        documented as carrying none. The shortened form resolves to the same issue.
+        Linear's links can end in a title slug, `/{IDENTIFIER}/{slug-of-the-title}`: the
+        title, lowercased and hyphenated. The API's `url` field carried none when checked
+        against a real workspace, but nothing promises that, and a slug passed through
+        would put issue text into the launch prompt and into notifications, both of which
+        are documented as carrying none. The shortened form resolves to the same issue.
         """
         if not isinstance(url, str) or not url:
             return None

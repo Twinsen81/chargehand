@@ -245,11 +245,15 @@ writes a small JSON file at its yield points and when it finishes.
 The file is what separates a run that succeeded from one that gave up, and it is where a
 pull-request URL comes from. Without it, `done` means "finished or waiting, go look".
 
-**Notifications** run a command you configure: a push service, email, anything. The payload
+**Notifications** run a command you configure: a desktop notification, email, a push service,
+anything. The bundled hook has commented examples of the first three. The payload
 is only the issue identifier, the state, the issue URL, and a short reason the runner itself
 writes, because it usually crosses a third-party relay. Nothing authored by an agent, a
 setup script, or the tracker goes into it; that stays local and is reached through
-`status --verbose` and `logs`. Worst-case latency is one poll interval.
+`status --verbose` and `logs`. Worst-case latency is one poll interval. A session's new
+state counts as notified only when the command succeeds, so a send that failed, for example
+on the first tick after a wake while the network is still down, is tried again on the next
+tick. A finished run's last notification is tried again for up to a day.
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude

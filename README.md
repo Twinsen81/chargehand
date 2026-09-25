@@ -59,7 +59,7 @@ python3 -m venv ~/.venvs/chargehand          # a packaged python refuses a direc
 ~/.venvs/chargehand/bin/pip install -e .
 export PATH="$HOME/.venvs/chargehand/bin:$PATH"
 
-chargehand init --machine            # ~/.config/chargehand/config.toml
+chargehand init --machine            # ~/.config/chargehand/config.toml and notify.sh
 chargehand init --repo ~/code/my-app # .chargehand.toml in the repository
 chargehand doctor                    # check this machine
 chargehand tick                      # one pass, in the foreground
@@ -79,6 +79,50 @@ you want to reach the machine from elsewhere, but nothing depends on that.
 `chargehand templates` lists the bundled starter files: the two configuration
 templates, a notification hook, the deny rules passed to launched sessions, and a
 skill for driving this CLI from a Claude Code session.
+
+## Notifications
+
+The runner calls `~/.config/chargehand/notify.sh` on every state change. As shipped it
+only prints, and the runner captures what it prints, so nothing reaches you until you
+enable a method in that file. It has commented examples of a macOS notification, an
+email, and a push service, and you can enable more than one. The hook receives only the
+issue identifier, the state, the issue URL, and a short reason the runner writes, never
+issue text or agent output.
+
+**macOS notification.** Uncomment the `osascript` example. macOS shows these
+notifications as coming from Script Editor, as banners that close after a few seconds;
+they stay in Notification Center. To keep them on screen until you close them, set
+Script Editor's notifications to Persistent in System Settings > Notifications.
+
+**Email.** macOS has no mail relay configured, so the example sends through an SMTP
+server with `curl`. Set it up once:
+
+1. Create a mailbox that you use only for these alerts. Any process that runs as your
+   user, a launched session included, can read its password from the keychain, so the
+   password must not protect anything else.
+2. For Gmail, turn on 2-Step Verification for that account, then create an app password
+   at <https://myaccount.google.com/apppasswords>. Work and school accounts often cannot
+   create one.
+3. Store the password in the login keychain. The command asks for it, so it stays out of
+   your shell history:
+
+   ```bash
+   security add-generic-password -s chargehand-smtp -a alerts@example.com -w
+   ```
+
+4. In `notify.sh`, uncomment the email example, and set `sender` to that mailbox and
+   `recipient` to the address that should get the alerts. For another provider, change
+   the server URL.
+
+**Test it** by running the hook by hand with a sample payload:
+
+```bash
+CHARGEHAND_ISSUE=TEST CHARGEHAND_STATE=blocked CHARGEHAND_DETAIL="test" \
+  ~/.config/chargehand/notify.sh; echo "exit $?"
+```
+
+Exit code 0 means that every method you enabled succeeded. When the hook fails, the
+runner logs it and sends the session's new state again on the next tick.
 
 ## Development
 

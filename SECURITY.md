@@ -108,6 +108,9 @@ public location.
   human review remain the final gate; chargehand never merges.
 - The machine running chargehand holds tracker credentials and an authenticated Claude Code
   install. Treat it as you would a CI worker with write access.
+- A session can read any credential that the runner or a notification hook reads from the
+  login keychain, because it runs as the same user. Give a hook a credential that protects
+  nothing else, such as the password of a mailbox that exists only to send alerts.
 
 ## Disclosure Policy
 

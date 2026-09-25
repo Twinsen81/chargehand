@@ -278,6 +278,23 @@ def test_a_worktree_column_that_is_empty_is_not_the_current_directory():
     assert smoke_route._worktree_of({"worktree": "/w/ABC-1"}) == pathlib.Path("/w/ABC-1")
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://linear.app/acme/issue/ABC-1", True),
+        ("https://linear.app/acme/issue/ABC-1/", True),
+        ("https://linear.app/acme/issue/ABC-1/fix-billing-for-globex", False),
+        ("https://linear.app/acme/issue/ABC-1?title=globex", False),
+        ("https://linear.app/acme/issue/ABC-1#globex", False),
+        ("https://linear.app/acme/issue/ABC-12", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_a_notification_url_passes_only_in_the_identifier_form(url, expected):
+    assert smoke_route._is_short_issue_url(url, "ABC-1") is expected
+
+
 def test_a_working_session_no_row_owns_is_unsupervised(monkeypatch):
     sessions = [{"id": "s1", "cwd": "/w/ABC-2", "state": "working"}]
     probe = probe_with([], sessions=sessions, monkeypatch=monkeypatch)
