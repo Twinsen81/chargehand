@@ -57,9 +57,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and how to test the hook by hand. `init --machine` now says that the hook it writes
   only prints until a method is enabled, because a new setup otherwise notifies nobody
   and looks as if it works.
+- `doctor` resolves `claude` and `git` through the `PATH` in the installed launchd job
+  rather than through its own, and checks that the program the job runs still exists.
+  launchd gives a job only the `PATH` its definition sets, so a tool that resolved in the
+  shell running `doctor` could still be missing from the job. That showed up as a "not
+  found" inside a tick long after setup looked fine; a removed virtual environment showed
+  up as nothing at all, because launchd could not start the job and so nothing reached
+  its log. `install` reports the same problems when it writes the job.
 
 ### Fixed
 
+- A control command issued while a tick is running is applied by the scheduled job. The
+  command kick-started the job once, and launchd ignores a kick-start while the job is
+  running; that tick could already be past the point where it reads requests. A command
+  issued right after another one, while the first one's tick was still finishing, waited
+  the full thirty seconds and then applied the request in a tick of its own, outside the
+  job's environment and missing from its log. Observed live with `cancel` followed by
+  `discard`, and again with `pause` followed by `resume`. The command now repeats the
+  kick-start every two seconds until a tick applies the request. launchd starts a job at
+  most once every ten seconds, so the second of two quick commands takes up to about that
+  long.
+- Control command output no longer has a space before the colon when there is no target,
+  as in `pause : all routes paused`.
 - A notification that failed is sent again on the next tick. A session's new state was
   recorded as notified whether or not the command succeeded, so one failed send, such as
   the first tick after a wake while the network is still down, left a blocked run with
@@ -98,6 +117,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory it ever created.
 
 ### Changed
+
+- Every line `chargehand tick` prints starts with the date and time. The scheduled job
+  appends this output to its log, and without a time the log could not show whether ticks
+  ran on schedule or when an error began. `--json` output is unchanged.
+- `install` suggests `launchctl kickstart` without `-k` to run a tick by hand. `-k` kills a
+  tick that is already running, which can abort a launch in the middle of a step.
 
 - The bundled notification hook has commented examples of a macOS notification and of an
   email sent through an SMTP server with the password read from the login keychain, next to

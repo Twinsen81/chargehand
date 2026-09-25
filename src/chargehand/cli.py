@@ -39,6 +39,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REFUSED = 3
 
+# How long a control command waits for the scheduled job to apply its request, and how
+# often it kick-starts the job meanwhile.
+SCHEDULED_JOB_WAIT_SECS = 30.0
+KICKSTART_RETRY_SECS = 2.0
+
 log = logging.getLogger("chargehand")
 
 
@@ -68,6 +73,14 @@ def _runner(config: MachineConfig, ledger: Ledger) -> Runner:
 
 def _print(text: str = "") -> None:
     print(text)
+
+
+def _stamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _described(kind: str, target: str | None) -> str:
+    return f"{kind} {target}" if target else kind
 
 
 def _emit_json(payload: object) -> None:
@@ -282,26 +295,32 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
-    config = _load_config(args)
-    with open_ledger() as ledger:
-        try:
-            with tick_lock(wait_secs=args.wait):
-                report = _runner(config, ledger).tick(crash_after_step=args.crash_after_step)
-        except TickBusy as exc:
-            print(f"{exc}", file=sys.stderr)
-            return EXIT_ERROR
+    # Every line is stamped. The scheduled job appends this output to its log, where a
+    # line that does not say when it was written cannot show whether ticks run on time or
+    # when an error began.
+    try:
+        config = _load_config(args)
+        with open_ledger() as ledger, tick_lock(wait_secs=args.wait):
+            report = _runner(config, ledger).tick(crash_after_step=args.crash_after_step)
+    except TickBusy as exc:
+        print(f"{_stamp()} {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except ChargehandError as exc:
+        print(f"{_stamp()} chargehand: {sanitize.one_line(str(exc), limit=500)}", file=sys.stderr)
+        return EXIT_ERROR
     if args.json:
         _emit_json(report.as_dict())
     else:
+        stamp = _stamp()
         for field in ("launched", "adopted", "resumed", "failed", "transitions", "requests",
                       "collected", "warnings", "errors"):
             for entry in getattr(report, field):
-                _print(f"{field[:-1] if field.endswith('s') else field}: "
+                _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
                        f"{sanitize.one_line(str(entry), limit=200)}")
         if not any(getattr(report, f) for f in ("launched", "adopted", "resumed", "failed",
                                                 "transitions", "requests", "collected",
                                                 "warnings", "errors")):
-            _print("nothing to do")
+            _print(f"{stamp} nothing to do")
     return EXIT_ERROR if report.errors else EXIT_OK
 
 
@@ -368,6 +387,24 @@ def _wait_for_request(ledger: Ledger, request_id: int, timeout: float) -> dict |
     return ledger.get_request(request_id)
 
 
+def _apply_through_the_scheduled_job(ledger: Ledger, request_id: int, timeout: float) -> dict | None:
+    """Kick-start the loaded job until one of its ticks applies the request.
+
+    `launchctl kickstart` without `-k` does nothing while the job is already running, and
+    that tick may be past the point where it reads requests. A command issued while the
+    previous command's tick is still finishing lands in exactly that window, so asking once
+    would leave the request to an inline tick instead: outside the job's environment and
+    missing from its log.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        install.kickstart()
+        remaining = max(0.0, deadline - time.monotonic())
+        request = _wait_for_request(ledger, request_id, min(KICKSTART_RETRY_SECS, remaining))
+        if (request and request["applied_at"] is not None) or time.monotonic() >= deadline:
+            return request
+
+
 def _runs_the_scheduled_job(args: argparse.Namespace) -> bool:
     """Whether the loaded launchd job would tick *this* configuration and ledger.
 
@@ -385,7 +422,7 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
     with open_ledger() as ledger:
         request_id = ledger.record_request(kind, target, **extra)
         if args.no_wait:
-            _print(f"recorded: {kind} {target or ''}".rstrip())
+            _print(f"recorded: {_described(kind, target)}")
             return EXIT_OK
 
         # Prefer the scheduled job when it is loaded: it runs inside the GUI session,
@@ -397,8 +434,9 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
         # ledger, and then waiting for a request that tick will never see.
         applied = None
         if _runs_the_scheduled_job(args) and install.is_loaded():
-            install.kickstart()
-            applied = _wait_for_request(ledger, request_id, min(args.wait, 30.0))
+            applied = _apply_through_the_scheduled_job(
+                ledger, request_id, min(args.wait, SCHEDULED_JOB_WAIT_SECS)
+            )
         if applied is None or applied["applied_at"] is None:
             try:
                 with tick_lock(wait_secs=args.wait):
@@ -408,11 +446,11 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
             applied = _wait_for_request(ledger, request_id, args.wait)
 
     if applied is None or applied["applied_at"] is None:
-        _print(f"recorded: {kind} {target or ''} — the next tick will apply it".rstrip())
+        _print(f"recorded: {_described(kind, target)} — the next tick will apply it")
         return EXIT_OK
     message = sanitize.one_line(applied["message"] or "", limit=300)
     if applied["ok"]:
-        _print(f"{kind} {target or ''}: {message}".strip())
+        _print(f"{_described(kind, target)}: {message}")
         return EXIT_OK
     print(f"refused: {message}", file=sys.stderr)
     return EXIT_REFUSED
@@ -461,11 +499,14 @@ def cmd_install(args: argparse.Namespace) -> int:
     config = _load_config(args)
     plist = install.write_plist(interval_secs=args.interval or config.poll_interval_secs)
     _print(f"wrote {plist}")
+    for check in install.job_checks(config, install.installed_job(plist) or {}):
+        if check.status != install.OK:
+            print(f"warning: {check.detail}", file=sys.stderr)
     if not args.load:
         _print("")
         _print("Not loaded. To start it:")
         _print(f"  launchctl bootstrap {install.domain()} {plist}")
-        _print(f"  launchctl kickstart -k {install.service_target()}   # run a tick now")
+        _print(f"  launchctl kickstart {install.service_target()}   # run a tick now")
         _print("")
         _print("Re-run with --load to do that now.")
         return EXIT_OK

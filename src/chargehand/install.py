@@ -11,9 +11,10 @@ import plistlib
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from chargehand import __version__, paths
 from chargehand.claude import ClaudeCLI
@@ -31,6 +32,8 @@ FAIL = "fail"
 DEFAULT_JOB_PATH = (
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 )
+# What launchd gives a job whose definition sets no PATH.
+LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,52 @@ def write_plist(
     with target.open("wb") as handle:
         plistlib.dump(data, handle)
     return target
+
+
+def installed_job(plist: Path | None = None) -> dict[str, object] | None:
+    try:
+        with (plist or paths.launch_agent_plist()).open("rb") as handle:
+            data = plistlib.load(handle)
+    except (OSError, ValueError, ExpatError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def job_checks(config: MachineConfig, job: Mapping[str, object]) -> list[Check]:
+    """What the scheduled job can reach, rather than what the shell running doctor can.
+
+    The job has only the PATH its definition sets. A tool that resolves in a shell but not
+    there shows up as a "not found" inside a tick, long after setup looked fine.
+    """
+    checks: list[Check] = []
+    argv = job.get("ProgramArguments")
+    program = argv[0] if isinstance(argv, list) and argv else job.get("Program")
+    if not isinstance(program, str) or not os.access(program, os.X_OK):
+        checks.append(
+            Check("launchd program", FAIL,
+                  f"the job runs {program}, which is not an executable file; "
+                  "re-run `chargehand install --load`")
+        )
+    environment = job.get("EnvironmentVariables")
+    job_path = environment.get("PATH") if isinstance(environment, Mapping) else None
+    found: list[str] = []
+    missing: list[str] = []
+    for tool in (config.claude_bin, config.git_bin):
+        where = shutil.which(os.path.expanduser(tool), path=job_path or LAUNCHD_PATH)
+        if where:
+            found.append(f"{tool} at {where}")
+        else:
+            missing.append(tool)
+    if missing:
+        checks.append(
+            Check("launchd PATH", FAIL,
+                  f"the job's PATH does not reach {', '.join(missing)}; re-run "
+                  "`chargehand install --load` from a shell where it resolves, or set an "
+                  "absolute claude_bin or git_bin")
+        )
+    else:
+        checks.append(Check("launchd PATH", OK, ", ".join(found)))
+    return checks
 
 
 def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
@@ -283,6 +332,12 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
             checks.append(
                 Check("launchd", WARN, f"{plist} exists but is not loaded; run `chargehand install --load`")
             )
+        if plist.exists():
+            job = installed_job(plist)
+            if job is None:
+                checks.append(Check("launchd", FAIL, f"{plist} cannot be read as a property list"))
+            else:
+                checks.extend(job_checks(config, job))
     else:
         checks.append(
             Check("launchd", WARN, "not macOS: schedule `chargehand tick` with your own timer")

@@ -292,7 +292,12 @@ chargehand tick                     # run a tick now
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
   tracker. It records the request in the ledger, kick-starts the scheduled tick when that job
-  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome. A
+  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome.
+  launchd ignores a kick-start while a tick is running, and that tick can be past the point
+  where it reads requests, so the command repeats the kick-start until a tick applies the
+  request. launchd also starts a job at most once every ten seconds and holds a kick-start
+  back until then, so the second of two quick commands can take that long. The command runs
+  a tick itself only when the job has not applied the request within 30 seconds. A
   `cancel` therefore cannot race a launch in progress. Reconciliation runs *before* recorded
   requests, so a cancel issued during a launch acts on a session that is known rather than
   leaving one that the dying tick had already started running unsupervised.
@@ -376,7 +381,9 @@ The first releases ship a no-op pool so the runner can be proven on its own.
   login keychain, and launchd agents run in that session. A locked screen is fine; a logged
   out one is not.
 - launchd starts jobs with a minimal `PATH`; everything the tick shells out to must be
-  reachable through the `PATH` set in the job definition.
+  reachable through the `PATH` set in the job definition. `install` copies the `PATH` of the
+  shell it runs in, and `doctor` resolves `claude` and `git` through the job's `PATH`
+  rather than its own. A repository's setup script inherits the same `PATH`.
 - Runs share the machine with you. Keep `max_concurrent` low until the lease pool exists,
   because until then nothing stops two runs from reaching for the same device or emulator.
 - Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
@@ -430,6 +437,11 @@ test.
   would allow a `reply` command. Until then, answering a question means attaching.
 - Do commands started by Claude Code's shell tool run in their own process group? That decides
   how pool-aware scripts isolate the group the reaper signals.
+- What environment does a background session get when the scheduled job starts it? launchd
+  runs the job as a background process, and the tick's children start at the throttled
+  priority that goes with it. If the session inherits that priority and the job's `PATH`,
+  a build inside a runner-launched session is slower than the same build started by hand,
+  and finds only the tools that `PATH` reaches.
 
 Settled by inspecting Claude Code 2.1.270, and by running background sessions and the
 deny-rule probe against 2.1.278:
