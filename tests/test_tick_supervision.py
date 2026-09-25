@@ -34,14 +34,20 @@ def test_a_blocked_session_marks_the_issue_blocked_and_notifies_once(harness):
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
 
 
-def test_a_notification_that_failed_is_sent_again_on_the_next_tick(harness, tmp_path):
-    """The first tick after a wake can run before the network is back."""
+def _hook_that_fails_while_offline(harness, tmp_path):
+    """Returns the file whose removal brings the network back."""
     offline = tmp_path / "offline"
     offline.touch()
     hook = tmp_path / "notify.sh"
     hook.write_text(f'#!/bin/sh\n[ -e "{offline}" ] && exit 1\nexit 0\n')
     hook.chmod(0o755)
     harness.notifier.config = NotifyConfig(command=str(hook))
+    return offline
+
+
+def test_a_notification_that_failed_is_sent_again_on_the_next_tick(harness, tmp_path):
+    """The first tick after a wake can run before the network is back."""
+    offline = _hook_that_fails_while_offline(harness, tmp_path)
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "blocked")
 
@@ -56,6 +62,47 @@ def test_a_notification_that_failed_is_sent_again_on_the_next_tick(harness, tmp_
     harness.next_tick()
 
     assert harness.notifications().count(("ABC-1", "blocked")) == 3
+
+
+def test_a_finished_runs_last_notification_is_sent_again_after_a_failure(
+    harness, repo, tmp_path
+):
+    """A finished attempt leaves the live loop, so its notification needs its own retry."""
+    offline = _hook_that_fails_while_offline(harness, tmp_path)
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.attempt("ABC-1").state == ledger_mod.DONE
+    assert harness.notifications().count(("ABC-1", "done")) == 2
+
+    offline.unlink()
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications().count(("ABC-1", "done")) == 3
+    assert harness.notifier.sent[-1].detail == "complete"
+
+
+def test_a_finished_runs_notification_is_given_up_after_a_day(harness, repo, tmp_path):
+    offline = _hook_that_fails_while_offline(harness, tmp_path)
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "aborted"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    harness.ledger.update(harness.attempt("ABC-1"), finished_at=time.time() - 25 * 3600)
+    offline.unlink()
+
+    report = harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications().count(("ABC-1", "failed")) == 1
+    assert any("gave up" in warning for warning in report.warnings)
 
 
 def test_answering_a_blocked_session_flips_the_label_back(harness):

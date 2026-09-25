@@ -63,8 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A notification that failed is sent again on the next tick. A session's new state was
   recorded as notified whether or not the command succeeded, so one failed send, such as
   the first tick after a wake while the network is still down, left a blocked run with
-  nobody told. One-time events (a failed launch, the watchdog, a cancel) are still sent
-  once, and a failed send now also appears as a warning in the tick's output.
+  nobody told. That includes the last notification of a run that a status file marks
+  complete or aborted: a finished attempt is no longer part of the state diff, so that
+  notification waits in the ledger and is tried again for up to a day. One-time events
+  (a failed launch, the watchdog, a cancel) are still sent once, and a failed send now
+  also appears as a warning in the tick's output.
 - A control command no longer kick-starts the scheduled job unless this process is the
   instance that job runs. The LaunchAgent carries no path overrides, so it always ticks
   the default configuration and ledger: a second instance, which `CHARGEHAND_CONFIG`,

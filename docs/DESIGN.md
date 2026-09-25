@@ -253,7 +253,7 @@ setup script, or the tracker goes into it; that stays local and is reached throu
 `status --verbose` and `logs`. Worst-case latency is one poll interval. A session's new
 state counts as notified only when the command succeeds, so a send that failed, for example
 on the first tick after a wake while the network is still down, is tried again on the next
-tick.
+tick. A finished run's last notification is tried again for up to a day.
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude

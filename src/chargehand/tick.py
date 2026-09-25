@@ -62,6 +62,11 @@ TRACKER_FAILURES = (TrackerError,)
 WATCHDOG_LONG_RUN = 1
 WATCHDOG_STOP_FAILED = 2
 
+# A finished attempt's last notification, when its hook failed, waits in the runner state
+# under this prefix and the attempt id, and is sent again for up to this long.
+PENDING_NOTIFICATION_PREFIX = "notify-pending:"
+PENDING_NOTIFICATION_MAX_AGE_SECS = 24 * 3600
+
 # The queue status each attempt state should be reflected by on the tracker.
 _STATUS_FOR_STATE = {
     ledger_mod.LAUNCHING: Status.RUNNING,
@@ -763,6 +768,9 @@ class Runner:
     # ----- 4. state diff and notification -----------------------------------
 
     def _diff_and_notify(self, report: TickReport) -> None:
+        # Before the diff, so a send that fails below waits for the next tick rather than
+        # being tried twice in this one.
+        self._retry_pending_notifications(report)
         sessions = {s.id: s for s in self.sessions()}
         for attempt in self.ledger.live_attempts():
             if attempt.state == ledger_mod.LAUNCHING:
@@ -838,9 +846,31 @@ class Runner:
             if self._notify(report, attempt.identifier, target_state, attempt.url,
                             attempt.route, detail=detail):
                 attempt = self.ledger.update(attempt, notified_state=observed)
+            elif attempt.is_terminal:
+                # A finished attempt leaves the live loop, so nothing would visit it again.
+                self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{attempt.id}", detail or "")
         elif observed == claude_mod.WORKING and attempt.notified_state != observed:
             attempt = self.ledger.update(attempt, notified_state=observed)
         return attempt
+
+    def _retry_pending_notifications(self, report: TickReport) -> None:
+        for key, detail in self.ledger.all_state().items():
+            if not key.startswith(PENDING_NOTIFICATION_PREFIX):
+                continue
+            attempt_id = key.removeprefix(PENDING_NOTIFICATION_PREFIX)
+            attempt = self.ledger.get(int(attempt_id)) if attempt_id.isdigit() else None
+            if attempt is None or not attempt.finished_at:
+                self.ledger.delete_state(key)
+                continue
+            if time.time() - attempt.finished_at > PENDING_NOTIFICATION_MAX_AGE_SECS:
+                self.ledger.delete_state(key)
+                report.warnings.append(
+                    f"gave up on the notification for {attempt.identifier} ({attempt.state})"
+                )
+                continue
+            if self._notify(report, attempt.identifier, attempt.state, attempt.url,
+                            attempt.route, detail=detail or None):
+                self.ledger.delete_state(key)
 
     def _resolve_done(
         self, attempt: Attempt, context: RouteContext | None
