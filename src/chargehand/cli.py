@@ -386,12 +386,13 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def _wait_for_request(ledger: Ledger, request_id: int, timeout: float) -> dict | None:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         request = ledger.get_request(request_id)
-        if request and request["applied_at"] is not None:
+        remaining = deadline - time.monotonic()
+        if (request and request["applied_at"] is not None) or remaining <= 0:
             return request
-        time.sleep(0.25)
-    return ledger.get_request(request_id)
+        # Never past the deadline, or a short wait between kick-starts becomes a long one.
+        time.sleep(min(0.25, remaining))
 
 
 def _apply_through_the_scheduled_job(ledger: Ledger, request_id: int, timeout: float) -> dict | None:
