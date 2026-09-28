@@ -397,6 +397,13 @@ The first releases ship a no-op pool so the runner can be proven on its own.
   reachable through the `PATH` set in the job definition. `install` copies the `PATH` of the
   shell it runs in, and `doctor` resolves `claude` and `git` through the job's `PATH`
   rather than its own. A repository's setup script inherits the same `PATH`.
+- The job runs as launchd's `Interactive` process type, which gives it the priority a
+  terminal gets. Everything the tick starts inherits the type, and that includes every
+  session: `claude --bg` starts the daemon that hosts background sessions when none is
+  running, and the daemon keeps the type, also when it restarts itself for an upgrade.
+  With the `Background` type, sessions ran at the lowest scheduling priority and CPU-bound
+  work took about three times as long. The daemon also hosts the sessions you start by
+  hand, so a throttled daemon would slow those too.
 - Runs share the machine with you. Keep `max_concurrent` low until the lease pool exists,
   because until then nothing stops two runs from reaching for the same device or emulator.
 - Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
@@ -450,11 +457,6 @@ test.
   would allow a `reply` command. Until then, answering a question means attaching.
 - Do commands started by Claude Code's shell tool run in their own process group? That decides
   how pool-aware scripts isolate the group the reaper signals.
-- What environment does a background session get when the scheduled job starts it? launchd
-  runs the job as a background process, and the tick's children start at the throttled
-  priority that goes with it. If the session inherits that priority and the job's `PATH`,
-  a build inside a runner-launched session is slower than the same build started by hand,
-  and finds only the tools that `PATH` reaches.
 
 Settled by inspecting Claude Code 2.1.270, and by running background sessions and the
 deny-rule probe against 2.1.278:
@@ -537,3 +539,20 @@ smoke probe:
   the login keychain is still readable there, which is what the launchd job needs.
   `claude` itself is not on a minimal `PATH`; `doctor` says so, and a tick refuses with the
   fix in the message rather than failing obscurely.
+
+Settled by launching a session through the scheduled job, with Claude Code 2.1.283 and
+2.1.284:
+
+- **A session gets the scheduled job's environment.** `claude --bg` starts a daemon when
+  none is running, the daemon detaches, and every session it hosts inherits the job's
+  `PATH` and its process type. Under launchd's `Background` type, the daemon, the session
+  and every command the session ran had the lowest scheduling priority, and a CPU-bound
+  benchmark took 20.9 s in the session against 7.0 s from a terminal. Neither
+  `setpriority` nor `taskpolicy -B` moves a child out of a type that launchd applied, so
+  the fix is the job's own type (see "Leaving it running"). The daemon exits a few seconds
+  after its last session ends. When Claude Code updates itself during a run, the daemon
+  restarts onto the new version with the same type, and the session continues.
+- **A slash command works as the launch prompt**, so `prompt` can name a skill.
+- **A question asked with the `AskUserQuestion` tool reads `blocked`**, with
+  `status: waiting` and `waitingFor: "input needed"`, beside the two shapes above. The
+  runner marks the run blocked and notifies, the same as for the other two.

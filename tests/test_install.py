@@ -23,7 +23,8 @@ def test_the_plist_runs_a_tick_on_a_timer_with_an_explicit_path():
     assert data["ProgramArguments"][-1] == "tick"
     assert data["StartInterval"] == 300
     assert data["RunAtLoad"] is True
-    assert data["ProcessType"] == "Background"
+    # Sessions inherit the job's process type; Background would throttle them.
+    assert data["ProcessType"] == "Interactive"
     # launchd starts jobs with a minimal PATH, so the job carries its own.
     assert "/opt/homebrew/bin" in data["EnvironmentVariables"]["PATH"]
 
