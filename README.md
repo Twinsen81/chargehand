@@ -83,6 +83,35 @@ you want to reach the machine from elsewhere, but nothing depends on that.
 templates, a notification hook, the deny rules passed to launched sessions, and a
 skill for driving this CLI from a Claude Code session.
 
+## Driving it from Claude Code
+
+A Claude Code session can answer questions about the runner, such as "which runs are
+blocked, and why?", and steer it when you ask. Install the bundled skill and its
+permission rules for the sessions you start:
+
+```bash
+mkdir -p ~/.claude/skills/chargehand
+chargehand templates skill/SKILL.md > ~/.claude/skills/chargehand/SKILL.md
+chargehand templates assistant-settings.json
+```
+
+Add the `allow` and `ask` lists that the last command prints to the `permissions` object
+in `~/.claude/settings.json`. User settings apply in every session you start. A project's
+shared `.claude/settings.json` works too, but Claude Code holds back its `allow` rules
+until you trust the folder, so the status read prompts until then; `ask` rules apply at
+once.
+
+With the rules in place, `status --json` runs without a prompt, because by default it
+prints only identifiers, states, timings and URLs. Everything else prompts, in every
+permission mode, auto and `bypassPermissions` included: each command that changes a run
+or the runner, and the two reads that bring untrusted text into the session, `logs` and
+`--verbose-titles`. A prompt protects you only when a person sees it. A hook, a script or
+an app that answers permission prompts automatically removes that protection, and some
+apps do this in their bypass mode. Check yours once with a request that cannot do harm,
+such as cancelling an issue that does not exist with `--no-wait`: you should see a
+prompt before anything runs.
+`probes/assistant_rules.py` checks the rules and the skill against a real Claude Code.
+
 ## Notifications
 
 The runner calls `~/.config/chargehand/notify.sh` on every state change. As shipped it

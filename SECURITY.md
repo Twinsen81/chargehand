@@ -65,12 +65,22 @@ public location.
 - **No server.** chargehand opens no port. It is steered by a CLI on the machine it runs on. There
   is no token to leak and no browser-borne attack surface (CSRF, DNS rebinding, XSS).
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
-  states, timings, and URLs only. Titles need `--verbose`; agent output needs `logs`. All
-  output is stripped of terminal control sequences.
+  states, timings, and URLs only. Titles and a session's waiting text need
+  `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
+  kept only when it is a plain URL, and a branch a session renamed after the tracker's
+  convention, which carries a slug of the title, is shown only with `--verbose-titles`.
+  All output is stripped of terminal control sequences.
 - **Driving the CLI from an AI assistant.** Status output then lands in a session that
-  holds the operator's permissions. The shipped skill reads only `status --json`, and every
-  mutating command sits behind a Claude Code *ask* rule, which prompts in every permission
-  mode. `discard` additionally requires `--yes` and refuses when commits are unpushed.
+  holds the operator's permissions. The shipped skill reads with `status --json`, which by
+  default carries identifiers, states, timings and URLs only, and the shipped settings let
+  only that read run without a prompt. Everything else sits behind a Claude Code *ask*
+  rule, which prompts in every permission mode, auto and `bypassPermissions` included:
+  every mutating command, and `logs` and `--verbose-titles`, which bring issue and agent
+  text into the session. `discard` additionally requires `--yes`, which approving the
+  prompt does not replace, and refuses when commits are unpushed. An ask rule makes Claude
+  Code ask whatever runs the session. A hook, a script or an app that answers permission
+  prompts automatically leaves no person to see the prompt, and then the rule protects
+  nothing.
 - **Agents are discouraged from steering the runner.** Sessions that chargehand launches
   get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
   other sessions, and for the flags that would start a fresh session without these rules.
@@ -91,7 +101,7 @@ public location.
   output, issue titles, a status file's `stop_reason`, or a setup script's output —
   because it usually crosses a third-party relay. Stripping terminal escapes would not
   make that text safe to forward; it is kept local instead, in the ledger, and reached
-  through `status --verbose` and `logs`.
+  through `status --verbose-titles` and `logs`.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 ### Known limits

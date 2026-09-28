@@ -1,10 +1,9 @@
 {
-  "//": "Drop these into the settings of the Claude Code session you drive chargehand from (not the runner's). Reading is allowed; every mutating command asks, which prompts in every permission mode including auto and bypassPermissions.",
-  "//rules": "Each ask rule leads with a wildcard rather than anchoring on the program name. A Bash rule matches the command text, not the program behind it, so an anchored 'Bash(chargehand cancel:*)' gates 'chargehand cancel X' and misses both '/usr/local/bin/chargehand cancel X' and \"sh -c 'chargehand cancel X'\". An assistant that ran 'which chargehand' and used the answer produces the second form without trying to evade anything. The allow rules stay anchored on purpose: a read that falls outside them prompts, which is the harmless direction to fail in.",
+  "//": "Add these to the settings of the Claude Code sessions you drive chargehand from, not the runner's. ~/.claude/settings.json covers every session you start; a project's shared .claude/settings.json holds its allow rules until you trust the folder. `status` runs without a prompt, because by default it prints only identifiers, states, timings and URLs. Everything else here asks, and an ask rule prompts in every permission mode, auto and bypassPermissions included: every mutating command, and the two reads that bring untrusted text into the session, `logs` and `--verbose-titles`.",
+  "//rules": "Each ask rule leads with a wildcard rather than anchoring on the program name. A Bash rule matches the command text, not the program behind it, so an anchored 'Bash(chargehand cancel:*)' gates 'chargehand cancel X' and misses both '/usr/local/bin/chargehand cancel X' and \"sh -c 'chargehand cancel X'\". An assistant that ran 'which chargehand' and used the answer produces the second form without trying to evade anything. The allow rule stays anchored on purpose: a read that falls outside it prompts, which is the harmless direction to fail in.",
   "permissions": {
     "allow": [
-      "Bash(chargehand status:*)",
-      "Bash(chargehand logs:*)"
+      "Bash(chargehand status:*)"
     ],
     "ask": [
       "Bash(*chargehand cancel *)",
@@ -17,7 +16,9 @@
       "Bash(*chargehand tick*)",
       "Bash(*chargehand install*)",
       "Bash(*chargehand uninstall*)",
-      "Bash(*chargehand init*)"
+      "Bash(*chargehand init*)",
+      "Bash(*chargehand logs*)",
+      "Bash(*chargehand *--verbose-titles*)"
     ]
   }
 }

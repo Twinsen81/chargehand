@@ -93,6 +93,22 @@ class Git:
         head = entry.get("branch")
         return head.removeprefix("refs/heads/") if head else None
 
+    def renamed_from(self, repo: Path, branch: str, old: str) -> bool:
+        """Whether *branch* got its name by renaming *old*, directly or in steps.
+
+        The branch's reflog is the only record of a rename. A repository with reflogs
+        turned off has none, and then the answer is no.
+        """
+        result = self.run(
+            ["reflog", "show", "--format=%gs", f"refs/heads/{branch}"], cwd=repo, check=False
+        )
+        if result.returncode != 0:
+            return False
+        return any(
+            line.startswith(f"Branch: renamed refs/heads/{old} to ")
+            for line in result.stdout.splitlines()
+        )
+
     def branch_exists(self, repo: Path, branch: str) -> bool:
         return (
             self.run(

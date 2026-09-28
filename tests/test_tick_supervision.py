@@ -284,6 +284,41 @@ def test_collection_refuses_to_destroy_unpushed_work(harness, repo, tmp_path):
     assert any("unpushed" in warning for warning in report.warnings)
 
 
+def test_collection_deletes_a_branch_the_session_renamed(harness, repo, tmp_path):
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("branch", "-m", "chargehand/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+
+    harness.board.close("ABC-1")
+    report = harness.next_tick()
+
+    assert "ABC-1" in report.collected
+    assert not harness.runner.git.branch_exists(repo, "abc-1-a-title-slug")
+    assert not any("kept" in warning for warning in report.warnings)
+
+
+def test_collection_reports_a_branch_it_kept(harness, repo, tmp_path):
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("checkout", "-b", "made-by-the-session", cwd=worktree)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+
+    harness.board.close("ABC-1")
+    report = harness.next_tick()
+
+    assert "ABC-1" in report.collected
+    assert harness.runner.git.branch_exists(repo, "made-by-the-session")
+    assert any("branch was kept" in warning for warning in report.warnings)
+    assert not any("made-by-the-session" in warning for warning in report.warnings)
+
+
 def test_an_open_issue_is_not_collected(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)

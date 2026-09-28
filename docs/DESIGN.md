@@ -169,7 +169,9 @@ idempotent, and the row's `step` advances after each one.
 2. Swap the labels, then re-read the issue to verify. A write that reports failure is not
    assumed to have failed; the row stays `launching` and reconciliation settles it.
 3. Fetch, then create the worktree on a placeholder branch (skip if it already exists).
-   The session may rename the branch later.
+   The session may rename the branch later. Removing the worktree deletes the branch
+   under its new name too, when git's reflog records the rename; a branch the session
+   switched to in any other way is kept, and the result says so.
 4. Run the repository's setup script in the worktree. Failure marks the attempt failed.
 5. Start the background session, named after the issue, in the configured permission mode.
    Starting inside a linked worktree means Claude Code does not create one of its own.
@@ -250,7 +252,7 @@ anything. The bundled hook has commented examples of the first three. The payloa
 is only the issue identifier, the state, the issue URL, and a short reason the runner itself
 writes, because it usually crosses a third-party relay. Nothing authored by an agent, a
 setup script, or the tracker goes into it; that stays local and is reached through
-`status --verbose` and `logs`. Worst-case latency is one poll interval. A session's new
+`status --verbose-titles` and `logs`. Worst-case latency is one poll interval. A session's new
 state counts as notified only when the command succeeds, so a send that failed, for example
 on the first tick after a wake while the network is still down, is tried again on the next
 tick. A finished run's last notification is tried again for up to a day.
@@ -302,18 +304,29 @@ chargehand tick                     # run a tick now
   requests, so a cancel issued during a launch acts on a session that is known rather than
   leaving one that the dying tick had already started running unsupervised.
 - **Untrusted text.** Issue titles and agent output are attacker-influenced, so `status` and
-  `watch` omit free text by default; titles need `--verbose`, output needs `logs`. Everything
-  printed is stripped of terminal control sequences.
+  `watch` omit free text by default; titles and a session's waiting text need
+  `--verbose-titles`, output needs `logs`. That covers what a session can put into fields
+  that look structured: a pull-request URL it reports is kept only when it is a plain URL,
+  and a branch it renamed, which then carries a slug of the issue title, is shown only
+  with `--verbose-titles`. Flags cannot be abbreviated, so the rules that gate a flag see
+  its full name. Everything printed is stripped of terminal control sequences.
 - **An AI assistant as the interface.** Driving the CLI from a Claude Code session is
   convenient, and it is the one real risk of this design: status output lands in a session
-  that holds your permissions. The shipped skill therefore reads only `status --json`, and
-  every mutating command sits behind a Claude Code *ask* rule, which prompts in every
-  permission mode including `bypassPermissions`. Those rules lead with a wildcard rather
-  than anchoring on the program name, for the same reason the launch-time deny rules do: a
-  rule matches the command text, so an anchored one gates `chargehand cancel X` and misses
-  both `/usr/local/bin/chargehand cancel X` and `sh -c 'chargehand cancel X'`.
-  `probes/assistant_rules.py` checks that against a real install, because the claim is
-  about Claude Code's matcher rather than about this tool.
+  that holds your permissions. So the shipped settings let exactly one read run without a
+  prompt, `status --json`, which by default carries no free text. Everything else sits
+  behind a Claude Code *ask* rule, which prompts in every permission mode, auto and
+  `bypassPermissions` included: every mutating command, and the two reads that bring issue
+  or agent text into the session, `logs` and `--verbose-titles`. Gating those two reads
+  makes "only when asked" a rule rather than the model's judgement. The rules lead with a
+  wildcard rather than anchoring on the program name, for the same reason the launch-time
+  deny rules do: a rule matches the command text, so an anchored one gates
+  `chargehand cancel X` and misses both `/usr/local/bin/chargehand cancel X` and
+  `sh -c 'chargehand cancel X'`. The skill tells the session to stop when a prompt is
+  declined, not to reach the same result another way. An ask rule makes Claude Code ask
+  whatever runs the session, so it protects nothing where a hook or an app answers
+  prompts automatically. `probes/assistant_rules.py` checks the rules, and the skill in
+  conversation, against a real install, because those claims are about Claude Code rather
+  than about this tool.
 - **Agents versus the control plane.** Sessions run as the same user, so they could call the
   CLI, stop other sessions, or start a session without any of these restrictions. Launched
   sessions get deny rules for all three. A `Bash` rule matches command text rather than the

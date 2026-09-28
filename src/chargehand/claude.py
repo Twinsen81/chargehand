@@ -45,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chargehand import sanitize
 from chargehand.errors import ClaudeError
 
 WORKING = "working"
@@ -168,7 +169,9 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
         raw_state=raw_state,
         waiting_for=str(waiting) if waiting is not None else None,
         started_at=_parse_time(_first(node, _STARTED_KEYS)),
-        pr_url=(lambda v: str(v) if v is not None else None)(_first(node, _PR_KEYS)),
+        # The session's agent influences this value, and `status --json` prints it by
+        # default, so it has to be a URL and nothing else.
+        pr_url=sanitize.safe_url(_first(node, _PR_KEYS)),
         pid=(lambda v: int(v) if isinstance(v, int) and not isinstance(v, bool) else None)(
             _first(node, _PID_KEYS)
         ),
@@ -251,6 +254,8 @@ class ClaudeCLI:
             completed = subprocess.run(
                 argv,
                 cwd=str(cwd) if cwd else None,
+                # Nothing here reads stdin, and `-p` waits for input on an open pipe.
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout or self.timeout_secs,
@@ -324,7 +329,7 @@ class ClaudeCLI:
         *,
         cwd: Path,
         permission_mode: str,
-        settings: Mapping[str, Any] | None = None,
+        settings: Mapping[str, Any] | Path | None = None,
         env: Mapping[str, str] | None = None,
         extra_args: Sequence[str] = (),
         timeout_secs: float = 180.0,
@@ -332,11 +337,14 @@ class ClaudeCLI:
         """Run one non-interactive turn and return when it ends.
 
         Not used by the tick, which only ever starts background sessions. This is the
-        shape the deny-rule probe needs: a single turn whose exit is observable, so a
-        refusal can be attributed to the settings the turn was given.
+        shape the probes need: a single turn whose exit is observable, so a refusal can
+        be attributed to the settings the turn was given. A path is passed as it is, so
+        a probe can load a shipped settings file byte for byte.
         """
         args = ["-p", "--permission-mode", permission_mode]
-        if settings is not None:
+        if isinstance(settings, Path):
+            args += ["--settings", str(settings)]
+        elif settings is not None:
             args += ["--settings", json.dumps(settings, sort_keys=True)]
         args += list(extra_args)
         args.append(prompt)
