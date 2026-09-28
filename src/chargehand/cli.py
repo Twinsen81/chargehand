@@ -103,6 +103,13 @@ def _elapsed(since: float | None, now: float | None = None) -> str:
     return f"{delta / 86400:.1f}d"
 
 
+def _branch_is_ours(attempt: Attempt) -> bool:
+    # A session can rename its branch after the tracker's convention, which puts a slug of
+    # the issue title into the name, and an adopted session is recorded under the branch
+    # it is on. The runner's own placeholder ends in the identifier.
+    return attempt.branch.endswith(attempt.identifier)
+
+
 def _attempt_dict(attempt: Attempt, *, verbose: bool) -> dict[str, object]:
     payload: dict[str, object] = {
         "issue": attempt.identifier,
@@ -115,7 +122,7 @@ def _attempt_dict(attempt: Attempt, *, verbose: bool) -> dict[str, object]:
         "launch_attempts": attempt.launch_attempts,
         "session_id": attempt.session_id,
         "worktree": attempt.worktree,
-        "branch": attempt.branch,
+        "branch": attempt.branch if verbose or _branch_is_ours(attempt) else None,
         "url": attempt.url,
         "pr_url": attempt.pr_url,
         "label_state": attempt.label_state,
@@ -611,14 +618,20 @@ def cmd_templates(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="chargehand", description=DESCRIPTION)
+    # No abbreviated flags. A permission rule that gates a flag matches the command text,
+    # so `status --verbose` must not quietly mean `status --verbose-titles`.
+    parser = argparse.ArgumentParser(
+        prog="chargehand", description=DESCRIPTION, allow_abbrev=False
+    )
     parser.add_argument("--version", action="version", version=f"chargehand {__version__}")
     parser.add_argument("--config", help=f"machine configuration file (default: {paths.config_file()})")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="log more; repeat for debug")
     subparsers = parser.add_subparsers(dest="command")
 
     def add(name: str, handler, help_text: str, *, aliases: Sequence[str] = ()):
-        sub = subparsers.add_parser(name, help=help_text, aliases=list(aliases))
+        sub = subparsers.add_parser(
+            name, help=help_text, aliases=list(aliases), allow_abbrev=False
+        )
         sub.set_defaults(handler=handler)
         return sub
 

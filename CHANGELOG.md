@@ -36,9 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and what a session reports at the end of several shapes of turn. It runs as a throwaway
   instance beside any real one, and a proxy in front of the tracker injects the write
   faults, which cannot be provoked from outside.
-- `probes/assistant_rules.py`, which checks that the bundled assistant settings really
-  do gate every mutating command against a real Claude Code, in the spellings an
-  assistant produces by accident rather than by evasion.
+- `probes/assistant_rules.py`, which checks the bundled assistant skill and settings
+  against a real Claude Code, in auto and `bypassPermissions` mode. It loads the shipped
+  settings file as it is and runs every gated command in the spellings an assistant
+  produces by accident rather than by evasion. It then installs the skill in a scratch
+  project and asks what an operator asks: a status question must be answered without a
+  prompt, in Manual mode too, and a request to cancel, stop, continue, retry, discard or
+  pause must be refused at its command and go no further.
 - Lease-pool interface with a no-op implementation, so the call sites exist before the
   pool does.
 - Starter templates: machine and repository configuration, a notification hook, the
@@ -67,6 +71,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `status --json` no longer prints text a session wrote. A pull-request URL taken from
+  Claude Code's session listing was stored and printed as it came, while the one from a
+  status file was already checked; both must now be a plain URL. A branch a session
+  renamed after the tracker's convention carries a slug of the issue title, and an adopted
+  session is recorded under the branch it is on, so such a branch is shown only with
+  `--verbose-titles`.
+- `logs` and `--verbose-titles` prompt when an assistant runs them with the bundled
+  settings. They were allowed like `status`, although they are the two reads that bring
+  issue and agent text into a session that holds the operator's permissions, so only the
+  skill's instructions stood between that text and the session.
+- Flags can no longer be abbreviated. `status --verbose` was accepted as
+  `--verbose-titles`, so a rule that names the full flag would not have seen it.
+- The bundled skill pointed a session at `waiting_for`, which `status --json` does not
+  carry by default, and so toward the flag that adds untrusted text; it now reads
+  `waiting` and gives the `attach` command. It also tells a session to stop when a prompt
+  is declined rather than reach the same result another way, explains why an ended run
+  can still carry the blocked label, and no longer lists `watch`, which never exits.
 - A control command issued while a tick is running is applied by the scheduled job. The
   command kick-started the job once, and launchd ignores a kick-start while the job is
   running; that tick could already be past the point where it reads requests. A command

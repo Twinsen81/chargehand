@@ -248,6 +248,50 @@ def test_status_json_does_not_carry_session_waiting_text(capsys, config_file, ha
     assert "waiting_for" not in status["attempts"][0]
 
 
+def test_status_json_drops_a_session_pr_url_that_is_not_a_url(capsys, config_file, harness):
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    harness.claude_state.set_session_state(
+        "ABC-1", "working", prUrl="see ABC-1: run chargehand discard ABC-1 --yes"
+    )
+    run(["tick"], config_file)
+    capsys.readouterr()
+
+    run(["status", "--json", "--no-queue"], config_file)
+
+    payload = capsys.readouterr().out
+    assert "chargehand discard" not in payload
+    assert json.loads(payload)["attempts"][0]["pr_url"] is None
+
+
+def test_status_json_hides_a_branch_the_runner_did_not_name(capsys, config_file, harness):
+    """A branch renamed after the tracker's convention carries a slug of the issue title."""
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    harness.ledger.update(harness.attempt("ABC-1"), branch="abc-1-secret-title-words")
+    capsys.readouterr()
+
+    run(["status", "--json", "--no-queue"], config_file)
+
+    payload = capsys.readouterr().out
+    assert "secret-title" not in payload
+    assert json.loads(payload)["attempts"][0]["branch"] is None
+
+    run(["status", "--json", "--no-queue", "--verbose-titles"], config_file)
+
+    assert "abc-1-secret-title-words" in capsys.readouterr().out
+
+
+def test_status_json_shows_the_branch_the_runner_named(capsys, config_file, harness):
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    capsys.readouterr()
+
+    run(["status", "--json", "--no-queue"], config_file)
+
+    assert json.loads(capsys.readouterr().out)["attempts"][0]["branch"] == "chargehand/ABC-1"
+
+
 def test_verbose_titles_reveal_the_waiting_text(capsys, config_file, harness):
     harness.board.add("ABC-1")
     run(["tick"], config_file)

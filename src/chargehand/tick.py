@@ -898,7 +898,7 @@ class Runner:
         if status.state == "needs-input":
             return ledger_mod.BLOCKED, "needs input"
         if status.state == "aborted":
-            # stop_reason is written by the agent. It is kept for `status --verbose` and
+            # stop_reason is written by the agent. It is kept for `--verbose-titles` and
             # deliberately left out of the notification, which usually crosses a relay.
             if status.stop_reason:
                 self.ledger.update(attempt, last_error=f"aborted: {status.stop_reason}"[:500])
@@ -950,7 +950,7 @@ class Runner:
             report.errors.append(f"{attempt.identifier}: {exc}")
             return attempt
         # Deliberately does not clear last_error: a successful label write says nothing
-        # about why the attempt failed, and that reason is what `status --verbose` shows.
+        # about why the attempt failed, and that reason is what `--verbose-titles` shows.
         return self.ledger.update(attempt, label_state=desired.value)
 
     # ----- 5/6. admission and launch ----------------------------------------
@@ -1288,7 +1288,7 @@ class Runner:
     ) -> Attempt:
         """*reason* may quote a setup script or a tracker, so it stays local.
 
-        It is recorded in the ledger and shown by `status --verbose`; the notification
+        It is recorded in the ledger and shown by `--verbose-titles`; the notification
         carries only *notify_detail*, which this module writes.
         """
         attempt = self.ledger.update(
@@ -1396,7 +1396,7 @@ class Runner:
         A notification usually crosses a third-party relay, so nothing authored by an
         agent, a setup script, or the tracker belongs in it — not an issue title, not a
         session's `waitingFor`, not a status file's `stop_reason`, not a script's stderr.
-        Those are kept in the ledger and reached through `status --verbose` and `logs`.
+        Those are kept in the ledger and reached through `--verbose-titles` and `logs`.
 
         Returns False only when a configured command failed.
         """
