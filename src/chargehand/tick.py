@@ -67,6 +67,13 @@ WATCHDOG_STOP_FAILED = 2
 PENDING_NOTIFICATION_PREFIX = "notify-pending:"
 PENDING_NOTIFICATION_MAX_AGE_SECS = 24 * 3600
 
+# Names no branch, because the session chose the name and this text reaches the terminal,
+# the tick log, and whichever assistant ran the command.
+KEPT_BRANCH = (
+    "the worktree was on a branch the runner did not create, so that branch was kept; "
+    "`git branch` in the repository lists it"
+)
+
 # The queue status each attempt state should be reflected by on the tracker.
 _STATUS_FOR_STATE = {
     ledger_mod.LAUNCHING: Status.RUNNING,
@@ -641,6 +648,7 @@ class Runner:
             )
         if context is None or not context.usable:
             return False, f"route '{attempt.route}' is unavailable"
+        branches_removed = True
         if attempt.worktree_path.exists():
             blocker = self._worktree_holds_work(attempt)
             if blocker and not force:
@@ -649,7 +657,7 @@ class Runner:
                     f"(`chargehand discard {attempt.identifier} --yes`)."
                 )
             try:
-                self._remove_worktree(attempt, force=True)
+                branches_removed = self._remove_worktree(attempt, force=True)
             except GitError as exc:
                 return False, f"could not remove the previous worktree: {exc}"
         # The previous session is kept by `stop`, and it still carries this issue's name
@@ -672,7 +680,8 @@ class Runner:
         except (*TRACKER_FAILURES, AmbiguousWrite) as exc:
             return False, f"could not re-queue {attempt.identifier}: {exc}"
         self.ledger.update(attempt, gc_done=1)
-        return True, "re-queued; the next admission pass starts a new attempt"
+        outcome = "re-queued; the next admission pass starts a new attempt"
+        return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
 
     def _do_discard(
         self, attempt: Attempt, context: RouteContext | None, force: bool, report: TickReport
@@ -691,19 +700,20 @@ class Runner:
         removed = self._remove_session(attempt)
         self.pool.release_all(attempt.worktree_path)
         try:
-            self._remove_worktree(attempt, force=True)
+            branches_removed = self._remove_worktree(attempt, force=True)
         except GitError as exc:
             return False, f"could not remove the worktree: {exc}"
         if not attempt.is_terminal:
             attempt = self.ledger.update(attempt, state=ledger_mod.CANCELLED)
             self._sync_labels(attempt, context, report)
         self.ledger.update(attempt, gc_done=1, session_id=None, session_uuid=None)
+        kept = "" if branches_removed else f"; {KEPT_BRANCH}"
         if not removed:
             return True, (
                 "worktree and branch deleted, but the session could not be removed; "
-                "remove it with `claude rm`"
+                f"remove it with `claude rm`{kept}"
             )
-        return True, "session removed, worktree and branch deleted"
+        return True, f"session removed, worktree and branch deleted{kept}"
 
     def _worktree_holds_work(self, attempt: Attempt) -> str | None:
         worktree = attempt.worktree_path
@@ -718,11 +728,27 @@ class Runner:
             return "its worktree has uncommitted changes"
         return None
 
-    def _remove_worktree(self, attempt: Attempt, *, force: bool) -> None:
+    def _remove_worktree(self, attempt: Attempt, *, force: bool) -> bool:
+        """Remove the worktree and every branch the runner can show is its own.
+
+        A session can rename the branch it was given, typically after the tracker's naming
+        convention, and the placeholder name then no longer exists. Git records a rename in
+        the branch's reflog, and that record is what makes the branch the runner's to
+        delete. A branch the session switched to in any other way is left alone. Returns
+        False when such a branch was left behind.
+        """
         repo = attempt.repo_path
+        current = None
         if attempt.worktree_path.exists():
+            current = self.git.worktree_branch(repo, attempt.worktree_path)
             self.git.remove_worktree(repo, attempt.worktree_path, force=force)
         self.git.delete_branch(repo, attempt.branch, force=True)
+        if not current or current == attempt.branch:
+            return True
+        if self.git.renamed_from(repo, current, attempt.branch):
+            self.git.delete_branch(repo, current, force=True)
+            return True
+        return False
 
     # ----- 3. reap and watchdog ---------------------------------------------
 
@@ -1328,10 +1354,12 @@ class Runner:
             self._remove_session(attempt)
             self.pool.release_all(attempt.worktree_path)
             try:
-                self._remove_worktree(attempt, force=False)
+                branches_removed = self._remove_worktree(attempt, force=False)
             except GitError as exc:
                 report.warnings.append(f"{attempt.identifier}: could not collect: {exc}")
                 continue
+            if not branches_removed:
+                report.warnings.append(f"{attempt.identifier}: collected, but {KEPT_BRANCH}")
             self.ledger.update(attempt, gc_done=1, session_id=None, session_uuid=None)
             report.collected.append(attempt.identifier)
 

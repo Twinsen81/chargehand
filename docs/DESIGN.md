@@ -169,7 +169,9 @@ idempotent, and the row's `step` advances after each one.
 2. Swap the labels, then re-read the issue to verify. A write that reports failure is not
    assumed to have failed; the row stays `launching` and reconciliation settles it.
 3. Fetch, then create the worktree on a placeholder branch (skip if it already exists).
-   The session may rename the branch later.
+   The session may rename the branch later. Removing the worktree deletes the branch
+   under its new name too, when git's reflog records the rename; a branch the session
+   switched to in any other way is kept, and the result says so.
 4. Run the repository's setup script in the worktree. Failure marks the attempt failed.
 5. Start the background session, named after the issue, in the configured permission mode.
    Starting inside a linked worktree means Claude Code does not create one of its own.

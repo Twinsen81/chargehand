@@ -71,6 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `discard`, `retry` and the collection of closed issues delete a run's branch that the
+  session renamed. They deleted only the placeholder name, which no longer exists after a
+  rename, so the renamed branch stayed in the repository. A branch counts as the run's
+  only when git's reflog records that it was renamed from the placeholder. A branch the
+  session switched to in any other way is kept, and the result says so without naming it,
+  because the session chose the name.
 - `status --json` no longer prints text a session wrote. A pull-request URL taken from
   Claude Code's session listing was stored and printed as it came, while the one from a
   status file was already checked; both must now be a plain URL. A branch a session

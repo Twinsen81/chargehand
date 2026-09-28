@@ -168,6 +168,78 @@ def test_discard_removes_the_session_worktree_and_branch(harness):
     assert not harness.runner.git.branch_exists(harness.repo, "chargehand/ABC-1")
 
 
+def test_discard_deletes_a_branch_the_session_renamed(harness):
+    """A session may rename its placeholder after the tracker's convention."""
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("branch", "-m", "chargehand/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    apply_request(harness, "cancel", "ABC-1")
+
+    result = apply_request(harness, "discard", "ABC-1")
+
+    assert result["ok"] == 1
+    assert not harness.runner.git.branch_exists(harness.repo, "abc-1-a-title-slug")
+    assert "kept" not in result["message"]
+
+
+def test_discard_follows_a_branch_renamed_more_than_once(harness):
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("branch", "-m", "chargehand/ABC-1", "abc-1-first", cwd=worktree)
+    run_git("branch", "-m", "abc-1-first", "abc-1-second", cwd=worktree)
+    apply_request(harness, "cancel", "ABC-1")
+
+    result = apply_request(harness, "discard", "ABC-1")
+
+    assert result["ok"] == 1
+    assert not harness.runner.git.branch_exists(harness.repo, "abc-1-second")
+
+
+def test_discard_keeps_a_branch_the_runner_did_not_create(harness):
+    """Only a recorded rename proves a branch is the runner's; any other may be work."""
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("checkout", "-b", "made-by-the-session", cwd=worktree)
+    apply_request(harness, "cancel", "ABC-1")
+
+    result = apply_request(harness, "discard", "ABC-1")
+
+    assert result["ok"] == 1
+    assert not worktree.exists()
+    assert harness.runner.git.branch_exists(harness.repo, "made-by-the-session")
+    assert not harness.runner.git.branch_exists(harness.repo, "chargehand/ABC-1")
+    assert "branch was kept" in result["message"]
+    # The session chose that name, and this message can reach an assistant's session.
+    assert "made-by-the-session" not in result["message"]
+
+
+def test_discard_keeps_a_renamed_branch_when_the_repository_keeps_no_reflog(harness):
+    """Without a reflog there is no proof of the rename, so the branch stays."""
+    run_git("config", "core.logAllRefUpdates", "false", cwd=harness.repo)
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("branch", "-m", "chargehand/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    apply_request(harness, "cancel", "ABC-1")
+
+    result = apply_request(harness, "discard", "ABC-1")
+
+    assert result["ok"] == 1
+    assert harness.runner.git.branch_exists(harness.repo, "abc-1-a-title-slug")
+    assert "branch was kept" in result["message"]
+
+
+def test_retry_deletes_a_branch_the_session_renamed(harness):
+    launch(harness)
+    worktree = harness.worktree_root / "ABC-1"
+    run_git("branch", "-m", "chargehand/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    apply_request(harness, "cancel", "ABC-1")
+
+    result = apply_request(harness, "retry", "ABC-1")
+
+    assert result["ok"] == 1
+    assert not harness.runner.git.branch_exists(harness.repo, "abc-1-a-title-slug")
+
+
 def test_discard_refuses_when_commits_are_unpushed(harness):
     launch(harness)
     worktree = harness.worktree_root / "ABC-1"
