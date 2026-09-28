@@ -71,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sessions that the scheduled job starts run at the priority a terminal gives. The job was
+  a launchd `Background` job, and everything it starts inherits that type: the daemon that
+  `claude --bg` starts when none is running, every session the daemon hosts, and every
+  build those sessions run. CPU-bound work in such a session took about three times as
+  long as from a terminal. The daemon also hosts background sessions started by hand, so
+  while it was up, those were slowed too. The job is now an `Interactive` job. Run
+  `chargehand install --load` again to rewrite and reload it.
 - `discard`, `retry` and the collection of closed issues delete a run's branch that the
   session renamed. They deleted only the placeholder name, which no longer exists after a
   rename, so the renamed branch stayed in the repository. A branch counts as the run's

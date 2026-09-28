@@ -34,6 +34,12 @@ DEFAULT_JOB_PATH = (
 )
 # What launchd gives a job whose definition sets no PATH.
 LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# Everything the tick starts inherits the job's process type, including the Claude Code
+# daemon that a launch starts, and that daemon then hosts every background session on
+# the machine, the operator's own as well. Background would hold all of them in the
+# throttled band, where CPU-bound work measured about three times slower than from a
+# terminal. Interactive gives them the priority a terminal gives.
+JOB_PROCESS_TYPE = "Interactive"
 
 
 @dataclass(frozen=True)
@@ -60,7 +66,7 @@ def build_plist(
         "ProgramArguments": argv,
         "StartInterval": int(interval_secs),
         "RunAtLoad": True,
-        "ProcessType": "Background",
+        "ProcessType": JOB_PROCESS_TYPE,
         "EnvironmentVariables": {"PATH": job_path or _merge_path(DEFAULT_JOB_PATH, extra_path)},
         "StandardOutPath": str(log_path or paths.log_file()),
         "StandardErrorPath": str(log_path or paths.log_file()),
