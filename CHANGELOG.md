@@ -152,6 +152,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The lease pool is now planned as an external tool instead of a part of chargehand. How
+  the runner connects to it is not decided yet; until then the runner keeps its no-op pool.
 - Every line `chargehand tick` prints starts with the date and time. The scheduled job
   appends this output to its log, and without a time the log could not show whether ticks
   ran on schedule or when an error began. `--json` output is unchanged.
