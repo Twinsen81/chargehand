@@ -58,7 +58,7 @@ Components:
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised sessions |
 | Control CLI | See and steer the runner; no server |
 | Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
-| Lease pool — deferred; the first releases ship a no-op pool | Optional leases for devices, emulators, and build slots |
+| Lease pool (an external tool, TBD; until then, a no-op pool) | Optional leases for devices, emulators, and build slots |
 
 ## 3. Trigger and routing
 
@@ -157,8 +157,8 @@ A new launch needs both `working < max_concurrent` and `working + blocked < max_
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
 the session. So `max_concurrent` is a launch throttle, not the memory bound. The memory bound
-is the pool's counted slots (see "Lease pool"): however many sessions resume at once, only so many heavy
-builds or emulators run. A session that is reading code or waiting for a slot is cheap.
+belongs to the lease pool (see "Lease pool"): however many sessions resume at once, only so many heavy
+builds or emulators should run. A session that is reading code or waiting for a slot is cheap.
 
 ### Steps
 
@@ -337,56 +337,13 @@ chargehand tick                     # run a tick now
   stronger option.
 - **Optional later:** a read-only, loopback-only status page with no mutating endpoints.
 
-## 8. Lease pool (deferred, optional)
+## 8. Lease pool (external, TBD)
 
-Parallel agents on one machine fight over scarce things: a phone on USB, a limited number of
-emulators, memory for heavy builds. A lock held by "whoever started it" becomes permanent as
-soon as that run dies. The pool uses **leases** instead. It is optional everywhere: a
-repository's scripts use it when it is installed and behave exactly as before when it is not.
-The first releases ship a no-op pool so the runner can be proven on its own.
-
-- **Lease files** live in a machine-global temporary directory, one per resource, guarded by
-  a file lock held only for bookkeeping. A lease records its owner (the worktree), the owning
-  session process, the processes currently using the resource, and its deadlines.
-- **Reserve before start.** The lease is written, in a `booting` state with its own deadline,
-  before the resource is started. A resource that is still starting therefore always has a
-  lease and cannot be mistaken for an orphan.
-- **A lease is void** when its boot deadline passes; when its owner session is dead *and*
-  nothing touched it for a grace period; when it has been idle too long; or when its hard cap
-  expires. Owner death alone is not proof of idleness: Claude Code carries a session's
-  background commands across a process restart, and those keep touching the lease.
-- **Renewal needs no agent cooperation.** A project's device scripts touch the lease on every
-  call; long-running ones keep a touch loop alive for their own lifetime.
-- **Fencing works both ways.** Scripts register themselves as users on entry and check
-  ownership; the touch loop aborts its own script when the lease is lost. For a void lease
-  the reaper first stops further checks from passing, terminates the registered users, and
-  confirms they are gone. Something that can be killed (an emulator) is killed — that is the
-  fence. Something that cannot (a physical device) is reassigned **only after** its users are
-  confirmed dead; otherwise it is quarantined until a human clears it.
-- **Reaping** runs at the start of every pool command and on every runner tick.
-- **Resource kinds are configuration, not code:** a kind declares how to `discover` its
-  instances and what to run `on_acquire` (reset) and `on_void` (kill). Counted kinds — build
-  slots, ports, GPUs — need no hooks. Presets can ship for common cases.
-- **Some resources come in pairs.** A device is often only useful together with something
-  scarcer that lives on it — a signed-in test account, a provisioning profile, a licence
-  seat — and a run needs to be told which one it got. Treating that as an attribute of the
-  device is wrong as soon as the same account exists on two devices: the two device leases
-  are independent, so two runs acquire them and then trample each other's shared state.
-  Paired things are therefore leased in their own right, and a request for "a device with
-  one" is a single joint acquire that picks the pair under the same lock, so two runs can
-  never half-acquire and deadlock.
-- **Discovery is a human gate that defaults to closed.** `discover` enumerates what is
-  attached, asks which instances may be used for testing, and writes an inventory file.
-  Anything outside a configured pattern starts unselected: a machine with test devices on
-  it usually also has something personal signed in, and including that by mistake hands an
-  unattended agent real credentials, while excluding a test resource by mistake costs one
-  re-scan. Re-running `discover` merges, so a re-scan can never silently widen access.
-- **The inventory is policy, not a cache.** What is actually on a device drifts, so
-  `acquire` re-reads it and grants from the intersection of "permitted" and "present now".
-  The pool stores identifiers — never credentials; the point of a signed-in device is that
-  the run does not need the password.
-- **Build slots** are the memory bound described under "Launch sequence": a build acquires a slot when it starts and
-  releases it when it ends, so direct build invocations are covered too.
+Parallel runs on one machine compete for scarce things: a phone on USB, a limited number of
+emulators, memory for heavy builds. Sharing them safely is the job of a lease pool, which is
+an external tool and not part of chargehand. How the runner connects to it is to be decided.
+Until then the runner calls a no-op pool, so keep `max_concurrent` low (see "Leaving it
+running").
 
 ## 9. Leaving it running
 
@@ -416,10 +373,8 @@ The first releases ship a no-op pool so the runner can be proven on its own.
 |---|---|
 | Machine reboots | Observed: the ledger, the labels and the worktrees survive, the scheduled job runs a tick by itself, the killed session reads `failed`, and the run is parked as blocked with one attempt recorded. `continue` brings the session back but not the work it had running, so resuming is left to you. |
 | Tick crashes mid-launch, or a tracker write lands but reports failure | The ledger row came first; the next tick adopts, resumes, or fails the attempt loudly. |
-| Session process restarts mid-run | Background commands carry over and keep touching leases; the grace period keeps them valid. |
-| Agent hangs holding a resource | Idle expiry voids the lease; the reaper terminates its users; the watchdog later stops the session. |
-| Run parked waiting for you | It should release its leases before asking; if it does not, the dead-owner check frees them once the idle session process is stopped. |
-| Several blocked runs resumed at once | Sessions wake together; builds and emulators queue on their slots. |
+| Agent hangs | The watchdog notifies after `max_run_hours` and stops the session after `hard_stop_hours`. |
+| Several blocked runs resumed at once | Sessions wake together; `max_open_attempts` bounds how many there can be. |
 | Tracker unavailable | The tick logs and exits; the next one retries. |
 | Control command during a tick | Recorded, then applied by the next, kick-started tick. |
 | Prompt injection through issue text | Mitigated, not eliminated — see `SECURITY.md`. |
@@ -438,7 +393,7 @@ Done:
 Next:
 
 - Run it unattended for a day against a real tracker.
-- The lease pool and its presets.
+- The lease pool, an external tool, and the runner's connection to it (TBD).
 - `github` and `command` adapters, packaging, first release.
 - Optional: the read-only status page, agents under a separate user.
 
@@ -455,8 +410,6 @@ test.
   calls; a long one is what the watchdog already does, only at `max_run_hours`.
 - Will Claude Code offer a scriptable way to send a message to a background session? That
   would allow a `reply` command. Until then, answering a question means attaching.
-- Do commands started by Claude Code's shell tool run in their own process group? That decides
-  how pool-aware scripts isolate the group the reaper signals.
 
 Settled by inspecting Claude Code 2.1.270, and by running background sessions and the
 deny-rule probe against 2.1.278:
