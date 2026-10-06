@@ -9,9 +9,10 @@ session picks it up in a fresh git worktree on a machine you own.
 > suite that fault-injects every launch step. The same sequence has been run against a
 > real tracker and real Claude Code on a scratch repository, including a restart that
 > killed a session mid-turn. It has not yet been left running unattended for a working
-> day, the lease pool is a no-op, and the `github` and `command` adapters are not
-> written. Treat it as something to try on a scratch repository, not something to leave
-> running. The design is in [docs/DESIGN.md](docs/DESIGN.md).
+> day, the connection to the lease pool is tested only against a fake pool, and the
+> `github` and `command` adapters are not written. Treat it as something to try on a
+> scratch repository, not something to leave running. The design is in
+> [docs/DESIGN.md](docs/DESIGN.md).
 
 A *chargehand* is the worker in charge of a small crew. This tool is that for coding
 agents: it watches your issue tracker, starts one background session per issue, keeps
@@ -71,8 +72,10 @@ load it until you pass `--load`, or run the `launchctl bootstrap` line it prints
 records an absolute path to the interpreter it was installed with, so it works whether or
 not the environment is on your shell's PATH. It also records the PATH of the shell you run
 `install` from, because launchd gives a job only a minimal one; `doctor` checks that
-`claude` and `git` resolve through the job's PATH, not only through yours. Each tick
-appends timestamped lines to `~/Library/Logs/chargehand.log`.
+`claude` and `git` resolve through the job's PATH, not only through yours. If the lease
+pool's command, `banksman`, resolves there too, each tick reaps its void leases and
+`status` lists the leases; without it, runs take no leases. Each tick appends timestamped
+lines to `~/Library/Logs/chargehand.log`.
 
 Steer it with `status`, `watch`, `logs`, `pause`, `cancel`, `stop`, `continue`, `retry`
 and `discard`. Answers to a session's questions go through Claude Code's own agent view

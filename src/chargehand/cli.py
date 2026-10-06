@@ -10,6 +10,7 @@ attacker-influenced, so they stay out of default output entirely.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -23,10 +24,12 @@ from pathlib import Path
 from chargehand import __version__, install, paths, sanitize, trackers
 from chargehand.claude import ClaudeCLI
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
-from chargehand.errors import ChargehandError, ConfigError, TickBusy
+from chargehand.errors import ChargehandError, ConfigError, PoolError, TickBusy
 from chargehand.gitutil import Git
 from chargehand.ledger import Attempt, Ledger, open_ledger
 from chargehand.notify import Notifier
+from chargehand.pool import Lease
+from chargehand.pool import select as select_pool
 from chargehand.tick import Runner, tick_lock
 from chargehand.trackers import Status
 
@@ -67,6 +70,7 @@ def _runner(config: MachineConfig, ledger: Ledger) -> Runner:
         ledger,
         claude=ClaudeCLI(config.claude_bin),
         git=Git(config.git_bin),
+        pool=select_pool(config.pool_bin),
         notifier=Notifier(config.notify),
     )
 
@@ -93,7 +97,11 @@ def _emit_json(payload: object) -> None:
 def _elapsed(since: float | None, now: float | None = None) -> str:
     if not since:
         return "-"
-    delta = max(0.0, (now or time.time()) - since)
+    return _span((now or time.time()) - since)
+
+
+def _span(secs: float) -> str:
+    delta = max(0.0, secs)
     if delta < 90:
         return f"{delta:.0f}s"
     if delta < 5400:
@@ -108,6 +116,16 @@ def _branch_is_ours(attempt: Attempt) -> bool:
     # the issue title into the name, and an adopted session is recorded under the branch
     # it is on. The runner's own placeholder ends in the identifier.
     return attempt.branch.endswith(attempt.identifier)
+
+
+def _lease_dict(lease: Lease, *, verbose: bool) -> dict[str, object]:
+    payload = dataclasses.asdict(lease)
+    # The pool is shared with agents that chargehand did not start, so a holder's worktree
+    # path is any text they chose, such as a slug of an issue title. banksman validates the
+    # issue id.
+    if not verbose:
+        payload["owner"] = None
+    return payload
 
 
 def _attempt_dict(attempt: Attempt, *, verbose: bool) -> dict[str, object]:
@@ -196,6 +214,12 @@ def build_status(
             entry["config_error"] = str(exc)
         routes_payload.append(entry)
 
+    pool: dict[str, object] = {"enabled": runner.pool.enabled, "leases": [], "error": None}
+    try:
+        pool["leases"] = [_lease_dict(lease, verbose=verbose) for lease in runner.pool.status()]
+    except PoolError as exc:
+        pool["error"] = str(exc)
+
     root = config.worktree_root
     try:
         usage = shutil.disk_usage(root if root.exists() else root.parent)
@@ -235,7 +259,7 @@ def build_status(
         ],
         "sessions": sessions_payload,
         "session_error": session_error,
-        "pool": {"enabled": runner.pool.enabled, "leases": [l.__dict__ for l in runner.pool.status()]},
+        "pool": pool,
     }
 
 
@@ -254,6 +278,9 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append(f"  paused routes: {', '.join(runner['paused_routes'])}")
     if status.get("session_error"):
         lines.append(f"  ! claude: {sanitize.one_line(str(status['session_error']), limit=160)}")
+    pool = status["pool"]  # type: ignore[index]
+    if pool["error"]:
+        lines.append(f"  ! pool: {sanitize.one_line(str(pool['error']), limit=160)}")
 
     lines.append("")
     lines.append("routes")
@@ -289,6 +316,20 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
             )
             if verbose and attempt.get("last_error"):
                 lines.append(f"      ! {attempt['last_error']}")
+
+    if pool["leases"]:
+        lines.append("")
+        lines.append(f"  {'LEASE':<22} {'KIND':<16} {'STATE':<11} {'IF ABANDONED':>12}  HOLDER")
+        for lease in pool["leases"]:
+            expires = lease["expires_in_secs"]
+            holder = lease["issue"] or (Path(lease["owner"]).name if lease["owner"] else "-")
+            lines.append(
+                f"  {sanitize.one_line(lease['resource'], limit=22):<22} "
+                f"{sanitize.one_line(lease['kind'], limit=16):<16} "
+                f"{sanitize.one_line(lease['state'], limit=11):<11} "
+                f"{'-' if expires is None else _span(expires):>12}  "
+                f"{sanitize.one_line(holder, limit=60)}"
+            )
 
     if runner["pending_requests"]:
         lines.append("")
@@ -508,7 +549,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     plist = install.write_plist(interval_secs=args.interval or config.poll_interval_secs)
     _print(f"wrote {plist}")
     for check in install.job_checks(config, install.installed_job(plist) or {}):
-        if check.status != install.OK:
+        if check.status in (install.WARN, install.FAIL):
             print(f"warning: {check.detail}", file=sys.stderr)
     if not args.load:
         _print("")
@@ -553,7 +594,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         _emit_json([check.as_dict() for check in checks])
     else:
         for check in checks:
-            marker = {"ok": "  ok  ", " warn ": " warn ", "warn": " warn ", "fail": " FAIL "}.get(
+            marker = {"ok": "  ok  ", "info": " info ", "warn": " warn ", "fail": " FAIL "}.get(
                 check.status, check.status
             )
             _print(f"[{marker}] {check.name:<22} {sanitize.one_line(check.detail, limit=140)}")

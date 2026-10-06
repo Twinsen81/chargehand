@@ -34,6 +34,10 @@ class ClaudeError(ChargehandError):
     """The Claude Code CLI is missing, failed, or returned unparseable output."""
 
 
+class PoolError(ChargehandError):
+    """The lease pool's command failed, or printed output this version cannot read."""
+
+
 class GitError(ChargehandError):
     """A git command failed."""
 

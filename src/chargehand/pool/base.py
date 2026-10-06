@@ -1,17 +1,21 @@
 """The lease-pool interface.
 
-The pool itself is deferred: parallel runs sharing scarce local resources is a real
-problem, but the runner has to be proven on its own first. The interface exists from
-the start so the watchdog, cancel, discard, and garbage-collection paths already call
-it, and turning the pool on later changes one line of wiring rather than five call
-sites.
+The pool is an external tool, and optional: a machine without it runs with the no-op
+pool. The runner needs only two calls. It reaps at the start of every tick, and it lists
+the leases for `chargehand status`.
+
+The runner never releases a lease itself. The pool records the agent process of every
+lease, and a lease whose agent process has ended becomes void after the pool's grace
+period. So when the runner stops a session, its leases end without the runner, and the
+next reap takes their resources back. A release by the runner would need either the
+worktree, which several agents can share, or the agent process, which has already ended
+when the runner knows that the session stopped.
 """
 
 from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -29,11 +33,7 @@ class Pool(abc.ABC):
 
     @abc.abstractmethod
     def reap(self) -> list[str]:
-        """Void expired leases and terminate their registered users. Returns what was reaped."""
-
-    @abc.abstractmethod
-    def release_all(self, owner: Path) -> list[str]:
-        """Release every lease held by *owner* (a worktree). Returns what was released."""
+        """Take back the resources of void leases. Returns one line for each lease it ended."""
 
     @abc.abstractmethod
     def status(self) -> list[Lease]:

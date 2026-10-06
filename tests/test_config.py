@@ -22,6 +22,15 @@ def test_a_minimal_machine_config_gets_sensible_defaults():
     assert config.routes[0].tracker.type == "linear"
     assert config.labels.queued == "chargehand"
     assert config.pass_deny_rules_at_launch is True
+    assert config.pool_bin == "banksman"
+
+
+def test_the_pools_command_can_be_named():
+    assert MachineConfig.parse({**MINIMAL, "pool_bin": "/opt/bin/banksman"}).pool_bin == (
+        "/opt/bin/banksman"
+    )
+    with pytest.raises(ConfigError, match="pool_bin"):
+        MachineConfig.parse({**MINIMAL, "pool_bin": 3})
 
 
 def test_at_least_one_route_is_required():

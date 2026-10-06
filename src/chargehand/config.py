@@ -56,6 +56,10 @@ DEFAULT_DENY_RULES = (
     "Bash(*claude rm*)",
     "Bash(*claude respawn*)",
     "Bash(*claude agents*)",
+    # The lease pool keeps every operator command under one prefix, so this one rule
+    # also covers the ones it adds later. Agents keep the rest of the pool, which their
+    # scripts use.
+    "Bash(*banksman admin*)",
     # A session that starts a second session without these rules has escaped all of
     # them, so the flags that would do it are denied too.
     "Bash(*dangerously-skip-permissions*)",
@@ -272,6 +276,7 @@ class MachineConfig:
     trust_worktrees: bool = True
     claude_bin: str = "claude"
     git_bin: str = "git"
+    pool_bin: str = "banksman"
     source: Path | None = None
 
     _TOP_LEVEL = (
@@ -288,6 +293,7 @@ class MachineConfig:
         "trust_worktrees",
         "claude_bin",
         "git_bin",
+        "pool_bin",
         "notify",
         "labels",
         "route",
@@ -365,6 +371,7 @@ class MachineConfig:
             trust_worktrees=bool(data.get("trust_worktrees", True)),
             claude_bin=_as_str(data.get("claude_bin", "claude"), "config.claude_bin"),
             git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
+            pool_bin=_as_str(data.get("pool_bin", "banksman"), "config.pool_bin"),
             source=source,
         )
 

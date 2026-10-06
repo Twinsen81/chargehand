@@ -207,7 +207,6 @@ def test_the_shape_claude_code_actually_returns_is_parsed():
     assert working.id == "abc123"
     assert working.uuid == "abc123"
     assert working.state == "working"
-    assert working.pid == 40560
     assert working.kind == "background"
     # startedAt is milliseconds; reading it as seconds would put it in the year 58690.
     assert 1789938320.0 < working.started_at < 1789938321.0
@@ -287,7 +286,6 @@ def test_every_observed_shape_parses_into_a_known_state(node):
 
     assert session.state in ("working", "done", "blocked")
     assert session.kind == "background"
-    assert session.pid == node["pid"]
     assert 1790073000 < session.started_at < 1790075000
 
 

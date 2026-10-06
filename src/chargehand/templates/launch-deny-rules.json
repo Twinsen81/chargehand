@@ -8,6 +8,7 @@
       "Bash(*claude rm*)",
       "Bash(*claude respawn*)",
       "Bash(*claude agents*)",
+      "Bash(*banksman admin*)",
       "Bash(*dangerously-skip-permissions*)",
       "Bash(*bypassPermissions*)"
     ]

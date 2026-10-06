@@ -597,7 +597,7 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
         "recent": recent,
         "sessions": sessions,
         "session_error": None,
-        "pool": {"enabled": False, "leases": []},
+        "pool": {"enabled": False, "leases": [], "error": None},
     }
 
 

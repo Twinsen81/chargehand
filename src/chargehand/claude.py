@@ -94,7 +94,6 @@ _STATE_ALIASES = {
 }
 
 _ID_KEYS = ("id", "shortId", "short_id", "agentId", "agent_id", "sessionShortId")
-_PID_KEYS = ("pid", "processId", "process_id")
 _KIND_KEYS = ("kind", "type")
 _UUID_KEYS = ("uuid", "sessionId", "session_id", "sessionUuid", "session_uuid")
 _NAME_KEYS = ("name", "title", "label")
@@ -138,8 +137,6 @@ class Session:
     waiting_for: str | None = None
     started_at: float | None = None
     pr_url: str | None = None
-    # Carried because the lease pool needs an owner process to test for liveness.
-    pid: int | None = None
     kind: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
@@ -172,9 +169,6 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
         # The session's agent influences this value, and `status --json` prints it by
         # default, so it has to be a URL and nothing else.
         pr_url=sanitize.safe_url(_first(node, _PR_KEYS)),
-        pid=(lambda v: int(v) if isinstance(v, int) and not isinstance(v, bool) else None)(
-            _first(node, _PID_KEYS)
-        ),
         kind=(lambda v: str(v) if v is not None else None)(_first(node, _KIND_KEYS)),
         raw=dict(node),
     )
