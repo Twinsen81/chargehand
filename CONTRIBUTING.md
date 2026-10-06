@@ -34,7 +34,7 @@ after each step and assert that the next tick adopts, resumes, or fails loudly.
 
 As the implementation lands, modules follow the split described in `docs/DESIGN.md`: the
 tick, the ledger, one module that knows the Claude Code CLI, tracker adapters, the pool
-interface, and notifications.
+interface with one module that knows the pool's CLI, and notifications.
 
 ## Coding standards
 

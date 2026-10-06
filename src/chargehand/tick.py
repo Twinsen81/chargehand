@@ -41,6 +41,7 @@ from chargehand.errors import (
     ConfigError,
     GitError,
     LaunchAborted,
+    PoolError,
     TickBusy,
     TrackerError,
 )
@@ -592,12 +593,11 @@ class Runner:
                 f"{attempt.identifier}: the session did not stop; it is still working. "
                 f"Check it with `claude attach {attempt.session_id}`."
             )
-        self.pool.release_all(attempt.worktree_path)
         attempt = self.ledger.update(attempt, state=ledger_mod.CANCELLED, session_state=None)
         self._sync_labels(attempt, context, report)
         self._notify(report, attempt.identifier, "cancelled", attempt.url, attempt.route,
                      detail="cancelled by operator")
-        return True, "session stopped, leases released, worktree kept"
+        return True, "session stopped, worktree kept"
 
     def _do_stop(
         self, attempt: Attempt, context: RouteContext | None, report: TickReport
@@ -698,7 +698,6 @@ class Runner:
                 f"--force."
             )
         removed = self._remove_session(attempt)
-        self.pool.release_all(attempt.worktree_path)
         try:
             branches_removed = self._remove_worktree(attempt, force=True)
         except GitError as exc:
@@ -753,8 +752,14 @@ class Runner:
     # ----- 3. reap and watchdog ---------------------------------------------
 
     def _reap_and_watchdog(self, report: TickReport) -> None:
-        for resource in self.pool.reap():
-            report.warnings.append(f"reaped lease {resource}")
+        try:
+            reaped = self.pool.reap()
+        except PoolError as exc:
+            # The watchdog below must run however the pool fails.
+            report.errors.append(f"pool: {exc}")
+            reaped = []
+        for line in reaped:
+            report.warnings.append(f"reaped lease {line}")
 
         now = time.time()
         max_run = self.config.max_run_hours * 3600
@@ -776,7 +781,6 @@ class Runner:
                                      attempt.url, attempt.route,
                                      detail=f"running for {elapsed / 3600:.1f}h")
                     continue
-                self.pool.release_all(attempt.worktree_path)
                 updated = self.ledger.update(
                     attempt,
                     state=ledger_mod.BLOCKED,
@@ -1352,7 +1356,6 @@ class Runner:
                 )
                 continue
             self._remove_session(attempt)
-            self.pool.release_all(attempt.worktree_path)
             try:
                 branches_removed = self._remove_worktree(attempt, force=False)
             except GitError as exc:

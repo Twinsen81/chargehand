@@ -3,9 +3,9 @@
 **Status:** the runner and the control surface are implemented and tested against a fake
 Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
 and real Claude Code on a scratch repository, including a crash after every launch step and a
-reboot that killed a session mid-turn; the lease pool is a no-op and the `github` and
-`command` adapters are not written. It has not yet been left running unattended for a
-working day.
+reboot that killed a session mid-turn. The connection to the lease pool is tested only
+against a fake pool, and the `github` and `command` adapters are not written. It has not
+yet been left running unattended for a working day.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -58,7 +58,7 @@ Components:
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised sessions |
 | Control CLI | See and steer the runner; no server |
 | Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
-| Lease pool (an external tool, TBD; until then, a no-op pool) | Optional leases for devices, emulators, and build slots |
+| Lease pool (banksman, an external tool; a no-op pool when it is not installed) | Optional leases for devices, emulators, and build slots |
 
 ## 3. Trigger and routing
 
@@ -284,7 +284,7 @@ chargehand watch                    # self-refreshing status table
 chargehand logs <ISSUE>             # tail of the session's output — explicitly untrusted
 chargehand pause [--route <name>]   # stop admitting new launches; running sessions continue
 chargehand resume [--route <name>]
-chargehand cancel <ISSUE>           # stop the session, release leases, mark blocked; keep the worktree
+chargehand cancel <ISSUE>           # stop the session, mark blocked; keep the worktree
 chargehand stop <ISSUE>             # pause one run
 chargehand continue <ISSUE>         # respawn it; the saved conversation resumes
 chargehand retry <ISSUE>            # new attempt for a failed or cancelled one
@@ -329,21 +329,43 @@ chargehand tick                     # run a tick now
   than about this tool.
 - **Agents versus the control plane.** Sessions run as the same user, so they could call the
   CLI, stop other sessions, or start a session without any of these restrictions. Launched
-  sessions get deny rules for all three. A `Bash` rule matches command text rather than the
-  program behind it, so every pattern leads with a wildcard to cover an absolute path and a
-  `sh -c '...'` wrapper alongside the bare name; `probes/deny_rules.py` checks each form
-  against a real install. That makes the rules a guardrail against the careless path and
-  not a boundary against a deliberate one. Running agents under a separate user is the
-  stronger option.
+  sessions get deny rules for all three, and one more for the lease pool's operator
+  commands, which all start with `banksman admin`. The other pool commands stay open,
+  because the repository's scripts use them. A `Bash` rule matches command text rather
+  than the program behind it, so every pattern leads with a wildcard to cover an absolute
+  path and a `sh -c '...'` wrapper alongside the bare name; `probes/deny_rules.py` checks
+  each form against a real install. That makes the rules a guardrail against the careless
+  path and not a boundary against a deliberate one. Running agents under a separate user
+  is the stronger option.
 - **Optional later:** a read-only, loopback-only status page with no mutating endpoints.
 
-## 8. Lease pool (external, TBD)
+## 8. Lease pool
 
 Parallel runs on one machine compete for scarce things: a phone on USB, a limited number of
 emulators, memory for heavy builds. Sharing them safely is the job of a lease pool, which is
-an external tool and not part of chargehand. How the runner connects to it is to be decided.
-Until then the runner calls a no-op pool, so keep `max_concurrent` low (see "Leaving it
-running").
+an external tool and not part of chargehand: banksman. The repository's own scripts lease
+what they need from it. The runner's part is small.
+
+- **Optional.** The runner uses the pool when `pool_bin` (`banksman` by default) resolves
+  through the job's `PATH`, and a no-op pool otherwise. `doctor` resolves it the same way.
+  A missing command is information, not a fault, and a pool whose output this version
+  cannot read is an error.
+- **A command, never an import.** One module runs `banksman` and reads its JSON. An import
+  would add a runtime dependency, and a copy inside chargehand's own environment can
+  differ from the command that the scripts call, while both work on the same lease files.
+  Every JSON document carries a `schema` number, and output with a number that this
+  version does not know is refused.
+- **Reap and status, nothing else.** Each tick starts with `banksman reap`, which takes
+  back the resources of void leases, and `chargehand status` lists the leases. A pool that
+  fails is reported, and the tick goes on.
+- **No release by the runner.** banksman records the agent process of every lease, and a
+  lease whose agent process has ended becomes void after a grace period, 5 minutes by
+  default. When the runner stops a session, for a cancel, the watchdog, a discard, or
+  collection, the leases of that session therefore end without the runner, and a later
+  reap takes their resources back. A release by the runner would need either the worktree,
+  which several agents can share, or the agent process, which has already ended when the
+  runner knows that the session stopped. The cost: after a stop, a resource can stay held
+  for the grace period and one more tick.
 
 ## 9. Leaving it running
 
@@ -352,8 +374,9 @@ running").
   out one is not.
 - launchd starts jobs with a minimal `PATH`; everything the tick shells out to must be
   reachable through the `PATH` set in the job definition. `install` copies the `PATH` of the
-  shell it runs in, and `doctor` resolves `claude` and `git` through the job's `PATH`
-  rather than its own. A repository's setup script inherits the same `PATH`.
+  shell it runs in, and `doctor` resolves `claude`, `git`, and the lease pool's command
+  through the job's `PATH` rather than its own. A repository's setup script inherits the
+  same `PATH`.
 - The job runs as launchd's `Interactive` process type, which gives it the priority a
   terminal gets. Everything the tick starts inherits the type, and that includes every
   session: `claude --bg` starts the daemon that hosts background sessions when none is
@@ -361,8 +384,9 @@ running").
   With the `Background` type, sessions ran at the lowest scheduling priority and CPU-bound
   work took about three times as long. The daemon also hosts the sessions you start by
   hand, so a throttled daemon would slow those too.
-- Runs share the machine with you. Keep `max_concurrent` low until the lease pool exists,
-  because until then nothing stops two runs from reaching for the same device or emulator.
+- Runs share the machine with you. Keep `max_concurrent` low until the repository's
+  scripts lease their devices through the lease pool, because until then nothing stops two
+  runs from reaching for the same device or emulator.
 - Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
   next tick parks any run whose session is gone, so a restart costs progress but never
   consistency.
@@ -389,11 +413,14 @@ Done:
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
 - `init`, `doctor`, `install`, and the bundled templates.
+- The connection to the lease pool: reap on every tick, the leases in `status`, the pool's
+  command and schema in `doctor`, and the deny rule for its operator commands.
 
 Next:
 
 - Run it unattended for a day against a real tracker.
-- The lease pool, an external tool, and the runner's connection to it (TBD).
+- Run several sessions at once with the lease pool and with repository scripts that lease
+  through it.
 - `github` and `command` adapters, packaging, first release.
 - Optional: the read-only status page, agents under a separate user.
 

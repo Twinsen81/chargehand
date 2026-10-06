@@ -21,6 +21,10 @@ hard_stop_hours = 10
 
 worktree_root = "~/chargehand-worktrees"
 
+# The lease pool's command. The runner uses the pool when this resolves through the
+# scheduled job's PATH, and runs without leases otherwise.
+# pool_bin = "banksman"
+
 # Warn when the worktree root's filesystem drops below this.
 min_free_disk_gb = 30
 

@@ -123,6 +123,32 @@ def test_an_anchored_rule_would_have_missed_the_path_and_the_wrapper():
     assert first_matching_rule(anchored, "sh -c 'chargehand cancel ABC-1'") is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        "banksman admin discover --all --yes",
+        "/opt/homebrew/bin/banksman admin release --force --resource emulator-5554",
+        "sh -c 'banksman admin discover --all'",
+    ),
+)
+def test_the_pools_operator_commands_are_denied(command):
+    assert first_matching_rule(DEFAULT_DENY_RULES, command) == "Bash(*banksman admin*)"
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "banksman acquire --where form=tablet --for 'check the layout'",
+        "banksman status --json",
+        "banksman touch --lease 3f2a",
+        "banksman release --lease 3f2a",
+        "banksman enter --resource emulator-5554 --lease 3f2a --pid 4242",
+    ),
+)
+def test_agents_keep_the_pool_commands_their_scripts_use(command):
+    assert first_matching_rule(DEFAULT_DENY_RULES, command) is None
+
+
 def test_stop_is_denied_under_its_kill_alias():
     """`claude kill` is `claude stop`, so denying one and not the other denies nothing."""
     assert first_matching_rule(DEFAULT_DENY_RULES, "claude kill abc123")
@@ -149,6 +175,7 @@ def test_the_decoys_record_that_they_ran(tmp_path):
 
     assert "cancel ABC-1" in marker.read_text()
     assert os.access(bin_dir / "claude", os.X_OK)
+    assert os.access(bin_dir / "banksman", os.X_OK)
 
 
 def test_the_module_form_records_that_it_ran(tmp_path):

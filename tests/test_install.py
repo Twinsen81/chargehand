@@ -261,7 +261,7 @@ def test_doctor_checks_the_path_the_job_has_rather_than_its_own(tmp_path, harnes
     }
 
     checks = {check.name: check for check in install.job_checks(config, job)}
-    assert set(checks) == {"launchd PATH"}
+    assert set(checks) == {"launchd PATH", "pool"}
     assert checks["launchd PATH"].status == install.OK
     assert str(claude) in checks["launchd PATH"].detail
     assert str(git) in checks["launchd PATH"].detail

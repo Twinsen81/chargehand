@@ -83,17 +83,18 @@ public location.
   nothing.
 - **Agents are discouraged from steering the runner.** Sessions that chargehand launches
   get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
-  other sessions, and for the flags that would start a fresh session without these rules.
-  Read that as a guardrail and not as a boundary. A Claude Code `Bash` rule matches the
-  command text the model writes, not the program it ends up running, which its
-  documentation states plainly: such a rule "isn't a security boundary around the
-  program". chargehand's patterns therefore lead with a wildcard so that an absolute path
-  to the binary and a `sh -c '...'` wrapper are covered as well as the bare name, which
-  closes the forms a session reaches by accident. It does not close the forms a session
-  reaches on purpose: text assembled at runtime, a name split across quotes, a copy of the
-  binary under another name, or a script that calls the API directly all still get through,
-  and no list of patterns can change that. The boundary is the operating system, not the
-  rule list; see the first known limit below.
+  other sessions, for the lease pool's operator commands (`banksman admin`), and for the
+  flags that would start a fresh session without these rules. Read that as a guardrail
+  and not as a boundary. A Claude Code `Bash` rule matches the command text the model
+  writes, not the program it ends up running, which its documentation states plainly:
+  such a rule "isn't a security boundary around the program". chargehand's patterns
+  therefore lead with a wildcard so that an absolute path to the binary and a
+  `sh -c '...'` wrapper are covered as well as the bare name, which closes the forms a
+  session reaches by accident. It does not close the forms a session reaches on purpose:
+  text assembled at runtime, a name split across quotes, a copy of the binary under
+  another name, or a script that calls the API directly all still get through, and no
+  list of patterns can change that. The boundary is the operating system, not the rule
+  list; see the first known limit below.
 - **One writer of side effects.** Mutating commands record a request; only the periodic
   tick acts on it. Control actions cannot race a launch in progress.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
