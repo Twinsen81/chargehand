@@ -28,6 +28,7 @@ from chargehand.errors import ChargehandError, ConfigError, PoolError, TickBusy
 from chargehand.gitutil import Git
 from chargehand.ledger import Attempt, Ledger, open_ledger
 from chargehand.notify import Notifier
+from chargehand.pool import Lease
 from chargehand.pool import select as select_pool
 from chargehand.tick import Runner, tick_lock
 from chargehand.trackers import Status
@@ -115,6 +116,16 @@ def _branch_is_ours(attempt: Attempt) -> bool:
     # the issue title into the name, and an adopted session is recorded under the branch
     # it is on. The runner's own placeholder ends in the identifier.
     return attempt.branch.endswith(attempt.identifier)
+
+
+def _lease_dict(lease: Lease, *, verbose: bool) -> dict[str, object]:
+    payload = dataclasses.asdict(lease)
+    # The pool is shared with agents that chargehand did not start, so a holder's worktree
+    # path is any text they chose, such as a slug of an issue title. banksman validates the
+    # issue id.
+    if not verbose:
+        payload["owner"] = None
+    return payload
 
 
 def _attempt_dict(attempt: Attempt, *, verbose: bool) -> dict[str, object]:
@@ -205,7 +216,7 @@ def build_status(
 
     pool: dict[str, object] = {"enabled": runner.pool.enabled, "leases": [], "error": None}
     try:
-        pool["leases"] = [dataclasses.asdict(lease) for lease in runner.pool.status()]
+        pool["leases"] = [_lease_dict(lease, verbose=verbose) for lease in runner.pool.status()]
     except PoolError as exc:
         pool["error"] = str(exc)
 
@@ -311,7 +322,7 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append(f"  {'LEASE':<22} {'KIND':<16} {'STATE':<11} {'IF ABANDONED':>12}  HOLDER")
         for lease in pool["leases"]:
             expires = lease["expires_in_secs"]
-            holder = lease["issue"] or Path(lease["owner"]).name
+            holder = lease["issue"] or (Path(lease["owner"]).name if lease["owner"] else "-")
             lines.append(
                 f"  {sanitize.one_line(lease['resource'], limit=22):<22} "
                 f"{sanitize.one_line(lease['kind'], limit=16):<16} "

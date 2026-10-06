@@ -274,16 +274,35 @@ def test_status_json_carries_the_leases(capsys, pool_config, banksman_state):
         "resource": "emulator-5554",
         "kind": "emulator",
         "state": "ready",
-        "owner": "/tmp/worktrees/ABC-1",
+        "owner": None,
         "issue": "ABC-1",
         "expires_in_secs": 1200.0,
     }]
 
 
+def test_status_shows_a_lease_owner_only_with_verbose_titles(capsys, pool_config, banksman_state):
+    # Another agent on the machine chose this path, so it is free text.
+    banksman_state.set(resources=[leased("pixel-8", "/tmp/worktrees/fix-the-login-crash")])
+
+    main(["--config", str(pool_config), "status", "--json", "--no-queue"])
+    assert json.loads(capsys.readouterr().out)["pool"]["leases"][0]["owner"] is None
+    main(["--config", str(pool_config), "status", "--no-queue"])
+    out = capsys.readouterr().out
+    assert re.search(r"pixel-8\s+emulator\s+ready\s+20m\s+-$", out, re.MULTILINE)
+    assert "fix-the-login-crash" not in out
+
+    main(["--config", str(pool_config), "status", "--json", "--no-queue", "--verbose-titles"])
+    owner = json.loads(capsys.readouterr().out)["pool"]["leases"][0]["owner"]
+    assert owner == "/tmp/worktrees/fix-the-login-crash"
+    main(["--config", str(pool_config), "status", "--no-queue", "--verbose-titles"])
+    assert re.search(r"pixel-8\s+.*\s+fix-the-login-crash$", capsys.readouterr().out, re.MULTILINE)
+
+
 def test_status_shows_the_leases_in_its_table(capsys, pool_config, banksman_state):
     banksman_state.set(resources=[
         leased("emulator-5554", "/tmp/worktrees/ABC-1", issue="ABC-1"),
-        leased("pixel-8", "/tmp/worktrees/ABC-2", abandoned_in=None, state="draining"),
+        leased("pixel-8", "/tmp/worktrees/ABC-2", issue="ABC-2", abandoned_in=None,
+               state="draining"),
     ])
 
     main(["--config", str(pool_config), "status", "--no-queue"])
@@ -291,14 +310,13 @@ def test_status_shows_the_leases_in_its_table(capsys, pool_config, banksman_stat
     out = capsys.readouterr().out
     assert "IF ABANDONED" in out
     assert re.search(r"emulator-5554\s+emulator\s+ready\s+20m\s+ABC-1", out)
-    # Without an issue the holder is the worktree's directory name.
     assert re.search(r"pixel-8\s+emulator\s+draining\s+-\s+ABC-2", out)
 
 
 def test_status_strips_control_sequences_from_a_lease(capsys, pool_config, banksman_state):
     banksman_state.set(resources=[leased("emulator-5554", "/tmp/worktrees/\x1b[31mred")])
 
-    main(["--config", str(pool_config), "status", "--no-queue"])
+    main(["--config", str(pool_config), "status", "--no-queue", "--verbose-titles"])
 
     out = capsys.readouterr().out
     assert "emulator-5554" in out

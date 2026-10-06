@@ -48,9 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The connection to the lease pool, banksman, in one module that runs its command and
   reads its JSON. When `pool_bin` (`banksman` by default) resolves through the job's
   `PATH`, each tick reaps void leases first, and `status` lists the leases; otherwise the
-  runner keeps its no-op pool. `doctor` reports a missing pool as information, and a pool
-  whose output has an unknown `schema` number as an error. Launched sessions get one more
-  deny rule, for the pool's operator commands under `banksman admin`.
+  runner keeps its no-op pool. A holder's worktree path needs `--verbose-titles`, as other
+  agents that share the pool choose it. `doctor` reports a missing pool as information,
+  and a pool whose output has an unknown `schema` number as an error. Launched sessions
+  get one more deny rule, for the pool's operator commands under `banksman admin`.
 - Starter templates: machine and repository configuration, a notification hook, the
   deny rules passed to launched sessions, and a skill for driving the CLI from a
   Claude Code session.

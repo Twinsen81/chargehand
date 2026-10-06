@@ -308,8 +308,10 @@ chargehand tick                     # run a tick now
   `--verbose-titles`, output needs `logs`. That covers what a session can put into fields
   that look structured: a pull-request URL it reports is kept only when it is a plain URL,
   and a branch it renamed, which then carries a slug of the issue title, is shown only
-  with `--verbose-titles`. Flags cannot be abbreviated, so the rules that gate a flag see
-  its full name. Everything printed is stripped of terminal control sequences.
+  with `--verbose-titles`. The same holds for the worktree path of a lease's holder, which
+  any agent that shares the lease pool chooses. Flags cannot be abbreviated, so the rules
+  that gate a flag see its full name. Everything printed is stripped of terminal control
+  sequences.
 - **An AI assistant as the interface.** Driving the CLI from a Claude Code session is
   convenient, and it is the one real risk of this design: status output lands in a session
   that holds your permissions. So the shipped settings let exactly one read run without a

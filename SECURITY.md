@@ -69,7 +69,9 @@ public location.
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
   kept only when it is a plain URL, and a branch a session renamed after the tracker's
   convention, which carries a slug of the title, is shown only with `--verbose-titles`.
-  All output is stripped of terminal control sequences.
+  So is the worktree path of a lease's holder, because the lease pool is shared with
+  agents that chargehand did not start, and they choose that path. All output is
+  stripped of terminal control sequences.
 - **Driving the CLI from an AI assistant.** Status output then lands in a session that
   holds the operator's permissions. The shipped skill reads with `status --json`, which by
   default carries identifiers, states, timings and URLs only, and the shipped settings let
