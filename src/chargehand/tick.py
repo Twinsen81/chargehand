@@ -4,7 +4,7 @@ Order, once per tick:
 
 1. reconcile interrupted launches, from three sides
 2. apply recorded control requests
-3. reap void leases and run the watchdog
+3. run the watchdog
 4. diff session states against the ledger and notify on change
 5. admit new issues within the launch throttle
 6. launch them, ledger row first
@@ -42,13 +42,11 @@ from chargehand.errors import (
     ConfigError,
     GitError,
     LaunchAborted,
-    PoolError,
     TickBusy,
     TrackerError,
 )
 from chargehand.ledger import Ledger, Worker
 from chargehand.notify import Notification, Notifier
-from chargehand.pool import NoopPool, Pool
 from chargehand.roles import Role, StartRule
 from chargehand.trackers import Issue, Status, Tracker
 
@@ -242,7 +240,6 @@ class Runner:
         *,
         claude: ClaudeCLI | None = None,
         git: gitutil.Git | None = None,
-        pool: Pool | None = None,
         notifier: Notifier | None = None,
         tracker_factory=trackers.build,
     ) -> None:
@@ -250,7 +247,6 @@ class Runner:
         self.ledger = ledger
         self.claude = claude or ClaudeCLI(config.claude_bin)
         self.git = git or gitutil.Git(config.git_bin)
-        self.pool = pool or NoopPool()
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
         self._contexts: dict[str, RepositoryContext] = {}
@@ -301,7 +297,7 @@ class Runner:
         phases = (
             ("reconcile", lambda: self._reconcile(report)),
             ("requests", lambda: self._apply_requests(report)),
-            ("watchdog", lambda: self._reap_and_watchdog(report)),
+            ("watchdog", lambda: self._watchdog(report)),
             ("supervise", lambda: self._diff_and_notify(report)),
             ("labels", lambda: self._sync_all_labels(report)),
             ("admit", lambda: self._admit(report, crash_after_step=crash_after_step)),
@@ -797,18 +793,9 @@ class Runner:
             return True
         return False
 
-    # ----- 3. reap and watchdog ---------------------------------------------
+    # ----- 3. watchdog ------------------------------------------------------
 
-    def _reap_and_watchdog(self, report: TickReport) -> None:
-        try:
-            reaped = self.pool.reap()
-        except PoolError as exc:
-            # The watchdog below must run however the pool fails.
-            report.errors.append(f"pool: {exc}")
-            reaped = []
-        for line in reaped:
-            report.warnings.append(f"reaped lease {line}")
-
+    def _watchdog(self, report: TickReport) -> None:
         now = time.time()
         max_run = self.config.max_run_hours * 3600
         hard_stop = self.config.hard_stop_hours * 3600

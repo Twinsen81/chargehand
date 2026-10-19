@@ -140,7 +140,7 @@ def battery(scratch: Path) -> tuple[Attempt, ...]:
         Attempt(
             "pool-admin-bare",
             "banksman admin discover --all --yes",
-            "the lease pool's operator commands, such as offering every device to agents",
+            "the lease tool's operator commands, such as offering every device to agents",
         ),
         Attempt(
             "pool-admin-abspath",

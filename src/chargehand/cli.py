@@ -10,7 +10,6 @@ attacker-influenced, so they stay out of default output entirely.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import logging
 import os
@@ -25,12 +24,10 @@ from chargehand import __version__, install, paths, sanitize, trackers
 from chargehand import roles as roles_mod
 from chargehand.claude import ClaudeCLI
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
-from chargehand.errors import ChargehandError, ConfigError, PoolError, TickBusy
+from chargehand.errors import ChargehandError, ConfigError, TickBusy
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
-from chargehand.pool import Lease
-from chargehand.pool import select as select_pool
 from chargehand.tick import Runner, tick_lock
 from chargehand.trackers import Status
 
@@ -71,7 +68,6 @@ def _runner(config: MachineConfig, ledger: Ledger) -> Runner:
         ledger,
         claude=ClaudeCLI(config.claude_bin),
         git=Git(config.git_bin),
-        pool=select_pool(config.pool_bin),
         notifier=Notifier(config.notify),
     )
 
@@ -117,16 +113,6 @@ def _branch_is_ours(worker: Worker) -> bool:
     # the issue title into the name, and an adopted session is recorded under the branch
     # it is on. The runner's own placeholder ends in the item.
     return worker.branch.endswith(worker.item)
-
-
-def _lease_dict(lease: Lease, *, verbose: bool) -> dict[str, object]:
-    payload = dataclasses.asdict(lease)
-    # The pool is shared with agents that chargehand did not start, so a holder's worktree
-    # path is any text they chose, such as a slug of an issue title. banksman validates the
-    # issue id.
-    if not verbose:
-        payload["owner"] = None
-    return payload
 
 
 def _worker_dict(worker: Worker, *, verbose: bool) -> dict[str, object]:
@@ -236,12 +222,6 @@ def build_status(
         entry["roles"] = roles_payload
         repositories_payload.append(entry)
 
-    pool: dict[str, object] = {"enabled": runner.pool.enabled, "leases": [], "error": None}
-    try:
-        pool["leases"] = [_lease_dict(lease, verbose=verbose) for lease in runner.pool.status()]
-    except PoolError as exc:
-        pool["error"] = str(exc)
-
     root = config.worktree_root
     try:
         usage = shutil.disk_usage(root if root.exists() else root.parent)
@@ -281,7 +261,6 @@ def build_status(
         ],
         "sessions": sessions_payload,
         "session_error": session_error,
-        "pool": pool,
     }
 
 
@@ -300,9 +279,6 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append(f"  paused repositories: {', '.join(runner['paused_repositories'])}")
     if status.get("session_error"):
         lines.append(f"  ! claude: {sanitize.one_line(str(status['session_error']), limit=160)}")
-    pool = status["pool"]  # type: ignore[index]
-    if pool["error"]:
-        lines.append(f"  ! pool: {sanitize.one_line(str(pool['error']), limit=160)}")
 
     lines.append("")
     lines.append("repositories")
@@ -345,20 +321,6 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
             )
             if verbose and worker.get("last_error"):
                 lines.append(f"      ! {worker['last_error']}")
-
-    if pool["leases"]:
-        lines.append("")
-        lines.append(f"  {'LEASE':<22} {'KIND':<16} {'STATE':<11} {'IF ABANDONED':>12}  HOLDER")
-        for lease in pool["leases"]:
-            expires = lease["expires_in_secs"]
-            holder = lease["issue"] or (Path(lease["owner"]).name if lease["owner"] else "-")
-            lines.append(
-                f"  {sanitize.one_line(lease['resource'], limit=22):<22} "
-                f"{sanitize.one_line(lease['kind'], limit=16):<16} "
-                f"{sanitize.one_line(lease['state'], limit=11):<11} "
-                f"{'-' if expires is None else _span(expires):>12}  "
-                f"{sanitize.one_line(holder, limit=60)}"
-            )
 
     if runner["pending_requests"]:
         lines.append("")

@@ -20,13 +20,12 @@ from chargehand import __version__, paths
 from chargehand.claude import ClaudeCLI
 from chargehand import roles as roles_mod
 from chargehand.config import MachineConfig, load_repo_config
-from chargehand.errors import ChargehandError, ConfigError, PoolError
+from chargehand.errors import ChargehandError, ConfigError
 from chargehand.gitutil import Git
-from chargehand.pool import BanksmanPool
 from chargehand.trackers import build as build_tracker
 
 OK = "ok"
-# Not a fault: the lease pool is optional, and a machine without it is set up correctly.
+# Not a fault: something worth knowing that needs no change for the machine to work.
 INFO = "info"
 WARN = "warn"
 FAIL = "fail"
@@ -157,22 +156,7 @@ def job_checks(config: MachineConfig, job: Mapping[str, object]) -> list[Check]:
         )
     else:
         checks.append(Check("launchd PATH", OK, ", ".join(found)))
-    checks.append(pool_check(config, job_path or LAUNCHD_PATH, where="the job's PATH"))
     return checks
-
-
-def pool_check(config: MachineConfig, path: str | None, *, where: str) -> Check:
-    """The tick uses the pool when its command resolves on the tick's PATH, so check the same."""
-    found = shutil.which(os.path.expanduser(config.pool_bin), path=path)
-    if not found:
-        return Check(
-            "pool", INFO, f"'{config.pool_bin}' not found on {where}; runs take no leases"
-        )
-    try:
-        version = BanksmanPool(found).version()
-    except PoolError as exc:
-        return Check("pool", FAIL, str(exc))
-    return Check("pool", OK, f"banksman {version} at {found}")
 
 
 def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
@@ -249,6 +233,8 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
         )
         return checks
     checks.append(Check("config", OK, str(config.source or "(in memory)")))
+    for key in config.ignored_keys:
+        checks.append(Check("config", INFO, f"{key} is ignored and can be removed"))
 
     claude = ClaudeCLI(config.claude_bin)
     if not claude.is_available():
@@ -397,10 +383,6 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
         checks.append(
             Check("launchd", WARN, "not macOS: schedule `chargehand tick` with your own timer")
         )
-    if job is None:
-        # No job definition to read a PATH from, so the best guess is the shell's own.
-        checks.append(pool_check(config, None, where="PATH"))
-
     return checks
 
 

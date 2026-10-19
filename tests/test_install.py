@@ -147,6 +147,18 @@ def test_doctor_warns_when_the_launch_deny_rules_cannot_be_passed(capsys, config
     assert checks["launch deny rules"]["status"] == install.OK
 
 
+def test_doctor_names_a_setting_that_is_ignored(capsys, tmp_path, repo, harness):
+    from conftest import write_machine_config
+
+    config_file = write_machine_config(
+        tmp_path / "config.toml", repo, harness.worktree_root, pool_bin="banksman"
+    )
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    notes = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "config"]
+    assert any(c["status"] == install.INFO and "pool_bin is ignored" in c["detail"] for c in notes)
+
+
 def test_worst_picks_the_most_serious_status():
     assert install.worst([install.Check("a", install.OK)]) == install.OK
     assert install.worst([install.Check("a", install.OK), install.Check("b", install.WARN)]) == install.WARN
@@ -266,7 +278,7 @@ def test_doctor_checks_the_path_the_job_has_rather_than_its_own(tmp_path, harnes
     }
 
     checks = {check.name: check for check in install.job_checks(config, job)}
-    assert set(checks) == {"launchd PATH", "pool"}
+    assert set(checks) == {"launchd PATH"}
     assert checks["launchd PATH"].status == install.OK
     assert str(claude) in checks["launchd PATH"].detail
     assert str(git) in checks["launchd PATH"].detail
