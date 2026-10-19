@@ -564,7 +564,7 @@ class Sandbox:
             "# Written by the smoke probe. Throwaway.\n"
             "poll_interval_secs = 60\n"
             f"max_concurrent = {self.max_concurrent}\n"
-            "max_open_attempts = 4\n"
+            "max_open_workers = 4\n"
             "max_run_hours = 6\n"
             "hard_stop_hours = 10\n"
             "min_free_disk_gb = 1\n"
@@ -575,7 +575,7 @@ class Sandbox:
             f"queued = {json.dumps(self.labels['queued'])}\n"
             f"running = {json.dumps(self.labels['running'])}\n"
             f"blocked = {json.dumps(self.labels['blocked'])}\n"
-            "\n[[route]]\n"
+            "\n[[repository]]\n"
             "name = \"smoke\"\n"
             f"repo = {json.dumps(str(self.repo))}\n"
             f"tracker = {{ {entries} }}\n"
@@ -631,20 +631,20 @@ class Sandbox:
 
     # ----- inspection -------------------------------------------------------
 
-    def attempts(self) -> list[dict[str, Any]]:
+    def workers(self) -> list[dict[str, Any]]:
         """Read the ledger directly: the probe asserts on columns `status` does not show."""
         if not self.ledger_file.exists():
             return []
         connection = sqlite3.connect(f"file:{self.ledger_file}?mode=ro", uri=True, timeout=10)
         connection.row_factory = sqlite3.Row
         try:
-            rows = connection.execute("SELECT * FROM attempts ORDER BY id").fetchall()
+            rows = connection.execute("SELECT * FROM workers ORDER BY id").fetchall()
         finally:
             connection.close()
         return [dict(row) for row in rows]
 
-    def attempt(self, identifier: str) -> dict[str, Any] | None:
-        rows = [row for row in self.attempts() if row["identifier"] == identifier]
+    def worker(self, item: str) -> dict[str, Any] | None:
+        rows = [row for row in self.workers() if row["item"] == item]
         return rows[-1] if rows else None
 
     def notifications(self) -> list[dict[str, str]]:

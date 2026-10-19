@@ -1,9 +1,11 @@
-"""The two configuration layers, and the strict template substitution they share.
+"""The configuration layers, and the strict template substitution they share.
 
 Machine layer (``~/.config/chargehand/config.toml``) holds everything specific to
-one machine: poll interval, limits, worktree root, notification command, routes.
+one machine: poll interval, limits, worktree root, notification command, the
+repositories chargehand may work in and the roles each one enables.
 Repository layer (``.chargehand.toml`` at a repo root) holds what the repository
-owns: base branch, setup script, prompt, permission mode, status file.
+owns: base branch, setup script, branch prefix. Roles (:mod:`chargehand.roles`) hold
+how a worker thinks and when it runs.
 
 Splitting them is what lets a repository be shared without sharing machine details.
 """
@@ -28,7 +30,10 @@ PERMISSION_MODES = ("auto", "manual", "acceptEdits", "dontAsk", "plan", "bypassP
 # Deliberately no {title} and no {body}: the launch prompt is a trusted user message,
 # so attacker-controlled issue text must reach the agent as a tool result it fetches
 # itself. Adding a text variable here would undo the main prompt-injection defense.
-TEMPLATE_VARS = ("issue", "url", "worktree", "branch", "repo")
+#
+# {issue} and {url} are the names from before work items existed; they render the same
+# values as {item} and {item_url} and stay accepted.
+TEMPLATE_VARS = ("item", "item_url", "worktree", "branch", "repo", "issue", "url")
 
 DEFAULT_LABELS = {
     "queued": "chargehand",
@@ -66,22 +71,26 @@ DEFAULT_DENY_RULES = (
     "Bash(*bypassPermissions*)",
 )
 
-_DENY_RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_*]*(\(.*\))?$")
+_PERMISSION_RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_*]*(\(.*\))?$")
 
 
-def validate_deny_rule(rule: str) -> None:
+def validate_permission_rule(rule: str, *, where: str) -> None:
     """Reject a rule Claude Code would not accept, at read time.
 
     A settings payload that fails validation is dropped silently in a non-interactive
-    run, and every session chargehand starts is non-interactive. One typo in this list
-    would therefore launch sessions with no deny rules at all and say nothing, so the
+    run, and every session chargehand starts is non-interactive. One typo in a rule
+    list would therefore launch sessions with none of its rules and say nothing, so the
     shape is checked here where it can still be reported.
     """
-    if not rule or rule != rule.strip() or not _DENY_RULE.fullmatch(rule):
+    if not rule or rule != rule.strip() or not _PERMISSION_RULE.fullmatch(rule):
         raise ConfigError(
-            f"config.deny_rules: {rule!r} is not a permission rule; expected a tool name "
+            f"{where}: {rule!r} is not a permission rule; expected a tool name "
             f"such as 'Bash' or a scoped rule such as 'Bash(*claude stop*)'"
         )
+
+
+def validate_deny_rule(rule: str) -> None:
+    validate_permission_rule(rule, where="config.deny_rules")
 
 
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -210,33 +219,60 @@ class TrackerConfig:
         return cls(type=kind, options=options)
 
 
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+DEFAULT_ROLES = ("implementer",)
+
+
 @dataclass(frozen=True)
-class Route:
+class Repository:
+    """A repository chargehand may work in, and the roles it enables there.
+
+    Written as ``[[repository]]`` in the machine configuration; ``[[route]]`` with a
+    ``repo`` key is the older spelling and stays accepted.
+    """
+
     name: str
-    repo: Path
+    path: Path
     tracker: TrackerConfig
     labels: Labels
     max_concurrent: int | None = None
+    roles: tuple[str, ...] = DEFAULT_ROLES
 
     @classmethod
-    def parse(cls, table: Mapping[str, object], index: int, defaults: Labels) -> "Route":
-        where = f"route[{index}]"
-        _unknown_keys(table, ("name", "repo", "tracker", "labels", "max_concurrent"), where)
-        repo = _expand(_as_str(_require(table, "repo", where), f"{where}.repo"))
-        name = _as_str(table.get("name", repo.name), f"{where}.name")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+    def parse(cls, table: Mapping[str, object], where: str, defaults: Labels) -> "Repository":
+        _unknown_keys(
+            table, ("name", "path", "repo", "tracker", "labels", "max_concurrent", "roles"), where
+        )
+        if "path" in table and "repo" in table:
+            raise ConfigError(f"{where}: give either path or repo, not both")
+        raw_path = table["path"] if "path" in table else _require(table, "repo", where)
+        path = _expand(_as_str(raw_path, f"{where}.path"))
+        name = _as_str(table.get("name", path.name), f"{where}.name")
+        if not _SAFE_NAME.fullmatch(name):
             raise ConfigError(f"{where}.name: use letters, digits, dot, dash, underscore")
         max_concurrent = (
             _as_int(table["max_concurrent"], f"{where}.max_concurrent", minimum=0)
             if "max_concurrent" in table
             else None
         )
+        raw_roles = table.get("roles", list(DEFAULT_ROLES))
+        if not isinstance(raw_roles, list) or not raw_roles:
+            raise ConfigError(f"{where}.roles: expected a non-empty list of role names")
+        roles = []
+        for role in raw_roles:
+            if not isinstance(role, str) or not _SAFE_NAME.fullmatch(role):
+                raise ConfigError(f"{where}.roles: use letters, digits, dot, dash, underscore")
+            if role in roles:
+                raise ConfigError(f"{where}.roles: '{role}' is listed twice")
+            roles.append(role)
         return cls(
             name=name,
-            repo=repo,
+            path=path,
             tracker=TrackerConfig.parse(_require(table, "tracker", where), f"{where}.tracker"),
             labels=Labels.parse(table.get("labels"), f"{where}.labels", defaults),
             max_concurrent=max_concurrent,
+            roles=tuple(roles),
         )
 
 
@@ -260,11 +296,11 @@ class NotifyConfig:
 
 @dataclass(frozen=True)
 class MachineConfig:
-    routes: tuple[Route, ...]
+    repositories: tuple[Repository, ...]
     worktree_root: Path
     poll_interval_secs: int = 180
     max_concurrent: int = 2
-    max_open_attempts: int = 4
+    max_open_workers: int = 4
     max_run_hours: float = 6.0
     hard_stop_hours: float = 10.0
     min_free_disk_gb: float = 30.0
@@ -282,6 +318,7 @@ class MachineConfig:
     _TOP_LEVEL = (
         "poll_interval_secs",
         "max_concurrent",
+        "max_open_workers",
         "max_open_attempts",
         "max_run_hours",
         "hard_stop_hours",
@@ -296,35 +333,41 @@ class MachineConfig:
         "pool_bin",
         "notify",
         "labels",
+        "repository",
         "route",
     )
 
-    def route_by_name(self, name: str) -> Route | None:
-        for route in self.routes:
-            if route.name == name:
-                return route
+    def repository_by_name(self, name: str) -> Repository | None:
+        for repository in self.repositories:
+            if repository.name == name:
+                return repository
         return None
 
-    def limit_for(self, route: Route) -> int:
-        return self.max_concurrent if route.max_concurrent is None else route.max_concurrent
+    def limit_for(self, repository: Repository) -> int:
+        return self.max_concurrent if repository.max_concurrent is None else repository.max_concurrent
 
     @classmethod
     def parse(cls, data: Mapping[str, object], source: Path | None = None) -> "MachineConfig":
         _unknown_keys(data, cls._TOP_LEVEL, "config")
         labels = Labels.parse(data.get("labels"), "labels")
 
-        raw_routes = data.get("route", [])
-        if not isinstance(raw_routes, list) or not raw_routes:
-            raise ConfigError("config: at least one [[route]] is required")
-        routes = []
-        for index, entry in enumerate(raw_routes):
+        entries: list[tuple[str, object]] = []
+        for key in ("repository", "route"):
+            raw = data.get(key, [])
+            if not isinstance(raw, list):
+                raise ConfigError(f"config: [[{key}]] entries must be tables")
+            entries.extend((f"{key}[{index}]", entry) for index, entry in enumerate(raw))
+        if not entries:
+            raise ConfigError("config: at least one [[repository]] is required")
+        repositories = []
+        for where, entry in entries:
             if not isinstance(entry, Mapping):
-                raise ConfigError(f"route[{index}]: expected a table")
-            routes.append(Route.parse(entry, index, labels))
-        names = [r.name for r in routes]
+                raise ConfigError(f"{where}: expected a table")
+            repositories.append(Repository.parse(entry, where, labels))
+        names = [r.name for r in repositories]
         duplicate = next((n for n in names if names.count(n) > 1), None)
         if duplicate:
-            raise ConfigError(f"config: duplicate route name '{duplicate}'")
+            raise ConfigError(f"config: duplicate repository name '{duplicate}'")
 
         worktree_root = _expand(
             _as_str(data.get("worktree_root", "~/chargehand-worktrees"), "config.worktree_root")
@@ -337,10 +380,13 @@ class MachineConfig:
             validate_deny_rule(rule)
 
         max_concurrent = _as_int(data.get("max_concurrent", 2), "config.max_concurrent", minimum=0)
-        max_open = _as_int(data.get("max_open_attempts", 4), "config.max_open_attempts", minimum=0)
+        if "max_open_workers" in data and "max_open_attempts" in data:
+            raise ConfigError("config: give either max_open_workers or max_open_attempts, not both")
+        raw_open = data.get("max_open_workers", data.get("max_open_attempts", 4))
+        max_open = _as_int(raw_open, "config.max_open_workers", minimum=0)
         if max_open < max_concurrent:
             raise ConfigError(
-                "config: max_open_attempts must be >= max_concurrent, otherwise blocked runs "
+                "config: max_open_workers must be >= max_concurrent, otherwise blocked workers "
                 "would starve the launch throttle"
             )
         max_run = _as_number(data.get("max_run_hours", 6.0), "config.max_run_hours", minimum=0)
@@ -349,13 +395,13 @@ class MachineConfig:
             raise ConfigError("config: hard_stop_hours must be greater than max_run_hours")
 
         return cls(
-            routes=tuple(routes),
+            repositories=tuple(repositories),
             worktree_root=worktree_root,
             poll_interval_secs=_as_int(
                 data.get("poll_interval_secs", 180), "config.poll_interval_secs", minimum=10
             ),
             max_concurrent=max_concurrent,
-            max_open_attempts=max_open,
+            max_open_workers=max_open,
             max_run_hours=max_run,
             hard_stop_hours=hard_stop,
             min_free_disk_gb=_as_number(
@@ -378,8 +424,15 @@ class MachineConfig:
 
 @dataclass(frozen=True)
 class RepoConfig:
+    """What the repository owns: where runs start from and how a worktree is prepared.
+
+    ``prompt``, ``permission_mode`` and ``status_file`` are the keys from before roles
+    existed. When present they describe the ``implementer`` role for a repository that
+    has no role file yet; see :func:`chargehand.roles.legacy_role`.
+    """
+
     base: str
-    prompt: str
+    prompt: str | None = None
     setup: str | None = None
     permission_mode: str = "auto"
     status_file: str | None = None
@@ -407,14 +460,15 @@ class RepoConfig:
                 f"{where}.permission_mode: unknown mode '{mode}'; "
                 f"expected one of {', '.join(PERMISSION_MODES)}"
             )
-        prompt = _as_str(_require(data, "prompt", where), f"{where}.prompt")
-        for forbidden in ("{title}", "{body}", "{description}"):
-            if forbidden in prompt:
-                raise ConfigError(
-                    f"{where}.prompt: {forbidden} is not available by design. Issue text is "
-                    "untrusted and must reach the agent as a tool result it fetches itself."
-                )
-        validate_template(prompt, where=f"{where}.prompt")
+        prompt = _as_str(data["prompt"], f"{where}.prompt") if data.get("prompt") is not None else None
+        if prompt is not None:
+            for forbidden in ("{title}", "{body}", "{description}"):
+                if forbidden in prompt:
+                    raise ConfigError(
+                        f"{where}.prompt: {forbidden} is not available by design. Issue text is "
+                        "untrusted and must reach the agent as a tool result it fetches itself."
+                    )
+            validate_template(prompt, where=f"{where}.prompt")
         branch_prefix = _as_str(data.get("branch_prefix", "chargehand/"), f"{where}.branch_prefix")
         if branch_prefix.startswith("/") or ".." in branch_prefix:
             raise ConfigError(f"{where}.branch_prefix: must not start with '/' or contain '..'")

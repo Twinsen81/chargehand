@@ -36,7 +36,7 @@ def test_tick_launches_a_queued_issue(capsys, config_file, harness):
     assert run(["tick"], config_file) == EXIT_OK
 
     assert "launched: ABC-1" in capsys.readouterr().out
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
 def test_status_json_carries_no_issue_titles(capsys, config_file, harness):
@@ -49,9 +49,9 @@ def test_status_json_carries_no_issue_titles(capsys, config_file, harness):
     payload = capsys.readouterr().out
     assert "secret internal title" not in payload
     status = json.loads(payload)
-    assert status["attempts"][0]["issue"] == "ABC-1"
+    assert status["workers"][0]["item"] == "ABC-1"
     assert status["runner"]["working"] == 1
-    assert status["routes"][0]["queued"] == 0
+    assert status["repositories"][0]["queued"] == 0
 
 
 def test_verbose_titles_are_opt_in(capsys, config_file, harness):
@@ -109,13 +109,13 @@ def test_cancel_goes_through_a_tick(capsys, config_file, harness):
 
     assert run(["cancel", "ABC-1"], config_file) == EXIT_OK
 
-    assert harness.attempt("ABC-1").state == ledger_mod.CANCELLED
+    assert harness.worker("ABC-1").state == ledger_mod.CANCELLED
     assert "worktree kept" in capsys.readouterr().out
 
 
 def test_a_refused_request_reports_a_non_zero_exit(capsys, config_file, harness):
     assert run(["cancel", "NOPE-1"], config_file) == EXIT_REFUSED
-    assert "no attempt recorded" in capsys.readouterr().err
+    assert "no worker recorded" in capsys.readouterr().err
 
 
 def test_discard_requires_an_explicit_yes(capsys, config_file, harness):
@@ -126,7 +126,7 @@ def test_discard_requires_an_explicit_yes(capsys, config_file, harness):
     assert run(["discard", "ABC-1"], config_file) == EXIT_REFUSED
 
     assert "Re-run with --yes" in capsys.readouterr().err
-    assert (harness.worktree_root / "ABC-1").exists()
+    assert (harness.worktree("ABC-1")).exists()
 
 
 def test_discard_with_yes_removes_the_worktree(capsys, config_file, harness):
@@ -135,7 +135,7 @@ def test_discard_with_yes_removes_the_worktree(capsys, config_file, harness):
 
     assert run(["discard", "ABC-1", "--yes"], config_file) == EXIT_OK
 
-    assert not (harness.worktree_root / "ABC-1").exists()
+    assert not (harness.worktree("ABC-1")).exists()
 
 
 def test_no_wait_only_records_the_request(capsys, config_file, harness):
@@ -146,7 +146,7 @@ def test_no_wait_only_records_the_request(capsys, config_file, harness):
     assert run(["cancel", "ABC-1", "--no-wait"], config_file) == EXIT_OK
 
     assert "recorded" in capsys.readouterr().out
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
     assert [r["kind"] for r in harness.ledger.pending_requests()] == ["cancel"]
 
 
@@ -156,7 +156,7 @@ def test_pause_stops_the_next_tick_from_launching(capsys, config_file, harness):
 
     run(["tick"], config_file)
 
-    assert harness.attempt("ABC-1") is None
+    assert harness.worker("ABC-1") is None
 
 
 def test_the_fault_injection_flag_is_reachable_from_the_cli(capsys, config_file, harness):
@@ -165,8 +165,8 @@ def test_the_fault_injection_flag_is_reachable_from_the_cli(capsys, config_file,
     assert run(["tick", "--crash-after-step", "2"], config_file) != EXIT_OK
 
     assert "launch aborted after step 2" in capsys.readouterr().err
-    assert harness.attempt("ABC-1").step == 2
-    assert harness.attempt("ABC-1").state == ledger_mod.LAUNCHING
+    assert harness.worker("ABC-1").step == 2
+    assert harness.worker("ABC-1").state == ledger_mod.LAUNCHING
 
 
 def test_a_second_tick_cannot_run_while_one_holds_the_lock(capsys, config_file, harness):
@@ -203,7 +203,7 @@ def test_a_request_is_reported_without_stray_spaces(capsys, config_file, harness
     assert run(["pause", "--no-wait"], config_file) == EXIT_OK
 
     assert capsys.readouterr().out.splitlines() == [
-        "pause: all routes paused",
+        "pause: all repositories paused",
         "recorded: pause",
     ]
 
@@ -244,8 +244,8 @@ def test_status_json_does_not_carry_session_waiting_text(capsys, config_file, ha
     payload = capsys.readouterr().out
     assert "prod-acme" not in payload
     status = json.loads(payload)
-    assert status["attempts"][0]["waiting"] is True
-    assert "waiting_for" not in status["attempts"][0]
+    assert status["workers"][0]["waiting"] is True
+    assert "waiting_for" not in status["workers"][0]
 
 
 def test_status_json_drops_a_session_pr_url_that_is_not_a_url(capsys, config_file, harness):
@@ -261,21 +261,21 @@ def test_status_json_drops_a_session_pr_url_that_is_not_a_url(capsys, config_fil
 
     payload = capsys.readouterr().out
     assert "chargehand discard" not in payload
-    assert json.loads(payload)["attempts"][0]["pr_url"] is None
+    assert json.loads(payload)["workers"][0]["pr_url"] is None
 
 
 def test_status_json_hides_a_branch_the_runner_did_not_name(capsys, config_file, harness):
     """A branch renamed after the tracker's convention carries a slug of the issue title."""
     harness.board.add("ABC-1")
     run(["tick"], config_file)
-    harness.ledger.update(harness.attempt("ABC-1"), branch="abc-1-secret-title-words")
+    harness.ledger.update(harness.worker("ABC-1"), branch="abc-1-secret-title-words")
     capsys.readouterr()
 
     run(["status", "--json", "--no-queue"], config_file)
 
     payload = capsys.readouterr().out
     assert "secret-title" not in payload
-    assert json.loads(payload)["attempts"][0]["branch"] is None
+    assert json.loads(payload)["workers"][0]["branch"] is None
 
     run(["status", "--json", "--no-queue", "--verbose-titles"], config_file)
 
@@ -289,7 +289,7 @@ def test_status_json_shows_the_branch_the_runner_named(capsys, config_file, harn
 
     run(["status", "--json", "--no-queue"], config_file)
 
-    assert json.loads(capsys.readouterr().out)["attempts"][0]["branch"] == "chargehand/ABC-1"
+    assert json.loads(capsys.readouterr().out)["workers"][0]["branch"] == "chargehand/implementer/ABC-1"
 
 
 def test_verbose_titles_reveal_the_waiting_text(capsys, config_file, harness):

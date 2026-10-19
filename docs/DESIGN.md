@@ -5,7 +5,9 @@ Claude Code and a fake tracker, and the whole sequence has been run against a re
 and real Claude Code on a scratch repository, including a crash after every launch step and a
 reboot that killed a session mid-turn. The connection to the lease pool is tested only
 against a fake pool, and the `github` and `command` adapters are not written. It has not
-yet been left running unattended for a working day.
+yet been left running unattended for a working day. The unit of work is a *worker* of a
+*role* (section 4); event sources other than the tracker queue, a resident daemon and a
+board are not built yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -39,11 +41,11 @@ launchd timer ──► chargehand tick
    2. apply recorded control requests
    3. reap void leases, watchdog long runs
    4. diff session states, notify on change      ◄── claude agents --json --all
-   5. admit new issues (routes, ledger, capacity)
+   5. admit new issues (repositories, roles' start rules, ledger, capacity)
    6. ledger → label → worktree → setup → claude --bg "<prompt>"
         │
         ▼
-Claude Code supervisor (background sessions, one per issue)
+Claude Code supervisor (background sessions, one per worker)
         │
         ▼
 whatever the prompt produces — typically a draft pull request
@@ -55,7 +57,8 @@ Components:
 
 | Component | Purpose |
 |---|---|
-| Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised sessions |
+| Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised workers |
+| Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
 | Control CLI | See and steer the runner; no server |
 | Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
 | Lease pool (banksman, an external tool; a no-op pool when it is not installed) | Optional leases for devices, emulators, and build slots |
@@ -63,8 +66,10 @@ Components:
 ## 3. Trigger and routing
 
 An issue is picked up when all of these hold: it carries the queue label, it is assigned to
-the owner of the credentials the runner uses, it matches the route's optional state filter,
-and the local ledger has no non-terminal attempt for it.
+the owner of the credentials the runner uses, it matches the repository's optional state
+filter, a role enabled in the repository has a start rule for the queue label, and the
+ledger has no live worker for it in any role. The label is one per issue and every worker the
+queue starts drives it, so re-adding the label while a worker runs starts nothing.
 
 - **Per-assignee filtering removes cross-machine races by construction.** Two developers'
   runners never see the same issue. Assigning the issue *is* the routing decision, and the
@@ -84,8 +89,9 @@ Label lifecycle (names are configurable):
 | `chargehand-blocked` | Waiting for you, cancelled, failed, or needs a look | runner |
 | *(none)* | Finished | runner |
 
-Re-arm an issue by adding the queue label again; a new attempt starts only when the previous
-one is terminal and its worktree is gone.
+Re-arm an issue by adding the queue label again; a new worker starts only when the previous
+one is terminal and its worktree is gone. The label is one per issue, so of several roles
+that start on it, the first one listed in the repository's `roles` takes the issue.
 
 ### Tracker adapters
 
@@ -111,39 +117,81 @@ Machine layer — `~/.config/chargehand/config.toml`:
 
 ```toml
 poll_interval_secs = 180
-max_concurrent = 2                  # launch throttle: sessions currently working
-max_open_attempts = 4               # working + blocked; bounds the resume burst
+max_concurrent = 2                  # launch throttle: workers currently working
+max_open_workers = 4                # working + blocked; bounds the resume burst
 max_run_hours = 6                   # watchdog: notify
 hard_stop_hours = 10                # watchdog: stop the session
 worktree_root = "~/chargehand-worktrees"
 
 [notify]
-command = "~/.config/chargehand/notify.sh"   # receives ISSUE, STATE, URL as env vars
+command = "~/.config/chargehand/notify.sh"   # receives ITEM, ROLE, STATE, URL, REPOSITORY as env vars
 
-[[route]]
-repo = "~/code/my-app"
+[[repository]]
+name = "my-app"
+path = "~/code/my-app"
 tracker = { type = "github", repo = "me/my-app" }
+roles = ["implementer"]             # role files enabled in this repository
 
-[[route]]
-repo = "~/code/other"
+[[repository]]
+path = "~/code/other"
 tracker = { type = "linear", team = "ABC", state = "Todo" }
 ```
+
+`[[route]]` with `repo` and `max_open_attempts` are the older spellings and stay accepted.
 
 Repository layer — `.chargehand.toml`, checked in:
 
 ```toml
 base = "origin/main"
 setup = "scripts/setup_worktree.sh {worktree}"
-prompt = "/work-issue {issue}"      # or just "{issue}"
-permission_mode = "auto"            # auto | manual | acceptEdits | dontAsk | plan | bypassPermissions
-status_file = "/tmp/chargehand/{issue}/status.json"   # optional, see "Supervision"
-branch_prefix = "chargehand/"       # the placeholder branch each run starts on
+branch_prefix = "chargehand/"       # the placeholder branch each worker starts on
 ```
 
-Template variables are `{issue}`, `{url}`, `{worktree}`, `{branch}`, and `{repo}`. There is
-deliberately no `{title}` or `{body}`: the prompt is a trusted user message, so issue text must
-reach the agent as a tool result it fetches itself, never inlined. A configured template that
-names any other variable is a configuration error, not a literal.
+Role files — `.chargehand/roles/<name>.toml` in the repository, or
+`~/.config/chargehand/roles/<name>.toml` for every repository that has none of its own:
+
+```toml
+# .chargehand/roles/implementer.toml
+runtime = "claude"                  # the coding agent; claude is the only one so far
+agent = "implementer"               # optional: .claude/agents/implementer.md, passed as --agent
+model = "opus"                      # optional, passed as --model
+effort = "high"                     # optional, passed as --effort
+prompt = "/work-issue {item}"       # or just "{item}"
+permission_mode = "auto"            # auto | manual | acceptEdits | dontAsk | plan | bypassPermissions
+allow = ["Bash(gh pr *)"]           # optional allow rules for this role's sessions
+setup = "scripts/prepare.sh {worktree}"   # optional, runs after the repository's setup
+status_file = "/tmp/chargehand/{item}/status.json"   # optional, see "Supervision"
+
+[[start]]                           # create a worker when an issue gets the queue label
+on = "labeled"                      # any tracker; "linear.labeled" names one
+unless_subscribed = "role"          # for later sources; the queue skips an item any worker has
+
+[policy]
+max_workers = 2                     # open workers of this role, across repositories
+```
+
+A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` and
+`status_file`, and has no role file, gets an `implementer` role built from them, so a
+configuration from before roles keeps working.
+
+Template variables are `{item}`, `{item_url}`, `{worktree}`, `{branch}`, and `{repo}`;
+`{issue}` and `{url}` are the older names for the first two. There is deliberately no
+`{title}` or `{body}`: the prompt is a trusted user message, so issue text must reach the
+agent as a tool result it fetches itself, never inlined. A configured template that names any
+other variable is a configuration error, not a literal.
+
+### Roles and workers
+
+A role is a template; a worker is one member of it, with its own worktree and session, and
+a role may have any number of workers. A worker usually has one work item, the issue it was
+created for. Its worktree is `<worktree_root>/<role>/<item>`, its placeholder branch
+`<branch_prefix><role>/<item>`, and its session is named `<role>/<item>`, which is also how
+the CLI and the logs name it.
+
+A start rule creates a worker on its own. A start event arrives again on every poll, so the
+ledger allows at most one live worker per role and item among the workers that start rules
+created, enforced by the database. The ledger already records each worker's origin, so a
+later way to create workers by hand is not held to that limit.
 
 A command template is split into arguments *before* its variables are substituted, and nothing
 is run through a shell, so a value containing spaces or shell metacharacters stays one argument.
@@ -152,7 +200,9 @@ is run through a shell, so a value containing spaces or shell metacharacters sta
 
 ### Admission
 
-A new launch needs both `working < max_concurrent` and `working + blocked < max_open_attempts`.
+A new launch needs `working < max_concurrent`, `working + blocked < max_open_workers`, the
+repository's own `max_concurrent` when it has one, and the role's `max_workers` when it has
+one.
 
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
@@ -165,15 +215,17 @@ builds or emulators should run. A session that is reading code or waiting for a 
 Write-ahead: the ledger row is written before any external side effect, every step is
 idempotent, and the row's `step` advances after each one.
 
-1. **Ledger first.** Insert the attempt: `state = launching`, `step = 0`.
+1. **Ledger first.** Insert the worker: `state = launching`, `step = 0`.
 2. Swap the labels, then re-read the issue to verify. A write that reports failure is not
    assumed to have failed; the row stays `launching` and reconciliation settles it.
 3. Fetch, then create the worktree on a placeholder branch (skip if it already exists).
    The session may rename the branch later. Removing the worktree deletes the branch
    under its new name too, when git's reflog records the rename; a branch the session
    switched to in any other way is kept, and the result says so.
-4. Run the repository's setup script in the worktree. Failure marks the attempt failed.
-5. Start the background session, named after the issue, in the configured permission mode.
+4. Run the repository's setup script in the worktree, then the role's. Failure marks the
+   worker failed.
+5. Start the background session, named `<role>/<item>`, with the role's agent, model,
+   effort, permission mode and allow rules.
    Starting inside a linked worktree means Claude Code does not create one of its own.
 6. Find the new session in the listing by name or working directory and record its ids.
    `state = running`. Looking it up rather than scraping the launch output is what makes
@@ -186,20 +238,23 @@ launchd runs one tick at a time, so a row still `launching` when a tick starts i
 interrupted launch, not a concurrent one.
 
 - **Ledger side:** for a row stuck in `launching`, look for a session whose working
-  directory is the row's worktree or whose name is the issue identifier. Found → adopt it.
+  directory is the row's worktree or whose name is the worker's name (or the issue
+identifier alone, for a session from before roles). Found → adopt it.
   Not found → resume from the recorded step. After three attempts → fail loudly and mark the
   issue blocked. Never silently re-queue; that would loop.
 - **Tracker side:** an issue assigned to you that carries the "running" label but has no
   live ledger row is marked blocked and reported. This catches a lost ledger and label writes
   that landed without a row.
 - **Session side:** a background session under the worktree root with no ledger row is
-  adopted when the issue can be derived from its name or path, otherwise reported. No
+  adopted when the role and the issue can be derived from its name or path, otherwise
+  reported. No
   unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
-survives reboots. A partial unique index over non-terminal rows makes two live attempts for
-one issue impossible at the database level rather than by a check the caller might skip. The
-queue status last *verified* on the tracker is stored separately from the attempt's own
+survives reboots. A partial unique index over live rows that a start rule created makes two
+such workers of one role for one issue impossible at the database level rather than by a
+check the caller might skip. Every session a worker owns is recorded in a `sessions` table.
+The queue status last *verified* on the tracker is stored separately from the worker's own
 state, so a write that could not be confirmed is retried on the next tick instead of being
 assumed to have landed.
 
@@ -279,18 +334,21 @@ elsewhere, but nothing depends on that and it is not part of what is tested. Rea
 machine remotely is the operating system's job, not this tool's.
 
 ```
-chargehand status [--json]          # queue, attempts, sessions, machine — no free text
+chargehand status [--json]          # queue, workers, repositories, sessions — no free text
 chargehand watch                    # self-refreshing status table
-chargehand logs <ISSUE>             # tail of the session's output — explicitly untrusted
-chargehand pause [--route <name>]   # stop admitting new launches; running sessions continue
-chargehand resume [--route <name>]
-chargehand cancel <ISSUE>           # stop the session, mark blocked; keep the worktree
-chargehand stop <ISSUE>             # pause one run
-chargehand continue <ISSUE>         # respawn it; the saved conversation resumes
-chargehand retry <ISSUE>            # new attempt for a failed or cancelled one
-chargehand discard <ISSUE> --yes    # remove session, worktree, branch; refuses with unpushed commits
+chargehand logs <ITEM>              # tail of the session's output — explicitly untrusted
+chargehand pause [--repository <name>]   # stop admitting new launches; running sessions continue
+chargehand resume [--repository <name>]
+chargehand cancel <ITEM>            # stop the session, mark blocked; keep the worktree
+chargehand stop <ITEM>              # pause one worker
+chargehand continue <ITEM>          # respawn it; the saved conversation resumes
+chargehand retry <ITEM>             # new worker for a failed or cancelled one
+chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
 chargehand tick                     # run a tick now
 ```
+
+Commands that take an item also take `--role`, which is needed when workers of several
+roles hold the item. `--route` stays accepted for `--repository`.
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
   tracker. It records the request in the ledger, kick-starts the scheduled tick when that job
@@ -397,10 +455,10 @@ what they need from it. The runner's part is small.
 
 | Failure | Behavior |
 |---|---|
-| Machine reboots | Observed: the ledger, the labels and the worktrees survive, the scheduled job runs a tick by itself, the killed session reads `failed`, and the run is parked as blocked with one attempt recorded. `continue` brings the session back but not the work it had running, so resuming is left to you. |
-| Tick crashes mid-launch, or a tracker write lands but reports failure | The ledger row came first; the next tick adopts, resumes, or fails the attempt loudly. |
+| Machine reboots | Observed: the ledger, the labels and the worktrees survive, the scheduled job runs a tick by itself, the killed session reads `failed`, and the run is parked as blocked with one worker recorded. `continue` brings the session back but not the work it had running, so resuming is left to you. |
+| Tick crashes mid-launch, or a tracker write lands but reports failure | The ledger row came first; the next tick adopts, resumes, or fails the worker loudly. |
 | Agent hangs | The watchdog notifies after `max_run_hours` and stops the session after `hard_stop_hours`. |
-| Several blocked runs resumed at once | Sessions wake together; `max_open_attempts` bounds how many there can be. |
+| Several blocked runs resumed at once | Sessions wake together; `max_open_workers` bounds how many there can be. |
 | Tracker unavailable | The tick logs and exits; the next one retries. |
 | Control command during a tick | Recorded, then applied by the next, kick-started tick. |
 | Prompt injection through issue text | Mitigated, not eliminated — see `SECURITY.md`. |
@@ -417,13 +475,18 @@ Done:
 - `init`, `doctor`, `install`, and the bundled templates.
 - The connection to the lease pool: reap on every tick, the leases in `status`, the pool's
   command and schema in `doctor`, and the deny rule for its operator commands.
+- Roles and workers: role files with an agent, model, effort and allow rules, start rules,
+  several roles per repository, and a ledger of workers and their sessions.
 
 Next:
 
 - Run it unattended for a day against a real tracker.
 - Run several sessions at once with the lease pool and with repository scripts that lease
   through it.
-- `github` and `command` adapters, packaging, first release.
+- Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
+  workers that subscribe to the pull requests and issues they follow.
+- A resident daemon on loopback with a local board, replacing the scheduled job.
+- Packaging, first release.
 - Optional: the read-only status page, agents under a separate user.
 
 Acceptance for the runner runs against a throwaway repository and a cheap prompt, with fault
@@ -437,8 +500,11 @@ test.
 - Should a run that reports `working` with `status: idle` for long enough be treated as
   stalled rather than healthy? A short window would misread the gap between two tool
   calls; a long one is what the watchdog already does, only at `max_run_hours`.
-- Will Claude Code offer a scriptable way to send a message to a background session? That
-  would allow a `reply` command. Until then, answering a question means attaching.
+- A `reply` command. Claude Code 2.1.301 can send a message to a background session from a
+  script: after `claude stop`, `claude --resume <full session id> --bg "<message>"` continues
+  the same session with its saved launch options. Against a running session, or with the
+  short id, it starts a copy instead and says so. The adapter can do this; no command uses it
+  yet, so answering a question still means attaching.
 
 Settled by inspecting Claude Code 2.1.270, and by running background sessions and the
 deny-rule probe against 2.1.278:

@@ -22,11 +22,12 @@ It runs on your own Mac, the one you already work on, not in a cloud.
 ## How it works
 
 1. You assign an issue to yourself and add the queue label.
-2. Within a few minutes the runner sees it, records the attempt, swaps the label to
+2. Within a few minutes the runner sees it, records a worker, swaps the label to
    "running", creates a worktree, runs your repo's setup script, and starts a Claude Code
-   background session with the prompt your repo configured.
+   background session with the prompt, agent, model and effort the role configured.
 3. The session works the issue. What "work" means is up to your repo: a slash command, a
-   skill, or a plain prompt.
+   skill, or a plain prompt. A *role* file under `.chargehand/roles/` holds that, and a
+   repository may enable several roles.
 4. When a session needs you, the runner notices, notifies you, and marks the issue
    "blocked". You answer in Claude Code's own agent view; the session continues.
 5. When the session finishes, the runner clears the label and later removes the worktree.
@@ -43,7 +44,7 @@ deliberately no server to expose.
 - **Crash-safe.** Launches are recorded before they have side effects and reconciled on
   every tick, so a crash never strands an issue or leaves a session unsupervised.
 - **Small surface.** Standard-library Python, no runtime dependencies, no listening port.
-- **Installed, not copied.** A repo contributes one small config file, never scripts.
+- **Installed, not copied.** A repo contributes small config files, never scripts.
 
 ## Requirements
 
@@ -61,7 +62,7 @@ python3 -m venv ~/.venvs/chargehand          # a packaged python refuses a direc
 export PATH="$HOME/.venvs/chargehand/bin:$PATH"
 
 chargehand init --machine            # ~/.config/chargehand/config.toml and notify.sh
-chargehand init --repo ~/code/my-app # .chargehand.toml in the repository
+chargehand init --repo ~/code/my-app # .chargehand.toml and .chargehand/roles/implementer.toml
 chargehand doctor                    # check this machine
 chargehand tick                      # one pass, in the foreground
 chargehand status                    # what is running

@@ -19,7 +19,12 @@ Options:
   --bg                     start a background session
   -n, --name <name>        name the session
   --permission-mode <mode> auto | default | acceptEdits | dontAsk | plan | bypassPermissions
+  --agent <name>           run a named agent definition
+  --model <model>          model for the session
+  --effort <level>         effort level
+  --plugin-dir <path>      load a plugin directory for the session
   --settings <json>        per-session settings
+  --resume <id>            with --bg: wake a stopped session with a new prompt
   --version
 
 Commands:
@@ -97,6 +102,32 @@ def main(argv: list[str]) -> int:
         save(state)
         sys.stdout.write(state.get("logs", "plain log line\n"))
         return 0
+
+    if "--resume" in argv and "--bg" in argv:
+        # `claude --resume <session id> --bg "<prompt>"`: wake a stopped session in place,
+        # or start a copy when the state says so, with the note the real binary prints.
+        target = argv[argv.index("--resume") + 1]
+        prompt = argv[-1]
+        record(state, "resumes", {"argv": argv, "target": target, "prompt": prompt})
+        copy_id = state.get("resume_copy_id")
+        if copy_id:
+            sys.stdout.write(
+                f"note: session {target[:8]} is already running in the background, so this "
+                f"started a copy as {copy_id}. `claude attach {target[:8]}` opens the original.\n"
+                f"backgrounded · {copy_id}\n"
+            )
+            save(state)
+            return 0
+        for session in state.get("sessions", []):
+            if session.get("uuid") == target or session.get("id") == target:
+                session["state"] = state.get("resume_state", "working")
+                sys.stdout.write(f"backgrounded · {session.get('id')} · {session.get('name')}\n")
+                sys.stdout.write("note: woke session with its saved options\n")
+                save(state)
+                return 0
+        save(state)
+        sys.stderr.write(f"No conversation found with session ID: {target}\n")
+        return 1
 
     if "--bg" in argv:
         record(state, "launches", {"argv": argv, "cwd": os.getcwd()})

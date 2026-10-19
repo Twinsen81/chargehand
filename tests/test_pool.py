@@ -32,7 +32,7 @@ def pool(banksman_state) -> BanksmanPool:
 def launch(harness, identifier="ABC-1"):
     harness.board.add(identifier)
     harness.tick()
-    return harness.attempt(identifier)
+    return harness.worker(identifier)
 
 
 def apply_request(harness, kind, target=None, **args):
@@ -189,7 +189,7 @@ def test_a_failing_pool_does_not_stop_the_watchdog(harness, pool, banksman_state
     assert [e for e in report.errors if e.startswith("pool: ")] == report.errors
     assert len(report.errors) == 1
     assert ("ABC-1", "watchdog-stopped") in harness.notifications()
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
 
 
 def test_a_pool_with_an_unknown_schema_is_reported_and_the_tick_goes_on(
@@ -215,7 +215,7 @@ def test_cancel_stop_and_discard_leave_the_leases_to_the_pool(harness, pool, ban
     assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
     assert apply_request(harness, "discard", "ABC-1")["ok"] == 1
 
-    assert not (harness.worktree_root / "ABC-1").exists()
+    assert not (harness.worktree("ABC-1")).exists()
     assert banksman_state.calls == [REAP] * 4
 
 
@@ -226,7 +226,7 @@ def test_the_watchdog_leaves_the_leases_to_the_pool(harness, pool, banksman_stat
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert banksman_state.calls == [REAP]
 
 

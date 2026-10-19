@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import pytest
 
 from chargehand import config as config_mod
+from chargehand import roles as roles_mod
 from chargehand.config import MachineConfig, RepoConfig, render, render_argv
 from chargehand.errors import ConfigError
 
@@ -17,9 +20,9 @@ def test_a_minimal_machine_config_gets_sensible_defaults():
     config = MachineConfig.parse(MINIMAL)
 
     assert config.max_concurrent == 2
-    assert config.max_open_attempts == 4
-    assert config.routes[0].name == "app"
-    assert config.routes[0].tracker.type == "linear"
+    assert config.max_open_workers == 4
+    assert config.repositories[0].name == "app"
+    assert config.repositories[0].tracker.type == "linear"
     assert config.labels.queued == "chargehand"
     assert config.pass_deny_rules_at_launch is True
     assert config.pool_bin == "banksman"
@@ -48,13 +51,13 @@ def test_route_names_must_be_unique():
         {"name": "a", "repo": "/x", "tracker": {"type": "linear"}},
         {"name": "a", "repo": "/y", "tracker": {"type": "linear"}},
     ]}
-    with pytest.raises(ConfigError, match="duplicate route"):
+    with pytest.raises(ConfigError, match="duplicate repository"):
         MachineConfig.parse(data)
 
 
 def test_open_attempts_must_not_starve_the_launch_throttle():
-    with pytest.raises(ConfigError, match="max_open_attempts"):
-        MachineConfig.parse({**MINIMAL, "max_concurrent": 4, "max_open_attempts": 2})
+    with pytest.raises(ConfigError, match="max_open_workers"):
+        MachineConfig.parse({**MINIMAL, "max_concurrent": 4, "max_open_workers": 2})
 
 
 def test_the_hard_stop_must_come_after_the_notification_limit():
@@ -74,14 +77,14 @@ def test_a_route_can_override_the_labels():
                    "labels": {"blocked": "held"}}],
     })
 
-    assert config.routes[0].labels.as_dict() == {"queued": "q", "running": "r", "blocked": "held"}
+    assert config.repositories[0].labels.as_dict() == {"queued": "q", "running": "r", "blocked": "held"}
 
 
-def test_a_repo_config_needs_a_base_and_a_prompt():
-    with pytest.raises(ConfigError, match="prompt"):
-        RepoConfig.parse({"base": "origin/main"})
+def test_a_repo_config_needs_a_base_and_the_prompt_is_optional():
     with pytest.raises(ConfigError, match="base"):
         RepoConfig.parse({"prompt": "{issue}"})
+    # The prompt moved to role files; a repository configuration without one is complete.
+    assert RepoConfig.parse({"base": "origin/main"}).prompt is None
 
 
 @pytest.mark.parametrize("variable", ["{title}", "{body}", "{description}"])
@@ -120,7 +123,9 @@ def test_render_argv_does_not_let_a_value_become_more_arguments():
 def test_the_available_template_variables_exclude_issue_text():
     assert "title" not in config_mod.TEMPLATE_VARS
     assert "body" not in config_mod.TEMPLATE_VARS
-    assert set(config_mod.TEMPLATE_VARS) == {"issue", "url", "worktree", "branch", "repo"}
+    assert set(config_mod.TEMPLATE_VARS) == {
+        "item", "item_url", "worktree", "branch", "repo", "issue", "url",
+    }
 
 
 def test_loading_a_missing_repo_config_names_the_fix(tmp_path):
@@ -143,8 +148,12 @@ def test_the_bundled_templates_parse(tmp_path):
     (tmp_path / "config.toml").write_text(machine)
     (tmp_path / ".chargehand.toml").write_text(repo)
 
-    assert config_mod.load_machine_config(tmp_path / "config.toml").routes
-    assert config_mod.load_repo_config(tmp_path).prompt
+    assert config_mod.load_machine_config(tmp_path / "config.toml").repositories
+    assert config_mod.load_repo_config(tmp_path).base
+    for name in ("implementer", "pr-reviewer"):
+        text = (paths.templates_dir() / "roles" / f"{name}.toml").read_text()
+        role = roles_mod.Role.parse(name, tomllib.loads(text))
+        assert role.prompt and role.start
 
 
 @pytest.mark.parametrize("key", ["prompt", "setup", "status_file"])

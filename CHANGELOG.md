@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The runner's unit of work is now a *worker*: one member of a *role*, usually bound to
+  one work *item*. A role may have any number of workers. The ledger's `attempts` table
+  becomes `workers`, with `role`, `origin`, `start_rule`, `runtime`, `item`, `item_id`
+  and `repository` columns, a `sessions` table for the agent sessions a worker owns over
+  its life, and a `wakes` counter; a version 1 ledger is migrated in place, with the old
+  table kept as `attempts_v1` for one release. The database allows at most one live
+  worker per role and item among the workers a start rule created, because a start event
+  arrives again on every poll; workers created by hand are not limited, and the item may
+  be empty.
+- Roles. How a worker thinks and when it runs moves out of `.chargehand.toml` into a role
+  file, `<repo>/.chargehand/roles/<name>.toml` or `~/.config/chargehand/roles/<name>.toml`:
+  an optional Claude Code agent definition (`agent`), `model`, `effort`, the first
+  `prompt`, `permission_mode`, `allow` rules, an optional role `setup` that runs after the
+  repository's, a `status_file`, `[[start]]` rules that create a worker when an event
+  arrives (`on`, optional `repositories`, `unless_subscribed` with `role` or `any`, and the
+  `subscribe` and `close_on` event kinds for the worker's item), and `[policy]` caps such
+  as `max_workers`. `runtime` names the coding agent; `claude` is the only one so far. The
+  queue label is one per issue, so a queued issue that any live worker holds is skipped,
+  whichever role holds it. A repository whose `.chargehand.toml` still carries `prompt` and
+  has no role file gets its `implementer` role from it, so an older configuration keeps
+  working. `init` writes both files; `doctor` checks every enabled
+  role and the agent file it names.
+- Machine configuration: `[[repository]]` with `path` and `roles` replaces `[[route]]`
+  with `repo`, and `max_open_workers` replaces `max_open_attempts`; the old spellings are
+  still accepted. Template variables gain `{item}` and `{item_url}`; `{issue}` and `{url}`
+  render the same values.
+- A worker's worktree is `<worktree_root>/<role>/<item>`, its placeholder branch
+  `<prefix><role>/<item>`, and its session is named `<role>/<item>`. Sessions and
+  worktrees from before this change are still recognised.
+- Control commands take an item and, when several roles hold it, `--role`; `pause` and
+  `resume` take `--repository`. `status --json` reports `workers` and `repositories`, each
+  repository with its roles. Notifications carry `CHARGEHAND_ITEM`, `CHARGEHAND_ROLE` and
+  `CHARGEHAND_REPOSITORY`; `CHARGEHAND_ISSUE` and `CHARGEHAND_ROUTE` stay set.
+- The Claude Code adapter passes `--agent`, `--model`, `--effort` and `--plugin-dir` at
+  launch, and can wake a stopped background session with a new prompt by its full
+  session id, recognising when Claude Code started a copy instead.
+
 ### Added
 
 - Runner: a `tick` that reconciles interrupted launches, applies recorded control

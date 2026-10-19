@@ -24,16 +24,17 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from chargehand import claude as claude_mod
+from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import gitutil, ledger as ledger_mod, paths, sanitize, trackers
 from chargehand.claude import ClaudeCLI, Session
-from chargehand.config import MachineConfig, RepoConfig, Route
+from chargehand.config import MachineConfig, RepoConfig, Repository
 from chargehand.errors import (
     AmbiguousWrite,
     ChargehandError,
@@ -45,16 +46,17 @@ from chargehand.errors import (
     TickBusy,
     TrackerError,
 )
-from chargehand.ledger import Attempt, Ledger
+from chargehand.ledger import Ledger, Worker
 from chargehand.notify import Notification, Notifier
 from chargehand.pool import NoopPool, Pool
+from chargehand.roles import Role, StartRule
 from chargehand.trackers import Issue, Status, Tracker
 
 log = logging.getLogger(__name__)
 
-# Transient "this route cannot be talked to right now" conditions: an unreachable API and
+# Transient "this repository cannot be talked to right now" conditions: an unreachable API and
 # an unreadable credential alike. Deliberately NOT ConfigError — a broken template or a
-# bad setup command must fail the attempt loudly rather than inherit the forgiveness an
+# bad setup command must fail the worker loudly rather than inherit the forgiveness an
 # outage gets, or a typo would retry forever while holding a launch slot.
 TRACKER_FAILURES = (TrackerError,)
 
@@ -63,8 +65,8 @@ TRACKER_FAILURES = (TrackerError,)
 WATCHDOG_LONG_RUN = 1
 WATCHDOG_STOP_FAILED = 2
 
-# A finished attempt's last notification, when its hook failed, waits in the runner state
-# under this prefix and the attempt id, and is sent again for up to this long.
+# A finished worker's last notification, when its hook failed, waits in the runner state
+# under this prefix and the worker id, and is sent again for up to this long.
 PENDING_NOTIFICATION_PREFIX = "notify-pending:"
 PENDING_NOTIFICATION_MAX_AGE_SECS = 24 * 3600
 
@@ -75,7 +77,7 @@ KEPT_BRANCH = (
     "`git branch` in the repository lists it"
 )
 
-# The queue status each attempt state should be reflected by on the tracker.
+# The queue status each worker state should be reflected by on the tracker.
 _STATUS_FOR_STATE = {
     ledger_mod.LAUNCHING: Status.RUNNING,
     ledger_mod.RUNNING: Status.RUNNING,
@@ -151,15 +153,38 @@ class TickReport:
 
 
 @dataclass
-class RouteContext:
-    route: Route
+class RepositoryContext:
+    repository: Repository
     tracker: Tracker | None = None
     repo_config: RepoConfig | None = None
     error: str | None = None
+    roles: dict[str, Role | ConfigError] = field(default_factory=dict)
 
     @property
     def usable(self) -> bool:
         return self.tracker is not None and self.repo_config is not None and self.error is None
+
+    def role(self, name: str) -> Role:
+        """The role *name* as this repository defines it, loaded once per tick.
+
+        A role that does not load is a configuration error for every worker in it, so
+        the error is kept and raised again rather than the file being read on each call.
+        """
+        cached = self.roles.get(name)
+        if cached is None:
+            try:
+                cached = roles_mod.load_role(
+                    self.repository.path,
+                    name,
+                    repo_config=self.repo_config,
+                    tracker_type=self.tracker.type if self.tracker else None,
+                )
+            except ConfigError as exc:
+                cached = exc
+            self.roles[name] = cached
+        if isinstance(cached, ConfigError):
+            raise cached
+        return cached
 
 
 @dataclass
@@ -178,7 +203,7 @@ class StatusFile:
         `state` is acted on, and `stop_reason` is never printed by default.
         """
         try:
-            # The path is keyed by issue, so a previous attempt's file is still sitting
+            # The path is keyed by issue, so a previous worker's file is still sitting
             # there. Acting on it would end a live run on a verdict about a dead one.
             if not_before is not None and path.stat().st_mtime < not_before:
                 return cls(present=True, stale=True)
@@ -228,7 +253,7 @@ class Runner:
         self.pool = pool or NoopPool()
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
-        self._contexts: dict[str, RouteContext] = {}
+        self._contexts: dict[str, RepositoryContext] = {}
         self._sessions: list[Session] | None = None
 
     # ----- collaborators ----------------------------------------------------
@@ -245,22 +270,22 @@ class Runner:
     def invalidate_sessions(self) -> None:
         self._sessions = None
 
-    def context(self, route: Route) -> RouteContext:
-        cached = self._contexts.get(route.name)
+    def context(self, repository: Repository) -> RepositoryContext:
+        cached = self._contexts.get(repository.name)
         if cached is not None:
             return cached
-        context = RouteContext(route=route)
+        context = RepositoryContext(repository=repository)
         try:
-            context.tracker = self._tracker_factory(route)
-            context.repo_config = config_mod.load_repo_config(route.repo)
+            context.tracker = self._tracker_factory(repository)
+            context.repo_config = config_mod.load_repo_config(repository.path)
         except (ConfigError, TrackerError) as exc:
             context.error = str(exc)
-        self._contexts[route.name] = context
+        self._contexts[repository.name] = context
         return context
 
-    def context_for_attempt(self, attempt: Attempt) -> RouteContext | None:
-        route = self.config.route_by_name(attempt.route)
-        return self.context(route) if route else None
+    def context_for_worker(self, worker: Worker) -> RepositoryContext | None:
+        repository = self.config.repository_by_name(worker.repository)
+        return self.context(repository) if repository else None
 
     # ----- the tick ---------------------------------------------------------
 
@@ -302,81 +327,78 @@ class Runner:
 
     def _reconcile_ledger(self, report: TickReport) -> None:
         """A row still `launching` when a tick starts is an interrupted launch."""
-        for attempt in self.ledger.attempts_in_state([ledger_mod.LAUNCHING]):
-            context = self.context_for_attempt(attempt)
+        for worker in self.ledger.workers_in_state([ledger_mod.LAUNCHING]):
+            context = self.context_for_worker(worker)
             if context is None:
-                self._fail_attempt(
-                    attempt, None, f"route '{attempt.route}' is no longer configured", report,
-                    notify_detail="route is no longer configured",
+                self._fail_worker(
+                    worker, None, f"repository '{worker.repository}' is no longer configured", report,
+                    notify_detail="repository is no longer configured",
                 )
                 continue
             if not context.usable:
-                report.errors.append(f"route {attempt.route}: {context.error}")
+                report.errors.append(f"repository {worker.repository}: {context.error}")
                 continue
 
-            session = self.claude.find_session(
-                self.sessions(),
-                name=attempt.identifier,
-                cwd=attempt.worktree_path,
-                # Same guard the launch uses: a previous attempt's stopped session keeps
-                # this issue's name and worktree, and must not be adopted as this one's.
-                exclude=self._sessions_owned_by_other_attempts(attempt),
+            # Same guard the launch uses: a previous worker's stopped session keeps this
+            # item's name and worktree, and must not be adopted as this one's.
+            session = self._find_worker_session(
+                worker, exclude=self._sessions_owned_by_other_workers(worker)
             )
             if session is not None:
-                self._adopt(attempt, session, report)
+                self._adopt(worker, session, report)
                 continue
 
-            if attempt.launch_attempts >= self.config.max_launch_attempts:
-                self._fail_attempt(
-                    attempt,
+            if worker.launch_attempts >= self.config.max_launch_attempts:
+                self._fail_worker(
+                    worker,
                     context,
-                    f"launch did not complete after {attempt.launch_attempts} attempts "
-                    f"(stopped at step {attempt.step})",
+                    f"launch did not complete after {worker.launch_attempts} launch attempts "
+                    f"(stopped at step {worker.step})",
                     report,
                     notify_detail="launch did not complete",
                 )
                 continue
 
-            before = attempt.launch_attempts
-            attempt = self.ledger.update(attempt, launch_attempts=before + 1)
-            report.resumed.append(f"{attempt.identifier}@step{attempt.step}")
+            before = worker.launch_attempts
+            worker = self.ledger.update(worker, launch_attempts=before + 1)
+            report.resumed.append(f"{worker.item}@step{worker.step}")
             log.info(
-                "resuming launch of %s from step %s (attempt %s)",
-                attempt.identifier, attempt.step, attempt.launch_attempts,
+                "resuming launch of %s from step %s (worker %s)",
+                worker.item, worker.step, worker.launch_attempts,
             )
             try:
-                self._run_launch_steps(context, attempt, report)
+                self._run_launch_steps(context, worker, report)
             except LaunchAborted:
                 raise
             except TRACKER_FAILURES as exc:
-                # A tracker outage is not this attempt's fault. Give the retry back,
+                # A tracker outage is not this worker's fault. Give the retry back,
                 # otherwise three unlucky ticks fail a launch that never went wrong.
                 self.ledger.update(
-                    attempt, launch_attempts=before, last_error=str(exc)[:500]
+                    worker, launch_attempts=before, last_error=str(exc)[:500]
                 )
-                report.errors.append(f"{attempt.identifier}: {exc}")
+                report.errors.append(f"{worker.item}: {exc}")
             except ChargehandError as exc:
                 # Never silently re-queue: that would loop. Leave it launching and let
-                # the attempt counter fail it loudly.
-                self.ledger.update(attempt, last_error=str(exc)[:500])
-                report.errors.append(f"{attempt.identifier}: {exc}")
+                # the worker counter fail it loudly.
+                self.ledger.update(worker, last_error=str(exc)[:500])
+                report.errors.append(f"{worker.item}: {exc}")
 
     def _reconcile_sessions(self, report: TickReport) -> None:
         """No session under the worktree root runs outside the watchdog."""
         root = self.config.worktree_root
-        live = self.ledger.live_attempts()
-        known = {str(Path(a.worktree)) for a in live} | {a.session_id for a in live if a.session_id}
+        live = self.ledger.live_workers()
+        known = {str(Path(w.worktree)) for w in live} | {w.session_id for w in live if w.session_id}
         for session in self.sessions():
             if session.id in known or (session.cwd and str(Path(session.cwd)) in known):
                 continue
             if not self._under(root, session.cwd):
                 continue
-            identifier = claude_mod.identifier_from_session(session, root)
-            previous = self.ledger.attempt_by_session_id(session.id) or (
-                self.ledger.latest_attempt_for(identifier) if identifier else None
+            derived = claude_mod.worker_from_session(session, root)
+            previous = self.ledger.worker_by_session_id(session.id) or (
+                self.ledger.latest_worker_for(derived[1], derived[0]) if derived else None
             )
             # `cancel` stops a session but keeps its worktree, so a stopped session
-            # belonging to an attempt that already ended is expected, not an orphan.
+            # belonging to a worker that already ended is expected, not an orphan.
             # Only one that is still working needs supervising again.
             if (
                 previous is not None
@@ -384,9 +406,9 @@ class Runner:
                 and session.state != claude_mod.WORKING
             ):
                 continue
-            if identifier is None:
+            if derived is None:
                 report.warnings.append(
-                    f"unadopted session {session.id} under {root} with no derivable issue"
+                    f"unadopted session {session.id} under {root} with no derivable worker"
                 )
                 key = f"orphan-notified:{session.id}"
                 if not self.ledger.get_state(key):
@@ -394,135 +416,140 @@ class Runner:
                     self._notify(report, "?", "orphan-session", None, None,
                                  detail=f"session {session.id}")
                 continue
-            if self.ledger.live_attempt_for(identifier) is not None:
+            role, item = derived
+            if self.ledger.live_worker_for(item, role) is not None:
                 continue
-            adopted = self._adopt_orphan(identifier, session, report)
+            adopted = self._adopt_orphan(role, item, session, report)
             if adopted is None:
                 report.warnings.append(
-                    f"session {session.id} looks like {identifier} but no route owns "
-                    f"{session.cwd}"
+                    f"session {session.id} looks like {role}/{item} but no configured "
+                    f"repository and role own {session.cwd}"
                 )
 
     def _reconcile_tracker(self, report: TickReport) -> None:
         """A "running" label with no live row means the ledger and the tracker disagree."""
-        for route in self.config.routes:
-            context = self.context(route)
+        for repository in self.config.repositories:
+            context = self.context(repository)
             if not context.usable:
                 if context.error:
-                    report.errors.append(f"route {route.name}: {context.error}")
+                    report.errors.append(f"repository {repository.name}: {context.error}")
                 continue
             try:
                 running = context.tracker.list(Status.RUNNING)  # type: ignore[union-attr]
             except TRACKER_FAILURES as exc:
-                report.errors.append(f"route {route.name}: {exc}")
+                report.errors.append(f"repository {repository.name}: {exc}")
                 continue
             for issue in running:
-                if self.ledger.live_attempt_for(issue.identifier) is not None:
+                if self.ledger.live_worker_for(issue.identifier) is not None:
                     continue
                 if self._label_sync_pending(issue.identifier):
                     # The ledger knows what this label should be and has not managed to
                     # write it yet. That is a pending write, not a disagreement.
                     continue
                 report.warnings.append(
-                    f"{issue.identifier} carries the running label but has no live attempt"
+                    f"{issue.identifier} carries the running label but has no live worker"
                 )
                 try:
                     context.tracker.mark(issue, Status.BLOCKED)  # type: ignore[union-attr]
                 except (*TRACKER_FAILURES, AmbiguousWrite) as exc:
                     report.errors.append(f"{issue.identifier}: {exc}")
                     continue
-                self._notify(report, issue.identifier, "blocked", issue.url, route.name,
-                             detail="running label without a live attempt")
+                self._notify(report, issue.identifier, "blocked", issue.url, repository.name,
+                             detail="running label without a live worker")
 
-    def _stop_session(self, attempt: Attempt) -> bool:
+    def _stop_session(self, worker: Worker) -> bool:
         """Stop the session and confirm it stopped, by re-reading the listing.
 
         The exit code alone is not enough: a stop can report success and leave the
         session running. Everything destructive downstream — removing a worktree, hard
         stopping a run — depends on the session really being gone.
         """
-        if not attempt.session_id:
+        if not worker.session_id:
             return True
-        self.claude.stop(attempt.session_id)
+        self.claude.stop(worker.session_id)
         self.invalidate_sessions()
         try:
             sessions = self.sessions(refresh=True)
         except ClaudeError:
             return False
-        session = next((s for s in sessions if s.id == attempt.session_id), None)
+        session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is None:
             return True
         return session.state in (claude_mod.DONE, claude_mod.STOPPED, claude_mod.FAILED)
 
-    def _remove_session(self, attempt: Attempt) -> bool:
-        if not attempt.session_id:
+    def _remove_session(self, worker: Worker) -> bool:
+        if not worker.session_id:
             return True
-        self.claude.remove(attempt.session_id)
+        self.claude.remove(worker.session_id)
         self.invalidate_sessions()
         try:
             sessions = self.sessions(refresh=True)
         except ClaudeError:
             return False
-        return all(s.id != attempt.session_id for s in sessions)
+        return all(s.id != worker.session_id for s in sessions)
 
-    def _adopt(self, attempt: Attempt, session: Session, report: TickReport) -> Attempt:
-        attempt = self.ledger.update(
-            attempt,
+    def _adopt(self, worker: Worker, session: Session, report: TickReport) -> Worker:
+        worker = self.ledger.update(
+            worker,
             session_id=session.id,
             session_uuid=session.uuid,
             state=ledger_mod.RUNNING,
             step=ledger_mod.LAST_STEP,
             session_state=session.state,
-            working_since=attempt.working_since or time.time(),
+            working_since=worker.working_since or time.time(),
             last_error=None,
         )
-        report.adopted.append(attempt.identifier)
-        log.info("adopted session %s for %s", session.id, attempt.identifier)
-        return attempt
+        self.ledger.record_session(
+            worker, kind=ledger_mod.SESSION_ADOPTED, session_id=session.id, session_uuid=session.uuid
+        )
+        report.adopted.append(worker.item)
+        log.info("adopted session %s for %s", session.id, worker.handle)
+        return worker
 
     def _adopt_orphan(
-        self, identifier: str, session: Session, report: TickReport
-    ) -> Attempt | None:
+        self, role_name: str, item: str, session: Session, report: TickReport
+    ) -> Worker | None:
         """Bring a session started by a tick that died before recording ids under supervision."""
         worktree = Path(session.cwd) if session.cwd else None
         if worktree is None:
             return None
-        route = self._route_owning(worktree)
-        if route is None:
+        repository = self._repository_owning(worktree)
+        if repository is None or role_name not in repository.roles:
             return None
-        context = self.context(route)
-        issue_id, url = identifier, None
+        context = self.context(repository)
+        item_id, url = item, None
         if context.usable:
             try:
-                issue = context.tracker.get(identifier)  # type: ignore[union-attr]
+                issue = context.tracker.get(item)  # type: ignore[union-attr]
             except TRACKER_FAILURES:
                 issue = None
             if issue is not None:
-                issue_id, url = issue.id, issue.url
-        branch = self.git.worktree_branch(route.repo, worktree) or self._branch_for(
-            context.repo_config, identifier
+                item_id, url = issue.id, issue.url
+        branch = self.git.worktree_branch(repository.path, worktree) or self._branch_for(
+            context.repo_config, role_name, item
         )
-        attempt = self.ledger.create_attempt(
-            issue_id=issue_id,
-            identifier=identifier,
+        worker = self.ledger.create_worker(
+            role=role_name,
+            item=item,
+            item_id=item_id,
             url=url,
-            route=route.name,
-            repo=route.repo,
+            repository=repository.name,
+            repo=repository.path,
             worktree=worktree,
             branch=branch,
         )
-        attempt = self._adopt(attempt, session, report)
-        report.warnings.append(f"adopted unsupervised session {session.id} as {identifier}")
-        return attempt
+        worker = self._adopt(worker, session, report)
+        report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
+        return worker
 
-    def _route_owning(self, worktree: Path) -> Route | None:
-        for route in self.config.routes:
+    def _repository_owning(self, worktree: Path) -> Repository | None:
+        for repository in self.config.repositories:
             try:
-                entries = self.git.list_worktrees(route.repo)
+                entries = self.git.list_worktrees(repository.path)
             except GitError:
                 continue
             if str(worktree) in entries or str(worktree.resolve()) in entries:
-                return route
+                return repository
         return None
 
     @staticmethod
@@ -561,151 +588,172 @@ class Runner:
             return True, "tick run"
         if kind in ("pause", "resume"):
             self.ledger.set_paused(kind == "pause", target)
-            scope = f"route {target}" if target else "all routes"
+            scope = f"repository {target}" if target else "all repositories"
             return True, f"{scope} {'paused' if kind == 'pause' else 'resumed'}"
         if target is None:
-            return False, f"{kind} needs an issue identifier"
+            return False, f"{kind} needs a work item"
 
-        attempt = self.ledger.live_attempt_for(target) or self.ledger.latest_attempt_for(target)
-        if attempt is None:
-            return False, f"no attempt recorded for {target}"
-        context = self.context_for_attempt(attempt)
+        role = args.get("role") or None
+        found, problem = self._resolve_target(target, role)
+        if found is None:
+            return False, problem or f"no worker recorded for {target}"
+        worker = found
+        context = self.context_for_worker(worker)
 
         if kind == "cancel":
-            return self._do_cancel(attempt, context, report)
+            return self._do_cancel(worker, context, report)
         if kind == "stop":
-            return self._do_stop(attempt, context, report)
+            return self._do_stop(worker, context, report)
         if kind == "continue":
-            return self._do_continue(attempt, context, report)
+            return self._do_continue(worker, context, report)
         if kind == "retry":
-            return self._do_retry(attempt, context, bool(args.get("force")), report)
+            return self._do_retry(worker, context, bool(args.get("force")), report)
         if kind == "discard":
-            return self._do_discard(attempt, context, bool(args.get("force")), report)
+            return self._do_discard(worker, context, bool(args.get("force")), report)
         return False, f"unknown request '{kind}'"
 
+    def _resolve_target(self, item: str, role: str | None) -> tuple[Worker | None, str | None]:
+        """The one worker a control command means, or why it cannot tell.
+
+        Several roles can hold the same item, so a bare item is enough only while one
+        live worker has it; otherwise the command has to name the role.
+        """
+        live = self.ledger.live_workers_for(item)
+        if role is not None:
+            live = [w for w in live if w.role == role]
+        if len(live) > 1:
+            names = ", ".join(sorted(w.role for w in live))
+            return None, f"{item} has live workers in several roles ({names}); pass --role"
+        if live:
+            return live[0], None
+        latest = self.ledger.latest_worker_for(item, role)
+        if latest is None:
+            return None, f"no worker recorded for {item}" + (f" in role {role}" if role else "")
+        return latest, None
+
     def _do_cancel(
-        self, attempt: Attempt, context: RouteContext | None, report: TickReport
+        self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
-        if attempt.is_terminal:
-            return False, f"{attempt.identifier} is already {attempt.state}"
-        if not self._stop_session(attempt):
+        if worker.is_terminal:
+            return False, f"{worker.item} is already {worker.state}"
+        if not self._stop_session(worker):
             return False, (
-                f"{attempt.identifier}: the session did not stop; it is still working. "
-                f"Check it with `claude attach {attempt.session_id}`."
+                f"{worker.item}: the session did not stop; it is still working. "
+                f"Check it with `claude attach {worker.session_id}`."
             )
-        attempt = self.ledger.update(attempt, state=ledger_mod.CANCELLED, session_state=None)
-        self._sync_labels(attempt, context, report)
-        self._notify(report, attempt.identifier, "cancelled", attempt.url, attempt.route,
+        worker = self.ledger.update(worker, state=ledger_mod.CANCELLED, session_state=None)
+        self._sync_labels(worker, context, report)
+        self._notify(report, worker.item, "cancelled", worker.url, worker.repository, role=worker.role,
                      detail="cancelled by operator")
         return True, "session stopped, worktree kept"
 
     def _do_stop(
-        self, attempt: Attempt, context: RouteContext | None, report: TickReport
+        self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
-        if attempt.is_terminal:
-            return False, f"{attempt.identifier} is already {attempt.state}"
-        if not attempt.session_id:
-            return False, f"{attempt.identifier} has no session to stop"
-        if not self._stop_session(attempt):
-            return False, f"{attempt.identifier}: the session did not stop; it is still working"
-        attempt = self.ledger.update(attempt, state=ledger_mod.PAUSED)
-        self._sync_labels(attempt, context, report)
+        if worker.is_terminal:
+            return False, f"{worker.item} is already {worker.state}"
+        if not worker.session_id:
+            return False, f"{worker.item} has no session to stop"
+        if not self._stop_session(worker):
+            return False, f"{worker.item}: the session did not stop; it is still working"
+        worker = self.ledger.update(worker, state=ledger_mod.PAUSED)
+        self._sync_labels(worker, context, report)
         return True, "session stopped; `chargehand continue` respawns it"
 
     def _do_continue(
-        self, attempt: Attempt, context: RouteContext | None, report: TickReport
+        self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
-        if not attempt.session_id:
-            return False, f"{attempt.identifier} has no session to respawn"
-        if attempt.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED):
-            return False, f"{attempt.identifier} is {attempt.state}, not paused or blocked"
-        result = self.claude.respawn(attempt.session_id)
+        if not worker.session_id:
+            return False, f"{worker.item} has no session to respawn"
+        if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED):
+            return False, f"{worker.item} is {worker.state}, not paused or blocked"
+        result = self.claude.respawn(worker.session_id)
         self.invalidate_sessions()
         if result.returncode != 0:
             return False, f"respawn failed: {sanitize.one_line(result.stderr or result.stdout, limit=200)}"
         # Same rule as stopping: confirm by re-reading rather than trusting the exit code.
         session = next(
-            (s for s in self.sessions(refresh=True) if s.id == attempt.session_id), None
+            (s for s in self.sessions(refresh=True) if s.id == worker.session_id), None
         )
         if session is None or session.state in (claude_mod.STOPPED, claude_mod.FAILED):
             return False, (
-                f"{attempt.identifier}: respawn reported success but the session is "
+                f"{worker.item}: respawn reported success but the session is "
                 f"{session.state if session else 'gone'}"
             )
-        attempt = self.ledger.update(
-            attempt, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0
+        worker = self.ledger.update(
+            worker, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0
         )
-        self._sync_labels(attempt, context, report)
+        self._sync_labels(worker, context, report)
         return True, "session respawned"
 
     def _do_retry(
-        self, attempt: Attempt, context: RouteContext | None, force: bool, report: TickReport
+        self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
     ) -> tuple[bool, str]:
-        """Re-arm the issue and let ordinary admission start a fresh attempt."""
-        if not attempt.is_terminal:
+        """Re-arm the issue and let ordinary admission start a fresh worker."""
+        if not worker.is_terminal:
             return False, (
-                f"{attempt.identifier} is {attempt.state}; cancel or stop it before retrying"
+                f"{worker.item} is {worker.state}; cancel or stop it before retrying"
             )
         if context is None or not context.usable:
-            return False, f"route '{attempt.route}' is unavailable"
+            return False, f"repository '{worker.repository}' is unavailable"
         branches_removed = True
-        if attempt.worktree_path.exists():
-            blocker = self._worktree_holds_work(attempt)
+        if worker.worktree_path.exists():
+            blocker = self._worktree_holds_work(worker)
             if blocker and not force:
                 return False, (
-                    f"{attempt.identifier}: {blocker}. Push or discard it first "
-                    f"(`chargehand discard {attempt.identifier} --yes`)."
+                    f"{worker.item}: {blocker}. Push or discard it first "
+                    f"(`chargehand discard {worker.item} --yes`)."
                 )
             try:
-                branches_removed = self._remove_worktree(attempt, force=True)
+                branches_removed = self._remove_worktree(worker, force=True)
             except GitError as exc:
                 return False, f"could not remove the previous worktree: {exc}"
         # The previous session is kept by `stop`, and it still carries this issue's name
         # and working directory. Left in place it would be adopted as the retry's own
         # session, so the retry would report success without starting anything.
-        if attempt.session_id:
-            self._stop_session(attempt)
-            if not self._remove_session(attempt):
+        if worker.session_id:
+            self._stop_session(worker)
+            if not self._remove_session(worker):
                 return False, (
-                    f"{attempt.identifier}: the previous session could not be removed; "
-                    f"a new attempt would adopt it instead of starting. Remove it with "
-                    f"`claude rm {attempt.session_id}`."
+                    f"{worker.item}: the previous session could not be removed; "
+                    f"a new worker would adopt it instead of starting. Remove it with "
+                    f"`claude rm {worker.session_id}`."
                 )
-            attempt = self.ledger.update(attempt, session_id=None, session_uuid=None)
+            worker = self.ledger.update(worker, session_id=None, session_uuid=None)
         try:
-            issue = context.tracker.get(attempt.issue_id)  # type: ignore[union-attr]
+            issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
             if issue is None:
-                return False, f"{attempt.identifier} no longer exists on the tracker"
+                return False, f"{worker.item} no longer exists on the tracker"
             context.tracker.mark(issue, Status.QUEUED)  # type: ignore[union-attr]
         except (*TRACKER_FAILURES, AmbiguousWrite) as exc:
-            return False, f"could not re-queue {attempt.identifier}: {exc}"
-        self.ledger.update(attempt, gc_done=1)
-        outcome = "re-queued; the next admission pass starts a new attempt"
+            return False, f"could not re-queue {worker.item}: {exc}"
+        self.ledger.update(worker, gc_done=1)
+        outcome = "re-queued; the next admission pass starts a new worker"
         return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
 
     def _do_discard(
-        self, attempt: Attempt, context: RouteContext | None, force: bool, report: TickReport
+        self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
     ) -> tuple[bool, str]:
-        blocker = self._worktree_holds_work(attempt)
+        blocker = self._worktree_holds_work(worker)
         if blocker and not force:
-            return False, f"{attempt.identifier}: {blocker}. Re-run with --force to discard anyway."
+            return False, f"{worker.item}: {blocker}. Re-run with --force to discard anyway."
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
-        if not self._stop_session(attempt) and not force:
+        if not self._stop_session(worker) and not force:
             return False, (
-                f"{attempt.identifier}: the session did not stop, so its worktree is still "
-                f"in use. Check it with `claude attach {attempt.session_id}`, or re-run with "
+                f"{worker.item}: the session did not stop, so its worktree is still "
+                f"in use. Check it with `claude attach {worker.session_id}`, or re-run with "
                 f"--force."
             )
-        removed = self._remove_session(attempt)
+        removed = self._remove_session(worker)
         try:
-            branches_removed = self._remove_worktree(attempt, force=True)
+            branches_removed = self._remove_worktree(worker, force=True)
         except GitError as exc:
             return False, f"could not remove the worktree: {exc}"
-        if not attempt.is_terminal:
-            attempt = self.ledger.update(attempt, state=ledger_mod.CANCELLED)
-            self._sync_labels(attempt, context, report)
-        self.ledger.update(attempt, gc_done=1, session_id=None, session_uuid=None)
+        if not worker.is_terminal:
+            worker = self.ledger.update(worker, state=ledger_mod.CANCELLED)
+            self._sync_labels(worker, context, report)
+        self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
         kept = "" if branches_removed else f"; {KEPT_BRANCH}"
         if not removed:
             return True, (
@@ -714,8 +762,8 @@ class Runner:
             )
         return True, f"session removed, worktree and branch deleted{kept}"
 
-    def _worktree_holds_work(self, attempt: Attempt) -> str | None:
-        worktree = attempt.worktree_path
+    def _worktree_holds_work(self, worker: Worker) -> str | None:
+        worktree = worker.worktree_path
         if not worktree.exists():
             return None
         unpushed = self.git.unpushed_commits(worktree)
@@ -727,7 +775,7 @@ class Runner:
             return "its worktree has uncommitted changes"
         return None
 
-    def _remove_worktree(self, attempt: Attempt, *, force: bool) -> bool:
+    def _remove_worktree(self, worker: Worker, *, force: bool) -> bool:
         """Remove the worktree and every branch the runner can show is its own.
 
         A session can rename the branch it was given, typically after the tracker's naming
@@ -736,15 +784,15 @@ class Runner:
         delete. A branch the session switched to in any other way is left alone. Returns
         False when such a branch was left behind.
         """
-        repo = attempt.repo_path
+        repo = worker.repo_path
         current = None
-        if attempt.worktree_path.exists():
-            current = self.git.worktree_branch(repo, attempt.worktree_path)
-            self.git.remove_worktree(repo, attempt.worktree_path, force=force)
-        self.git.delete_branch(repo, attempt.branch, force=True)
-        if not current or current == attempt.branch:
+        if worker.worktree_path.exists():
+            current = self.git.worktree_branch(repo, worker.worktree_path)
+            self.git.remove_worktree(repo, worker.worktree_path, force=force)
+        self.git.delete_branch(repo, worker.branch, force=True)
+        if not current or current == worker.branch:
             return True
-        if self.git.renamed_from(repo, current, attempt.branch):
+        if self.git.renamed_from(repo, current, worker.branch):
             self.git.delete_branch(repo, current, force=True)
             return True
         return False
@@ -764,36 +812,34 @@ class Runner:
         now = time.time()
         max_run = self.config.max_run_hours * 3600
         hard_stop = self.config.hard_stop_hours * 3600
-        for attempt in self.ledger.live_attempts():
-            if attempt.state != ledger_mod.RUNNING or not attempt.working_since:
+        for worker in self.ledger.live_workers():
+            if worker.state != ledger_mod.RUNNING or not worker.working_since:
                 continue
-            elapsed = now - attempt.working_since
+            elapsed = now - worker.working_since
             if hard_stop and elapsed > hard_stop:
-                if not self._stop_session(attempt):
-                    # Leaving the attempt `running` keeps working_since intact, so the
+                if not self._stop_session(worker):
+                    # Leaving the worker `running` keeps working_since intact, so the
                     # next tick tries again instead of handing the run a fresh deadline.
                     report.errors.append(
-                        f"{attempt.identifier}: the watchdog could not stop the session"
+                        f"{worker.item}: the watchdog could not stop the session"
                     )
-                    if attempt.watchdog_notified != WATCHDOG_STOP_FAILED:
-                        self.ledger.update(attempt, watchdog_notified=WATCHDOG_STOP_FAILED)
-                        self._notify(report, attempt.identifier, "watchdog-stop-failed",
-                                     attempt.url, attempt.route,
+                    if worker.watchdog_notified != WATCHDOG_STOP_FAILED:
+                        self.ledger.update(worker, watchdog_notified=WATCHDOG_STOP_FAILED)
+                        self._notify(report, worker.item, "watchdog-stop-failed",
+                                     worker.url, worker.repository,
                                      detail=f"running for {elapsed / 3600:.1f}h")
                     continue
                 updated = self.ledger.update(
-                    attempt,
+                    worker,
                     state=ledger_mod.BLOCKED,
                     last_error=f"watchdog hard stop after {elapsed / 3600:.1f}h",
                 )
-                self._sync_labels(updated, self.context_for_attempt(updated), report)
-                self._notify(report, attempt.identifier, "watchdog-stopped", attempt.url,
-                             attempt.route, detail=f"running for {elapsed / 3600:.1f}h")
-                report.warnings.append(f"{attempt.identifier}: watchdog stopped the session")
-            elif max_run and elapsed > max_run and not attempt.watchdog_notified:
-                self.ledger.update(attempt, watchdog_notified=WATCHDOG_LONG_RUN)
-                self._notify(report, attempt.identifier, "long-running", attempt.url,
-                             attempt.route, detail=f"running for {elapsed / 3600:.1f}h")
+                self._sync_labels(updated, self.context_for_worker(updated), report)
+                self._notify(report, worker.item, "watchdog-stopped", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
+                report.warnings.append(f"{worker.item}: watchdog stopped the session")
+            elif max_run and elapsed > max_run and not worker.watchdog_notified:
+                self.ledger.update(worker, watchdog_notified=WATCHDOG_LONG_RUN)
+                self._notify(report, worker.item, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
 
     # ----- 4. state diff and notification -----------------------------------
 
@@ -802,47 +848,45 @@ class Runner:
         # being tried twice in this one.
         self._retry_pending_notifications(report)
         sessions = {s.id: s for s in self.sessions()}
-        for attempt in self.ledger.live_attempts():
-            if attempt.state == ledger_mod.LAUNCHING:
+        for worker in self.ledger.live_workers():
+            if worker.state == ledger_mod.LAUNCHING:
                 continue
-            session = sessions.get(attempt.session_id or "")
+            session = sessions.get(worker.session_id or "")
             if session is None:
-                session = self.claude.find_session(
-                    self.sessions(), name=attempt.identifier, cwd=attempt.worktree_path
-                )
+                session = self._find_worker_session(worker)
                 if session is not None:
-                    attempt = self.ledger.update(
-                        attempt, session_id=session.id, session_uuid=session.uuid
+                    worker = self.ledger.update(
+                        worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
             waiting = session.waiting_for if session else None
-            pr_url = (session.pr_url if session else None) or attempt.pr_url
+            pr_url = (session.pr_url if session else None) or worker.pr_url
 
             changes: dict[str, object] = {}
-            if observed != attempt.session_state:
+            if observed != worker.session_state:
                 changes["session_state"] = observed
-            if waiting != attempt.waiting_for:
+            if waiting != worker.waiting_for:
                 changes["waiting_for"] = sanitize.one_line(waiting) if waiting else None
-            if pr_url != attempt.pr_url:
+            if pr_url != worker.pr_url:
                 changes["pr_url"] = pr_url
             if changes:
-                attempt = self.ledger.update(attempt, **changes)
+                worker = self.ledger.update(worker, **changes)
 
-            attempt = self._apply_session_state(attempt, observed, report)
+            worker = self._apply_session_state(worker, observed, report)
 
     def _apply_session_state(
-        self, attempt: Attempt, observed: str, report: TickReport
-    ) -> Attempt:
-        context = self.context_for_attempt(attempt)
+        self, worker: Worker, observed: str, report: TickReport
+    ) -> Worker:
+        context = self.context_for_worker(worker)
         detail: str | None = None
-        target_state = attempt.state
+        target_state = worker.state
 
         if observed == claude_mod.WORKING:
             target_state = ledger_mod.RUNNING
-            if attempt.state != ledger_mod.RUNNING:
+            if worker.state != ledger_mod.RUNNING:
                 # A reply landed in agent view; the run is live again.
-                attempt = self.ledger.update(
-                    attempt, working_since=time.time(), watchdog_notified=0, last_error=None
+                worker = self.ledger.update(
+                    worker, working_since=time.time(), watchdog_notified=0, last_error=None
                 )
         elif observed == claude_mod.BLOCKED:
             # waiting_for comes from the session listing and can quote whatever the
@@ -850,79 +894,80 @@ class Runner:
             # reaches a notification.
             target_state, detail = ledger_mod.BLOCKED, "needs input"
         elif observed == claude_mod.DONE:
-            target_state, detail = self._resolve_done(attempt, context)
+            target_state, detail = self._resolve_done(worker, context)
         elif observed == claude_mod.FAILED:
             target_state, detail = ledger_mod.BLOCKED, "session failed"
         elif observed == claude_mod.STOPPED:
-            if attempt.state == ledger_mod.PAUSED:
-                return attempt
+            if worker.state == ledger_mod.PAUSED:
+                return worker
             target_state, detail = ledger_mod.BLOCKED, "session stopped"
         elif observed == ledger_mod.SESSION_MISSING:
-            if attempt.state == ledger_mod.PAUSED:
-                return attempt
+            if worker.state == ledger_mod.PAUSED:
+                return worker
             target_state, detail = ledger_mod.BLOCKED, "session is gone from the listing"
         else:
             target_state, detail = ledger_mod.BLOCKED, "session state not recognised — go look"
 
-        if target_state != attempt.state:
-            attempt = self.ledger.update(attempt, state=target_state)
-            report.transitions.append(f"{attempt.identifier}: {observed} -> {target_state}")
-        self._sync_labels(attempt, context, report)
+        if target_state != worker.state:
+            worker = self.ledger.update(worker, state=target_state)
+            report.transitions.append(f"{worker.item}: {observed} -> {target_state}")
+        self._sync_labels(worker, context, report)
 
-        if observed != attempt.notified_state and observed != claude_mod.WORKING:
+        if observed != worker.notified_state and observed != claude_mod.WORKING:
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
-            if self._notify(report, attempt.identifier, target_state, attempt.url,
-                            attempt.route, detail=detail):
-                attempt = self.ledger.update(attempt, notified_state=observed)
-            elif attempt.is_terminal:
-                # A finished attempt leaves the live loop, so nothing would visit it again.
-                self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{attempt.id}", detail or "")
-        elif observed == claude_mod.WORKING and attempt.notified_state != observed:
-            attempt = self.ledger.update(attempt, notified_state=observed)
-        return attempt
+            if self._notify(report, worker.item, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
+                worker = self.ledger.update(worker, notified_state=observed)
+            elif worker.is_terminal:
+                # A finished worker leaves the live loop, so nothing would visit it again.
+                self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{worker.id}", detail or "")
+        elif observed == claude_mod.WORKING and worker.notified_state != observed:
+            worker = self.ledger.update(worker, notified_state=observed)
+        return worker
 
     def _retry_pending_notifications(self, report: TickReport) -> None:
         for key, detail in self.ledger.all_state().items():
             if not key.startswith(PENDING_NOTIFICATION_PREFIX):
                 continue
-            attempt_id = key.removeprefix(PENDING_NOTIFICATION_PREFIX)
-            attempt = self.ledger.get(int(attempt_id)) if attempt_id.isdigit() else None
-            if attempt is None or not attempt.finished_at:
+            worker_id = key.removeprefix(PENDING_NOTIFICATION_PREFIX)
+            worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            if worker is None or not worker.finished_at:
                 self.ledger.delete_state(key)
                 continue
-            if time.time() - attempt.finished_at > PENDING_NOTIFICATION_MAX_AGE_SECS:
+            if time.time() - worker.finished_at > PENDING_NOTIFICATION_MAX_AGE_SECS:
                 self.ledger.delete_state(key)
                 report.warnings.append(
-                    f"gave up on the notification for {attempt.identifier} ({attempt.state})"
+                    f"gave up on the notification for {worker.item} ({worker.state})"
                 )
                 continue
-            if self._notify(report, attempt.identifier, attempt.state, attempt.url,
-                            attempt.route, detail=detail or None):
+            if self._notify(report, worker.item, worker.state, worker.url, worker.repository, role=worker.role, detail=detail or None):
                 self.ledger.delete_state(key)
 
     def _resolve_done(
-        self, attempt: Attempt, context: RouteContext | None
+        self, worker: Worker, context: RepositoryContext | None
     ) -> tuple[str, str | None]:
         """`done` is ambiguous: a session that asked in plain text also reads done."""
-        repo_config = context.repo_config if context else None
-        if repo_config is None or not repo_config.status_file:
+        try:
+            role = context.role(worker.role) if context and context.usable else None
+        except ConfigError:
+            role = None
+        if role is None or not role.status_file:
             return ledger_mod.BLOCKED, "finished or waiting — no status file, go look"
         path = Path(
             config_mod.render(
-                repo_config.status_file,
-                self._template_values(attempt),
-                where=f"{attempt.route}.status_file",
+                role.status_file,
+                self._template_values(worker),
+                where=f"{role.source or role.name}.status_file",
             )
         ).expanduser()
-        status = StatusFile.read(path, not_before=attempt.created_at)
+        status = StatusFile.read(path, not_before=worker.created_at)
         if status.stale:
-            return ledger_mod.BLOCKED, "its status file predates this attempt — go look"
+            return ledger_mod.BLOCKED, "its status file predates this worker — go look"
         if not status.present:
             return ledger_mod.BLOCKED, "finished but wrote no status file — go look"
-        if status.pr_url and status.pr_url != attempt.pr_url:
-            self.ledger.update(attempt, pr_url=status.pr_url)
+        if status.pr_url and status.pr_url != worker.pr_url:
+            self.ledger.update(worker, pr_url=status.pr_url)
         if status.state == "complete":
             return ledger_mod.DONE, "complete"
         if status.state == "needs-input":
@@ -931,200 +976,242 @@ class Runner:
             # stop_reason is written by the agent. It is kept for `--verbose-titles` and
             # deliberately left out of the notification, which usually crosses a relay.
             if status.stop_reason:
-                self.ledger.update(attempt, last_error=f"aborted: {status.stop_reason}"[:500])
+                self.ledger.update(worker, last_error=f"aborted: {status.stop_reason}"[:500])
             return ledger_mod.FAILED, "aborted"
         return ledger_mod.BLOCKED, "status file did not name a known state — go look"
 
     # ----- labels -----------------------------------------------------------
 
     def _sync_all_labels(self, report: TickReport) -> None:
-        # Terminal attempts are included: the last label write an attempt makes is the
+        # Terminal workers are included: the last label write an worker makes is the
         # one at its final transition, and if that write fails nothing else would ever
         # retry it. An overnight credential outage would otherwise leave every run that
         # finished during it wearing the wrong label.
-        for attempt in (*self.ledger.live_attempts(), *self.ledger.terminal_attempts_since()):
-            if attempt.state == ledger_mod.LAUNCHING and attempt.step < 1:
+        for worker in (*self.ledger.live_workers(), *self.ledger.terminal_workers_since()):
+            if worker.state == ledger_mod.LAUNCHING and worker.step < 1:
                 continue
-            self._sync_labels(attempt, self.context_for_attempt(attempt), report)
+            self._sync_labels(worker, self.context_for_worker(worker), report)
 
-    def _label_sync_pending(self, identifier: str) -> bool:
-        attempt = self.ledger.latest_attempt_for(identifier)
-        if attempt is None:
+    def _label_sync_pending(self, item: str) -> bool:
+        worker = self.ledger.latest_worker_for(item)
+        if worker is None:
             return False
-        desired = _STATUS_FOR_STATE.get(attempt.state)
-        return desired is not None and attempt.label_state != desired.value
+        desired = _STATUS_FOR_STATE.get(worker.state)
+        return desired is not None and worker.label_state != desired.value
 
     def _sync_labels(
-        self, attempt: Attempt, context: RouteContext | None, report: TickReport
-    ) -> Attempt:
-        """Drive the tracker towards the label the attempt state implies.
+        self, worker: Worker, context: RepositoryContext | None, report: TickReport
+    ) -> Worker:
+        """Drive the tracker towards the label the worker state implies.
 
         `label_state` records what was last *verified*, so a write that could not be
         confirmed is simply retried on the next tick rather than assumed to have landed.
         """
-        desired = _STATUS_FOR_STATE.get(attempt.state)
-        if desired is None or attempt.label_state == desired.value:
-            return attempt
+        desired = _STATUS_FOR_STATE.get(worker.state)
+        if desired is None or worker.label_state == desired.value:
+            return worker
         if context is None or not context.usable:
-            return attempt
+            return worker
         try:
-            issue = context.tracker.get(attempt.issue_id)  # type: ignore[union-attr]
+            issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
             if issue is None:
-                report.warnings.append(f"{attempt.identifier} no longer exists on the tracker")
-                return self.ledger.update(attempt, label_state=desired.value)
+                report.warnings.append(f"{worker.item} no longer exists on the tracker")
+                return self.ledger.update(worker, label_state=desired.value)
             context.tracker.mark(issue, desired)  # type: ignore[union-attr]
         except AmbiguousWrite as exc:
-            report.errors.append(f"{attempt.identifier}: {exc}")
-            return self.ledger.update(attempt, last_error=str(exc)[:500])
+            report.errors.append(f"{worker.item}: {exc}")
+            return self.ledger.update(worker, last_error=str(exc)[:500])
         except TRACKER_FAILURES as exc:
-            report.errors.append(f"{attempt.identifier}: {exc}")
-            return attempt
+            report.errors.append(f"{worker.item}: {exc}")
+            return worker
         # Deliberately does not clear last_error: a successful label write says nothing
-        # about why the attempt failed, and that reason is what `--verbose-titles` shows.
-        return self.ledger.update(attempt, label_state=desired.value)
+        # about why the worker failed, and that reason is what `--verbose-titles` shows.
+        return self.ledger.update(worker, label_state=desired.value)
 
     # ----- 5/6. admission and launch ----------------------------------------
 
     def _counts(self) -> tuple[int, int, dict[str, int]]:
-        """(working, open, per-route working) as the admission rules define them."""
+        """(working, open, per-repository working) as the admission rules define them."""
         working = 0
-        open_attempts = 0
+        open_workers = 0
         per_route: dict[str, int] = {}
-        for attempt in self.ledger.live_attempts():
-            open_attempts += 1
-            is_working = attempt.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
+        for worker in self.ledger.live_workers():
+            open_workers += 1
+            is_working = worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
             if is_working:
                 working += 1
-                per_route[attempt.route] = per_route.get(attempt.route, 0) + 1
-        return working, open_attempts, per_route
+                per_route[worker.repository] = per_route.get(worker.repository, 0) + 1
+        return working, open_workers, per_route
 
     def _admit(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
-        for route in self.config.routes:
-            if self.ledger.is_paused(route.name):
-                report.skipped.append(f"route {route.name} is paused")
+        for repository in self.config.repositories:
+            if self.ledger.is_paused(repository.name):
+                report.skipped.append(f"repository {repository.name} is paused")
                 continue
-            context = self.context(route)
+            context = self.context(repository)
             if not context.usable:
                 if context.error:
-                    report.errors.append(f"route {route.name}: {context.error}")
+                    report.errors.append(f"repository {repository.name}: {context.error}")
                 continue
-            try:
-                queued = context.tracker.list(Status.QUEUED)  # type: ignore[union-attr]
-            except TRACKER_FAILURES as exc:
-                report.errors.append(f"route {route.name}: {exc}")
-                continue
-
-            for issue in queued:
-                identifier = issue.identifier
-                if not sanitize.is_safe_identifier(identifier):
-                    report.warnings.append(
-                        f"skipping an issue whose identifier is not usable as a path or "
-                        f"branch name: {sanitize.scrub_identifier(identifier)!r}"
-                    )
-                    continue
-                if self.ledger.live_attempt_for(identifier) is not None:
-                    continue
-                stale = self._stale_worktree_for(identifier)
-                if stale is not None:
-                    report.skipped.append(
-                        f"{identifier}: the previous attempt's worktree is still at {stale}; "
-                        f"`chargehand retry {identifier}` reuses it safely, "
-                        f"`chargehand discard {identifier} --yes` removes it"
-                    )
-                    continue
-
-                working, open_attempts, per_route = self._counts()
-                if working >= self.config.max_concurrent:
-                    report.skipped.append(
-                        f"{identifier}: launch throttle ({working}/{self.config.max_concurrent})"
-                    )
-                    break
-                if open_attempts >= self.config.max_open_attempts:
-                    report.skipped.append(
-                        f"{identifier}: {open_attempts}/{self.config.max_open_attempts} open attempts"
-                    )
-                    break
-                if (
-                    route.max_concurrent is not None
-                    and per_route.get(route.name, 0) >= route.max_concurrent
-                ):
-                    report.skipped.append(
-                        f"{identifier}: route {route.name} is at its own limit "
-                        f"({route.max_concurrent})"
-                    )
-                    break
-
+            for role_name in repository.roles:
                 try:
-                    self._launch(context, issue, report, crash_after_step=crash_after_step)
-                except LaunchAborted:
-                    raise
-                except ChargehandError as exc:
-                    report.errors.append(f"{identifier}: {exc}")
+                    role = context.role(role_name)
+                except ConfigError as exc:
+                    report.errors.append(f"repository {repository.name}: {exc}")
+                    continue
+                tracker_type = context.tracker.type  # type: ignore[union-attr]
+                rule = role.start_rule_for(roles_mod.LABELED, tracker_type, repository.name)
+                if rule is None:
+                    # Started by some other event source, which the tracker queue is not.
+                    continue
+                self._admit_role(context, role, rule, report, crash_after_step=crash_after_step)
 
-    def _stale_worktree_for(self, identifier: str) -> Path | None:
-        """A re-armed issue starts a new attempt only once the old worktree is gone.
+    def _admit_role(
+        self,
+        context: RepositoryContext,
+        role: Role,
+        rule: StartRule,
+        report: TickReport,
+        *,
+        crash_after_step: int | None,
+    ) -> None:
+        repository = context.repository
+        try:
+            queued = context.tracker.list(Status.QUEUED)  # type: ignore[union-attr]
+        except TRACKER_FAILURES as exc:
+            report.errors.append(f"repository {repository.name}: {exc}")
+            return
+
+        for issue in queued:
+            item = issue.identifier
+            if not sanitize.is_safe_identifier(item):
+                report.warnings.append(
+                    f"skipping an issue whose identifier is not usable as a path or "
+                    f"branch name: {sanitize.scrub_identifier(item)!r}"
+                )
+                continue
+            # The queue label is one per issue, and every worker the queue starts drives that
+            # label, so a second one would clear it when either finished. An issue that any
+            # live worker holds stays with it, whatever the rule's `unless_subscribed` says;
+            # re-adding the label while it runs must not start another role on it.
+            if self.ledger.live_worker_for(item) is not None:
+                continue
+            stale = self._stale_worktree_for(role.name, item)
+            if stale is not None:
+                report.skipped.append(
+                    f"{item}: the previous worker's worktree is still at {stale}; "
+                    f"`chargehand retry {item}` reuses it safely, "
+                    f"`chargehand discard {item} --yes` removes it"
+                )
+                continue
+
+            working, open_workers, per_repository = self._counts()
+            if working >= self.config.max_concurrent:
+                report.skipped.append(
+                    f"{item}: launch throttle ({working}/{self.config.max_concurrent})"
+                )
+                break
+            if open_workers >= self.config.max_open_workers:
+                report.skipped.append(
+                    f"{item}: {open_workers}/{self.config.max_open_workers} open workers"
+                )
+                break
+            if (
+                repository.max_concurrent is not None
+                and per_repository.get(repository.name, 0) >= repository.max_concurrent
+            ):
+                report.skipped.append(
+                    f"{item}: repository {repository.name} is at its own limit "
+                    f"({repository.max_concurrent})"
+                )
+                break
+            in_role = self.ledger.live_count_by_role().get(role.name, 0)
+            if role.policy.max_workers is not None and in_role >= role.policy.max_workers:
+                report.skipped.append(
+                    f"{item}: role {role.name} is at its limit ({role.policy.max_workers} workers)"
+                )
+                break
+
+            try:
+                self._launch(context, role, rule, issue, report,
+                             crash_after_step=crash_after_step)
+            except LaunchAborted:
+                raise
+            except ChargehandError as exc:
+                report.errors.append(f"{item}: {exc}")
+
+    def _stale_worktree_for(self, role: str, item: str) -> Path | None:
+        """A re-armed item starts a new worker only once the old worktree is gone.
 
         Reusing it would start a run that is supposed to be fresh on top of the previous
-        attempt's changes, and — if that launch were interrupted — leave its session as
-        the obvious thing for reconciliation to adopt.
+        worker's changes, and, if that launch were interrupted, leave its session as the
+        obvious thing for reconciliation to adopt.
         """
-        previous = self.ledger.latest_attempt_for(identifier)
+        previous = self.ledger.latest_worker_for(item, role)
         if previous is None or not previous.is_terminal:
             return None
         return previous.worktree_path if previous.worktree_path.exists() else None
 
     def _launch(
         self,
-        context: RouteContext,
+        context: RepositoryContext,
+        role: Role,
+        rule: StartRule,
         issue: Issue,
         report: TickReport,
         *,
         crash_after_step: int | None = None,
     ) -> None:
-        route = context.route
+        repository = context.repository
         repo_config = context.repo_config
         assert repo_config is not None
-        worktree = self.config.worktree_root / issue.identifier
-        branch = self._branch_for(repo_config, issue.identifier)
+        worktree = self.config.worktree_root / role.name / issue.identifier
+        branch = self._branch_for(repo_config, role.name, issue.identifier)
 
         # Step 0: the row exists before any external side effect.
-        attempt = self.ledger.create_attempt(
-            issue_id=issue.id,
-            identifier=issue.identifier,
+        worker = self.ledger.create_worker(
+            role=role.name,
+            item=issue.identifier,
+            item_id=issue.id,
             url=issue.url,
-            route=route.name,
-            repo=route.repo,
+            repository=repository.name,
+            repo=repository.path,
             worktree=worktree,
             branch=branch,
+            start_rule=rule.name,
+            runtime=role.runtime,
         )
-        log.info("launching %s in %s", issue.identifier, worktree)
+        log.info("launching %s in %s", worker.handle, worktree)
         self._check_crash(0, crash_after_step)
-        self._run_launch_steps(context, attempt, report, crash_after_step=crash_after_step,
+        self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step,
                                issue=issue)
 
     def _run_launch_steps(
         self,
-        context: RouteContext,
-        attempt: Attempt,
+        context: RepositoryContext,
+        worker: Worker,
         report: TickReport,
         *,
         crash_after_step: int | None = None,
         issue: Issue | None = None,
-    ) -> Attempt:
+    ) -> Worker:
         repo_config = context.repo_config
         tracker = context.tracker
         assert repo_config is not None and tracker is not None
+        # A role that fails to load is a ChargehandError: the caller records it and the
+        # launch retry counter fails the worker loudly rather than looping.
+        role = context.role(worker.role)
 
         # Step 1: swap the labels, then verify by re-reading.
-        if attempt.step < 1:
+        if worker.step < 1:
             if issue is None:
                 # Only reached when resuming an interrupted launch; a tracker or
                 # credential failure here is caught by _reconcile_ledger, which hands
-                # the attempt its launch retry back rather than spending one.
-                issue = tracker.get(attempt.issue_id)
+                # the worker its launch retry back rather than spending one.
+                issue = tracker.get(worker.item_id)
                 if issue is None:
-                    return self._fail_attempt(
-                        attempt, context, "the issue no longer exists on the tracker", report,
+                    return self._fail_worker(
+                        worker, context, "the issue no longer exists on the tracker", report,
                         notify_detail="issue no longer exists",
                     )
 
@@ -1134,53 +1221,55 @@ class Runner:
                 # It may have landed. Record why and stay at step 0, then let the caller
                 # decide what it costs. A resume hands its launch retry back, because an
                 # unverifiable write is a fact about the tracker and not a fault in this
-                # attempt: a tracker that answers a correct write with a stale read would
+                # worker: a tracker that answers a correct write with a stale read would
                 # otherwise fail a launch that never went wrong, in three ticks.
-                self.ledger.update(attempt, last_error=str(exc)[:500])
+                self.ledger.update(worker, last_error=str(exc)[:500])
                 raise
-            attempt = self.ledger.update(attempt, step=1, label_state=Status.RUNNING.value)
+            worker = self.ledger.update(worker, step=1, label_state=Status.RUNNING.value)
             self._check_crash(1, crash_after_step)
 
         # Step 2: fetch, then create the worktree on a placeholder branch.
-        if attempt.step < 2:
-            self.git.fetch(context.route.repo, gitutil.remote_of(repo_config.base))
+        if worker.step < 2:
+            self.git.fetch(context.repository.path, gitutil.remote_of(repo_config.base))
             self.git.add_worktree(
-                context.route.repo, attempt.worktree_path, attempt.branch, repo_config.base
+                context.repository.path, worker.worktree_path, worker.branch, repo_config.base
             )
-            attempt = self.ledger.update(attempt, step=2)
+            worker = self.ledger.update(worker, step=2)
             self._check_crash(2, crash_after_step)
 
-        # Step 3: the repository's own setup script.
-        if attempt.step < 3:
-            failure = self._run_setup(repo_config, attempt)
-            if failure is not None:
-                # `failure` can quote the setup script's stderr, so it stays local.
-                return self._fail_attempt(
-                    attempt, context, failure, report, notify_detail="setup script failed"
-                )
-            attempt = self.ledger.update(attempt, step=3)
+        # Step 3: the repository's own setup script, then the role's.
+        if worker.step < 3:
+            for template, where in (
+                (repo_config.setup, f"{repo_config.source or 'repo config'}.setup"),
+                (role.setup, f"{role.source or 'role ' + role.name}.setup"),
+            ):
+                failure = self._run_script(template, worker, repo_config.setup_timeout_secs, where)
+                if failure is not None:
+                    # `failure` can quote the script's stderr, so it stays local.
+                    return self._fail_worker(
+                        worker, context, failure, report, notify_detail="setup script failed"
+                    )
+            worker = self.ledger.update(worker, step=3)
             self._check_crash(3, crash_after_step)
 
         # Step 4: start the background session and record its ids.
-        if attempt.step < 4:
-            attempt = self._start_session(context, attempt, repo_config, report)
+        if worker.step < 4:
+            worker = self._start_session(context, role, worker, report)
             self._check_crash(4, crash_after_step)
 
-        return attempt
+        return worker
 
-    def _run_setup(self, repo_config: RepoConfig, attempt: Attempt) -> str | None:
-        if not repo_config.setup:
+    def _run_script(
+        self, template: str | None, worker: Worker, timeout_secs: float, where: str
+    ) -> str | None:
+        if not template:
             return None
-        argv = config_mod.render_argv(
-            repo_config.setup,
-            self._template_values(attempt),
-            where=f"{repo_config.source or 'repo config'}.setup",
-        )
+        argv = config_mod.render_argv(template, self._template_values(worker), where=where)
         program = Path(argv[0])
         if not program.is_absolute():
             # The worktree is a full checkout, so its own copy of the script is the one
             # the run should use; the main checkout is only a fallback.
-            for root in (attempt.worktree_path, attempt.repo_path):
+            for root in (worker.worktree_path, worker.repo_path):
                 candidate = root / program
                 if candidate.exists():
                     argv[0] = str(candidate)
@@ -1188,14 +1277,14 @@ class Runner:
         try:
             result = subprocess.run(
                 argv,
-                cwd=str(attempt.worktree_path),
+                cwd=str(worker.worktree_path),
                 capture_output=True,
                 text=True,
-                timeout=repo_config.setup_timeout_secs,
+                timeout=timeout_secs,
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return f"setup script timed out after {repo_config.setup_timeout_secs:.0f}s"
+            return f"setup script timed out after {timeout_secs:.0f}s"
         except OSError as exc:
             return f"setup script could not be run: {exc}"
         if result.returncode != 0:
@@ -1205,62 +1294,52 @@ class Runner:
 
     def _start_session(
         self,
-        context: RouteContext,
-        attempt: Attempt,
-        repo_config: RepoConfig,
+        context: RepositoryContext,
+        role: Role,
+        worker: Worker,
         report: TickReport,
-    ) -> Attempt:
+    ) -> Worker:
         # Adoption first: a previous run of this step may have started the session and
         # died before recording its ids.
-        owned_elsewhere = self._sessions_owned_by_other_attempts(attempt)
-        existing = self.claude.find_session(
-            self.sessions(refresh=True),
-            name=attempt.identifier,
-            cwd=attempt.worktree_path,
-            exclude=owned_elsewhere,
-        )
+        owned_elsewhere = self._sessions_owned_by_other_workers(worker)
+        self.sessions(refresh=True)
+        existing = self._find_worker_session(worker, exclude=owned_elsewhere)
         if existing is None:
             prompt = config_mod.render(
-                repo_config.prompt,
-                self._template_values(attempt),
-                where=f"{repo_config.source or 'repo config'}.prompt",
+                role.prompt,
+                self._template_values(worker),
+                where=f"{role.source or 'role ' + role.name}.prompt",
             )
             # Claude Code will not start a background session in a directory nobody has
             # accepted a trust dialog for, and every worktree here was made seconds ago.
             # There is no dialog a runner can answer, so the flag is written instead.
             if self.config.trust_worktrees and not self.claude.trust_worktree(
-                attempt.worktree_path
+                worker.worktree_path
             ):
                 report.warnings.append(
-                    f"{attempt.identifier}: could not record {attempt.worktree_path} as a "
+                    f"{worker.handle}: could not record {worker.worktree_path} as a "
                     f"trusted workspace; the launch may be refused"
                 )
-            settings = self._launch_settings()
             result = self.claude.launch(
-                worktree=attempt.worktree_path,
-                name=attempt.identifier,
+                worktree=worker.worktree_path,
+                name=worker.handle,
                 prompt=prompt,
-                permission_mode=repo_config.permission_mode,
-                settings=settings,
+                permission_mode=role.permission_mode,
+                agent=role.agent,
+                model=role.model,
+                effort=role.effort,
+                settings=self._launch_settings(role),
             )
-            existing = self.claude.find_session(
-                self.sessions(refresh=True),
-                name=attempt.identifier,
-                cwd=attempt.worktree_path,
-                exclude=owned_elsewhere,
-            )
+            self.sessions(refresh=True)
+            existing = self._find_worker_session(worker, exclude=owned_elsewhere)
             if existing is None:
                 raise ClaudeError(
-                    f"started a session for {attempt.identifier} but it did not appear in "
+                    f"started a session for {worker.handle} but it did not appear in "
                     f"`claude agents --json --all`; the launch printed: "
                     f"{sanitize.one_line(result.stdout or result.stderr, limit=200)!r}"
                 )
-        if existing is None:
-            raise ClaudeError(
-                f"no session for {attempt.identifier} in `claude agents --json --all`"
-            )
-        attempt = self.ledger.update(
-            attempt,
+        worker = self.ledger.update(
+            worker,
             step=ledger_mod.LAST_STEP,
             state=ledger_mod.RUNNING,
             session_id=existing.id,
@@ -1269,131 +1348,153 @@ class Runner:
             working_since=time.time(),
             last_error=None,
         )
-        report.launched.append(attempt.identifier)
-        return attempt
+        self.ledger.record_session(
+            worker, kind=ledger_mod.SESSION_INITIAL, session_id=existing.id, session_uuid=existing.uuid
+        )
+        report.launched.append(worker.item)
+        return worker
 
-    def _sessions_owned_by_other_attempts(self, attempt: Attempt) -> set[str]:
+    def _find_worker_session(self, worker: Worker, *, exclude: Collection[str] = ()) -> Session | None:
+        """The worker's session in the current listing, by worktree or by name.
+
+        A session is named after its worker (`role/item`). Sessions from before roles
+        existed were named after the issue alone, so that name is tried second.
+        """
+        sessions = self.sessions()
+        found = self.claude.find_session(
+            sessions, name=worker.handle, cwd=worker.worktree_path, exclude=exclude
+        )
+        if found is None:
+            found = self.claude.find_session(sessions, name=worker.item, exclude=exclude)
+        return found
+
+    def _sessions_owned_by_other_workers(self, worker: Worker) -> set[str]:
         return {
             other.session_id
-            for other in self.ledger.recent_attempts(200)
-            if other.session_id and other.id != attempt.id
+            for other in self.ledger.recent_workers(200)
+            if other.session_id and other.id != worker.id
         }
 
-    def _launch_settings(self) -> dict[str, object] | None:
-        """Deny rules for runner-launched sessions.
+    def _launch_settings(self, role: Role) -> dict[str, object] | None:
+        """Deny rules for runner-launched sessions, and the role's own allow rules.
 
         A guardrail, not a sandbox: sessions run as the operator's user, so this only
         stops the easy case of a session steering the runner or stopping its siblings.
         """
-        if not self.config.pass_deny_rules_at_launch or not self.config.deny_rules:
-            return None
-        return {"permissions": {"deny": list(self.config.deny_rules)}}
+        deny = self.config.deny_rules if self.config.pass_deny_rules_at_launch else ()
+        return role.launch_settings(tuple(deny))
 
-    def _branch_for(self, repo_config: RepoConfig | None, identifier: str) -> str:
+    def _branch_for(self, repo_config: RepoConfig | None, role: str, item: str) -> str:
+        # Two roles can take the same item, and git refuses to check one branch out in
+        # two worktrees, so the role is part of the placeholder name.
         prefix = repo_config.branch_prefix if repo_config else "chargehand/"
-        return f"{prefix}{identifier}"
+        return f"{prefix}{role}/{item}"
 
-    def _template_values(self, attempt: Attempt) -> dict[str, str]:
-        return {
-            "issue": attempt.identifier,
-            "url": attempt.url or "",
-            "worktree": str(attempt.worktree_path),
-            "branch": attempt.branch,
-            "repo": str(attempt.repo_path),
+    def _template_values(self, worker: Worker) -> dict[str, str]:
+        values = {
+            "item": worker.item,
+            "item_url": worker.url or "",
+            "worktree": str(worker.worktree_path),
+            "branch": worker.branch,
+            "repo": str(worker.repo_path),
         }
+        # The names from before work items existed.
+        values["issue"] = values["item"]
+        values["url"] = values["item_url"]
+        return values
 
     @staticmethod
     def _check_crash(step: int, crash_after_step: int | None) -> None:
         if crash_after_step is not None and step == crash_after_step:
             raise LaunchAborted(step)
 
-    def _fail_attempt(
+    def _fail_worker(
         self,
-        attempt: Attempt,
-        context: RouteContext | None,
+        worker: Worker,
+        context: RepositoryContext | None,
         reason: str,
         report: TickReport,
         *,
-        notify_detail: str = "attempt failed",
-    ) -> Attempt:
+        notify_detail: str = "worker failed",
+    ) -> Worker:
         """*reason* may quote a setup script or a tracker, so it stays local.
 
         It is recorded in the ledger and shown by `--verbose-titles`; the notification
         carries only *notify_detail*, which this module writes.
         """
-        attempt = self.ledger.update(
-            attempt, state=ledger_mod.FAILED, last_error=sanitize.one_line(reason, limit=400)
+        worker = self.ledger.update(
+            worker, state=ledger_mod.FAILED, last_error=sanitize.one_line(reason, limit=400)
         )
-        self._sync_labels(attempt, context, report)
-        report.failed.append(f"{attempt.identifier}: {reason}")
-        log.error("%s failed: %s", attempt.identifier, reason)
-        self._notify(report, attempt.identifier, "failed", attempt.url, attempt.route,
+        self._sync_labels(worker, context, report)
+        report.failed.append(f"{worker.item}: {reason}")
+        log.error("%s failed: %s", worker.item, reason)
+        self._notify(report, worker.item, "failed", worker.url, worker.repository, role=worker.role,
                      detail=notify_detail)
-        return attempt
+        return worker
 
     # ----- 7. garbage collection --------------------------------------------
 
     def _collect_garbage(self, report: TickReport) -> None:
         self._check_disk(report)
         self._close_out_finished_issues(report)
-        for attempt in self.ledger.attempts_needing_gc():
-            context = self.context_for_attempt(attempt)
+        for worker in self.ledger.workers_needing_gc():
+            context = self.context_for_worker(worker)
             if context is None or not context.usable:
                 continue
             try:
-                issue = context.tracker.get(attempt.issue_id)  # type: ignore[union-attr]
+                issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
             except TRACKER_FAILURES:
                 continue
             if issue is not None and not issue.closed:
                 continue
-            blocker = self._worktree_holds_work(attempt)
+            blocker = self._worktree_holds_work(worker)
             if blocker:
-                report.warnings.append(f"{attempt.identifier}: not collected, {blocker}")
+                report.warnings.append(f"{worker.item}: not collected, {blocker}")
                 continue
-            if attempt.session_id and not self._stop_session(attempt):
+            if worker.session_id and not self._stop_session(worker):
                 report.warnings.append(
-                    f"{attempt.identifier}: not collected, its session is still working"
+                    f"{worker.item}: not collected, its session is still working"
                 )
                 continue
-            self._remove_session(attempt)
+            self._remove_session(worker)
             try:
-                branches_removed = self._remove_worktree(attempt, force=False)
+                branches_removed = self._remove_worktree(worker, force=False)
             except GitError as exc:
-                report.warnings.append(f"{attempt.identifier}: could not collect: {exc}")
+                report.warnings.append(f"{worker.item}: could not collect: {exc}")
                 continue
             if not branches_removed:
-                report.warnings.append(f"{attempt.identifier}: collected, but {KEPT_BRANCH}")
-            self.ledger.update(attempt, gc_done=1, session_id=None, session_uuid=None)
-            report.collected.append(attempt.identifier)
+                report.warnings.append(f"{worker.item}: collected, but {KEPT_BRANCH}")
+            self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
+            report.collected.append(worker.item)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:
-        """A closed issue ends its attempt, even one parked as blocked.
+        """A closed issue ends its worker, even one parked as blocked.
 
-        Without this, a route with no status file never reaches a terminal state — `done`
+        Without this, a repository with no status file never reaches a terminal state — `done`
         alone means "go look" — so its worktree would sit there until someone discarded it
         by hand. A run that is still working is reported rather than stopped: the issue
         closing is not a reason to destroy work in progress.
         """
-        for attempt in self.ledger.live_attempts():
-            if attempt.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING):
+        for worker in self.ledger.live_workers():
+            if worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING):
                 continue
-            context = self.context_for_attempt(attempt)
+            context = self.context_for_worker(worker)
             if context is None or not context.usable:
                 continue
             try:
-                issue = context.tracker.get(attempt.issue_id)  # type: ignore[union-attr]
+                issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
             except TRACKER_FAILURES:
                 continue
             if issue is not None and not issue.closed:
                 continue
-            if not self._stop_session(attempt):
+            if not self._stop_session(worker):
                 report.warnings.append(
-                    f"{attempt.identifier}: issue is closed but its session would not stop"
+                    f"{worker.item}: issue is closed but its session would not stop"
                 )
                 continue
-            updated = self.ledger.update(attempt, state=ledger_mod.DONE, label_state=None)
+            updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
             self._sync_labels(updated, context, report)
-            report.transitions.append(f"{attempt.identifier}: issue closed -> done")
+            report.transitions.append(f"{worker.item}: issue closed -> done")
 
     def _check_disk(self, report: TickReport) -> None:
         if not self.config.min_free_disk_gb:
@@ -1415,28 +1516,32 @@ class Runner:
     def _notify(
         self,
         report: TickReport,
-        issue: str,
+        item: str,
         state: str,
         url: str | None,
-        route: str | None,
+        repository: str | None,
         *,
+        role: str | None = None,
         detail: str | None = None,
     ) -> bool:
         """*detail* must be a phrase this module writes.
 
         A notification usually crosses a third-party relay, so nothing authored by an
-        agent, a setup script, or the tracker belongs in it — not an issue title, not a
+        agent, a setup script, or the tracker belongs in it: not an issue title, not a
         session's `waitingFor`, not a status file's `stop_reason`, not a script's stderr.
         Those are kept in the ledger and reached through `--verbose-titles` and `logs`.
 
         Returns False only when a configured command failed.
         """
-        notification = Notification(issue=issue, state=state, url=url, route=route, detail=detail)
+        notification = Notification(
+            item=item, state=state, url=url, repository=repository, role=role, detail=detail
+        )
         if self.notifier.send(notification) or not self.notifier.enabled:
-            report.notified.append(f"{issue}: {state}")
+            report.notified.append(f"{item}: {state}")
             return True
-        report.warnings.append(f"notification for {issue} ({state}) failed; see the log")
+        report.warnings.append(f"notification for {item} ({state}) failed; see the log")
         return False
+
 
 
 def run_tick(
@@ -1449,4 +1554,4 @@ def run_tick(
     return Runner(config, ledger, **kwargs).tick(crash_after_step=crash_after_step)
 
 
-__all__ = ["Runner", "TickReport", "RouteContext", "StatusFile", "run_tick", "tick_lock"]
+__all__ = ["Runner", "TickReport", "RepositoryContext", "StatusFile", "run_tick", "tick_lock"]

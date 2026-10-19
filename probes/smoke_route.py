@@ -261,8 +261,8 @@ class Probe:
         """
         running = self.admin.issues_with_label(self.team_id, self.sandbox.labels["running"])
         live = {
-            row["identifier"]
-            for row in self.sandbox.attempts()
+            row["item"]
+            for row in self.sandbox.workers()
             if row["state"] in ("launching", "running", "blocked", "paused")
         }
         stranded = [
@@ -276,7 +276,7 @@ class Probe:
             stranded=stranded,
         )
 
-        owned = {row["worktree"] for row in self.sandbox.attempts() if row["state"] != "cancelled"}
+        owned = {row["worktree"] for row in self.sandbox.workers() if row["state"] != "cancelled"}
         unsupervised = []
         for entry in _sessions_under(self.sandbox.worktree_root):
             cwd = entry.get("cwd") or ""
@@ -302,7 +302,7 @@ class Probe:
             # The flag exists so a failed run can be picked over afterwards, and the
             # worktree and its session are most of what there is to look at.
             return
-        if discard and self.sandbox.attempt(issue.identifier):
+        if discard and self.sandbox.worker(issue.identifier):
             self.sandbox.cli("discard", issue.identifier, "--yes", "--force", "--wait", "60")
         self.admin.delete_issue(issue.id)
         self.issues = [entry for entry in self.issues if entry.id != issue.id]
@@ -329,7 +329,7 @@ class Probe:
                     f"report: {result.report.get('launched')} {result.report.get('errors')}",
                     report=result.report)
 
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "ledger row is complete",
                     row.get("state") == "running" and row.get("step") == 4
                     and bool(row.get("session_id")),
@@ -370,7 +370,7 @@ class Probe:
                     f"files={sorted(p.name for p in worktree.iterdir())}")
 
         result = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         # With no status file configured, `done` is deliberately not treated as success:
         # a session that asked its question as plain text reads the same way.
         self.expect(section, "a bare `done` parks the run rather than closing it",
@@ -403,7 +403,7 @@ class Probe:
                     f"rc={first.returncode} stderr={first.stderr[:120]}",
                     report=first.report)
 
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, f"step {step}: the row survives as an interrupted launch",
                     row.get("state") == "launching" and row.get("step") == step,
                     f"state={row.get('state')} step={row.get('step')}")
@@ -424,7 +424,7 @@ class Probe:
                     f"adopted={second.report.get('adopted')} "
                     f"errors={second.report.get('errors')}",
                     report=second.report)
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, f"step {step}: the attempt completed",
                     row.get("state") == "running" and row.get("step") == 4
                     and bool(row.get("session_id")),
@@ -436,7 +436,7 @@ class Probe:
         self.expect(section, f"step {step}: the running label is set",
                     self.label_key(issue) == "running", f"labels={self.labels_of(issue)}")
         self.expect(section, f"step {step}: exactly one attempt exists for the issue",
-                    len([r for r in self.sandbox.attempts()
+                    len([r for r in self.sandbox.workers()
                          if r["identifier"] == issue.identifier]) == 1)
         worktree = _worktree_of(row)
         entry = session_under(worktree) if worktree else None
@@ -479,7 +479,7 @@ class Probe:
         applied = [call for call in proxy.calls if call["action"].startswith("applied")]
         self.expect(section, "the fault was injected after the mutation reached the tracker",
                     bool(applied), f"proxy={applied}")
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "a write that landed is accepted on its re-read",
                     row.get("state") == "running" and row.get("step") == 4,
                     f"state={row.get('state')} step={row.get('step')} "
@@ -499,7 +499,7 @@ class Probe:
         proxy.arm(Fault(operation="Add", status=502, apply_upstream=True, times=1))
         issue = self.new_issue("tracker write applied half the swap")
         first = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "an unverifiable write holds the launch at step 0",
                     row.get("state") == "launching" and row.get("step") == 0,
                     f"state={row.get('state')} step={row.get('step')} "
@@ -510,7 +510,7 @@ class Probe:
         self.expect(section, "the tick reported the ambiguity",
                     bool(first.report.get("errors")), f"errors={first.report.get('errors')}")
         second = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "the next tick settles it and completes the launch",
                     row.get("state") == "running" and row.get("step") == 4,
                     f"state={row.get('state')} step={row.get('step')} "
@@ -526,14 +526,14 @@ class Probe:
         proxy.arm(Fault(operation="Issue", status=502, apply_upstream=False, times=1))
         issue = self.new_issue("verification read failed after the write landed")
         first = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "an unverifiable write is not assumed to have failed",
                     row.get("state") == "launching" and row.get("label_state") is None,
                     f"state={row.get('state')} label_state={row.get('label_state')} "
                     f"skipped={first.report.get('skipped')}",
                     report=first.report, proxy=list(proxy.calls))
         self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "the re-read on the next tick completes the launch",
                     row.get("state") == "running" and row.get("label_state") == "running",
                     f"state={row.get('state')} label_state={row.get('label_state')}")
@@ -565,7 +565,7 @@ class Probe:
         result = self.sandbox.tick()
         self.expect(section, "a paused route admits nothing",
                     not result.has("launched", issue.identifier)
-                    and self.sandbox.attempt(issue.identifier) is None,
+                    and self.sandbox.worker(issue.identifier) is None,
                     f"skipped={result.report.get('skipped')}")
 
         self.sandbox.cli("resume", "--route", "smoke", "--wait", "60")
@@ -577,7 +577,7 @@ class Probe:
         # admits. So the launch may already have happened before the probe ticks again;
         # what matters is that the held issue is running, not which tick started it.
         result = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "the held issue launches once resumed",
                     row.get("state") == "running" and row.get("step") == 4,
                     f"state={row.get('state')} step={row.get('step')} "
@@ -592,12 +592,12 @@ class Probe:
             self.record(section, "lifecycle setup", FAIL,
                         f"the run did not start: {launch.report.get('errors')}")
             return issue
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         worktree = Path(row["worktree"])
         first_attempt_id = row["id"]
 
         stopped = self.sandbox.cli("stop", issue.identifier, "--wait", "120")
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         entry = session_under(worktree)
         self.expect(section, "stop pauses the run and the session",
                     row.get("state") == "paused"
@@ -608,7 +608,7 @@ class Probe:
                     self.label_key(issue) == "blocked", f"labels={self.labels_of(issue)}")
 
         resumed = self.sandbox.cli("continue", issue.identifier, "--wait", "120")
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         entry = session_under(worktree)
         self.expect(section, "continue respawns the session",
                     row.get("state") == "running",
@@ -622,7 +622,7 @@ class Probe:
                     self.label_key(issue) == "running", f"labels={self.labels_of(issue)}")
 
         cancelled = self.sandbox.cli("cancel", issue.identifier, "--wait", "120")
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         entry = session_under(worktree)
         self.expect(section, "cancel ends the attempt and stops the session",
                     row.get("state") == "cancelled"
@@ -634,7 +634,7 @@ class Probe:
                     self.label_key(issue) == "blocked", f"labels={self.labels_of(issue)}")
         self.assert_no_strays(section)
 
-        cancelled_session = (self.sandbox.attempt(issue.identifier) or {}).get("session_id")
+        cancelled_session = (self.sandbox.worker(issue.identifier) or {}).get("session_id")
         retried = self.sandbox.cli("retry", issue.identifier, "--force", "--wait", "120")
         self.expect(section, "retry is accepted", retried.returncode == 0,
                     f"rc={retried.returncode} "
@@ -643,7 +643,7 @@ class Probe:
         # running again under a new attempt. Asserting on the momentary queued label
         # would be asserting on a state the runner is designed not to linger in.
         result = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "a retried issue starts a fresh attempt",
                     row.get("id") != first_attempt_id and row.get("state") == "running"
                     and row.get("step") == 4,
@@ -664,7 +664,7 @@ class Probe:
         branch = row.get("branch", "")
         discarded = self.sandbox.cli("discard", issue.identifier, "--yes", "--force", "--wait",
                                      "120")
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "discard removes the worktree, the branch and the session",
                     not worktree.is_dir() and branch not in self.sandbox.branches()
                     and session_under(worktree) is None,
@@ -687,7 +687,7 @@ class Probe:
         """
         issue = self.new_issue("cancel while a launch is in flight")
         interrupted = self.sandbox.tick(crash_after_step=2)
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         self.expect(section, "the launch is interrupted mid-sequence",
                     row.get("state") == "launching" and (row.get("step") or 4) < 4,
                     f"rc={interrupted.returncode} state={row.get('state')} "
@@ -700,7 +700,7 @@ class Probe:
                     f"rc={recorded.returncode} out={(recorded.stdout or recorded.stderr)[:120]}")
 
         result = self.sandbox.tick()
-        row = self.sandbox.attempt(issue.identifier) or {}
+        row = self.sandbox.worker(issue.identifier) or {}
         worktree = _worktree_of(row)
         entry = session_under(worktree) if worktree else None
         self.expect(section, "the tick finishes the launch, then cancels it",

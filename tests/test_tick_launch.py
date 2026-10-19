@@ -15,15 +15,15 @@ def test_a_queued_issue_becomes_a_supervised_session(harness):
     report = harness.tick()
 
     assert report.launched == ["ABC-1"]
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.step == LAST_STEP
     assert attempt.session_id
     assert attempt.session_uuid
-    assert attempt.branch == "chargehand/ABC-1"
+    assert attempt.branch == "chargehand/implementer/ABC-1"
     assert harness.labels("ABC-1") == ("chargehand-running",)
-    assert (harness.worktree_root / "ABC-1").is_dir()
-    assert (harness.worktree_root / "ABC-1" / "README.md").exists()
+    assert (harness.worktree("ABC-1")).is_dir()
+    assert (harness.worktree("ABC-1") / "README.md").exists()
 
 
 def test_the_launch_prompt_carries_no_issue_text(harness):
@@ -46,7 +46,7 @@ def test_the_launch_passes_the_permission_mode_and_deny_rules(harness):
     argv = harness.claude_state.launches[0]["argv"]
     assert "--bg" in argv
     assert argv[argv.index("--permission-mode") + 1] == "auto"
-    assert argv[argv.index("-n") + 1] == "ABC-1"
+    assert argv[argv.index("-n") + 1] == "implementer/ABC-1"
     settings = json.loads(argv[argv.index("--settings") + 1])
     assert set(DEFAULT_DENY_RULES) <= set(settings["permissions"]["deny"])
 
@@ -69,7 +69,7 @@ def test_an_unlabelled_issue_is_not_picked_up(harness):
     report = harness.tick()
 
     assert report.launched == []
-    assert harness.attempt("ABC-1") is None
+    assert harness.worker("ABC-1") is None
 
 
 def test_the_launch_throttle_caps_working_runs(harness):
@@ -93,7 +93,7 @@ def test_a_route_limit_applies_on_top_of_the_global_one(tmp_path, repo, claude_s
 
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
-    config = make_config(repo, worktree_root, max_concurrent=3, route_max_concurrent=1)
+    config = make_config(repo, worktree_root, max_concurrent=3, repository_max_concurrent=1)
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
     runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
@@ -115,7 +115,7 @@ def test_blocked_runs_do_not_hold_a_launch_slot(harness):
     harness.tick()
     harness.claude_state.set_session_state("ABC-1", "blocked")
     harness.next_tick()
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
 
     harness.board.add("ABC-2")
     report = harness.next_tick()
@@ -125,7 +125,7 @@ def test_blocked_runs_do_not_hold_a_launch_slot(harness):
 
 def test_open_attempts_bound_the_resume_burst(harness):
     harness.config = harness.config.__class__(
-        **{**harness.config.__dict__, "max_concurrent": 1, "max_open_attempts": 2}
+        **{**harness.config.__dict__, "max_concurrent": 1, "max_open_workers": 2}
     )
     for index in range(4):
         harness.board.add(f"ABC-{index}")
@@ -136,7 +136,7 @@ def test_open_attempts_bound_the_resume_burst(harness):
     harness.next_tick()
     harness.next_tick()
 
-    live = harness.ledger.live_attempts()
+    live = harness.ledger.live_workers()
     assert len(live) == 2
     assert {a.state for a in live} == {ledger_mod.BLOCKED, ledger_mod.RUNNING}
 
@@ -151,7 +151,7 @@ def test_a_failing_setup_script_fails_the_attempt_loudly(harness, repo):
 
     report = harness.tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
     assert "exited 7" in attempt.last_error
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
@@ -169,7 +169,7 @@ def test_the_setup_script_runs_in_the_worktree(harness, repo):
 
     harness.tick()
 
-    marker = harness.worktree_root / "ABC-1" / "where"
+    marker = harness.worktree("ABC-1") / "where"
     assert marker.read_text().strip().endswith("ABC-1")
 
 
@@ -203,7 +203,7 @@ def test_a_re_armed_issue_waits_until_its_old_worktree_is_gone(harness):
     harness.tick()
     harness.ledger.record_request("cancel", "ABC-1")
     harness.next_tick()
-    assert (harness.worktree_root / "ABC-1").is_dir()
+    assert (harness.worktree("ABC-1")).is_dir()
 
     # Re-arm by hand, as the label lifecycle documents.
     issue = harness.board.by_identifier("ABC-1")
@@ -240,7 +240,7 @@ def test_the_launch_marks_its_worktree_as_a_trusted_workspace(harness):
 
     harness.tick()
 
-    worktree = harness.worktree_root / "ABC-1"
+    worktree = harness.worktree("ABC-1")
     assert harness.runner.claude.is_trusted(worktree) is True
 
 
@@ -263,4 +263,4 @@ def test_trust_is_not_recorded_when_the_operator_turned_it_off(harness, monkeypa
 
     harness.tick()
 
-    assert harness.runner.claude.is_trusted(harness.worktree_root / "ABC-1") is False
+    assert harness.runner.claude.is_trusted(harness.worktree("ABC-1")) is False
