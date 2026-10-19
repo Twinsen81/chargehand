@@ -409,10 +409,14 @@ output, or know its version. A machine without a lease tool runs exactly the sam
 banksman needs nothing from the caller, so chargehand only has to keep a few properties that
 any such tool can rely on:
 
-- **A worker's commands run below its own agent process.** A lease tool finds the holder by
-  walking up the process tree to the agent, and a worker's session is a Claude Code process
-  of its own. A lease therefore belongs to one worker, also when several workers share a
-  machine.
+- **A worker's commands run below its own agent process.** A worker's session is a Claude
+  Code process of its own, and Claude Code names it in `CLAUDE_PID`. banksman takes that
+  process as the holder, so each worker has its own leases, also with the same holding
+  label. A walk up the process tree alone is not enough: the session process has the title
+  `claude bg-spare`, and above it is Claude Code's background service, one process that
+  hosts every background session of the user. Use a banksman from 2026-10-19 or later,
+  which reads `CLAUDE_PID` in that case; an older one makes all background workers one
+  holder.
 - **The branch names the work item.** A worker starts on `<branch_prefix><role>/<item>`, so
   a tool that reads an issue id from the branch name finds it.
 - **Stopping a worker ends its process.** banksman ends a lease when its agent process has
