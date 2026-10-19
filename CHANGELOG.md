@@ -25,9 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository's, a `status_file`, `[[start]]` rules that create a worker when an event
   arrives (`on`, optional `repositories`, `unless_subscribed` with `role` or `any`, and the
   `subscribe` and `close_on` event kinds for the worker's item), and `[policy]` caps such
-  as `max_workers`. `runtime` names the coding agent; `claude` is the only one so far. A repository whose `.chargehand.toml` still
-  carries `prompt` and has no role file gets its `implementer` role from it, so an older
-  configuration keeps working. `init` writes both files; `doctor` checks every enabled
+  as `max_workers`. `runtime` names the coding agent; `claude` is the only one so far. The
+  queue label is one per issue, so a queued issue that any live worker holds is skipped,
+  whichever role holds it. A repository whose `.chargehand.toml` still carries `prompt` and
+  has no role file gets its `implementer` role from it, so an older configuration keeps
+  working. `init` writes both files; `doctor` checks every enabled
   role and the agent file it names.
 - Machine configuration: `[[repository]]` with `path` and `roles` replaces `[[route]]`
   with `repo`, and `max_open_workers` replaces `max_open_attempts`; the old spellings are

@@ -49,7 +49,8 @@ on = "labeled"
 # Optional. Only these repositories; all of the role's repositories when left out.
 # repositories = ["my-app"]
 # Skip the item when a live worker of this role already has it ("role", the default),
-# or when a live worker of any role has it ("any").
+# or when a live worker of any role has it ("any"). For the queue label both mean any
+# role: the label is one per issue, so an issue that a worker holds stays with it.
 unless_subscribed = "role"
 
 [policy]

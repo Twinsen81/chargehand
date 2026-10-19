@@ -68,8 +68,8 @@ Components:
 An issue is picked up when all of these hold: it carries the queue label, it is assigned to
 the owner of the credentials the runner uses, it matches the repository's optional state
 filter, a role enabled in the repository has a start rule for the queue label, and the
-ledger has no live worker of that role for it (or of any role, when the rule says
-`unless_subscribed = "any"`).
+ledger has no live worker for it in any role. The label is one per issue and every worker the
+queue starts drives it, so re-adding the label while a worker runs starts nothing.
 
 - **Per-assignee filtering removes cross-machine races by construction.** Two developers'
   runners never see the same issue. Assigning the issue *is* the routing decision, and the
@@ -164,7 +164,7 @@ status_file = "/tmp/chargehand/{item}/status.json"   # optional, see "Supervisio
 
 [[start]]                           # create a worker when an issue gets the queue label
 on = "labeled"                      # any tracker; "linear.labeled" names one
-unless_subscribed = "role"          # skip the item when a live worker of this role has it
+unless_subscribed = "role"          # for later sources; the queue skips an item any worker has
 
 [policy]
 max_workers = 2                     # open workers of this role, across repositories

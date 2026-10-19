@@ -1090,8 +1090,11 @@ class Runner:
                     f"branch name: {sanitize.scrub_identifier(item)!r}"
                 )
                 continue
-            holder_role = role.name if rule.unless_subscribed == roles_mod.UNLESS_ROLE else None
-            if self.ledger.live_worker_for(item, holder_role) is not None:
+            # The queue label is one per issue, and every worker the queue starts drives that
+            # label, so a second one would clear it when either finished. An issue that any
+            # live worker holds stays with it, whatever the rule's `unless_subscribed` says;
+            # re-adding the label while it runs must not start another role on it.
+            if self.ledger.live_worker_for(item) is not None:
                 continue
             stale = self._stale_worktree_for(role.name, item)
             if stale is not None:

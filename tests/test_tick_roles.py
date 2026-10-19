@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import stat
 
@@ -250,4 +251,28 @@ repositories = ["somewhere-else"]
 
     assert report.launched == []
     assert report.errors == []
+
+
+def test_re_adding_the_queue_label_does_not_start_another_role_on_a_held_issue(
+    tmp_path, repo, claude_state, board
+):
+    """The queue label is one per issue. A second worker on it would clear the label of the
+    first when either finished, so the issue stays with the worker that has it."""
+    write_role(repo, "second", 'prompt = "second look at {item}"\n\n[[start]]\non = "labeled"\n')
+    harness = harness_with(tmp_path, repo, claude_state, board, roles=("implementer", "second"))
+    board.add("ABC-1")
+    harness.tick()
+    assert harness.worker("ABC-1").role == "implementer"
+
+    # The label comes back while the implementer still runs: the issue now carries both
+    # the queue label and the running label, and the tracker lists it as queued.
+    issue = board.by_identifier("ABC-1")
+    board.issues[issue.id] = dataclasses.replace(issue, labels=(*issue.labels, "chargehand"))
+
+    report = harness.next_tick()
+
+    assert report.launched == []
+    assert harness.worker("ABC-1", "second") is None
+    assert [w.role for w in harness.ledger.live_workers_for("ABC-1")] == ["implementer"]
+    harness.ledger.close()
 
