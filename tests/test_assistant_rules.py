@@ -381,7 +381,7 @@ def test_a_transcript_without_a_result_is_unfinished():
 
 
 def _key_sets(status):
-    blocked = next(a for a in status["attempts"] if a["state"] == "blocked")
+    blocked = next(a for a in status["workers"] if a["state"] == "blocked")
     return {
         "top": set(status),
         "machine": set(status["machine"]),
@@ -407,7 +407,7 @@ def test_the_decoy_status_has_the_real_shape(capsys, config_file, harness, verbo
 
     assert _key_sets(canned) == _key_sets(real)
     queue_keys = {"queued", "queued_issues", "queued_titles"}
-    assert set(canned["routes"][0]) - queue_keys == set(real["routes"][0])
+    assert set(canned["repositories"][0]) - queue_keys == set(real["repositories"][0])
 
 
 def test_only_the_verbose_status_carries_untrusted_text():
@@ -440,7 +440,7 @@ def test_the_decoy_answers_status_json_without_untrusted_text(scratch):
     result = scratch("chargehand", "status", "--json")
 
     assert result.returncode == 0
-    assert json.loads(result.stdout)["attempts"][1]["waiting"] is True
+    assert json.loads(result.stdout)["workers"][1]["waiting"] is True
     assert assistant_rules.CANARY not in result.stdout
     assert scratch.marker.read_text() == "chargehand status --json\n"
 

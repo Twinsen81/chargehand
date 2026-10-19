@@ -1,0 +1,57 @@
+# chargehand role: implementer
+#
+# A worker in this role takes an issue that got the queue label and works on it in a
+# fresh worktree. A role may have any number of workers. Checked in under
+# .chargehand/roles/; a copy under ~/.config/chargehand/roles/ applies to repositories
+# that have no file of their own.
+
+# Optional. The coding agent the workers run on. `claude` (Claude Code) is the only
+# runtime so far; `agent`, `permission_mode` and `allow` below belong to it.
+# runtime = "claude"
+
+# Optional. A Claude Code agent definition, .claude/agents/<name>.md in the repository
+# or ~/.claude/agents/<name>.md, passed as `--agent`. It holds the role's instructions,
+# tools and defaults. Without it the session runs as plain Claude Code.
+# agent = "implementer"
+
+# Optional. Passed as `--model` and `--effort`; both are kept for the worker's life.
+# model = "opus"
+# effort = "high"
+
+# The first turn: a slash command, a skill, or a plain instruction.
+#
+# Available variables: {item} {item_url} {worktree} {branch} {repo}
+#
+# There is deliberately no {title} and no {body}. The prompt is a trusted user
+# message, so issue text has to reach the agent as a tool result it fetches itself.
+prompt = "{item}"
+
+# auto (default) runs behind Claude Code's safety classifier and falls back to a
+# permission prompt, which chargehand surfaces as "blocked". bypassPermissions is a
+# deliberate opt-in for a dedicated machine, user account, or VM.
+permission_mode = "auto"
+
+# Optional. Allow rules for this role's sessions, so the commands it needs do not
+# prompt. Same syntax as Claude Code's permission rules.
+# allow = ["Bash(gh pr *)"]
+
+# Optional. `done` is ambiguous: a session that asked its question as plain text and
+# ended its turn also reads done. Write {"state": "needs-input|complete|aborted",
+# "stop_reason": "...", "pr_url": "..."} at every yield point to disambiguate.
+# status_file = "/tmp/chargehand/{item}/status.json"
+
+# A start rule creates a worker on its own when an event arrives. `labeled` is the
+# queue label on any tracker; `linear.labeled` names one tracker. The label is one per
+# issue, so of several roles that start on it, the first one listed in the
+# repository's `roles` takes the issue.
+[[start]]
+on = "labeled"
+# Optional. Only these repositories; all of the role's repositories when left out.
+# repositories = ["my-app"]
+# Skip the item when a live worker of this role already has it ("role", the default),
+# or when a live worker of any role has it ("any").
+unless_subscribed = "role"
+
+[policy]
+# How many workers of this role may be open at once, across repositories.
+max_workers = 2

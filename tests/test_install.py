@@ -60,8 +60,13 @@ def test_init_writes_a_repo_config_that_parses(tmp_path, capsys):
 
     config = load_repo_config(tmp_path)
     assert config.base
-    assert config.prompt
-    assert config.permission_mode == "auto"
+    assert config.prompt is None
+    from chargehand.roles import load_role
+
+    role = load_role(tmp_path, "implementer", repo_config=config, tracker_type="linear")
+    assert role.prompt == "{item}"
+    assert role.permission_mode == "auto"
+    assert role.start_rule_for("labeled", "linear") is not None
 
 
 def test_init_refuses_to_overwrite_without_force(tmp_path):
@@ -78,7 +83,7 @@ def test_init_machine_writes_a_config_and_a_notify_script(tmp_path, capsys):
 
     assert main(["init", "--machine", "--output", str(target)]) == EXIT_OK
 
-    assert load_machine_config(target).routes
+    assert load_machine_config(target).repositories
     assert (target.parent / "notify.sh").exists()
     assert (target.parent / "notify.sh").stat().st_mode & 0o111
     assert "only prints until you enable a method" in capsys.readouterr().out
@@ -115,7 +120,7 @@ def test_doctor_checks_every_route(capsys, config_file, harness):
     assert main(["--config", str(config_file), "doctor", "--json", "--no-tracker"]) in (0, 1)
 
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
-    assert checks["route test"]["status"] == install.OK
+    assert checks["repository test"]["status"] == install.OK
     assert checks["claude"]["status"] == install.OK
     assert checks["claude agents"]["status"] == install.OK
     assert checks["notify"]["status"] == install.WARN  # nothing configured
@@ -129,8 +134,8 @@ def test_doctor_flags_a_bypass_permissions_route(capsys, config_file, harness, r
     main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
 
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
-    assert checks["route test"]["status"] == install.WARN
-    assert "dedicated machine" in checks["route test"]["detail"]
+    assert checks["repository test role implementer"]["status"] == install.WARN
+    assert "dedicated machine" in checks["repository test role implementer"]["detail"]
 
 
 def test_doctor_warns_when_the_launch_deny_rules_cannot_be_passed(capsys, config_file, harness):
@@ -219,7 +224,7 @@ def test_a_control_command_keeps_asking_while_the_scheduled_job_is_busy(
     assert main(["--config", str(config_file), "pause"]) == EXIT_OK
 
     assert len(kicks) == 3
-    assert capsys.readouterr().out == "pause: all routes paused\n"
+    assert capsys.readouterr().out == "pause: all repositories paused\n"
     assert harness.ledger.is_paused()
 
 
@@ -236,7 +241,7 @@ def test_a_control_command_falls_back_when_the_scheduled_job_never_applies_it(
     assert main(["--config", str(config_file), "pause"]) == EXIT_OK
 
     assert len(kicks) > 1
-    assert capsys.readouterr().out == "pause: all routes paused\n"
+    assert capsys.readouterr().out == "pause: all repositories paused\n"
 
 
 def _executable(path):

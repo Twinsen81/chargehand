@@ -3,10 +3,12 @@
 #
 # Called once per state change with these variables set:
 #
-#   CHARGEHAND_ISSUE   the issue identifier
+#   CHARGEHAND_ITEM    the work item (an issue identifier)
+#   CHARGEHAND_ROLE    the worker's role
+#   CHARGEHAND_ISSUE   the same as CHARGEHAND_ITEM, kept for older hooks
 #   CHARGEHAND_STATE   blocked | done | failed | cancelled | long-running | watchdog-stopped | ...
 #   CHARGEHAND_URL     the issue URL, when the tracker provides one
-#   CHARGEHAND_ROUTE   the route name
+#   CHARGEHAND_REPOSITORY  the repository name (CHARGEHAND_ROUTE carries the same)
 #   CHARGEHAND_DETAIL  a short chargehand-generated reason
 #
 # There is no question text and no agent output here on purpose: this payload usually

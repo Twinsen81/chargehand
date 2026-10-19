@@ -1,8 +1,8 @@
 """Notifications: run a command the operator configures.
 
-The payload is deliberately only the issue identifier, the state, and the issue URL.
-A notification usually crosses a third-party relay, so no question text, no titles,
-and no agent output go into it.
+The payload is deliberately only the work item, the role, the state, and the item's
+URL. A notification usually crosses a third-party relay, so no question text, no
+titles, and no agent output go into it.
 """
 
 from __future__ import annotations
@@ -11,9 +11,7 @@ import logging
 import os
 import shlex
 import subprocess
-from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
 from chargehand.config import NotifyConfig
 
@@ -22,23 +20,28 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Notification:
-    issue: str
+    item: str
     state: str
     url: str | None = None
-    route: str | None = None
+    repository: str | None = None
+    role: str | None = None
     detail: str | None = None
 
     def env(self) -> dict[str, str]:
         payload = {
-            "CHARGEHAND_ISSUE": self.issue,
+            "CHARGEHAND_ITEM": self.item,
+            "CHARGEHAND_ROLE": self.role or "",
             "CHARGEHAND_STATE": self.state,
             "CHARGEHAND_URL": self.url or "",
-            "CHARGEHAND_ROUTE": self.route or "",
+            "CHARGEHAND_REPOSITORY": self.repository or "",
             # Short, chargehand-generated reason (never agent or tracker text).
             "CHARGEHAND_DETAIL": self.detail or "",
+            # The names hooks were written against before work items and repositories.
+            "CHARGEHAND_ISSUE": self.item,
+            "CHARGEHAND_ROUTE": self.repository or "",
         }
         # Historic names kept short for hand-written notify scripts.
-        payload.update({"ISSUE": self.issue, "STATE": self.state, "URL": self.url or ""})
+        payload.update({"ISSUE": self.item, "STATE": self.state, "URL": self.url or ""})
         return payload
 
 
@@ -55,7 +58,7 @@ class Notifier:
         self.sent.append(notification)
         if not self.config.command:
             log.info("notify (no command configured): %s -> %s",
-                     notification.issue, notification.state)
+                     notification.item, notification.state)
             return False
         try:
             argv = shlex.split(os.path.expanduser(self.config.command))

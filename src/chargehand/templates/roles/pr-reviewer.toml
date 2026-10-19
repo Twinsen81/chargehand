@@ -1,0 +1,30 @@
+# chargehand role: pr-reviewer
+#
+# A worker in this role reviews a pull request you were asked to review and answers
+# replies on its own comments. It starts from events of the `github` source, which
+# the runner does not deliver yet: the role is a template for what is coming, and a
+# repository that enables it today gets a worker only when that source exists.
+
+# agent = "pr-reviewer"
+# model = "opus"
+# effort = "high"
+prompt = "/pr-review {item_url}"
+permission_mode = "auto"
+allow = ["Bash(gh pr *)", "Bash(gh api *)"]
+
+# Branch the worktree from the pull request head rather than from `base`.
+checkout = "item"
+
+# Start a reviewer when you are asked to review a pull request and no reviewer has it
+# yet. A second request for the same pull request wakes the reviewer that has it.
+[[start]]
+on = "github.review_requested"
+unless_subscribed = "role"
+# The events on the pull request that wake the worker, and the ones that end it.
+subscribe = ["comment", "review", "ci_status"]
+close_on = ["pr_closed"]
+
+[policy]
+max_workers = 4
+max_wakes_per_day = 12
+debounce_secs = 120

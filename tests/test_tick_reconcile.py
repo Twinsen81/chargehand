@@ -19,13 +19,13 @@ def test_a_launch_interrupted_after_any_step_completes_on_the_next_tick(harness,
         harness.tick(crash_after_step=step)
     assert aborted.value.step == step
 
-    interrupted = harness.attempt("ABC-1")
+    interrupted = harness.worker("ABC-1")
     assert interrupted.state == ledger_mod.LAUNCHING
     assert interrupted.step == step
 
     report = harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING, report.errors
     assert attempt.step == LAST_STEP
     assert attempt.session_id
@@ -50,7 +50,7 @@ def test_a_session_started_before_the_crash_is_adopted_not_duplicated(harness):
         harness.tick(crash_after_step=3)
 
     # The tick died between starting the session and recording its ids.
-    worktree = harness.worktree_root / "ABC-1"
+    worktree = harness.worktree("ABC-1")
     state = harness.claude_state.read()
     state["sessions"] = [
         {"id": "pre-existing", "uuid": "u1", "name": "ABC-1", "cwd": str(worktree),
@@ -61,7 +61,7 @@ def test_a_session_started_before_the_crash_is_adopted_not_duplicated(harness):
     report = harness.next_tick()
 
     assert "ABC-1" in report.adopted
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.session_id == "pre-existing"
     assert harness.claude_state.launches == []
@@ -74,7 +74,7 @@ def test_a_launch_that_never_completes_fails_loudly_after_the_attempt_limit(harn
     for _ in range(harness.config.max_launch_attempts + 1):
         harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
     assert "did not complete after" in attempt.last_error
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
@@ -89,12 +89,12 @@ def test_a_tracker_write_that_landed_but_reported_failure_is_reconciled(harness)
 
     # The write landed; the tick was told it failed, so the row stayed at step 0.
     assert any("502" in error for error in first.errors)
-    assert harness.attempt("ABC-1").step == 0
+    assert harness.worker("ABC-1").step == 0
     assert harness.labels("ABC-1") == ("chargehand-running",)
 
     harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.step == LAST_STEP
     assert harness.labels("ABC-1") == ("chargehand-running",)
@@ -108,12 +108,12 @@ def test_a_write_that_reported_success_without_landing_is_caught_by_the_re_read(
     report = harness.tick()
 
     assert any("did not land" in error for error in report.errors)
-    assert harness.attempt("ABC-1").step == 0
+    assert harness.worker("ABC-1").step == 0
     assert harness.labels("ABC-1") == ("chargehand",)
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
     assert harness.labels("ABC-1") == ("chargehand-running",)
 
 
@@ -124,13 +124,13 @@ def test_a_running_label_with_no_live_attempt_is_marked_blocked(harness):
 
     assert harness.labels("ABC-9") == ("chargehand-blocked",)
     assert ("ABC-9", "blocked") in harness.notifications()
-    assert any("no live attempt" in warning for warning in report.warnings)
+    assert any("no live worker" in warning for warning in report.warnings)
 
 
 def test_a_session_under_the_worktree_root_with_no_ledger_row_is_adopted(harness):
     issue = harness.board.add("ABC-5", labels=("chargehand-running",))
-    worktree = harness.worktree_root / "ABC-5"
-    harness.runner.git.add_worktree(harness.repo, worktree, "chargehand/ABC-5", "origin/main")
+    worktree = harness.worktree("ABC-5")
+    harness.runner.git.add_worktree(harness.repo, worktree, "chargehand/implementer/ABC-5", "origin/main")
     harness.claude_state.set(
         sessions=[{"id": "orphan", "uuid": "u9", "name": "ABC-5", "cwd": str(worktree),
                    "state": "working"}]
@@ -138,11 +138,11 @@ def test_a_session_under_the_worktree_root_with_no_ledger_row_is_adopted(harness
 
     report = harness.next_tick()
 
-    attempt = harness.attempt("ABC-5")
+    attempt = harness.worker("ABC-5")
     assert attempt is not None
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.session_id == "orphan"
-    assert attempt.issue_id == issue.id
+    assert attempt.item_id == issue.id
     assert any("unsupervised" in warning for warning in report.warnings)
 
 
@@ -155,7 +155,7 @@ def test_a_session_with_no_derivable_issue_is_reported_not_ignored(harness):
 
     report = harness.next_tick()
 
-    assert any("no derivable issue" in warning for warning in report.warnings)
+    assert any("no derivable worker" in warning for warning in report.warnings)
     assert ("?", "orphan-session") in harness.notifications()
 
 
@@ -177,7 +177,7 @@ def test_the_tick_gives_up_cleanly_when_the_session_listing_is_unreadable(harnes
 
     assert report.errors and "claude" in report.errors[0]
     assert report.launched == []
-    assert harness.attempt("ABC-1") is None
+    assert harness.worker("ABC-1") is None
 
 
 def test_a_tracker_outage_during_admission_does_not_touch_other_phases(harness):
@@ -188,7 +188,7 @@ def test_a_tracker_outage_during_admission_does_not_touch_other_phases(harness):
     report = harness.next_tick()
 
     assert any("tracker is down" in error for error in report.errors)
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
 def test_a_tracker_outage_during_a_resume_does_not_burn_a_launch_retry(harness, monkeypatch):
@@ -199,7 +199,7 @@ def test_a_tracker_outage_during_a_resume_does_not_burn_a_launch_retry(harness, 
     harness.board.add("ABC-1")
     with pytest.raises(LaunchAborted):
         harness.tick(crash_after_step=0)
-    assert harness.attempt("ABC-1").launch_attempts == 1
+    assert harness.worker("ABC-1").launch_attempts == 1
 
     # monkeypatch.undo() would also undo the fixtures' own patches, so the outage is a
     # flag the stand-in reads instead.
@@ -215,14 +215,14 @@ def test_a_tracker_outage_during_a_resume_does_not_burn_a_launch_retry(harness, 
     for _ in range(4):
         harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.LAUNCHING
     assert attempt.launch_attempts == 1
 
     down["value"] = False
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
 def test_an_unusable_credential_still_lets_the_labels_phase_report(harness, monkeypatch):
@@ -243,20 +243,20 @@ def test_an_unusable_credential_still_lets_the_labels_phase_report(harness, monk
 
     assert any("no API key" in error for error in report.errors)
     assert not any("phase" in error for error in report.errors)
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
 
 
 def test_reconciliation_never_adopts_a_previous_attempts_session(harness):
     """A stopped session keeps this issue's name and worktree; it is not this attempt's."""
     harness.board.add("ABC-1")
     harness.tick()
-    first = harness.attempt("ABC-1")
+    first = harness.worker("ABC-1")
     harness.ledger.record_request("cancel", "ABC-1")
     harness.next_tick()
     # `cancel` keeps the worktree and the session. The operator tidies the worktree up
     # by hand, so admission lets the re-armed issue through while the session remains.
-    harness.runner.git.remove_worktree(harness.repo, harness.worktree_root / "ABC-1", force=True)
-    assert harness.attempt("ABC-1").session_id == first.session_id
+    harness.runner.git.remove_worktree(harness.repo, harness.worktree("ABC-1"), force=True)
+    assert harness.worker("ABC-1").session_id == first.session_id
 
     issue = harness.board.by_identifier("ABC-1")
     harness.board.issues[issue.id] = issue.__class__(
@@ -268,7 +268,7 @@ def test_reconciliation_never_adopts_a_previous_attempts_session(harness):
 
     harness.next_tick()
 
-    second = harness.attempt("ABC-1")
+    second = harness.worker("ABC-1")
     assert second.id != first.id
     assert second.session_id != first.session_id
     assert second.state == ledger_mod.RUNNING
@@ -295,7 +295,7 @@ def test_a_step_that_keeps_failing_on_resume_fails_the_attempt_loudly(harness, m
     for _ in range(harness.config.max_launch_attempts + 1):
         harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
     assert ("ABC-1", "failed") in harness.notifications()
@@ -318,12 +318,12 @@ def test_a_step_that_recovers_on_resume_completes_the_launch(harness, monkeypatc
 
     monkeypatch.setattr(Git, "fetch", flaky)
     harness.next_tick()
-    assert harness.attempt("ABC-1").state == ledger_mod.LAUNCHING
+    assert harness.worker("ABC-1").state == ledger_mod.LAUNCHING
 
     down["value"] = False
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
 def test_a_setup_failure_on_the_resume_path_is_terminal_not_retried(harness, repo):
@@ -338,7 +338,7 @@ def test_a_setup_failure_on_the_resume_path_is_terminal_not_retried(harness, rep
 
     harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
     assert "exited 9" in attempt.last_error
     assert attempt.launch_attempts == 2
@@ -353,7 +353,7 @@ def test_a_launch_that_keeps_being_refused_on_resume_fails_loudly(harness):
     for _ in range(harness.config.max_launch_attempts + 1):
         harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.FAILED
+    assert harness.worker("ABC-1").state == ledger_mod.FAILED
 
 
 def test_an_unadoptable_orphan_is_reported_once_not_every_tick(harness):
@@ -367,7 +367,7 @@ def test_an_unadoptable_orphan_is_reported_once_not_every_tick(harness):
 
     assert harness.notifications().count(("?", "orphan-session")) == 1
     # It stays visible in the tick's own output every time.
-    assert any("no derivable issue" in warning for warning in report.warnings)
+    assert any("no derivable worker" in warning for warning in report.warnings)
 
 
 def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monkeypatch):
@@ -384,7 +384,7 @@ def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monke
     harness.board.add("ABC-1")
     with pytest.raises(LaunchAborted):
         harness.tick(crash_after_step=0)
-    assert harness.attempt("ABC-1").launch_attempts == 1
+    assert harness.worker("ABC-1").launch_attempts == 1
 
     unverifiable = {"value": True}
     verified = fake_tracker.FakeTracker.mark
@@ -398,7 +398,7 @@ def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monke
     for _ in range(harness.config.max_launch_attempts + 1):
         harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.LAUNCHING
     assert attempt.launch_attempts == 1
     assert "re-read" in (attempt.last_error or "")
@@ -406,7 +406,7 @@ def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monke
     unverifiable["value"] = False
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
     assert harness.labels("ABC-1") == ("chargehand-running",)
 
 
@@ -417,7 +417,7 @@ def test_an_unverifiable_label_write_on_a_fresh_launch_is_recorded(harness):
 
     report = harness.tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.LAUNCHING
     assert attempt.step == 0
     assert attempt.launch_attempts == 1

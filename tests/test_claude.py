@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 
 from chargehand import claude as claude_mod
-from chargehand.claude import ClaudeCLI, Session, identifier_from_session, parse_sessions
+from chargehand.claude import (
+    ClaudeCLI,
+    CommandResult,
+    Session,
+    agent_file_candidates,
+    copy_started_by,
+    parse_sessions,
+    worker_from_session,
+)
 from chargehand.errors import ClaudeError
 from conftest import FAKE_CLAUDE
 
@@ -142,15 +150,21 @@ def test_find_session_matches_by_working_directory_then_name(tmp_path):
     assert cli.find_session([], name="ABC-1", cwd=worktree) is None
 
 
-def test_an_issue_identifier_can_be_derived_from_a_name_or_a_path(tmp_path):
+def test_a_worker_can_be_derived_from_a_session_name_or_path(tmp_path):
     root = tmp_path / "worktrees"
     (root / "ABC-7").mkdir(parents=True)
+    (root / "pr-reviewer" / "ABC-7").mkdir(parents=True)
 
-    assert identifier_from_session(Session(id="a", name="ABC-7"), root) == "ABC-7"
-    assert identifier_from_session(
+    assert worker_from_session(Session(id="a", name="pr-reviewer/ABC-7"), root) == ("pr-reviewer", "ABC-7")
+    assert worker_from_session(
+        Session(id="a", cwd=str(root / "pr-reviewer" / "ABC-7")), root
+    ) == ("pr-reviewer", "ABC-7")
+    # Sessions from before roles existed: named after the issue, in <root>/<issue>.
+    assert worker_from_session(Session(id="a", name="ABC-7"), root) == ("implementer", "ABC-7")
+    assert worker_from_session(
         Session(id="a", cwd=str(root / "ABC-7")), root
-    ) == "ABC-7"
-    assert identifier_from_session(Session(id="a", name="something else"), root) is None
+    ) == ("implementer", "ABC-7")
+    assert worker_from_session(Session(id="a", name="something else"), root) is None
 
 
 def test_the_fake_binary_round_trips_a_launch_and_a_listing(tmp_path, claude_state):
@@ -396,3 +410,57 @@ def test_the_configuration_directory_can_be_relocated(tmp_path, monkeypatch):
     (tmp_path / "elsewhere").mkdir()
 
     assert ClaudeCLI().config_file() == tmp_path / "elsewhere" / ".claude.json"
+
+
+def test_a_launch_passes_the_roles_flags_in_a_stable_order(tmp_path, claude_state):
+    cli = ClaudeCLI(str(FAKE_CLAUDE))
+    worktree = tmp_path / "w"
+    worktree.mkdir()
+
+    cli.launch(
+        worktree=worktree, name="pr-reviewer/ABC-1", prompt="go", permission_mode="auto",
+        agent="reviewer", model="opus", effort="high", plugin_dirs=["/opt/mod"],
+        settings={"permissions": {"allow": ["Bash(gh pr *)"]}},
+    )
+
+    argv = claude_state.launches[0]["argv"]
+    assert argv[:11] == [
+        "--bg", "-n", "pr-reviewer/ABC-1", "--permission-mode", "auto", "--agent", "reviewer",
+        "--model", "opus", "--effort", "high",
+    ]
+    assert argv[argv.index("--plugin-dir") + 1] == "/opt/mod"
+    assert argv[-1] == "go"
+
+
+def test_a_resume_wakes_a_stopped_session_by_its_full_id(tmp_path, claude_state):
+    cli = ClaudeCLI(str(FAKE_CLAUDE))
+    claude_state.set(sessions=[{"id": "s1", "uuid": "u1", "name": "implementer/ABC-1",
+                                "state": "stopped"}])
+
+    result = cli.resume("u1", "the operator answered: yes")
+
+    assert result.returncode == 0
+    assert claude_state.read()["resumes"][0]["argv"] == ["--resume", "u1", "--bg", "the operator answered: yes"]
+    assert claude_state.sessions[0]["state"] == "working"
+    assert copy_started_by(result) is None
+
+
+def test_a_resume_that_started_a_copy_is_recognised(claude_state):
+    cli = ClaudeCLI(str(FAKE_CLAUDE))
+    claude_state.set(sessions=[{"id": "s1", "uuid": "u1", "state": "done"}], resume_copy_id="d8e39541")
+
+    result = cli.resume("u1", "hello")
+
+    assert copy_started_by(result) == "d8e39541"
+    assert copy_started_by(CommandResult(("x",), 0, "note: started a copy of that conversation as 3db8bdd8.", "")) == "3db8bdd8"
+
+
+def test_agent_files_are_looked_up_in_the_project_then_the_user_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    candidates = agent_file_candidates(tmp_path / "repo", "reviewer")
+
+    assert candidates == [
+        tmp_path / "repo" / ".claude" / "agents" / "reviewer.md",
+        tmp_path / "cfg" / "agents" / "reviewer.md",
+    ]

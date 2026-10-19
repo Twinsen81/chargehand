@@ -22,11 +22,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from chargehand import __version__, install, paths, sanitize, trackers
+from chargehand import roles as roles_mod
 from chargehand.claude import ClaudeCLI
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError, PoolError, TickBusy
 from chargehand.gitutil import Git
-from chargehand.ledger import Attempt, Ledger, open_ledger
+from chargehand.ledger import Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
 from chargehand.pool import Lease
 from chargehand.pool import select as select_pool
@@ -34,8 +35,8 @@ from chargehand.tick import Runner, tick_lock
 from chargehand.trackers import Status
 
 DESCRIPTION = (
-    "Label an issue, get a supervised Claude Code session in a fresh git worktree "
-    "on a machine you own."
+    "Supervised Claude Code workers in fresh git worktrees on a machine you own: "
+    "label an issue, and a worker in the role you configured picks it up."
 )
 
 EXIT_OK = 0
@@ -111,11 +112,11 @@ def _span(secs: float) -> str:
     return f"{delta / 86400:.1f}d"
 
 
-def _branch_is_ours(attempt: Attempt) -> bool:
+def _branch_is_ours(worker: Worker) -> bool:
     # A session can rename its branch after the tracker's convention, which puts a slug of
     # the issue title into the name, and an adopted session is recorded under the branch
-    # it is on. The runner's own placeholder ends in the identifier.
-    return attempt.branch.endswith(attempt.identifier)
+    # it is on. The runner's own placeholder ends in the item.
+    return worker.branch.endswith(worker.item)
 
 
 def _lease_dict(lease: Lease, *, verbose: bool) -> dict[str, object]:
@@ -128,34 +129,36 @@ def _lease_dict(lease: Lease, *, verbose: bool) -> dict[str, object]:
     return payload
 
 
-def _attempt_dict(attempt: Attempt, *, verbose: bool) -> dict[str, object]:
+def _worker_dict(worker: Worker, *, verbose: bool) -> dict[str, object]:
     payload: dict[str, object] = {
-        "issue": attempt.identifier,
-        "route": attempt.route,
-        "state": attempt.state,
-        "session_state": attempt.session_state,
+        "item": worker.item,
+        "role": worker.role,
+        "repository": worker.repository,
+        "state": worker.state,
+        "session_state": worker.session_state,
         # Whether it is waiting is a state; why it says it is waiting is session text.
-        "waiting": bool(attempt.waiting_for),
-        "step": attempt.step,
-        "launch_attempts": attempt.launch_attempts,
-        "session_id": attempt.session_id,
-        "worktree": attempt.worktree,
-        "branch": attempt.branch if verbose or _branch_is_ours(attempt) else None,
-        "url": attempt.url,
-        "pr_url": attempt.pr_url,
-        "label_state": attempt.label_state,
-        "elapsed_secs": round(time.time() - attempt.created_at, 1),
-        "working_since": attempt.working_since,
-        "created_at": attempt.created_at,
-        "updated_at": attempt.updated_at,
+        "waiting": bool(worker.waiting_for),
+        "step": worker.step,
+        "launch_attempts": worker.launch_attempts,
+        "session_id": worker.session_id,
+        "worktree": worker.worktree,
+        "branch": worker.branch if verbose or _branch_is_ours(worker) else None,
+        "url": worker.url,
+        "pr_url": worker.pr_url,
+        "label_state": worker.label_state,
+        "wakes": worker.wakes,
+        "elapsed_secs": round(time.time() - worker.created_at, 1),
+        "working_since": worker.working_since,
+        "created_at": worker.created_at,
+        "updated_at": worker.updated_at,
     }
-    if attempt.state == "blocked" and attempt.session_id:
-        payload["attach"] = f"claude attach {attempt.session_id}"
+    if worker.state == "blocked" and worker.session_id:
+        payload["attach"] = f"claude attach {worker.session_id}"
     if verbose:
-        if attempt.waiting_for:
-            payload["waiting_for"] = sanitize.one_line(attempt.waiting_for)
-        if attempt.last_error:
-            payload["last_error"] = sanitize.one_line(attempt.last_error, limit=300)
+        if worker.waiting_for:
+            payload["waiting_for"] = sanitize.one_line(worker.waiting_for)
+        if worker.last_error:
+            payload["last_error"] = sanitize.one_line(worker.last_error, limit=300)
     return payload
 
 
@@ -167,7 +170,7 @@ def build_status(
     include_queue: bool = True,
 ) -> dict[str, object]:
     now = time.time()
-    attempts = ledger.live_attempts()
+    workers = ledger.live_workers()
     runner = _runner(config, ledger)
 
     sessions_payload: list[dict[str, object]] = []
@@ -188,18 +191,18 @@ def build_status(
     except ChargehandError as exc:
         session_error = str(exc)
 
-    routes_payload = []
-    for route in config.routes:
+    repositories_payload = []
+    for repository in config.repositories:
         entry: dict[str, object] = {
-            "name": route.name,
-            "repo": str(route.repo),
-            "tracker": route.tracker.type,
-            "paused": ledger.is_paused(route.name),
-            "labels": route.labels.as_dict(),
+            "name": repository.name,
+            "path": str(repository.path),
+            "tracker": repository.tracker.type,
+            "paused": ledger.is_paused(repository.name),
+            "labels": repository.labels.as_dict(),
         }
         if include_queue:
             try:
-                tracker = trackers.build(route)
+                tracker = trackers.build(repository)
                 queued = tracker.list(Status.QUEUED)
                 entry["queued"] = len(queued)
                 entry["queued_issues"] = [issue.identifier for issue in queued]
@@ -207,12 +210,31 @@ def build_status(
                     entry["queued_titles"] = [sanitize.one_line(issue.title) for issue in queued]
             except ChargehandError as exc:
                 entry["queue_error"] = str(exc)
+        repo_config = None
         try:
-            entry["prompt"] = load_repo_config(route.repo).prompt
-            entry["permission_mode"] = load_repo_config(route.repo).permission_mode
+            repo_config = load_repo_config(repository.path)
         except ConfigError as exc:
             entry["config_error"] = str(exc)
-        routes_payload.append(entry)
+        roles_payload: dict[str, object] = {}
+        for name in repository.roles:
+            try:
+                role = roles_mod.load_role(
+                    repository.path, name, repo_config=repo_config,
+                    tracker_type=repository.tracker.type,
+                )
+            except ConfigError as exc:
+                roles_payload[name] = {"error": str(exc)}
+                continue
+            roles_payload[name] = {
+                "prompt": role.prompt,
+                "permission_mode": role.permission_mode,
+                "agent": role.agent,
+                "model": role.model,
+                "effort": role.effort,
+                "source": str(role.source) if role.source else None,
+            }
+        entry["roles"] = roles_payload
+        repositories_payload.append(entry)
 
     pool: dict[str, object] = {"enabled": runner.pool.enabled, "leases": [], "error": None}
     try:
@@ -240,22 +262,22 @@ def build_status(
         },
         "runner": {
             "paused": ledger.is_paused(),
-            "paused_routes": ledger.paused_routes(),
+            "paused_repositories": ledger.paused_repositories(),
             "max_concurrent": config.max_concurrent,
-            "max_open_attempts": config.max_open_attempts,
-            "working": sum(1 for a in attempts if a.state in ("launching", "running")),
-            "open": len(attempts),
+            "max_open_workers": config.max_open_workers,
+            "working": sum(1 for w in workers if w.state in ("launching", "running")),
+            "open": len(workers),
             "pending_requests": [
                 {"kind": r["kind"], "target": r["target"], "created_at": r["created_at"]}
                 for r in ledger.pending_requests()
             ],
         },
-        "routes": routes_payload,
-        "attempts": [_attempt_dict(a, verbose=verbose) for a in attempts],
+        "repositories": repositories_payload,
+        "workers": [_worker_dict(w, verbose=verbose) for w in workers],
         "recent": [
-            _attempt_dict(a, verbose=verbose)
-            for a in ledger.recent_attempts(10)
-            if a.is_terminal
+            _worker_dict(w, verbose=verbose)
+            for w in ledger.recent_workers(10)
+            if w.is_terminal
         ],
         "sessions": sessions_payload,
         "session_error": session_error,
@@ -271,11 +293,11 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
     lines.append(
         f"chargehand {status['version']} on {machine['hostname']}{paused_note} — "
         f"{runner['working']}/{runner['max_concurrent']} working, "
-        f"{runner['open']}/{runner['max_open_attempts']} open, "
+        f"{runner['open']}/{runner['max_open_workers']} open, "
         f"{machine['free_disk_gb']} GB free"
     )
-    if runner["paused_routes"]:
-        lines.append(f"  paused routes: {', '.join(runner['paused_routes'])}")
+    if runner["paused_repositories"]:
+        lines.append(f"  paused repositories: {', '.join(runner['paused_repositories'])}")
     if status.get("session_error"):
         lines.append(f"  ! claude: {sanitize.one_line(str(status['session_error']), limit=160)}")
     pool = status["pool"]  # type: ignore[index]
@@ -283,39 +305,46 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append(f"  ! pool: {sanitize.one_line(str(pool['error']), limit=160)}")
 
     lines.append("")
-    lines.append("routes")
-    for route in status["routes"]:  # type: ignore[index]
-        queued = route.get("queued")
-        detail = f"queued {queued}" if queued is not None else route.get("queue_error", "")
-        flag = " (paused)" if route["paused"] else ""
+    lines.append("repositories")
+    for repository in status["repositories"]:  # type: ignore[index]
+        queued = repository.get("queued")
+        detail = f"queued {queued}" if queued is not None else repository.get("queue_error", "")
+        flag = " (paused)" if repository["paused"] else ""
+        roles = repository.get("roles") or {}
         lines.append(
-            f"  {route['name']:<16}{flag} {route['tracker']:<8} "
-            f"{sanitize.one_line(str(detail), limit=80)}"
+            f"  {repository['name']:<16}{flag} {repository['tracker']:<8} "
+            f"{', '.join(roles) or '-':<24} {sanitize.one_line(str(detail), limit=60)}"
         )
-        if route.get("config_error"):
-            lines.append(f"    ! {sanitize.one_line(route['config_error'], limit=160)}")
+        if repository.get("config_error"):
+            lines.append(f"    ! {sanitize.one_line(repository['config_error'], limit=160)}")
+        for name, role in roles.items():
+            if isinstance(role, dict) and role.get("error"):
+                lines.append(f"    ! role {name}: {sanitize.one_line(str(role['error']), limit=150)}")
 
-    attempts = status["attempts"]  # type: ignore[index]
+    workers = status["workers"]  # type: ignore[index]
     lines.append("")
-    if not attempts:
-        lines.append("no live attempts")
+    if not workers:
+        lines.append("no live workers")
     else:
-        header = f"  {'ISSUE':<14} {'STATE':<10} {'SESSION':<9} {'AGE':>6} {'STEP':>4}  DETAIL"
+        header = (
+            f"  {'ITEM':<14} {'ROLE':<12} {'STATE':<10} {'SESSION':<9} {'AGE':>6} {'STEP':>4}  DETAIL"
+        )
         lines.append(header)
-        for attempt in attempts:
-            detail = attempt.get("waiting_for") or attempt.get("pr_url") or (
-                "waiting" if attempt.get("waiting") else ""
+        for worker in workers:
+            detail = worker.get("waiting_for") or worker.get("pr_url") or (
+                "waiting" if worker.get("waiting") else ""
             )
-            if attempt.get("attach"):
-                detail = f"{detail} · {attempt['attach']}".strip(" ·")
+            if worker.get("attach"):
+                detail = f"{detail} · {worker['attach']}".strip(" ·")
             lines.append(
-                f"  {sanitize.scrub_identifier(str(attempt['issue'])):<14} {attempt['state']:<10} "
-                f"{str(attempt['session_state'] or '-'):<9} "
-                f"{_elapsed(attempt['created_at']):>6} {attempt['step']:>4}  "
+                f"  {sanitize.scrub_identifier(str(worker['item'])):<14} "
+                f"{sanitize.scrub_identifier(str(worker['role'])):<12} {worker['state']:<10} "
+                f"{str(worker['session_state'] or '-'):<9} "
+                f"{_elapsed(worker['created_at']):>6} {worker['step']:>4}  "
                 f"{sanitize.one_line(str(detail), limit=70)}"
             )
-            if verbose and attempt.get("last_error"):
-                lines.append(f"      ! {attempt['last_error']}")
+            if verbose and worker.get("last_error"):
+                lines.append(f"      ! {worker['last_error']}")
 
     if pool["leases"]:
         lines.append("")
@@ -405,18 +434,31 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
+def _find_worker(ledger: Ledger, item: str, role: str | None) -> tuple[Worker | None, str]:
+    live = ledger.live_workers_for(item)
+    if role is not None:
+        live = [w for w in live if w.role == role]
+    if len(live) > 1:
+        names = ", ".join(sorted(w.role for w in live))
+        return None, f"{sanitize.scrub_identifier(item)} has live workers in several roles ({names}); pass --role"
+    worker = live[0] if live else ledger.latest_worker_for(item, role)
+    if worker is None:
+        return None, f"no worker recorded for {sanitize.scrub_identifier(item)}"
+    return worker, ""
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     config = _load_config(args)
     with open_ledger() as ledger:
-        attempt = ledger.live_attempt_for(args.issue) or ledger.latest_attempt_for(args.issue)
-    if attempt is None:
-        print(f"no attempt recorded for {sanitize.scrub_identifier(args.issue)}", file=sys.stderr)
+        worker, problem = _find_worker(ledger, args.item, args.role)
+    if worker is None:
+        print(problem, file=sys.stderr)
         return EXIT_ERROR
-    if not attempt.session_id:
-        print(f"{attempt.identifier} has no session", file=sys.stderr)
+    if not worker.session_id:
+        print(f"{worker.handle} has no session", file=sys.stderr)
         return EXIT_ERROR
     try:
-        output = ClaudeCLI(config.claude_bin).logs(attempt.session_id, lines=args.lines)
+        output = ClaudeCLI(config.claude_bin).logs(worker.session_id, lines=args.lines)
     except ChargehandError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_ERROR
@@ -505,28 +547,32 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
     return EXIT_REFUSED
 
 
+def _role_args(args: argparse.Namespace) -> dict[str, object]:
+    return {"role": args.role} if getattr(args, "role", None) else {}
+
+
 def cmd_pause(args: argparse.Namespace) -> int:
-    return _request(args, "pause", args.route)
+    return _request(args, "pause", args.repository)
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
-    return _request(args, "resume", args.route)
+    return _request(args, "resume", args.repository)
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
-    return _request(args, "cancel", args.issue)
+    return _request(args, "cancel", args.item, **_role_args(args))
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    return _request(args, "stop", args.issue)
+    return _request(args, "stop", args.item, **_role_args(args))
 
 
 def cmd_continue(args: argparse.Namespace) -> int:
-    return _request(args, "continue", args.issue)
+    return _request(args, "continue", args.item, **_role_args(args))
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
-    return _request(args, "retry", args.issue, force=args.force)
+    return _request(args, "retry", args.item, force=args.force, **_role_args(args))
 
 
 def cmd_discard(args: argparse.Namespace) -> int:
@@ -537,7 +583,7 @@ def cmd_discard(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_REFUSED
-    return _request(args, "discard", args.issue, force=args.force)
+    return _request(args, "discard", args.item, force=args.force, **_role_args(args))
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -632,12 +678,14 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     repo = Path(args.repo or ".").expanduser().resolve()
     try:
-        target = install.init_repo(repo, force=args.force)
+        written = install.init_repo(repo, force=args.force)
     except ChargehandError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_REFUSED
-    _print(f"wrote {target}")
-    _print("Edit `base` and `prompt`, then add the route to your machine configuration.")
+    for target in written:
+        _print(f"wrote {target}")
+    _print("Edit `base` in the repository configuration and `prompt` in the role, then add "
+           "the repository to your machine configuration.")
     return EXIT_OK
 
 
@@ -677,6 +725,10 @@ def build_parser() -> argparse.ArgumentParser:
         sub.set_defaults(handler=handler)
         return sub
 
+    def add_item(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("item", help="the work item, such as an issue identifier")
+        sub.add_argument("--role", help="the worker's role, when several roles hold the item")
+
     tick = add("tick", cmd_tick, "run one tick now")
     tick.add_argument("--json", action="store_true")
     tick.add_argument("--wait", type=float, default=0.0,
@@ -685,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="fault injection: abort a launch right after step N (0-4)")
 
     for name, handler, help_text in (
-        ("status", cmd_status, "queue, attempts, sessions, machine"),
+        ("status", cmd_status, "queue, workers, sessions, machine"),
         ("watch", cmd_watch, "self-refreshing status table"),
     ):
         sub = add(name, handler, help_text)
@@ -697,7 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--interval", type=float, help="refresh seconds")
 
     logs = add("logs", cmd_logs, "tail one session's output (untrusted text)")
-    logs.add_argument("issue")
+    add_item(logs)
     logs.add_argument("--lines", type=int, default=200)
 
     for name, handler, help_text in (
@@ -705,25 +757,25 @@ def build_parser() -> argparse.ArgumentParser:
         ("resume", cmd_resume, "resume admitting new launches"),
     ):
         sub = add(name, handler, help_text)
-        sub.add_argument("--route", help="limit to one route")
+        sub.add_argument("--repository", "--route", dest="repository", help="limit to one repository")
         _add_request_flags(sub)
 
     for name, handler, help_text in (
-        ("cancel", cmd_cancel, "stop the session and mark the issue blocked; keep the worktree"),
-        ("stop", cmd_stop, "pause one run"),
-        ("continue", cmd_continue, "respawn a stopped or blocked run"),
+        ("cancel", cmd_cancel, "stop the session and mark the item blocked; keep the worktree"),
+        ("stop", cmd_stop, "pause one worker"),
+        ("continue", cmd_continue, "respawn a stopped or blocked worker"),
     ):
         sub = add(name, handler, help_text)
-        sub.add_argument("issue")
+        add_item(sub)
         _add_request_flags(sub)
 
-    retry = add("retry", cmd_retry, "start a new attempt for a failed or cancelled run")
-    retry.add_argument("issue")
+    retry = add("retry", cmd_retry, "start a new worker for a failed or cancelled one")
+    add_item(retry)
     retry.add_argument("--force", action="store_true", help="discard an unpushed worktree first")
     _add_request_flags(retry)
 
     discard = add("discard", cmd_discard, "remove the session, worktree, and local branch")
-    discard.add_argument("issue")
+    add_item(discard)
     discard.add_argument("--yes", action="store_true", help="required: this destroys work")
     discard.add_argument("--force", action="store_true", help="discard even with unpushed commits")
     _add_request_flags(discard)
@@ -746,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true")
 
     templates = add("templates", cmd_templates, "print a bundled template")
-    templates.add_argument("name", nargs="?", help="e.g. skill/SKILL.md, assistant-settings.json")
+    templates.add_argument("name", nargs="?", help="e.g. skill/SKILL.md, roles/implementer.toml")
 
     return parser
 

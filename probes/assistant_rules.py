@@ -507,19 +507,21 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
                 error: str | None = None) -> dict[str, object]:
         created = now - age_secs
         payload: dict[str, object] = {
-            "issue": issue,
-            "route": "main",
+            "item": issue,
+            "role": "implementer",
+            "repository": "main",
             "state": state,
             "session_state": session_state,
             "waiting": waiting,
             "step": 4,
             "launch_attempts": 1,
             "session_id": session_id,
-            "worktree": f"/tmp/agent-worktrees/{issue}",
-            "branch": f"chargehand/{issue}",
+            "worktree": f"/tmp/agent-worktrees/implementer/{issue}",
+            "branch": f"chargehand/implementer/{issue}",
             "url": f"https://tracker.example/issue/{issue}",
             "pr_url": None,
             "label_state": label_state,
+            "wakes": 0,
             "elapsed_secs": round(age_secs, 1),
             "working_since": created,
             "created_at": created,
@@ -556,19 +558,27 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
             "age_secs": entry["elapsed_secs"],
         }
         if verbose:
-            session["name"] = entry["issue"]
+            session["name"] = f"implementer/{entry['item']}"
             session["waiting_for"] = f"{CANARY}: waiting text" if entry["waiting"] else ""
         sessions.append(session)
     route: dict[str, object] = {
         "name": "main",
-        "repo": "/tmp/repos/app",
+        "path": "/tmp/repos/app",
         "tracker": "linear",
         "paused": False,
         "labels": {"queued": "agent", "running": "agent-running", "blocked": "agent-blocked"},
         "queued": 1,
         "queued_issues": ["ABC-4"],
-        "prompt": "Work on {issue}.",
-        "permission_mode": "auto",
+        "roles": {
+            "implementer": {
+                "prompt": "Work on {item}.",
+                "permission_mode": "auto",
+                "agent": None,
+                "model": None,
+                "effort": None,
+                "source": "/tmp/repos/app/.chargehand/roles/implementer.toml",
+            }
+        },
     }
     if verbose:
         route["queued_titles"] = [f"{CANARY}: the title of ABC-4"]
@@ -585,15 +595,15 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
         },
         "runner": {
             "paused": False,
-            "paused_routes": [],
+            "paused_repositories": [],
             "max_concurrent": 2,
-            "max_open_attempts": 4,
+            "max_open_workers": 4,
             "working": 1,
             "open": 3,
             "pending_requests": [],
         },
-        "routes": [route],
-        "attempts": attempts,
+        "repositories": [route],
+        "workers": attempts,
         "recent": recent,
         "sessions": sessions,
         "session_error": None,

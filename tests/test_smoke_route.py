@@ -124,9 +124,9 @@ def test_the_sandbox_writes_configuration_the_package_accepts(sandbox):
     import tomllib
 
     machine = MachineConfig.parse(tomllib.loads(sandbox.config_file.read_text()))
-    assert [route.name for route in machine.routes] == ["smoke"]
-    assert machine.routes[0].labels.queued == smoke_support.SMOKE_LABELS["queued"]
-    assert machine.routes[0].tracker.options["keychain_service"] == "probe-key"
+    assert [route.name for route in machine.repositories] == ["smoke"]
+    assert machine.repositories[0].labels.queued == smoke_support.SMOKE_LABELS["queued"]
+    assert machine.repositories[0].tracker.options["keychain_service"] == "probe-key"
     assert machine.worktree_root == sandbox.worktree_root
 
     repo = RepoConfig.parse(tomllib.loads((sandbox.repo / ".chargehand.toml").read_text()))
@@ -162,20 +162,21 @@ def test_the_sandbox_points_every_path_override_inside_itself(sandbox):
 
 def test_attempts_reads_rows_the_real_ledger_wrote(sandbox):
     ledger = ledger_mod.Ledger(sandbox.ledger_file)
-    ledger.create_attempt(
-        issue_id="uuid-1", identifier="ABC-1", url=None, route="smoke",
-        repo=sandbox.repo, worktree=sandbox.worktree_root / "ABC-1", branch="chargehand/ABC-1",
+    ledger.create_worker(
+        role="implementer", item="ABC-1", item_id="uuid-1", url=None, repository="smoke",
+        repo=sandbox.repo, worktree=sandbox.worktree_root / "implementer" / "ABC-1",
+        branch="chargehand/implementer/ABC-1",
     )
     ledger.close()
-    rows = sandbox.attempts()
-    assert [row["identifier"] for row in rows] == ["ABC-1"]
-    assert sandbox.attempt("ABC-1")["state"] == ledger_mod.LAUNCHING
-    assert sandbox.attempt("ABC-2") is None
+    rows = sandbox.workers()
+    assert [row["item"] for row in rows] == ["ABC-1"]
+    assert sandbox.worker("ABC-1")["state"] == ledger_mod.LAUNCHING
+    assert sandbox.worker("ABC-2") is None
 
 
 def test_attempts_opens_the_ledger_read_only(sandbox):
     ledger_mod.Ledger(sandbox.ledger_file).close()
-    sandbox.attempts()
+    sandbox.workers()
     with pytest.raises(sqlite3.OperationalError):
         connection = sqlite3.connect(f"file:{sandbox.ledger_file}?mode=ro", uri=True)
         connection.execute("CREATE TABLE probe_should_not_write (x INTEGER)")
@@ -228,7 +229,7 @@ class StubSandbox:
     def __init__(self, rows):
         self.rows = rows
 
-    def attempts(self):
+    def workers(self):
         return self.rows
 
 
@@ -252,14 +253,14 @@ def test_a_running_label_with_no_live_row_is_a_stranded_label(monkeypatch):
 
 
 def test_a_running_label_backed_by_a_live_row_is_not_stranded(monkeypatch):
-    rows = [{"identifier": "ABC-1", "state": "launching", "worktree": "/w/ABC-1"}]
+    rows = [{"item": "ABC-1", "state": "launching", "worktree": "/w/ABC-1"}]
     probe = probe_with(rows, running=["ABC-1"], monkeypatch=monkeypatch)
     probe.assert_no_strays("crash")
     assert verdicts(probe, "no stranded running label") == [smoke_route.PASS]
 
 
 def test_a_terminal_row_does_not_keep_a_running_label_honest(monkeypatch):
-    rows = [{"identifier": "ABC-1", "state": "done", "worktree": "/w/ABC-1"}]
+    rows = [{"item": "ABC-1", "state": "done", "worktree": "/w/ABC-1"}]
     probe = probe_with(rows, running=["ABC-1"], monkeypatch=monkeypatch)
     probe.assert_no_strays("crash")
     assert verdicts(probe, "no stranded running label") == [smoke_route.FAIL]
@@ -303,7 +304,7 @@ def test_a_working_session_no_row_owns_is_unsupervised(monkeypatch):
 
 
 def test_a_session_a_live_row_owns_is_supervised(monkeypatch):
-    rows = [{"identifier": "ABC-2", "state": "running", "worktree": "/w/ABC-2"}]
+    rows = [{"item": "ABC-2", "state": "running", "worktree": "/w/ABC-2"}]
     sessions = [{"id": "s1", "cwd": "/w/ABC-2", "state": "working"}]
     probe = probe_with(rows, sessions=sessions, monkeypatch=monkeypatch)
     probe.assert_no_strays("crash")
@@ -319,7 +320,7 @@ def test_a_finished_session_is_not_unsupervised(monkeypatch):
 
 def test_a_cancelled_run_keeps_its_worktree_without_owning_the_session(monkeypatch):
     """`cancel` stops the session and keeps the worktree, so its leftovers are expected."""
-    rows = [{"identifier": "ABC-2", "state": "cancelled", "worktree": "/w/ABC-2"}]
+    rows = [{"item": "ABC-2", "state": "cancelled", "worktree": "/w/ABC-2"}]
     sessions = [{"id": "s1", "cwd": "/w/ABC-2", "state": "stopped"}]
     probe = probe_with(rows, sessions=sessions, monkeypatch=monkeypatch)
     probe.assert_no_strays("crash")
@@ -421,10 +422,10 @@ def test_an_existing_directory_without_the_marker_is_refused(monkeypatch, capsys
 
 class RecordingSandbox(StubSandbox):
     def __init__(self):
-        super().__init__([{"identifier": "ABC-1", "state": "running", "worktree": "/w/ABC-1"}])
+        super().__init__([{"item": "ABC-1", "state": "running", "worktree": "/w/ABC-1"}])
         self.commands = []
 
-    def attempt(self, identifier):
+    def worker(self, item):
         return self.rows[0]
 
     def cli(self, *args, **kwargs):

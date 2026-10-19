@@ -303,6 +303,10 @@ class ClaudeCLI:
         name: str,
         prompt: str,
         permission_mode: str,
+        agent: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        plugin_dirs: Sequence[Path | str] = (),
         settings: Mapping[str, Any] | None = None,
         timeout_secs: float = 180.0,
     ) -> CommandResult:
@@ -310,12 +314,36 @@ class ClaudeCLI:
 
         Starting inside a linked worktree is deliberate: Claude Code skips its own
         background-session worktree isolation, so no nested worktree appears.
+
+        Claude Code stores these flags with the job and applies them again when the
+        session is woken with ``--resume --bg`` or ``respawn``, so what is passed here
+        holds for the worker's whole life.
         """
         args = ["--bg", "-n", name, "--permission-mode", permission_mode]
+        if agent:
+            args += ["--agent", agent]
+        if model:
+            args += ["--model", model]
+        if effort:
+            args += ["--effort", effort]
+        for plugin_dir in plugin_dirs:
+            args += ["--plugin-dir", str(plugin_dir)]
         if settings:
             args += ["--settings", json.dumps(settings, sort_keys=True)]
         args.append(prompt)
         return self._run(args, cwd=worktree, timeout=timeout_secs)
+
+    def resume(self, session_uuid: str, prompt: str, *, timeout_secs: float = 180.0) -> CommandResult:
+        """Wake a stopped background session with *prompt* as its next turn.
+
+        Only the full session id continues the session in place, and only while its
+        process is stopped; the short job id, or a process that is still alive, makes
+        Claude Code start a copy under a new id and say so with a ``note:`` line, which
+        :func:`copy_started_by` reads. No other flag is passed: the job's saved options
+        are applied again, and any extra flag would also force a copy. stdin is closed,
+        because a resume reads piped text into the prompt.
+        """
+        return self._run(["--resume", session_uuid, "--bg", prompt], timeout=timeout_secs, check=False)
 
     def one_shot(
         self,
@@ -496,26 +524,58 @@ def _resolve(path: Path) -> str:
         return str(path)
 
 
-_IDENTIFIER_IN_PATH = re.compile(r"([A-Za-z][A-Za-z0-9]*-\d+)")
+_COPY_NOTE = re.compile(r"started a copy (?:of that conversation )?as ([0-9a-f]{8})")
 
 
-def identifier_from_session(session: Session, worktree_root: Path) -> str | None:
-    """Derive an issue identifier from an unadopted session's name or path.
+def copy_started_by(result: CommandResult) -> str | None:
+    """The job id of the copy a resume started instead of continuing in place, or None."""
+    match = _COPY_NOTE.search(result.stdout + result.stderr)
+    return match.group(1) if match else None
+
+
+def user_claude_dir() -> Path:
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(override).expanduser() if override else Path(os.path.expanduser("~")) / ".claude"
+
+
+def agent_file_candidates(repo: Path, name: str) -> list[Path]:
+    """Where Claude Code looks for the agent definition *name*: the project, then the user."""
+    return [repo / ".claude" / "agents" / f"{name}.md", user_claude_dir() / "agents" / f"{name}.md"]
+
+
+_ROLE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_ITEM = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_HANDLE = re.compile(rf"({_ROLE_NAME})/({_ITEM})")
+_LEGACY_IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9]*-\d+")
+
+LEGACY_ROLE = "implementer"
+
+
+def worker_from_session(session: Session, worktree_root: Path) -> tuple[str, str] | None:
+    """Derive ``(role, item)`` from an unadopted session's name or path.
 
     Used by the session side of reconciliation, so a session started by a tick that
-    died before recording its ids is adopted instead of left unsupervised.
+    died before recording its ids is adopted instead of left unsupervised. A session
+    named after its worker reads ``role/item``; a session from before roles existed is
+    named after the issue alone and sits in ``<root>/<issue>``, so that shape maps to
+    the ``implementer`` role.
     """
     if session.name:
-        match = _IDENTIFIER_IN_PATH.fullmatch(session.name.strip())
+        name = session.name.strip()
+        match = _HANDLE.fullmatch(name)
         if match:
-            return match.group(1)
+            return match.group(1), match.group(2)
+        if _LEGACY_IDENTIFIER.fullmatch(name):
+            return LEGACY_ROLE, name
     if session.cwd:
         try:
             relative = Path(session.cwd).resolve().relative_to(worktree_root.resolve())
         except (ValueError, OSError):
             relative = None
-        if relative is not None and relative.parts:
-            match = _IDENTIFIER_IN_PATH.fullmatch(relative.parts[0])
-            if match:
-                return match.group(1)
+        if relative is not None:
+            parts = relative.parts
+            if len(parts) >= 2 and re.fullmatch(_ROLE_NAME, parts[0]) and re.fullmatch(_ITEM, parts[1]):
+                return parts[0], parts[1]
+            if len(parts) == 1 and _LEGACY_IDENTIFIER.fullmatch(parts[0]):
+                return LEGACY_ROLE, parts[0]
     return None

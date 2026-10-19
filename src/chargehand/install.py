@@ -18,6 +18,7 @@ from xml.parsers.expat import ExpatError
 
 from chargehand import __version__, paths
 from chargehand.claude import ClaudeCLI
+from chargehand import roles as roles_mod
 from chargehand.config import MachineConfig, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError, PoolError
 from chargehand.gitutil import Git
@@ -214,13 +215,22 @@ def kickstart(*, force: bool = False) -> subprocess.CompletedProcess[str]:
     return launchctl(*args)
 
 
-def init_repo(repo: Path, *, force: bool = False) -> Path:
-    target = repo / paths.REPO_CONFIG_NAME
-    if target.exists() and not force:
-        raise ChargehandError(f"{target} already exists; pass --force to overwrite")
-    template = (paths.templates_dir() / "chargehand.toml").read_text(encoding="utf-8")
-    target.write_text(template, encoding="utf-8")
-    return target
+def init_repo(repo: Path, *, force: bool = False) -> list[Path]:
+    """Write the repository configuration and a starter `implementer` role."""
+    targets = (
+        (repo / paths.REPO_CONFIG_NAME, "chargehand.toml"),
+        (repo / ".chargehand" / "roles" / f"{roles_mod.DEFAULT_ROLE}.toml",
+         f"roles/{roles_mod.DEFAULT_ROLE}.toml"),
+    )
+    for target, _ in targets:
+        if target.exists() and not force:
+            raise ChargehandError(f"{target} already exists; pass --force to overwrite")
+    written = []
+    for target, template in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((paths.templates_dir() / template).read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(target)
+    return written
 
 
 def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list[Check]:
@@ -310,38 +320,58 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
     else:
         checks.append(Check("notify", WARN, "no notify.command configured; nothing will reach you"))
 
-    for route in config.routes:
-        label = f"route {route.name}"
-        if not route.repo.exists():
-            checks.append(Check(label, FAIL, f"{route.repo} does not exist"))
+    for repository in config.repositories:
+        label = f"repository {repository.name}"
+        if not repository.path.exists():
+            checks.append(Check(label, FAIL, f"{repository.path} does not exist"))
             continue
-        if not git.is_repo(route.repo):
-            checks.append(Check(label, FAIL, f"{route.repo} is not a git repository"))
+        if not git.is_repo(repository.path):
+            checks.append(Check(label, FAIL, f"{repository.path} is not a git repository"))
             continue
         try:
-            repo_config = load_repo_config(route.repo)
+            repo_config = load_repo_config(repository.path)
         except ConfigError as exc:
             checks.append(Check(label, FAIL, str(exc)))
             continue
-        detail = f"{route.repo} · base {repo_config.base} · {repo_config.permission_mode}"
-        if repo_config.permission_mode == "bypassPermissions":
-            checks.append(
-                Check(
-                    label,
-                    WARN,
-                    detail + " — bypassPermissions is intended for a dedicated machine, "
-                    "user account, or VM",
-                )
-            )
-        else:
-            checks.append(Check(label, OK, detail))
-        if not git.ref_exists(route.repo, repo_config.base):
+        checks.append(Check(label, OK, f"{repository.path} · base {repo_config.base}"))
+        if not git.ref_exists(repository.path, repo_config.base):
             checks.append(
                 Check(f"{label} base", WARN, f"{repo_config.base} is not present; fetch first")
             )
+        for name in repository.roles:
+            role_label = f"{label} role {name}"
+            try:
+                role = roles_mod.load_role(
+                    repository.path, name, repo_config=repo_config,
+                    tracker_type=repository.tracker.type,
+                )
+            except ConfigError as exc:
+                checks.append(Check(role_label, FAIL, str(exc)))
+                continue
+            parts = [role.permission_mode]
+            if role.agent:
+                parts.append(f"agent {role.agent}")
+            if role.model:
+                parts.append(f"model {role.model}")
+            if role.effort:
+                parts.append(f"effort {role.effort}")
+            detail = " · ".join(parts)
+            if role.permission_mode == "bypassPermissions":
+                checks.append(
+                    Check(
+                        role_label,
+                        WARN,
+                        detail + " · bypassPermissions is intended for a dedicated machine, "
+                        "user account, or VM",
+                    )
+                )
+            elif not role.start:
+                checks.append(Check(role_label, WARN, detail + " · no start rule, so nothing starts it on its own"))
+            else:
+                checks.append(Check(role_label, OK, detail))
         if check_trackers:
             try:
-                tracker = build_tracker(route)
+                tracker = build_tracker(repository)
                 checks.append(Check(f"{label} tracker", OK, f"{tracker.describe()} as {tracker.whoami()}"))
             except ChargehandError as exc:
                 checks.append(Check(f"{label} tracker", FAIL, str(exc)))

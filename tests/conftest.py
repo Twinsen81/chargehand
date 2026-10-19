@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from chargehand import paths  # noqa: E402
 from chargehand.claude import ClaudeCLI  # noqa: E402
-from chargehand.config import Labels, MachineConfig, NotifyConfig, Route, TrackerConfig  # noqa: E402
+from chargehand.config import Labels, MachineConfig, NotifyConfig, Repository, TrackerConfig  # noqa: E402
 from chargehand.gitutil import Git  # noqa: E402
 from chargehand.ledger import Ledger  # noqa: E402
 from chargehand.notify import Notifier  # noqa: E402
@@ -30,11 +30,22 @@ FAKE_BANKSMAN = Path(__file__).parent / "support" / "fake_banksman.py"
 # banksman installed on the machine never runs from the suite.
 NO_POOL = Path(__file__).parent / "support" / "banksman-not-installed"
 
+# The pre-roles shape of a repository configuration, with the prompt inline. It stands
+# in for every repository configured before role files existed, which the `implementer`
+# role must keep serving unchanged.
 REPO_CONFIG = """\
 base = "origin/main"
 prompt = "work on {issue} ({url})"
 permission_mode = "auto"
 branch_prefix = "chargehand/"
+"""
+
+ROLE_CONFIG = """\
+prompt = "work on {item} ({item_url})"
+permission_mode = "auto"
+
+[[start]]
+on = "labeled"
 """
 
 
@@ -85,9 +96,11 @@ class FakeClaudeState:
         return self.read().get("commands", [])
 
     def set_session_state(self, name: str, session_state: str, **extra) -> None:
+        """Match a session by id, by its full name, or by the item part of `role/item`."""
         state = self.read()
         for session in state.get("sessions", []):
-            if session.get("name") == name or session.get("id") == name:
+            full = session.get("name") or ""
+            if full == name or full.endswith(f"/{name}") or session.get("id") == name:
                 session["state"] = session_state
                 session.update(extra)
         self.write(state)
@@ -201,16 +214,17 @@ class Harness:
         self.fresh_runner()
         return self.runner.tick(**kwargs)
 
-    def attempt(self, identifier: str):
-        return self.ledger.live_attempt_for(identifier) or self.ledger.latest_attempt_for(
-            identifier
-        )
+    def worker(self, item: str, role: str | None = None):
+        return self.ledger.live_worker_for(item, role) or self.ledger.latest_worker_for(item, role)
 
-    def labels(self, identifier: str) -> tuple[str, ...]:
-        return self.board.labels_of(identifier)
+    def worktree(self, item: str, role: str = "implementer") -> Path:
+        return self.worktree_root / role / item
+
+    def labels(self, item: str) -> tuple[str, ...]:
+        return self.board.labels_of(item)
 
     def notifications(self) -> list[tuple[str, str]]:
-        return [(n.issue, n.state) for n in self.notifier.sent]
+        return [(n.item, n.state) for n in self.notifier.sent]
 
 
 @pytest.fixture(autouse=True)
@@ -289,18 +303,19 @@ def board() -> "fake_tracker.Board":
 
 def make_config(repo: Path, worktree_root: Path, **overrides) -> MachineConfig:
     labels = Labels(queued="chargehand", running="chargehand-running", blocked="chargehand-blocked")
-    route = Route(
+    repository = Repository(
         name="test",
-        repo=repo,
+        path=repo,
         tracker=TrackerConfig(type="fake", options={"board": "default"}),
         labels=labels,
-        max_concurrent=overrides.pop("route_max_concurrent", None),
+        max_concurrent=overrides.pop("repository_max_concurrent", None),
+        roles=tuple(overrides.pop("roles", ("implementer",))),
     )
     defaults = dict(
-        routes=(route,),
+        repositories=(repository,),
         worktree_root=worktree_root,
         max_concurrent=2,
-        max_open_attempts=4,
+        max_open_workers=4,
         max_run_hours=6.0,
         hard_stop_hours=10.0,
         min_free_disk_gb=0.0,
@@ -349,7 +364,7 @@ def write_machine_config(path: Path, repo: Path, worktree_root: Path, **extra) -
         f'worktree_root = "{worktree_root}"',
         f'claude_bin = "{FAKE_CLAUDE}"',
         "max_concurrent = 2",
-        "max_open_attempts = 4",
+        "max_open_workers = 4",
         "min_free_disk_gb = 0",
     ]
     extra.setdefault("pool_bin", str(NO_POOL))
@@ -357,9 +372,9 @@ def write_machine_config(path: Path, repo: Path, worktree_root: Path, **extra) -
         lines.append(f"{key} = {json.dumps(value)}")
     lines += [
         "",
-        "[[route]]",
+        "[[repository]]",
         'name = "test"',
-        f'repo = "{repo}"',
+        f'path = "{repo}"',
         'tracker = { type = "fake", board = "default" }',
     ]
     path.write_text("\n".join(lines) + "\n")

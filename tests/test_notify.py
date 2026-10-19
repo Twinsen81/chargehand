@@ -10,14 +10,15 @@ from chargehand.notify import Notification, Notifier
 
 
 def test_the_payload_has_no_field_for_free_text():
-    env = Notification(issue="ABC-1", state="blocked", url="https://x.invalid/ABC-1").env()
+    env = Notification(item="ABC-1", state="blocked", url="https://x.invalid/ABC-1").env()
 
     assert env["CHARGEHAND_ISSUE"] == "ABC-1"
     assert env["CHARGEHAND_STATE"] == "blocked"
     assert env["CHARGEHAND_URL"] == "https://x.invalid/ABC-1"
     assert set(env) == {
-        "CHARGEHAND_ISSUE", "CHARGEHAND_STATE", "CHARGEHAND_URL",
-        "CHARGEHAND_ROUTE", "CHARGEHAND_DETAIL", "ISSUE", "STATE", "URL",
+        "CHARGEHAND_ITEM", "CHARGEHAND_ROLE", "CHARGEHAND_STATE", "CHARGEHAND_URL",
+        "CHARGEHAND_REPOSITORY", "CHARGEHAND_DETAIL",
+        "CHARGEHAND_ISSUE", "CHARGEHAND_ROUTE", "ISSUE", "STATE", "URL",
     }
 
 
@@ -47,7 +48,7 @@ def test_a_missing_command_does_not_break_a_tick(tmp_path):
     notifier = Notifier(NotifyConfig(command=str(tmp_path / "gone.sh")))
 
     assert notifier.send(Notification("ABC-1", "blocked")) is False
-    assert notifier.sent[-1].issue == "ABC-1"
+    assert notifier.sent[-1].item == "ABC-1"
 
 
 def test_with_no_command_configured_nothing_is_sent_but_the_call_is_recorded():

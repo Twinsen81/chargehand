@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from chargehand.config import Route
+from chargehand.config import Repository
 from chargehand.errors import ConfigError
 from chargehand.trackers.base import Issue, Status, Tracker
 from chargehand.trackers.linear import LinearTracker
@@ -23,15 +23,15 @@ def available() -> tuple[str, ...]:
     return tuple(sorted(_BUILTIN))
 
 
-def build(route: Route) -> Tracker:
+def build(repository: Repository) -> Tracker:
     try:
-        adapter = _BUILTIN[route.tracker.type]
+        adapter = _BUILTIN[repository.tracker.type]
     except KeyError as exc:
         raise ConfigError(
-            f"route '{route.name}': unknown tracker type '{route.tracker.type}'; "
+            f"repository '{repository.name}': unknown tracker type '{repository.tracker.type}'; "
             f"available: {', '.join(available())}"
         ) from exc
-    return adapter(route.tracker.options, route.labels.as_dict())  # type: ignore[call-arg]
+    return adapter(repository.tracker.options, repository.labels.as_dict())  # type: ignore[call-arg]
 
 
 def build_from(tracker_type: str, options: Mapping[str, object], labels: Mapping[str, str]) -> Tracker:

@@ -15,7 +15,7 @@ from conftest import run_git
 def launch(harness, identifier="ABC-1"):
     harness.board.add(identifier)
     harness.tick()
-    return harness.attempt(identifier)
+    return harness.worker(identifier)
 
 
 def test_a_blocked_session_marks_the_issue_blocked_and_notifies_once(harness):
@@ -24,7 +24,7 @@ def test_a_blocked_session_marks_the_issue_blocked_and_notifies_once(harness):
 
     harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.BLOCKED
     assert attempt.waiting_for == "permission prompt"
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
@@ -77,7 +77,7 @@ def test_a_finished_runs_last_notification_is_sent_again_after_a_failure(
     harness.next_tick()
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.DONE
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
     assert harness.notifications().count(("ABC-1", "done")) == 2
 
     offline.unlink()
@@ -95,7 +95,7 @@ def test_a_finished_runs_notification_is_given_up_after_a_day(harness, repo, tmp
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "aborted"}))
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
-    harness.ledger.update(harness.attempt("ABC-1"), finished_at=time.time() - 25 * 3600)
+    harness.ledger.update(harness.worker("ABC-1"), finished_at=time.time() - 25 * 3600)
     offline.unlink()
 
     report = harness.next_tick()
@@ -114,7 +114,7 @@ def test_answering_a_blocked_session_flips_the_label_back(harness):
     harness.claude_state.set_session_state("ABC-1", "working")
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
     assert harness.labels("ABC-1") == ("chargehand-running",)
 
 
@@ -124,7 +124,7 @@ def test_done_without_a_status_file_means_go_look(harness):
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
     detail = harness.notifier.sent[-1].detail
     assert "go look" in detail
@@ -149,7 +149,7 @@ def test_a_status_file_saying_complete_finishes_the_attempt(harness, repo, tmp_p
 
     harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.DONE
     assert attempt.pr_url == "https://example.invalid/pr/1"
     assert harness.labels("ABC-1") == ()
@@ -163,7 +163,7 @@ def test_a_status_file_saying_needs_input_keeps_the_run_open(harness, repo, tmp_
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
 
 
@@ -177,7 +177,7 @@ def test_a_status_file_saying_aborted_fails_the_attempt(harness, repo, tmp_path)
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.FAILED
+    assert harness.worker("ABC-1").state == ledger_mod.FAILED
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
 
 
@@ -189,7 +189,7 @@ def test_a_status_file_with_an_unknown_state_is_not_trusted(harness, repo, tmp_p
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
 
 
 def test_a_failed_session_is_blocked_and_reported(harness):
@@ -198,7 +198,7 @@ def test_a_failed_session_is_blocked_and_reported(harness):
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert ("ABC-1", "blocked") in harness.notifications()
 
 
@@ -208,7 +208,7 @@ def test_a_session_that_vanishes_is_blocked_not_forgotten(harness):
 
     harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.BLOCKED
     assert attempt.session_state == "missing"
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
@@ -220,7 +220,7 @@ def test_an_unrecognised_session_state_is_reported_rather_than_guessed(harness):
 
     harness.next_tick()
 
-    attempt = harness.attempt("ABC-1")
+    attempt = harness.worker("ABC-1")
     assert attempt.session_state == "unknown"
     assert attempt.state == ledger_mod.BLOCKED
     assert "go look" in harness.notifier.sent[-1].detail
@@ -234,7 +234,7 @@ def test_the_watchdog_notifies_a_long_run_once(harness):
     harness.next_tick()
 
     assert harness.notifications().count(("ABC-1", "long-running")) == 1
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
 def test_the_watchdog_stops_a_run_past_the_hard_limit(harness):
@@ -245,7 +245,7 @@ def test_the_watchdog_stops_a_run_past_the_hard_limit(harness):
 
     assert ("ABC-1", "watchdog-stopped") in harness.notifications()
     assert ["stop", attempt.session_id] in harness.claude_state.commands
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
 
 
@@ -255,20 +255,20 @@ def test_a_finished_run_is_collected_once_the_issue_closes(harness, repo, tmp_pa
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
-    assert (harness.worktree_root / "ABC-1").exists()
+    assert (harness.worktree("ABC-1")).exists()
 
     harness.board.close("ABC-1")
     report = harness.next_tick()
 
     assert "ABC-1" in report.collected
-    assert not (harness.worktree_root / "ABC-1").exists()
+    assert not (harness.worktree("ABC-1")).exists()
     assert harness.claude_state.sessions == []
 
 
 def test_collection_refuses_to_destroy_unpushed_work(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)
-    worktree = harness.worktree_root / "ABC-1"
+    worktree = harness.worktree("ABC-1")
     (worktree / "new.txt").write_text("work in progress\n")
     run_git("add", "-A", cwd=worktree)
     run_git("commit", "-m", "unpushed", cwd=worktree)
@@ -287,8 +287,8 @@ def test_collection_refuses_to_destroy_unpushed_work(harness, repo, tmp_path):
 def test_collection_deletes_a_branch_the_session_renamed(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)
-    worktree = harness.worktree_root / "ABC-1"
-    run_git("branch", "-m", "chargehand/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    worktree = harness.worktree("ABC-1")
+    run_git("branch", "-m", "chargehand/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
@@ -304,7 +304,7 @@ def test_collection_deletes_a_branch_the_session_renamed(harness, repo, tmp_path
 def test_collection_reports_a_branch_it_kept(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)
-    worktree = harness.worktree_root / "ABC-1"
+    worktree = harness.worktree("ABC-1")
     run_git("checkout", "-b", "made-by-the-session", cwd=worktree)
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
     harness.claude_state.set_session_state("ABC-1", "done")
@@ -329,7 +329,7 @@ def test_an_open_issue_is_not_collected(harness, repo, tmp_path):
     report = harness.next_tick()
 
     assert report.collected == []
-    assert (harness.worktree_root / "ABC-1").exists()
+    assert (harness.worktree("ABC-1")).exists()
 
 
 def test_low_disk_is_reported(harness):
@@ -359,21 +359,21 @@ def test_the_setup_script_from_the_worktrees_own_checkout_is_used(harness, repo)
 
     harness.tick()
 
-    assert (harness.worktree_root / "ABC-1" / "which").read_text().strip() == "main-checkout"
+    assert (harness.worktree("ABC-1") / "which").read_text().strip() == "main-checkout"
 
 
 def test_a_blocked_run_is_closed_out_when_its_issue_closes(harness):
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
 
     harness.board.close("ABC-1")
     report = harness.next_tick()
 
     assert "ABC-1" in report.collected
-    assert harness.attempt("ABC-1").state == ledger_mod.DONE
-    assert not (harness.worktree_root / "ABC-1").exists()
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
+    assert not (harness.worktree("ABC-1")).exists()
 
 
 def test_closing_an_issue_does_not_stop_a_run_that_is_still_working(harness):
@@ -383,8 +383,8 @@ def test_closing_an_issue_does_not_stop_a_run_that_is_still_working(harness):
     report = harness.next_tick()
 
     assert report.collected == []
-    assert harness.attempt("ABC-1").state == ledger_mod.RUNNING
-    assert (harness.worktree_root / "ABC-1").exists()
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    assert (harness.worktree("ABC-1")).exists()
 
 
 def test_a_watchdog_stop_that_did_not_take_does_not_reset_its_own_deadline(harness):
@@ -396,7 +396,7 @@ def test_a_watchdog_stop_that_did_not_take_does_not_reset_its_own_deadline(harne
 
     report = harness.next_tick()
 
-    after = harness.attempt("ABC-1")
+    after = harness.worker("ABC-1")
     assert after.state == ledger_mod.RUNNING
     assert after.working_since == pytest.approx(deadline, abs=1)
     assert ("ABC-1", "watchdog-stop-failed") in harness.notifications()
@@ -422,7 +422,7 @@ def test_a_watchdog_stop_that_takes_still_blocks_the_run(harness):
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert ("ABC-1", "watchdog-stopped") in harness.notifications()
 
 
@@ -444,7 +444,7 @@ def test_a_status_files_stop_reason_never_reaches_a_notification(harness, repo, 
     assert "acme-corp" not in _details(harness)
     assert ("ABC-1", "failed") in harness.notifications()
     # It is kept locally, for `status --verbose`.
-    assert "acme-corp" in harness.attempt("ABC-1").last_error
+    assert "acme-corp" in harness.worker("ABC-1").last_error
 
 
 def test_setup_script_output_never_reaches_a_notification(harness, repo):
@@ -459,7 +459,7 @@ def test_setup_script_output_never_reaches_a_notification(harness, repo):
 
     assert "hunter2" not in _details(harness)
     assert _details(harness).strip() == "setup script failed"
-    assert "hunter2" in harness.attempt("ABC-1").last_error
+    assert "hunter2" in harness.worker("ABC-1").last_error
 
 
 def test_a_sessions_waiting_text_never_reaches_a_notification(harness):
@@ -472,7 +472,7 @@ def test_a_sessions_waiting_text_never_reaches_a_notification(harness):
 
     assert "prod-acme" not in _details(harness)
     # It is still available locally, where `status` shows it.
-    assert "prod-acme" in harness.attempt("ABC-1").waiting_for
+    assert "prod-acme" in harness.worker("ABC-1").waiting_for
 
 
 def test_collection_leaves_a_worktree_alone_when_its_session_will_not_stop(harness, repo, tmp_path):
@@ -489,7 +489,7 @@ def test_collection_leaves_a_worktree_alone_when_its_session_will_not_stop(harne
     report = harness.next_tick()
 
     assert report.collected == []
-    assert (harness.worktree_root / "ABC-1").is_dir()
+    assert (harness.worktree("ABC-1")).is_dir()
     assert any("still working" in warning for warning in report.warnings)
 
 
@@ -500,7 +500,7 @@ def test_a_closed_issue_does_not_end_a_run_whose_session_will_not_stop(harness):
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "blocked")
     harness.next_tick()
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
 
     harness.board.close("ABC-1")
     harness.claude_state.set_session_state("ABC-1", "working")
@@ -511,8 +511,8 @@ def test_a_closed_issue_does_not_end_a_run_whose_session_will_not_stop(harness):
     harness.runner._close_out_finished_issues(report)
 
     assert any("would not stop" in warning for warning in report.warnings)
-    assert harness.attempt("ABC-1").state == ledger_mod.BLOCKED
-    assert (harness.worktree_root / "ABC-1").is_dir()
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert (harness.worktree("ABC-1")).is_dir()
 
 
 def test_a_status_file_from_an_earlier_attempt_is_ignored(harness, repo, tmp_path):
@@ -522,21 +522,21 @@ def test_a_status_file_from_an_earlier_attempt_is_ignored(harness, repo, tmp_pat
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "aborted"}))
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
-    first = harness.attempt("ABC-1")
+    first = harness.worker("ABC-1")
     assert first.state == ledger_mod.FAILED
 
     harness.ledger.record_request("retry", "ABC-1")
     harness.next_tick()
-    second = harness.attempt("ABC-1")
+    second = harness.worker("ABC-1")
     assert second.id != first.id and second.state == ledger_mod.RUNNING
 
     # The new session ends a turn without writing a status file of its own.
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
 
-    after = harness.attempt("ABC-1")
+    after = harness.worker("ABC-1")
     assert after.state == ledger_mod.BLOCKED
-    assert "predates this attempt" in harness.notifier.sent[-1].detail
+    assert "predates this worker" in harness.notifier.sent[-1].detail
 
 
 def test_a_status_file_written_by_this_attempt_is_still_honoured(harness, repo, tmp_path):
@@ -547,7 +547,7 @@ def test_a_status_file_written_by_this_attempt_is_still_honoured(harness, repo, 
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").state == ledger_mod.DONE
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
 
 
 def test_an_agent_written_pr_url_that_is_not_a_url_is_dropped(harness, repo, tmp_path):
@@ -561,7 +561,7 @@ def test_an_agent_written_pr_url_that_is_not_a_url_is_dropped(harness, repo, tmp
 
     harness.next_tick()
 
-    assert harness.attempt("ABC-1").pr_url is None
+    assert harness.worker("ABC-1").pr_url is None
 
 
 def _tracker_down_for_writes(monkeypatch):
@@ -590,7 +590,7 @@ def test_a_label_write_that_fails_at_completion_is_retried(harness, repo, tmp_pa
     down = _tracker_down_for_writes(monkeypatch)
 
     harness.next_tick()
-    assert harness.attempt("ABC-1").state == ledger_mod.DONE
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
     assert harness.labels("ABC-1") == ("chargehand-running",)
 
     down["value"] = False
@@ -615,4 +615,4 @@ def test_a_pending_label_write_is_not_mistaken_for_a_stranded_label(
 
     assert not any("no live attempt" in warning for warning in report.warnings)
     assert ("ABC-1", "blocked") not in harness.notifications()
-    assert harness.attempt("ABC-1").state == ledger_mod.DONE
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
