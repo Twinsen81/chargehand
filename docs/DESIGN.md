@@ -3,8 +3,8 @@
 **Status:** the runner and the control surface are implemented and tested against a fake
 Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
 and real Claude Code on a scratch repository, including a crash after every launch step and a
-reboot that killed a session mid-turn. The connection to the lease pool is tested only
-against a fake pool, and the `github` and `command` adapters are not written. It has not
+reboot that killed a session mid-turn. The `github` and `command` adapters are not
+written. It has not
 yet been left running unattended for a working day. The unit of work is a *worker* of a
 *role* (section 4); event sources other than the tracker queue, a resident daemon and a
 board are not built yet.
@@ -39,7 +39,7 @@ Issue: queue label + assigned to me (+ optional state filter)
 launchd timer ──► chargehand tick
    1. reconcile incomplete launches
    2. apply recorded control requests
-   3. reap void leases, watchdog long runs
+   3. watchdog long runs
    4. diff session states, notify on change      ◄── claude agents --json --all
    5. admit new issues (repositories, roles' start rules, ledger, capacity)
    6. ledger → label → worktree → setup → claude --bg "<prompt>"
@@ -61,7 +61,7 @@ Components:
 | Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
 | Control CLI | See and steer the runner; no server |
 | Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
-| Lease pool (banksman, an external tool; a no-op pool when it is not installed) | Optional leases for devices, emulators, and build slots |
+| A lease tool such as banksman (external, optional, never called by chargehand) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
 
 ## 3. Trigger and routing
 
@@ -207,8 +207,8 @@ one.
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
 the session. So `max_concurrent` is a launch throttle, not the memory bound. The memory bound
-belongs to the lease pool (see "Lease pool"): however many sessions resume at once, only so many heavy
-builds or emulators should run. A session that is reading code or waiting for a slot is cheap.
+belongs to a lease tool (see "Sharing devices"): however many sessions resume at once, only
+so many heavy builds or emulators should run. A session that is reading code or waiting for a slot is cheap.
 
 ### Steps
 
@@ -366,8 +366,7 @@ roles hold the item. `--route` stays accepted for `--repository`.
   `--verbose-titles`, output needs `logs`. That covers what a session can put into fields
   that look structured: a pull-request URL it reports is kept only when it is a plain URL,
   and a branch it renamed, which then carries a slug of the issue title, is shown only
-  with `--verbose-titles`. The same holds for the worktree path of a lease's holder, which
-  any agent that shares the lease pool chooses. Flags cannot be abbreviated, so the rules
+  with `--verbose-titles`. Flags cannot be abbreviated, so the rules
   that gate a flag see its full name. Everything printed is stripped of terminal control
   sequences.
 - **An AI assistant as the interface.** Driving the CLI from a Claude Code session is
@@ -389,9 +388,10 @@ roles hold the item. `--route` stays accepted for `--repository`.
   than about this tool.
 - **Agents versus the control plane.** Sessions run as the same user, so they could call the
   CLI, stop other sessions, or start a session without any of these restrictions. Launched
-  sessions get deny rules for all three, and one more for the lease pool's operator
-  commands, which all start with `banksman admin`. The other pool commands stay open,
-  because the repository's scripts use them. A `Bash` rule matches command text rather
+  sessions get deny rules for all three, and one more for the operator commands of the
+  lease tool banksman, which all start with `banksman admin` and which banksman asks every
+  caller to deny to agents. The rule matches nothing on a machine without banksman, and
+  the other banksman commands stay open, because the repository's scripts use them. A `Bash` rule matches command text rather
   than the program behind it, so every pattern leads with a wildcard to cover an absolute
   path and a `sh -c '...'` wrapper alongside the bare name; `probes/deny_rules.py` checks
   each form against a real install. That makes the rules a guardrail against the careless
@@ -399,33 +399,37 @@ roles hold the item. `--route` stays accepted for `--repository`.
   is the stronger option.
 - **Optional later:** a read-only, loopback-only status page with no mutating endpoints.
 
-## 8. Lease pool
+## 8. Sharing devices
 
-Parallel runs on one machine compete for scarce things: a phone on USB, a limited number of
-emulators, memory for heavy builds. Sharing them safely is the job of a lease pool, which is
-an external tool and not part of chargehand: banksman. The repository's own scripts lease
-what they need from it. The runner's part is small.
+Parallel workers on one machine compete for scarce things: a phone on USB, a limited number
+of emulators, memory for heavy builds. Sharing them safely is the job of a lease tool, such
+as banksman, which the repository's own scripts call. chargehand does not call it, read its
+output, or know its version. A machine without a lease tool runs exactly the same.
 
-- **Optional.** The runner uses the pool when `pool_bin` (`banksman` by default) resolves
-  through the job's `PATH`, and a no-op pool otherwise. `doctor` resolves it the same way.
-  A missing command is information, not a fault, and a pool whose output this version
-  cannot read is an error.
-- **A command, never an import.** One module runs `banksman` and reads its JSON. An import
-  would add a runtime dependency, and a copy inside chargehand's own environment can
-  differ from the command that the scripts call, while both work on the same lease files.
-  Every JSON document carries a `schema` number, and output with a number that this
-  version does not know is refused.
-- **Reap and status, nothing else.** Each tick starts with `banksman reap`, which takes
-  back the resources of void leases, and `chargehand status` lists the leases. A pool that
-  fails is reported, and the tick goes on.
-- **No release by the runner.** banksman records the agent process of every lease, and a
-  lease whose agent process has ended becomes void after a grace period, 5 minutes by
-  default. When the runner stops a session, for a cancel, the watchdog, a discard, or
-  collection, the leases of that session therefore end without the runner, and a later
-  reap takes their resources back. A release by the runner would need either the worktree,
-  which several agents can share, or the agent process, which has already ended when the
-  runner knows that the session stopped. The cost: after a stop, a resource can stay held
-  for the grace period and one more tick.
+banksman needs nothing from the caller, so chargehand only has to keep a few properties that
+any such tool can rely on:
+
+- **A worker's commands run below its own agent process.** A worker's session is a Claude
+  Code process of its own, and Claude Code names it in `CLAUDE_PID`. banksman takes that
+  process as the holder, so each worker has its own leases, also with the same holding
+  label. A walk up the process tree alone is not enough: the session process has the title
+  `claude bg-spare`, and above it is Claude Code's background service, one process that
+  hosts every background session of the user. Use a banksman from 2026-10-19 or later,
+  which reads `CLAUDE_PID` in that case; an older one makes all background workers one
+  holder.
+- **The branch names the work item.** A worker starts on `<branch_prefix><role>/<item>`, so
+  a tool that reads an issue id from the branch name finds it.
+- **Stopping a worker ends its process.** banksman ends a lease when its agent process has
+  ended, after a grace period, and takes the resource back at the start of its next command
+  or in its own reap job. So a cancel, the watchdog, a discard, or garbage collection frees a
+  worker's leases without chargehand releasing anything. The cost: after a stop, a resource
+  can stay held for the grace period.
+- **Agents cannot reach the tool's operator commands.** The launch deny rules include
+  `Bash(*banksman admin*)` (see "Control").
+
+chargehand once ran banksman's `reap` and `status` itself. That made every change of
+banksman's output schema a reason to change chargehand, for no gain in safety, because
+banksman reaps on its own. Use `banksman watch` to see who holds what.
 
 ## 9. Leaving it running
 
@@ -434,8 +438,8 @@ what they need from it. The runner's part is small.
   out one is not.
 - launchd starts jobs with a minimal `PATH`; everything the tick shells out to must be
   reachable through the `PATH` set in the job definition. `install` copies the `PATH` of the
-  shell it runs in, and `doctor` resolves `claude`, `git`, and the lease pool's command
-  through the job's `PATH` rather than its own. A repository's setup script inherits the
+  shell it runs in, and `doctor` resolves `claude` and `git` through the job's `PATH`
+  rather than its own. A repository's setup script inherits the
   same `PATH`.
 - The job runs as launchd's `Interactive` process type, which gives it the priority a
   terminal gets. Everything the tick starts inherits the type, and that includes every
@@ -445,7 +449,7 @@ what they need from it. The runner's part is small.
   work took about three times as long. The daemon also hosts the sessions you start by
   hand, so a throttled daemon would slow those too.
 - Runs share the machine with you. Keep `max_concurrent` low until the repository's
-  scripts lease their devices through the lease pool, because until then nothing stops two
+  scripts lease their devices through a lease tool, because until then nothing stops two
   runs from reaching for the same device or emulator.
 - Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
   next tick parks any run whose session is gone, so a restart costs progress but never
@@ -467,22 +471,22 @@ what they need from it. The runner's part is small.
 
 Done:
 
-- Runner with a no-op pool: configuration, the `linear` adapter, ledger-first launch,
+- Runner: configuration, the `linear` adapter, ledger-first launch,
   reconciliation, label lifecycle, state diffing, the control CLI, the launchd job.
 - Control surface: `watch`, `logs`, request plumbing through the tick, output sanitizing,
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
 - `init`, `doctor`, `install`, and the bundled templates.
-- The connection to the lease pool: reap on every tick, the leases in `status`, the pool's
-  command and schema in `doctor`, and the deny rule for its operator commands.
+- Devices shared through a lease tool that chargehand never calls, with the deny rule for
+  its operator commands.
 - Roles and workers: role files with an agent, model, effort and allow rules, start rules,
   several roles per repository, and a ledger of workers and their sessions.
 
 Next:
 
 - Run it unattended for a day against a real tracker.
-- Run several sessions at once with the lease pool and with repository scripts that lease
-  through it.
+- Run several workers at once, with repository scripts that lease their devices through
+  banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
 - A resident daemon on loopback with a local board, replacing the scheduled job.

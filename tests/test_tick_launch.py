@@ -88,7 +88,6 @@ def test_a_route_limit_applies_on_top_of_the_global_one(tmp_path, repo, claude_s
     from chargehand.gitutil import Git
     from chargehand.ledger import Ledger
     from chargehand.notify import Notifier
-    from chargehand.pool import NoopPool
     from chargehand.tick import Runner
 
     worktree_root = tmp_path / "worktrees"
@@ -97,7 +96,7 @@ def test_a_route_limit_applies_on_top_of_the_global_one(tmp_path, repo, claude_s
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
     runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
-                    pool=NoopPool(), notifier=notifier)
+                    notifier=notifier)
     harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root,
                       notifier)
     for index in range(3):

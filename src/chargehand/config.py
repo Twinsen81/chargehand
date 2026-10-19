@@ -61,9 +61,9 @@ DEFAULT_DENY_RULES = (
     "Bash(*claude rm*)",
     "Bash(*claude respawn*)",
     "Bash(*claude agents*)",
-    # The lease pool keeps every operator command under one prefix, so this one rule
-    # also covers the ones it adds later. Agents keep the rest of the pool, which their
-    # scripts use.
+    # banksman, a lease tool for devices and emulators, keeps every operator command
+    # under one prefix and asks every caller to deny it to agents. chargehand never runs
+    # it, and on a machine without it the rule matches nothing.
     "Bash(*banksman admin*)",
     # A session that starts a second session without these rules has escaped all of
     # them, so the flags that would do it are denied too.
@@ -223,6 +223,10 @@ _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 DEFAULT_ROLES = ("implementer",)
 
+# chargehand no longer runs a lease tool: banksman finds a worker's leases by itself and
+# ends them with the worker's process. Its command's key is still read, and ignored.
+_IGNORED_KEYS = ("pool_bin",)
+
 
 @dataclass(frozen=True)
 class Repository:
@@ -312,7 +316,8 @@ class MachineConfig:
     trust_worktrees: bool = True
     claude_bin: str = "claude"
     git_bin: str = "git"
-    pool_bin: str = "banksman"
+    # Keys that are accepted for one release and have no effect, for `doctor` to name.
+    ignored_keys: tuple[str, ...] = ()
     source: Path | None = None
 
     _TOP_LEVEL = (
@@ -417,7 +422,7 @@ class MachineConfig:
             trust_worktrees=bool(data.get("trust_worktrees", True)),
             claude_bin=_as_str(data.get("claude_bin", "claude"), "config.claude_bin"),
             git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
-            pool_bin=_as_str(data.get("pool_bin", "banksman"), "config.pool_bin"),
+            ignored_keys=tuple(key for key in _IGNORED_KEYS if key in data),
             source=source,
         )
 

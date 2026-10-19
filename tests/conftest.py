@@ -1,5 +1,4 @@
-"""Fixtures. Nothing here needs a real `claude`, a real `banksman`, a real tracker, or the
-network."""
+"""Fixtures. Nothing here needs a real `claude`, a real tracker, or the network."""
 
 from __future__ import annotations
 
@@ -7,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -20,15 +19,10 @@ from chargehand.config import Labels, MachineConfig, NotifyConfig, Repository, T
 from chargehand.gitutil import Git  # noqa: E402
 from chargehand.ledger import Ledger  # noqa: E402
 from chargehand.notify import Notifier  # noqa: E402
-from chargehand.pool import NoopPool, Pool  # noqa: E402
 from chargehand.tick import Runner  # noqa: E402
 from support import fake_tracker  # noqa: E402
 
 FAKE_CLAUDE = Path(__file__).parent / "support" / "fake_claude.py"
-FAKE_BANKSMAN = Path(__file__).parent / "support" / "fake_banksman.py"
-# The pool's command in every test configuration that does not ask for the fake, so that a
-# banksman installed on the machine never runs from the suite.
-NO_POOL = Path(__file__).parent / "support" / "banksman-not-installed"
 
 # The pre-roles shape of a repository configuration, with the prompt inline. It stands
 # in for every repository configured before role files existed, which the `implementer`
@@ -109,74 +103,6 @@ class FakeClaudeState:
         self.set(sessions=[])
 
 
-class FakeBanksmanState:
-    """Reads and writes the fake pool command's state file."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.write({})
-
-    def read(self) -> dict:
-        return json.loads(self.path.read_text() or "{}")
-
-    def write(self, state: dict) -> None:
-        self.path.write_text(json.dumps(state, indent=2))
-
-    def set(self, **values) -> None:
-        state = self.read()
-        state.update(values)
-        self.write(state)
-
-    @property
-    def calls(self) -> list[list[str]]:
-        return self.read().get("calls", [])
-
-
-def leased(resource: str, owner: str, *, issue: str | None = None, state: str = "ready",
-           abandoned_in: int | None = 1200) -> dict:
-    """A resource with a lease, in the shape of `banksman status --json`."""
-    free_by = None if abandoned_in is None else {
-        "expected": None,
-        "latest": {"at": "2026-10-05T18:00:00Z", "in": 10800},
-        "abandoned": {"at": "2026-10-05T15:20:00Z", "in": abandoned_in},
-    }
-    return {
-        "resource": resource,
-        "kind": "emulator",
-        "state": state,
-        "present": True,
-        "facts": {"form": "phone", "api": 34},
-        "lease": {
-            "resource": resource,
-            "kind": "emulator",
-            "state": state,
-            "owner": owner,
-            "owner_pid": 4242,
-            "agent": "claude",
-            "issue": issue,
-            "session": None,
-            "acquired_at": "2026-10-05T15:00:00Z",
-            "touched_at": "2026-10-05T15:00:00Z",
-            "free_by": free_by,
-            "drain_deadline": None,
-            "void_reason": None,
-            "users": [],
-            "accounts": [],
-        },
-    }
-
-
-def free(resource: str) -> dict:
-    return {"resource": resource, "kind": "emulator", "state": "free", "present": True,
-            "facts": {}, "lease": None}
-
-
-def reaped(resource: str, outcome: str = "released") -> dict:
-    """A lease that a reap ended, in the shape of `banksman reap --json`."""
-    return {"resource": resource, "kind": "emulator", "owner": "/tmp/worktrees/ABC-1",
-            "void_reason": "owner", "outcome": outcome, "running": []}
-
-
 @dataclass
 class Harness:
     config: MachineConfig
@@ -188,7 +114,6 @@ class Harness:
     origin: Path
     worktree_root: Path
     notifier: Notifier
-    pool: Pool = field(default_factory=NoopPool)
 
     def tick(self, **kwargs):
         self.runner.invalidate_sessions()
@@ -201,14 +126,9 @@ class Harness:
             self.ledger,
             claude=ClaudeCLI(self.config.claude_bin),
             git=Git(self.config.git_bin),
-            pool=self.pool,
             notifier=self.notifier,
         )
         return self.runner
-
-    def use_pool(self, pool: Pool) -> None:
-        self.pool = pool
-        self.runner.pool = pool
 
     def next_tick(self, **kwargs):
         self.fresh_runner()
@@ -290,13 +210,6 @@ def claude_state(tmp_path, monkeypatch) -> FakeClaudeState:
 
 
 @pytest.fixture
-def banksman_state(tmp_path, monkeypatch) -> FakeBanksmanState:
-    path = tmp_path / "banksman-state.json"
-    monkeypatch.setenv("FAKE_BANKSMAN_STATE", str(path))
-    return FakeBanksmanState(path)
-
-
-@pytest.fixture
 def board() -> "fake_tracker.Board":
     return fake_tracker.board("default")
 
@@ -323,7 +236,6 @@ def make_config(repo: Path, worktree_root: Path, **overrides) -> MachineConfig:
         notify=NotifyConfig(),
         claude_bin=str(FAKE_CLAUDE),
         git_bin="git",
-        pool_bin=str(NO_POOL),
     )
     defaults.update(overrides)
     return MachineConfig(**defaults)
@@ -341,7 +253,6 @@ def harness(tmp_path, repo, origin_repo, claude_state, board) -> Harness:
         ledger,
         claude=ClaudeCLI(config.claude_bin),
         git=Git(config.git_bin),
-        pool=NoopPool(),
         notifier=notifier,
     )
     harness = Harness(
@@ -367,7 +278,6 @@ def write_machine_config(path: Path, repo: Path, worktree_root: Path, **extra) -
         "max_open_workers = 4",
         "min_free_disk_gb = 0",
     ]
-    extra.setdefault("pool_bin", str(NO_POOL))
     for key, value in extra.items():
         lines.append(f"{key} = {json.dumps(value)}")
     lines += [

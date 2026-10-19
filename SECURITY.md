@@ -69,9 +69,7 @@ public location.
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
   kept only when it is a plain URL, and a branch a session renamed after the tracker's
   convention, which carries a slug of the title, is shown only with `--verbose-titles`.
-  So is the worktree path of a lease's holder, because the lease pool is shared with
-  agents that chargehand did not start, and they choose that path. All output is
-  stripped of terminal control sequences.
+  All output is stripped of terminal control sequences.
 - **Driving the CLI from an AI assistant.** Status output then lands in a session that
   holds the operator's permissions. The shipped skill reads with `status --json`, which by
   default carries identifiers, states, timings and URLs only, and the shipped settings let
@@ -85,7 +83,8 @@ public location.
   nothing.
 - **Agents are discouraged from steering the runner.** Sessions that chargehand launches
   get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
-  other sessions, for the lease pool's operator commands (`banksman admin`), and for the
+  other sessions, for the operator commands of the lease tool banksman (`banksman admin`),
+  and for the
   flags that would start a fresh session without these rules. Read that as a guardrail
   and not as a boundary. A Claude Code `Bash` rule matches the command text the model
   writes, not the program it ends up running, which its documentation states plainly:

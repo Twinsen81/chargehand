@@ -131,7 +131,7 @@ def test_an_anchored_rule_would_have_missed_the_path_and_the_wrapper():
         "sh -c 'banksman admin discover --all'",
     ),
 )
-def test_the_pools_operator_commands_are_denied(command):
+def test_the_lease_tools_operator_commands_are_denied(command):
     assert first_matching_rule(DEFAULT_DENY_RULES, command) == "Bash(*banksman admin*)"
 
 
@@ -145,7 +145,7 @@ def test_the_pools_operator_commands_are_denied(command):
         "banksman enter --resource emulator-5554 --lease 3f2a --pid 4242",
     ),
 )
-def test_agents_keep_the_pool_commands_their_scripts_use(command):
+def test_agents_keep_the_lease_tool_commands_their_scripts_use(command):
     assert first_matching_rule(DEFAULT_DENY_RULES, command) is None
 
 

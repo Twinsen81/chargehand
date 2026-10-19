@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- chargehand no longer runs banksman. The pool module, the reap at the start of every tick,
+  the leases in `status`, and the banksman check in `doctor` are gone. banksman finds a
+  worker's leases by itself, ends them when the worker's process ends, and reaps on its own,
+  so the call only tied chargehand to banksman's output schema. `pool_bin` is still
+  accepted for one release, and `doctor` says that it is ignored. The deny rule for
+  `banksman admin` stays in the launch deny rules.
+
 ### Changed
 
 - The runner's unit of work is now a *worker*: one member of a *role*, usually bound to
