@@ -197,6 +197,35 @@ def test_a_version_one_ledger_is_migrated_to_workers(tmp_path):
         assert kept is not None
 
 
+def test_a_migration_that_fails_half_way_leaves_the_old_ledger_as_it_was(tmp_path, monkeypatch):
+    """The rename, the copy and the version commit together, so the next open can migrate."""
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V1_SCHEMA)
+    conn.execute(
+        "INSERT INTO attempts (id, issue_id, identifier, url, route, repo, worktree, branch, "
+        "state, step, created_at, updated_at) "
+        "VALUES (3, 'uuid-3', 'ABC-3', NULL, 'main', '/repo', '/w/ABC-3', 'b', 'running', 4, 1.0, 2.0)"
+    )
+    conn.commit()
+    conn.close()
+    good = ledger_mod._MIGRATE_V1_TO_V2
+    monkeypatch.setattr(ledger_mod, "_MIGRATE_V1_TO_V2", good + "\nINSERT INTO no_such_table VALUES (1);\n")
+
+    with pytest.raises(sqlite3.OperationalError):
+        Ledger(path)
+
+    conn = sqlite3.connect(path)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert "attempts" in tables and "attempts_v1" not in tables and "workers" not in tables
+    conn.close()
+
+    monkeypatch.setattr(ledger_mod, "_MIGRATE_V1_TO_V2", good)
+    with Ledger(path) as ledger:
+        assert ledger.get(3).item == "ABC-3"
+
+
 def test_two_roles_may_hold_the_same_item_but_a_role_may_not_hold_it_twice(ledger):
     make(ledger, role="implementer")
     make(ledger, role="pr-reviewer", worktree="/w/pr-reviewer/ABC-1")

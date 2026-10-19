@@ -309,12 +309,18 @@ class Ledger:
             )
         if version == SCHEMA_VERSION:
             return
-        # executescript() commits any open transaction, so migration runs outside one.
-        if version == 1:
-            self._conn.executescript(_MIGRATE_V1_TO_V2)
-        else:
-            self._conn.executescript(_SCHEMA)
-        self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        # One transaction for the schema, the copied rows and the version, because SQLite's
+        # DDL and user_version are transactional: a migration that dies half way leaves the
+        # old ledger as it was, instead of a renamed table that the next open cannot rename.
+        script = _MIGRATE_V1_TO_V2 if version == 1 else _SCHEMA
+        try:
+            self._conn.executescript(
+                f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;"
+            )
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
+            raise
 
     @contextmanager
     def transaction(self):
