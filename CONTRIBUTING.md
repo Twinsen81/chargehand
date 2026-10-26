@@ -87,7 +87,7 @@ request must carry a sign-off line.
 chargehand follows [Semantic Versioning](https://semver.org/). Before `1.0.0` anything may
 change between minor versions. The surfaces that will be treated as public API are the CLI
 (commands, flags, `status --json` output), the configuration files, the status-file
-protocol, and the command-adapter JSON contract.
+protocol, and the [command-source JSON contract](docs/command-source.md).
 
 ## Code of Conduct
 

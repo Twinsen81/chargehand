@@ -50,6 +50,13 @@ public location.
   not leave the source. The marker filter is a convenience against workers waking each
   other, not a defense: anyone can quote the marker, and it only drops comments by the
   signed-in account.
+- **Command source output.** The commands of a `command` source are the operator's own,
+  but what they print comes from the system they poll. chargehand runs them without a
+  shell, with a timeout and a cap on the output, and checks every line against a closed
+  event shape: an item key must be a safe path name and a URL a plain http(s) URL. A
+  line that does not fit is skipped. The log names the reason and, for an unknown field,
+  the field names, sanitized and cut to 80 characters; it does not contain the line's
+  values.
 
 ### Defenses
 
