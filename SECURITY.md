@@ -56,6 +56,10 @@ public location.
   a notification. Claude Code's auto-mode
   classifier trusts user messages and does not see tool results, so this keeps
   attacker-controlled text on the untrusted side of that boundary.
+- **A wake carries pointers only.** The message that wakes a worker is a fixed line that
+  chargehand writes, followed by the events' pointers. A pointer that is not a plain
+  http(s) URL or a plain identifier is left out, and no actor name, title or body is
+  added, so the wake crosses the same boundary as the launch prompt.
 - **Auto permission mode by default.** Sessions run behind Claude Code's safety classifier,
   which is documented as blocking, among others, download-and-execute, data exfiltration,
   force pushes, and destroying files that predate the session, and which falls back to a

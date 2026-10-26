@@ -391,8 +391,14 @@ agent view is open in a terminal, which an unattended run cannot guarantee.
 |---|---|---|
 | `working` | A turn is running | — |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
-| `done` | The turn finished | read the status file if configured, then notify |
+| `done` | The turn finished | read the status file if configured, then notify; the worker is `idle` |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
+
+A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without a
+question and the worker waits for events), `queued` (events wait in its inbox for a wake
+that admission held back), `blocked` (it needs you) or `paused` (stopped by `stop`). On the
+tracker, `idle` and `queued` keep the blocked label, as a finished turn did before: the
+operator may want to look at what the turn left.
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -419,7 +425,29 @@ writes a small JSON file at its yield points and when it finishes.
 ```
 
 The file is what separates a run that succeeded from one that gave up, and it is where a
-pull-request URL comes from. Without it, `done` means "finished or waiting, go look".
+pull-request URL comes from. Without it, or when this worker has not written it yet, a
+`done` session makes the worker `idle`. `needs-input` makes it `blocked`, so no event wakes
+it over a question.
+
+**Delivery.** Once per tick, after the state diff, each `idle` or `queued` worker with
+events in its inbox gets one wake. Its events become one message that lists their pointers
+and nothing else; a pointer that is not a plain http(s) URL or identifier is left out. The
+wake must pass admission: the number of working turns below `max_concurrent`, the role's
+`max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
+no reserve). A worker that is not admitted becomes `queued` and keeps its events. The
+runtime then wakes the same session: `claude` stops a live idle process, confirms that it
+stopped, and resumes it by the full session id. After the wake, one ledger transaction marks
+the events delivered and records the wake on the worker and as a `wake` row in `sessions`.
+A crash between the two leaves the events in the inbox, and a later tick wakes the worker
+with them again, which costs one turn. A resume that starts a copy is a fault: the worker
+is paused with the reason, keeps its session and its events, and you are notified. A
+`blocked`, `paused` or `launching` worker is not woken; its events wait.
+
+When a worker's branch is on its remote and has an open pull request, the tick subscribes
+the worker to that pull request for `comment`, `review` and `ci_status`, once, so a review
+comment on an implementer's pull request wakes the implementer. The pull request is not its
+primary item, so its close does not end the worker. The source is asked only about a
+pushed branch.
 
 **Notifications** run a command you configure: a desktop notification, email, a push service,
 anything. The bundled hook has commented examples of the first three. The payload

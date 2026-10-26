@@ -62,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Delivery. Once per tick, each idle worker with events in its inbox gets one wake that
+  lists the events' pointers and continues the same session, admitted against
+  `max_concurrent`, the role's `max_wakes_per_day` and the usage reserve. The events are
+  marked delivered only after the wake, so a crash in between delivers them again. Workers
+  gain the live states `idle` (a turn ended without a question, which was "go look"
+  before) and `queued` (a wake was held back), and a worker follows the pull request of
+  its own pushed branch for comments, reviews and CI results. A resume that starts a copy
+  pauses the worker and notifies.
 - A repository's tracker is now an event source, and the tick reaches it only that way.
   The queue becomes `labeled` events through the router, and the issues that live workers
   follow give `comment` and `done` events, so a comment on an issue lands in the inbox of
