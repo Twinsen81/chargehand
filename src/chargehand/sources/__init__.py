@@ -5,8 +5,9 @@ from __future__ import annotations
 from chargehand.config import SourceConfig
 from chargehand.errors import ConfigError
 from chargehand.sources.base import AUTHORSHIP_MARKER, Event, Source, WorkItem
+from chargehand.sources.github import GithubSource
 
-_BUILTIN: dict[str, type[Source]] = {}
+_BUILTIN: dict[str, type[Source]] = {GithubSource.type: GithubSource}
 
 
 def register(adapter: type[Source]) -> None:

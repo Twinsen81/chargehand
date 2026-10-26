@@ -9,7 +9,7 @@ session picks it up in a fresh git worktree on a machine you own.
 > suite that fault-injects every launch step. The same sequence has been run against a
 > real tracker and real Claude Code on a scratch repository, including a restart that
 > killed a session mid-turn. It has not yet been left running unattended for a working
-> day, and the `github` and `command` adapters are not written. Treat it as something to try on a
+> day, and the `command` adapter is not written. Treat it as something to try on a
 > scratch repository, not something to leave running. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
@@ -50,8 +50,8 @@ deliberately no server to expose.
 - macOS (launchd, Keychain). Linux may follow.
 - Python 3.11 or newer.
 - Claude Code, signed in with a subscription account.
-- A tracker: Linear today, through an API key. GitHub Issues and a generic command
-  adapter are planned.
+- A tracker: Linear through an API key, or GitHub Issues through the `gh` CLI. A generic
+  command adapter is planned.
 
 ## Trying it
 
