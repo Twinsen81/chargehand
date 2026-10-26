@@ -3,7 +3,7 @@
 **Status:** the runner and the control surface are implemented and tested against a fake
 Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
 and real Claude Code on a scratch repository, including a crash after every launch step and a
-reboot that killed a session mid-turn. The `command` adapter is not written. It has not
+reboot that killed a session mid-turn. It has not
 yet been left running unattended for a working day. The unit of work is a *worker* of a
 *role* (section 4); event sources other than the tracker queue, a resident daemon and a
 board are not built yet.
@@ -66,7 +66,8 @@ Components:
 | Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
 | Runtimes | The coding agent behind one interface; `claude` is the only one that ships |
 | Control CLI | See and steer the runner; no server |
-| Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
+| Tracker adapters | `linear` and `github` |
+| Event sources | `github`, the repository's tracker, and a `command` source for anything else |
 | A lease tool such as banksman (external, optional, never called by chargehand) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
 
 ## 3. Trigger and routing
@@ -123,7 +124,9 @@ not load, and is dropped once the issue has left the queue.
 |---|---|
 | `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. The poll lists the queue in one paged query, and reads the followed issues and their comments since each issue's previous poll in one more query, with a five-minute overlap that the router's dedupe absorbs; the comments are read page by page, whatever their order, and an issue with more than twenty pages left is read from the same point again. A comment body is read only for the authorship marker. |
 | `github` | Through the `gh` CLI, so there is no token handling. No workflow states: the trigger is label + assignee + open. `tracker = { type = "github", repo = "owner/repo" }`; labels change with `gh issue edit` and are verified by a re-read. |
-| `command` | The escape hatch: you configure `list`, `mark`, `get`, and `whoami` commands that print a small JSON contract. |
+
+Any other system is connected as a `command` source, not as a tracker adapter (see "Event
+sources and the router").
 
 Tracker writes are treated as unreliable: a write that reports failure may have been applied,
 and label swaps made of two mutations are not atomic. Every write is followed by a re-read,
@@ -183,6 +186,17 @@ lower case, or a shortened form with a digest when a name does not fit a path or
 name, and a name that GitHub itself would refuse is skipped. A start event belongs to the
 `[[repository]]` whose `github` key names its `owner/repo`; on any other repository it
 starts nothing. `gh_bin` and `timeout_secs` are its options.
+
+The `command` source connects any other system without a plugin framework: chargehand runs
+a configured executable that reads the cursor on stdin, and the refs of the followed items
+in `CHARGEHAND_REFS`, and prints one JSON object per event and a last line with the new
+cursor. Optional commands answer `item_open` and `mark` (exit 3 means the write may or may
+not have landed); the tick changes labels only for workers that a repository's queue label
+started, so it does not call a source's `mark` yet. The commands run as subprocesses with a
+timeout and without a shell, each output line is checked against a closed event shape, and a
+line that does not fit is logged and skipped. A start event belongs to one of the
+repositories listed in the source's `repositories`. The contract is a public surface and is
+documented in [command-source.md](command-source.md).
 
 The source's cursor is saved after its events are routed, so a source that fails is one
 error in the report and its events arrive on a later tick. The queue label starts its
