@@ -10,13 +10,14 @@ labels, comments without text, closed issues. Run as the source's commands:
 
 The queue becomes ``queued`` events (a ``labeled`` event from a ``[[source]]`` starts
 nothing), closed issues ``done`` events, and comments after the cursor ``comment``
-events. Tests drive the board through :class:`CommandBoard`. Standard library only, so
+events. Each poll records the followed refs it was given. Tests drive the board through :class:`CommandBoard`. Standard library only, so
 the script runs without the package on its path.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ class CommandBoard:
                     "issues": {},
                     "comments": [],
                     "cursors": [],
+                    "followed": [],
                     "calls": [],
                     "garbage": [],
                     "fail_next_mark": None,
@@ -86,6 +88,11 @@ class CommandBoard:
         return self.read()["cursors"]
 
     @property
+    def followed(self) -> list[str | None]:
+        """What each poll found in CHARGEHAND_REFS."""
+        return self.read()["followed"]
+
+    @property
     def calls(self) -> list[list[str]]:
         return self.read()["calls"]
 
@@ -97,6 +104,7 @@ def _url(key: str) -> str:
 def poll(board: CommandBoard, cursor: str) -> list[str]:
     state = board.read()
     state["cursors"].append(cursor)
+    state["followed"].append(os.environ.get("CHARGEHAND_REFS"))
     board.write(state)
     start = int(cursor) if cursor.isdigit() else 0
     lines = list(state["garbage"])

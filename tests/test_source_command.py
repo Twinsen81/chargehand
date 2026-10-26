@@ -20,7 +20,12 @@ from chargehand.gitutil import Git
 from chargehand.ledger import Ledger
 from chargehand.notify import Notifier
 from chargehand.sources.base import WorkItem
-from chargehand.sources.command import MAX_LINE_BYTES, MAX_OUTPUT_BYTES, CommandSource
+from chargehand.sources.command import (
+    MAX_LINE_BYTES,
+    MAX_OUTPUT_BYTES,
+    REFS_ENV,
+    CommandSource,
+)
 from chargehand.tick import Runner
 from chargehand.trackers.base import Status
 from support.fake_command_source import SCRIPT as FAKE_SCRIPT
@@ -111,6 +116,9 @@ def test_lines_that_do_not_fit_are_logged_and_skipped(tmp_path, caplog):
         json.dumps({**EVENT, "url": "javascript:alert(1)"}),
         json.dumps({**EVENT, "occurred_at": "yesterday"}),
         json.dumps({**EVENT, "occurred_at": "2026-10-27T10:00:00"}),
+        json.dumps({**EVENT, "occurred_at": 10**400}),
+        json.dumps({**EVENT, "occurred_at": -1}),
+        "[" * 30_000 + "]" * 30_000,
         json.dumps({**EVENT, "marked": "yes"}),
         json.dumps({**EVENT, "actor": None}),
         json.dumps({**EVENT, "dedupe_id": ""}),
@@ -130,6 +138,7 @@ def test_lines_that_do_not_fit_are_logged_and_skipped(tmp_path, caplog):
     assert len(skipped) == len(bad)
     assert any("unknown field(s): body" in message for message in skipped)
     assert any(f"longer than {MAX_LINE_BYTES} bytes" in message for message in skipped)
+    assert any("occurred_at is out of range" in message for message in skipped)
     # The text of a skipped line is not logged.
     assert not any("the text of the comment" in r.getMessage() for r in caplog.records)
 
@@ -184,6 +193,43 @@ def test_the_cursor_goes_in_on_stdin_and_comes_back_from_the_last_line(tmp_path)
 
     assert (first, second) == ("+", "++")
     assert seen.read_text() == "|+|"
+
+
+def test_an_unforeseen_error_on_one_line_skips_only_that_line(tmp_path, monkeypatch, caplog):
+    poll = printing(tmp_path, EVENT, {**EVENT, "dedupe_id": "comment:2"}, {"cursor": "c2"})
+    cmd = source(poll)
+    real = cmd._event
+
+    def flaky(entry):
+        if entry["dedupe_id"] == "comment:1":
+            raise RuntimeError("unforeseen")
+        return real(entry)
+
+    monkeypatch.setattr(cmd, "_event", flaky)
+    with caplog.at_level(logging.WARNING, logger="chargehand.sources.command"):
+        events, cursor = cmd.poll("c1", [])
+
+    assert [event.dedupe_id for event in events] == ["comment:2"]
+    assert cursor == "c2"
+    assert any("skipped output line 1: RuntimeError" in r.getMessage() for r in caplog.records)
+
+
+def test_the_poll_gets_the_followed_refs_in_the_environment(tmp_path):
+    seen = tmp_path / "seen"
+    poll = script(
+        tmp_path,
+        f'printf "%s" "${REFS_ENV}" > {shlex.quote(str(seen))}\necho \'{{"cursor": null}}\'\n',
+    )
+    items = [
+        WorkItem(source="cmd", key="DEMO-1", ref="10 042"),
+        WorkItem(source="cmd", key="DEMO-2", ref="DEMO-2"),
+        WorkItem(source="cmd", key="DEMO-3", ref="bad\nref"),
+    ]
+
+    source(poll).poll(None, items)
+    assert seen.read_text() == "10 042\nDEMO-2"
+    source(poll).poll(None, [])
+    assert seen.read_text() == ""
 
 
 def test_without_a_cursor_line_the_old_cursor_is_kept(tmp_path, caplog):
@@ -393,6 +439,7 @@ def test_the_fake_tracker_as_a_command_source_starts_and_wakes_a_worker(wired, f
     assert resume["target"] == watcher.session_uuid
     assert resume["prompt"].splitlines() == [MESSAGE_HEADER, "- https://tracker.invalid/DEMO-1#c1"]
     assert fake_board.cursors == ["", "0"]
+    assert fake_board.followed == ["", "DEMO-1"]
     assert wired.ledger.get_cursor("cmd") == "2"
     # The queue event came again and started no second worker.
     assert [w.role for w in wired.ledger.live_workers()] == ["watcher"]

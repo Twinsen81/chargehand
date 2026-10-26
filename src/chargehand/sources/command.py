@@ -58,6 +58,8 @@ EXIT_AMBIGUOUS = 3
 EVENT_REQUIRED = ("kind", "item", "actor", "occurred_at", "dedupe_id", "pointer")
 EVENT_OPTIONAL = ("source", "ref", "url", "repository", "marked")
 CURSOR_KEY = "cursor"
+# The refs of the items that live workers follow, one per line, for the poll command.
+REFS_ENV = "CHARGEHAND_REFS"
 
 _KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _MAX_TEXT = 256
@@ -93,8 +95,15 @@ def _kill_group(proc: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def run(argv: Sequence[str], *, stdin: bytes | None, timeout: float, cwd: Path | None) -> Output:
-    """Run *argv* with *stdin*, and read at most :data:`MAX_OUTPUT_BYTES` of its stdout.
+def run(
+    argv: Sequence[str],
+    *,
+    stdin: bytes | None,
+    timeout: float,
+    cwd: Path | None,
+    env: Mapping[str, str] | None = None,
+) -> Output:
+    """Run *argv* with *stdin* and *env* added to the environment, and read at most :data:`MAX_OUTPUT_BYTES` of its stdout.
 
     Raises :class:`TrackerError` when it cannot start, does not finish in *timeout*
     seconds, or prints more than the cap.
@@ -106,6 +115,7 @@ def run(argv: Sequence[str], *, stdin: bytes | None, timeout: float, cwd: Path |
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=str(cwd) if cwd is not None else None,
+            env={**os.environ, **env} if env else None,
             start_new_session=True,
         )
     except FileNotFoundError as exc:
@@ -186,18 +196,20 @@ def _text(entry: Mapping[str, Any], key: str, *, limit: int = _MAX_TEXT, empty: 
 def _timestamp(value: object) -> float:
     if isinstance(value, bool):
         raise Skip("occurred_at is not a time")
-    if isinstance(value, (int, float)):
-        seconds = float(value)
-    elif isinstance(value, str):
+    if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError as exc:
             raise Skip("occurred_at is not an ISO 8601 time") from exc
         if parsed.tzinfo is None:
             raise Skip("occurred_at has no time zone")
-        seconds = parsed.timestamp()
-    else:
+        value = parsed.timestamp()
+    if not isinstance(value, (int, float)):
         raise Skip("occurred_at is not a time")
+    try:
+        seconds = float(value)
+    except OverflowError as exc:
+        raise Skip("occurred_at is out of range") from exc
     if not math.isfinite(seconds) or seconds < 0:
         raise Skip("occurred_at is out of range")
     return seconds
@@ -212,6 +224,8 @@ def _decode(raw: bytes) -> object:
         raise Skip("the line is not UTF-8") from exc
     except ValueError as exc:
         raise Skip("the line is not JSON") from exc
+    except RecursionError as exc:
+        raise Skip("the line is nested too deeply") from exc
 
 
 def _is_cursor_line(value: object) -> bool:
@@ -276,7 +290,18 @@ class CommandSource(Source):
     def poll(
         self, cursor: str | None, items: Sequence[WorkItem]
     ) -> tuple[list[Event], str | None]:
-        output = self._run("poll", self.poll_command, {}, stdin=(cursor or "").encode("utf-8"))
+        # A system that is asked item by item needs the items that live workers follow.
+        # They go in the environment, so a command that does not need them ignores them.
+        refs = [
+            item.ref for item in items if item.ref == sanitize.clean(item.ref, keep_newlines=False)
+        ]
+        output = self._run(
+            "poll",
+            self.poll_command,
+            {},
+            stdin=(cursor or "").encode("utf-8"),
+            env={REFS_ENV: "\n".join(refs)},
+        )
         if output.returncode != EXIT_OK:
             raise self._failure("poll", output)
         lines = [
@@ -297,6 +322,12 @@ class CommandSource(Source):
                 events.append(self._event(_decode(raw)))
             except Skip as exc:
                 log.warning("source %s: skipped output line %d: %s", self.name, number, exc)
+            except Exception as exc:
+                # A line the checks did not foresee is still one line: it must not fail
+                # the poll, or the command prints it again on every tick.
+                log.warning(
+                    "source %s: skipped output line %d: %s", self.name, number, type(exc).__name__
+                )
         return events, next_cursor
 
     def mark(self, item: WorkItem, status: Status) -> None:
@@ -334,7 +365,13 @@ class CommandSource(Source):
     # ----- helpers --------------------------------------------------------------
 
     def _run(
-        self, what: str, template: str, values: Mapping[str, str], *, stdin: bytes | None
+        self,
+        what: str,
+        template: str,
+        values: Mapping[str, str],
+        *,
+        stdin: bytes | None,
+        env: Mapping[str, str] | None = None,
     ) -> Output:
         argv = render_argv(
             template, {"source": self.name, **values}, where=f"source {self.name}.{what}"
@@ -349,7 +386,13 @@ class CommandSource(Source):
             if candidate.exists():
                 argv[0] = str(candidate)
         try:
-            return run(argv, stdin=stdin, timeout=self.timeout, cwd=root if root.is_dir() else None)
+            return run(
+                argv,
+                stdin=stdin,
+                timeout=self.timeout,
+                cwd=root if root.is_dir() else None,
+                env=env,
+            )
         except TrackerError as exc:
             raise TrackerError(f"source {self.name}: {what}: {exc}") from exc
 
@@ -361,7 +404,7 @@ class CommandSource(Source):
         """Whether *raw* is a valid cursor line, and the cursor it carries."""
         try:
             value = _decode(raw)
-        except Skip:
+        except Exception:
             return False, None
         if not _is_cursor_line(value):
             return False, None
@@ -424,4 +467,4 @@ class CommandSource(Source):
         return name
 
 
-__all__ = ["CommandSource", "EXIT_AMBIGUOUS", "MAX_LINE_BYTES", "MAX_OUTPUT_BYTES"]
+__all__ = ["CommandSource", "EXIT_AMBIGUOUS", "MAX_LINE_BYTES", "MAX_OUTPUT_BYTES", "REFS_ENV"]
