@@ -38,6 +38,11 @@ public location.
   an issue. They are attacker-controlled input to an agent.
 - **Agent output.** Logs and messages produced by a session can echo anything the session
   read.
+- **Event fields.** An event's actor and pointer come from the source. An event has no
+  body: a source reads a comment only to find the authorship marker, and the text does
+  not leave the source. The marker filter is a convenience against workers waking each
+  other, not a defense: anyone can quote the marker, and it only drops comments by the
+  signed-in account.
 
 ### Defenses
 

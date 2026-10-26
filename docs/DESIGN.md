@@ -40,9 +40,10 @@ launchd timer ──► chargehand tick
    1. reconcile incomplete launches
    2. apply recorded control requests
    3. watchdog long runs
-   4. diff session states, notify on change      ◄── claude agents --json --all
-   5. admit new issues (repositories, roles' start rules, ledger, capacity)
-   6. ledger → label → worktree → setup → claude --bg "<prompt>"
+   4. poll the event sources, route: inboxes, then start rules
+   5. diff session states, notify on change      ◄── claude agents --json --all
+   6. admit new issues (repositories, roles' start rules, ledger, capacity)
+   7. ledger → label → worktree → setup → claude --bg "<prompt>"
         │
         ▼
 Claude Code supervisor (background sessions, one per worker)
@@ -109,6 +110,45 @@ Tracker writes are treated as unreliable: a write that reports failure may have 
 and label swaps made of two mutations are not atomic. Every write is followed by a re-read,
 and anything ambiguous is left for reconciliation (see "Launch sequence").
 
+### Event sources and the router
+
+A source is a poller behind one interface: `whoami`, `poll(cursor, items)` that returns
+events and the next cursor, an optional `mark` for label writes, and `item_open` for garbage
+collection. It is configured as a `[[source]]` table with a `name`, a `type`, and the type's
+own options. An event names its source, kind, work item, actor, time, a dedupe id and a
+pointer (a URL or identifier the worker fetches itself). It never carries a body: a source
+reads a comment only to find chargehand's authorship marker, and the text stays in the
+source. Kinds are bare (`comment`, any source) or qualified by the source name
+(`github.comment`).
+
+Delivery is publish and subscribe. A worker subscribes to work items, each with a set of
+event kinds; the subscription to the item a worker was created for is its primary one. Every
+live subscriber gets every matching event in its own inbox, so any number of workers can
+follow one pull request or issue. A source that has to ask about each item it follows is
+given the union of the live subscriptions.
+
+The router runs once per tick after the polls, in this order:
+
+1. Filters: drop an event seen before, by its source and dedupe id, even one that matched
+   no subscriber; drop an event whose actor is the signed-in account when its comment
+   carries the authorship marker. That filter covers every worker, not only the author:
+   workers post as you, and two workers on one pull request would otherwise wake each other
+   in turn.
+2. Delivery: one inbox row per matching live subscriber. The inbox is unique per worker and
+   event, so routing an event twice adds nothing.
+3. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
+   finds a live worker that has the item (`role`: of its own role, `any`: of any role) does
+   nothing, so a second review request wakes the reviewer that has the pull request and
+   starts no other. Otherwise it launches a worker under the same caps as the queue, with a
+   primary subscription carrying the rule's `subscribe` kinds. A start that the caps, a pause
+   or a previous worktree hold back is kept and offered to the rules again on the next tick.
+
+The source's cursor is saved after its events are routed, so a source that fails is one
+error in the report and its events arrive on a later tick. The queue label still starts its
+workers through admission, and only a worker the queue label started changes the label;
+every other worker on the issue only reads it. A worker started by another event ends when
+its source reports its primary item closed.
+
 ## 4. Configuration
 
 Two layers, so a repository can be shared without sharing machine details.
@@ -135,6 +175,10 @@ roles = ["implementer"]             # role files enabled in this repository
 [[repository]]
 path = "~/code/other"
 tracker = { type = "linear", team = "ABC", state = "Todo" }
+
+[[source]]                          # an event source; the other keys belong to its type
+name = "github"                     # defaults to the type; qualifies kinds as github.<kind>
+type = "github"
 ```
 
 `[[route]]` with `repo` and `max_open_attempts` are the older spellings and stay accepted.
@@ -254,6 +298,8 @@ The ledger is a SQLite database under `~/Library/Application Support/chargehand/
 survives reboots. A partial unique index over live rows that a start rule created makes two
 such workers of one role for one issue impossible at the database level rather than by a
 check the caller might skip. Every session a worker owns is recorded in a `sessions` table.
+Subscriptions, inboxes, the events the router has seen, and each source's cursor are kept
+in the same database.
 The queue status last *verified* on the tracker is stored separately from the worker's own
 state, so a write that could not be confirmed is retried on the next tick instead of being
 assumed to have landed.
