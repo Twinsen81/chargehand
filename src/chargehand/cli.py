@@ -45,6 +45,16 @@ EXIT_REFUSED = 3
 SCHEDULED_JOB_WAIT_SECS = 30.0
 KICKSTART_RETRY_SECS = 2.0
 
+# The worker states whose session `status` offers to attach to.
+ATTACH_STATES = ("blocked", "idle", "queued")
+
+# The parts of a tick report that `tick` prints, in this order. `skipped` holds the
+# launches and wakes that a cap or a pause held back.
+TICK_FIELDS = (
+    "launched", "adopted", "resumed", "woken", "failed", "transitions", "requests",
+    "collected", "skipped", "warnings", "errors",
+)
+
 log = logging.getLogger("chargehand")
 
 
@@ -140,7 +150,8 @@ def _worker_dict(
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
     }
-    if worker.state == "blocked" and worker.session_id and runner is not None:
+    # An idle or queued worker ended a turn whose result the operator may want to read.
+    if worker.state in ATTACH_STATES and worker.session_id and runner is not None:
         try:
             payload["attach"] = runner.runtime(worker.runtime).attach_command(worker.session_id)
         except ConfigError:
@@ -362,14 +373,11 @@ def cmd_tick(args: argparse.Namespace) -> int:
         _emit_json(report.as_dict())
     else:
         stamp = _stamp()
-        for field in ("launched", "adopted", "resumed", "failed", "transitions", "requests",
-                      "collected", "warnings", "errors"):
+        for field in TICK_FIELDS:
             for entry in getattr(report, field):
                 _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
                        f"{sanitize.one_line(str(entry), limit=200)}")
-        if not any(getattr(report, f) for f in ("launched", "adopted", "resumed", "failed",
-                                                "transitions", "requests", "collected",
-                                                "warnings", "errors")):
+        if not any(getattr(report, f) for f in TICK_FIELDS):
             _print(f"{stamp} nothing to do")
     return EXIT_ERROR if report.errors else EXIT_OK
 
