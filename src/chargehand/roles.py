@@ -47,6 +47,9 @@ DEFAULT_RUNTIME = runtime_mod.DEFAULT_RUNTIME
 # The event kind every tracker adapter produces for "an issue got the queue label".
 # A role starts on it as `labeled`, which means any tracker, or as `<tracker>.labeled`.
 LABELED = "labeled"
+# The kinds a tracker produces for the issues that live workers follow.
+COMMENT = "comment"
+DONE = "done"
 
 # The start rule a pre-roles `.chargehand.toml` describes, and the rule recorded on
 # workers migrated from a version 1 ledger.
@@ -346,7 +349,9 @@ def legacy_role(repo_config: RepoConfig, *, tracker_type: str | None = None) -> 
         prompt=repo_config.prompt,
         options={"permission_mode": repo_config.permission_mode},
         status_file=repo_config.status_file,
-        start=(StartRule(on=on, name=QUEUE_RULE),),
+        start=(
+            StartRule(on=on, name=QUEUE_RULE, subscribe=(COMMENT,), close_on=(DONE,)),
+        ),
         source=repo_config.source,
     )
 
@@ -380,7 +385,9 @@ def load_role(
 
 
 __all__ = [
+    "COMMENT",
     "DEFAULT_ROLE",
+    "DONE",
     "DEFAULT_RUNTIME",
     "EFFORT_LEVELS",
     "LABELED",

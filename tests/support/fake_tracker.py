@@ -6,16 +6,29 @@ Registered under the type name ``fake``. A route selects one board with
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from chargehand.errors import AmbiguousWrite, TrackerError
+from chargehand.sources import AUTHORSHIP_MARKER
 from chargehand.trackers import register
-from chargehand.trackers.base import Issue, Status, Tracker
+from chargehand.trackers.base import Comment, Issue, Status, Tracker, TrackerPoll
 
 _BOARDS: dict[str, "Board"] = {}
 _COUNTER = itertools.count(1)
+
+
+class _Issues(dict):
+    """Every write is a change, as on a real tracker: it moves the issue's ``updated_at``."""
+
+    def __init__(self, board: "Board") -> None:
+        super().__init__()
+        self._board = board
+
+    def __setitem__(self, key: str, issue: Issue) -> None:
+        super().__setitem__(key, dataclasses.replace(issue, updated_at=self._board.next_time()))
 
 
 class Board:
@@ -23,14 +36,20 @@ class Board:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.issues: dict[str, Issue] = {}
+        self.issues: dict[str, Issue] = _Issues(self)
+        self.comments: list[Comment] = []
         self.viewer = "tester@example.invalid"
         self.calls: list[tuple[str, str]] = []
+        self.clock = 1_000_000.0
         # Fault injection, each consumed once.
         self.fail_next_write: str | None = None
         self.silently_drop_next_write = False
         self.land_then_report_failure = False
         self.fail_next_list: str | None = None
+
+    def next_time(self) -> float:
+        self.clock += 1.0
+        return self.clock
 
     def add(
         self,
@@ -51,7 +70,24 @@ class Board:
             closed=closed,
         )
         self.issues[issue.id] = issue
-        return issue
+        return self.issues[issue.id]
+
+    def comment(
+        self, identifier: str, *, author: str = "someone@example.invalid", body: str = "a reply"
+    ) -> Comment:
+        """Post a comment. As in an adapter, only whether the body carries the marker is kept."""
+        issue = self.by_identifier(identifier)
+        if issue is None:
+            raise KeyError(identifier)
+        comment = Comment(
+            id=f"comment-{next(_COUNTER)}",
+            issue=issue,
+            author=author,
+            created_at=self.next_time(),
+            marked=AUTHORSHIP_MARKER in body,
+        )
+        self.comments.append(comment)
+        return comment
 
     def by_identifier(self, identifier: str) -> Issue | None:
         for issue in self.issues.values():
@@ -86,6 +122,18 @@ class FakeTracker(Tracker):
 
     def whoami(self) -> str:
         return self.board.viewer
+
+    def poll(self, cursor: str | None, followed: Sequence[str]) -> TrackerPoll:
+        """The default poll, plus every comment on the followed issues; the router drops
+        the ones it has seen."""
+        result = super().poll(cursor, followed)
+        current = {issue.id: issue for issue in result.followed}
+        result.comments = [
+            dataclasses.replace(comment, issue=current[comment.issue.id])
+            for comment in self.board.comments
+            if comment.issue.id in current
+        ]
+        return result
 
     def list(self, status: Status) -> list[Issue]:
         self.board.calls.append(("list", status.value))
@@ -126,8 +174,8 @@ class FakeTracker(Tracker):
                 f"fake: label write on {issue.identifier} reported success but did not land"
             )
 
-        updated = Issue(**{**issue.__dict__, "labels": new_labels})
-        self.board.issues[issue.id] = updated
+        self.board.issues[issue.id] = Issue(**{**issue.__dict__, "labels": new_labels})
+        updated = self.board.issues[issue.id]
 
         if self.board.land_then_report_failure:
             # The write landed; the caller is told it failed. Reconciliation must settle it.

@@ -30,6 +30,14 @@ class AmbiguousWrite(TrackerError):
     """
 
 
+class ItemGone(ChargehandError):
+    """The work item no longer exists on its source.
+
+    Not a TrackerError: the tick treats those as a passing outage and tries again, and an
+    item that is gone does not come back.
+    """
+
+
 class AgentRuntimeError(ChargehandError):
     """A runtime's agent is missing, failed, or returned output its adapter cannot use."""
 

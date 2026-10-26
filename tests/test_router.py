@@ -368,9 +368,11 @@ def test_the_queue_label_still_starts_its_workers_and_labeled_events_start_nothi
     assert report.launched == ["ABC-1"]
     assert [w.role for w in routed.ledger.live_workers_for("ABC-1")] == ["implementer"]
     assert routed.labels("ABC-1") == ("chargehand-running",)
-    # The queue's worker follows its issue too, with no kinds unless its rule names some.
+    # The queue's worker follows its issue too, for the kinds its rule names.
     (subscription,) = routed.ledger.subscriptions_of(routed.worker("ABC-1"))
-    assert (subscription.source, subscription.kinds, subscription.is_primary) == ("fake", (), True)
+    assert (subscription.source, subscription.kinds, subscription.is_primary) == (
+        "fake", ("comment",), True
+    )
 
 
 def test_a_failing_source_is_one_error_and_the_tick_goes_on(routed):

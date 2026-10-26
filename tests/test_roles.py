@@ -117,6 +117,25 @@ def test_a_repository_without_a_role_file_gets_implementer_from_its_old_config(t
     assert role.start_rule_for("labeled", "github") is None
 
 
+def test_the_shipped_implementer_starts_follows_and_closes_like_the_old_config():
+    """`chargehand init` writes the template; a pre-roles repository gets legacy_role. A
+    queue worker must hear the same events and end the same way under either."""
+    import tomllib
+
+    from chargehand import paths
+
+    path = paths.templates_dir() / "roles" / "implementer.toml"
+    shipped = Role.parse("implementer", tomllib.loads(path.read_text(encoding="utf-8")))
+    legacy = roles_mod.legacy_role(RepoConfig(base="origin/main", prompt="{issue}"))
+
+    (template_rule,) = shipped.start
+    (legacy_rule,) = legacy.start
+    assert template_rule.on == legacy_rule.on == roles_mod.LABELED
+    assert template_rule.subscribe == legacy_rule.subscribe == (roles_mod.COMMENT,)
+    assert template_rule.close_on == legacy_rule.close_on == (roles_mod.DONE,)
+    assert template_rule.unless_subscribed == legacy_rule.unless_subscribed
+
+
 def test_only_implementer_falls_back_to_the_old_config(tmp_path):
     repo_config = RepoConfig(base="origin/main", prompt="{issue}")
 
