@@ -100,6 +100,7 @@ _WORKER_COLUMNS = (
     "created_at",
     "updated_at",
     "finished_at",
+    "owns_label",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -139,7 +140,10 @@ CREATE TABLE IF NOT EXISTS workers (
     last_wake_at     REAL,
     created_at       REAL    NOT NULL,
     updated_at       REAL    NOT NULL,
-    finished_at      REAL
+    finished_at      REAL,
+    -- Whether this worker drives the tracker's queue label: set when the queue label
+    -- started it. Every worker before version 3 was started that way.
+    owns_label       INTEGER NOT NULL DEFAULT 1
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -277,9 +281,14 @@ SELECT id, session_id, session_uuid, '{SESSION_MIGRATED}', created_at
 FROM workers WHERE session_id IS NOT NULL;
 """
 
-# Version 3 adds subscriptions, the inbox, the seen events and the source cursors. It only
-# adds tables, so the existing rows and their ids stay as they are.
-_MIGRATE_V2_TO_V3 = _SCHEMA
+# Version 3 adds subscriptions, the inbox, the seen events and the source cursors, and the
+# `owns_label` column. It only adds, so the existing rows and their ids stay as they are.
+# The ALTER is not idempotent on its own; it runs only on a version 2 file, in the same
+# transaction as the version bump.
+_MIGRATE_V2_TO_V3 = f"""
+ALTER TABLE workers ADD COLUMN owns_label INTEGER NOT NULL DEFAULT 1;
+{_SCHEMA}
+"""
 
 
 @dataclass(frozen=True)
@@ -315,6 +324,7 @@ class Worker:
     created_at: float
     updated_at: float
     finished_at: float | None
+    owns_label: int = 1
 
     @property
     def is_terminal(self) -> bool:
@@ -377,7 +387,7 @@ class InboxEntry:
     delivered_at: float | None
 
 
-def _row_to_subscription(row: sqlite3.Row) -> Subscription:
+def _row_to_subscription(row: Mapping[str, Any]) -> Subscription:
     try:
         kinds = json.loads(row["kinds"])
     except (TypeError, ValueError):
@@ -489,6 +499,7 @@ class Ledger:
         origin: str = ORIGIN_SOURCE,
         start_rule: str | None = None,
         runtime: str = "claude",
+        owns_label: bool = True,
         now: float | None = None,
     ) -> Worker:
         """Step 0 of the launch sequence: the row exists before any side effect."""
@@ -499,11 +510,11 @@ class Ledger:
             """
             INSERT INTO workers (role, origin, start_rule, runtime, item, item_id, url,
                                  repository, repo, worktree, branch, state, step,
-                                 launch_attempts, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+                                 launch_attempts, created_at, updated_at, owns_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
             """,
             (role, origin, start_rule, runtime, item, item_id, url, repository, str(repo),
-             str(worktree), branch, LAUNCHING, stamp, stamp),
+             str(worktree), branch, LAUNCHING, stamp, stamp, 1 if owns_label else 0),
         )
         worker = self.get(int(cursor.lastrowid))
         assert worker is not None
@@ -527,6 +538,14 @@ class Ledger:
             (item, *NON_TERMINAL),
         ).fetchall()
         return [_row_to_worker(row) for row in rows]
+
+    def latest_label_owner(self, item: str) -> Worker | None:
+        """The newest worker on *item* that drives the queue label."""
+        row = self._conn.execute(
+            "SELECT * FROM workers WHERE item = ? AND owns_label = 1 ORDER BY id DESC LIMIT 1",
+            (item,),
+        ).fetchone()
+        return _row_to_worker(row) if row else None
 
     def latest_worker_for(self, item: str, role: str | None = None) -> Worker | None:
         if role is None:
@@ -696,18 +715,26 @@ class Ledger:
     def live_subscriptions(self, source: str, item: str) -> list[tuple[Subscription, Worker]]:
         """The subscriptions of live workers to one item, each with its worker."""
         rows = self._conn.execute(
-            f"SELECT s.* FROM subscriptions s JOIN workers w ON w.id = s.worker_id "
+            f"SELECT w.*, s.id AS s_id, s.worker_id AS s_worker_id, s.source AS s_source, "
+            f"s.item AS s_item, s.item_ref AS s_item_ref, s.kinds AS s_kinds, "
+            f"s.is_primary AS s_is_primary, s.created_at AS s_created_at "
+            f"FROM subscriptions s JOIN workers w ON w.id = s.worker_id "
             f"WHERE s.source = ? AND s.item = ? AND w.state IN "
             f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY s.id",
             (source, item, *NON_TERMINAL),
         ).fetchall()
-        found = []
-        for row in rows:
-            subscription = _row_to_subscription(row)
-            worker = self.get(subscription.worker_id)
-            if worker is not None:
-                found.append((subscription, worker))
-        return found
+        return [
+            (
+                _row_to_subscription(
+                    {key: row[f"s_{key}"] for key in (
+                        "id", "worker_id", "source", "item", "item_ref", "kinds", "is_primary",
+                        "created_at",
+                    )}
+                ),
+                _row_to_worker(row),
+            )
+            for row in rows
+        ]
 
     def subscribed_items(self, source: str) -> list[WorkItem]:
         """The union of the items that live workers subscribe to on one source."""
@@ -778,14 +805,19 @@ class Ledger:
 
     def prune_events(
         self, *, older_than_secs: float = 30 * 24 * 3600, pending_secs: float = 7 * 24 * 3600
-    ) -> int:
-        """Forget old events. A start deferred for longer than *pending_secs* is given up."""
+    ) -> tuple[int, int]:
+        """Forget old events; give up a start deferred for longer than *pending_secs*.
+
+        Returns how many events were forgotten, and how many of them were deferred starts.
+        """
         now = time.time()
-        cursor = self._conn.execute(
-            "DELETE FROM events WHERE seen_at < ? OR (start_pending = 1 AND seen_at < ?)",
-            (now - older_than_secs, now - pending_secs),
-        )
-        return cursor.rowcount
+        condition = "seen_at < ? OR (start_pending = 1 AND seen_at < ?)"
+        values = (now - older_than_secs, now - pending_secs)
+        given_up = self._conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE start_pending = 1 AND ({condition})", values
+        ).fetchone()[0]
+        cursor = self._conn.execute(f"DELETE FROM events WHERE {condition}", values)
+        return cursor.rowcount, int(given_up)
 
     def get_cursor(self, source: str) -> str | None:
         row = self._conn.execute(

@@ -262,7 +262,7 @@ class Runner:
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
         self._source_factory = source_factory
-        self._sources: dict[str, Source | ConfigError | None] = {}
+        self._sources: dict[str, Source | Exception | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
         self._sessions: list[Session] | None = None
 
@@ -303,7 +303,9 @@ class Runner:
             config = self.config.source_by_name(name)
             try:
                 self._sources[name] = self._source_factory(config) if config else None
-            except ConfigError as exc:
+            except Exception as exc:
+                # One source that cannot be built must not keep the others from polling.
+                log.exception("source %s could not be built", name)
                 self._sources[name] = exc
         found = self._sources[name]
         return found if isinstance(found, Source) else None
@@ -742,7 +744,7 @@ class Runner:
                     f"`claude rm {worker.session_id}`."
                 )
             worker = self.ledger.update(worker, session_id=None, session_uuid=None)
-        if not self._drives_label(worker, context):
+        if not self._drives_label(worker):
             # The queue label would start the queue's role, not this one. A new start
             # event for the item starts a new worker of this role.
             self.ledger.update(worker, gc_done=1)
@@ -880,7 +882,11 @@ class Runner:
         for config in self.config.sources:
             source = self.source(config.name)
             if source is None:
-                report.errors.append(str(self._sources.get(config.name)))
+                problem = self._sources.get(config.name)
+                message = sanitize.one_line(str(problem), limit=300)
+                report.errors.append(
+                    message if isinstance(problem, ConfigError) else f"source {config.name}: {message}"
+                )
                 continue
             try:
                 signed_in = source.whoami()
@@ -910,7 +916,11 @@ class Runner:
                     f"{result.own} by chargehand, {result.delivered} inbox row(s), "
                     f"{result.deferred} start(s) deferred"
                 )
-        self.ledger.prune_events()
+        _, given_up = self.ledger.prune_events()
+        if given_up:
+            report.warnings.append(
+                f"gave up {given_up} start(s) that waited longer than a week for a launch slot"
+            )
 
     def _start_from_event(
         self, event: Event, report: TickReport, *, crash_after_step: int | None = None
@@ -1130,27 +1140,21 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
 
     def _label_sync_pending(self, item: str) -> bool:
-        worker = self.ledger.latest_worker_for(item)
-        if worker is None or not self._drives_label(worker, self.context_for_worker(worker)):
+        worker = self.ledger.latest_label_owner(item)
+        if worker is None:
             return False
         desired = _STATUS_FOR_STATE.get(worker.state)
         return desired is not None and worker.label_state != desired.value
 
-    def _drives_label(self, worker: Worker, context: RepositoryContext | None) -> bool:
+    @staticmethod
+    def _drives_label(worker: Worker) -> bool:
         """Only a worker that the queue label started changes the label.
 
         The label is one per issue and several workers may follow the issue, so a worker
-        that another event started only reads it. A worker whose rule is unknown, such as
-        one adopted or migrated from an older ledger, keeps the label as before.
+        that another event started only reads it. Recorded when the worker is created,
+        so a later edit of the role file cannot hand the label to another worker.
         """
-        if worker.start_rule is None or context is None:
-            return True
-        try:
-            role = context.role(worker.role)
-        except ConfigError:
-            return True
-        rule = next((r for r in role.start if r.name == worker.start_rule), None)
-        return rule is None or rule.on.rsplit(".", 1)[-1] == roles_mod.LABELED
+        return bool(worker.owns_label)
 
     def _sync_labels(
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
@@ -1165,7 +1169,7 @@ class Runner:
             return worker
         if context is None or not context.usable:
             return worker
-        if not self._drives_label(worker, context):
+        if not self._drives_label(worker):
             return worker
         try:
             issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
@@ -1331,13 +1335,16 @@ class Runner:
         branch = self._branch_for(repo_config, role.name, item.key)
 
         # Step 0: the row, and the subscription to its own item, exist before any
-        # external side effect.
+        # external side effect. The url reaches the prompt as {item_url} and comes from the
+        # source, so only a plain URL is kept. The queue passes its issue, and only a worker
+        # it starts drives the label.
         with self.ledger.transaction():
             worker = self.ledger.create_worker(
                 role=role.name,
                 item=item.key,
                 item_id=item.ref,
-                url=item.url,
+                url=sanitize.safe_url(item.url),
+                owns_label=issue is not None,
                 repository=repository.name,
                 repo=repository.path,
                 worktree=worktree,
@@ -1369,7 +1376,7 @@ class Runner:
 
         # Step 1: swap the labels, then verify by re-reading. Only for a worker that the
         # queue label started; another worker on the item leaves the label alone.
-        if worker.step < 1 and not self._drives_label(worker, context):
+        if worker.step < 1 and not self._drives_label(worker):
             worker = self.ledger.update(worker, step=1)
             self._check_crash(1, crash_after_step)
         if worker.step < 1:
@@ -1709,14 +1716,16 @@ class Runner:
         A worker that the queue label started asks the tracker, as before. Any other asks
         the source of its primary item, because the tracker does not know a pull request.
         """
-        if not self._drives_label(worker, context):
+        if not self._drives_label(worker):
             subscription = self.ledger.primary_subscription(worker)
             source = self.source(subscription.source) if subscription else None
             if subscription is None or source is None:
                 return False
             try:
                 return not source.item_open(subscription.work_item)
-            except ChargehandError:
+            except Exception:
+                # One source failure must not end the phase for every other worker.
+                log.exception("source %s: item_open failed for %s", source.name, worker.handle)
                 return False
         try:
             issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]

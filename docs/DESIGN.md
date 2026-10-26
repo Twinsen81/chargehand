@@ -146,8 +146,11 @@ The router runs once per tick after the polls, in this order:
 The source's cursor is saved after its events are routed, so a source that fails is one
 error in the report and its events arrive on a later tick. The queue label still starts its
 workers through admission, and only a worker the queue label started changes the label;
-every other worker on the issue only reads it. A worker started by another event ends when
-its source reports its primary item closed.
+every other worker on the issue only reads it. The ledger records this when the worker is
+created, so an edit of a role file cannot move the label to another worker. A worker started
+by another event ends when its source reports its primary item closed. A start URL from a
+source reaches the prompt only when it is a plain http(s) URL, and a start that waits longer
+than a week is given up with a warning.
 
 ## 4. Configuration
 

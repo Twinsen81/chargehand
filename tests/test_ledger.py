@@ -344,6 +344,8 @@ def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
         assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 3
         worker = ledger.get(12)
         assert (worker.role, worker.item, worker.state) == ("implementer", "ABC-1", "running")
+        # Every worker before version 3 was started by the queue label, so it keeps it.
+        assert worker.owns_label == 1
         assert [(s.id, s.session_id) for s in ledger.sessions_of(worker)] == [(5, "s1")]
         assert ledger.get_state("notify-pending:12") == "x"
         tables = {
@@ -420,7 +422,7 @@ def test_old_events_and_long_deferred_starts_are_forgotten(ledger):
     ledger.record_event(event(dedupe_id="stuck"), start_pending=True, now=time.time() - 8 * 24 * 3600)
     ledger.record_event(event(dedupe_id="fresh"), start_pending=True)
 
-    assert ledger.prune_events() == 2
+    assert ledger.prune_events() == (2, 1)
     assert [e.dedupe_id for e in ledger.pending_start_events()] == ["fresh"]
 
 

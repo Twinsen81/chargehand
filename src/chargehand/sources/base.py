@@ -32,6 +32,8 @@ class WorkItem:
     ``ref`` is the source's own reference, stored as the worker's ``item_id``.
     ``hint`` says where the item lives in the source's own terms (a repository name,
     ``owner/repo``); :meth:`Source.repository_for` maps it to a configured repository.
+    ``url`` is untrusted: it reaches the launch prompt as ``{item_url}``, so the launch
+    keeps it only when it is a plain http(s) URL.
     """
 
     source: str
@@ -61,7 +63,12 @@ class Event:
 
 
 class Source(abc.ABC):
-    """One module per source; only that module knows the system it polls."""
+    """One module per source; only that module knows the system it polls.
+
+    An expected failure (the system cannot be reached, a credential is missing) raises a
+    :class:`~chargehand.errors.ChargehandError` subtype such as ``TrackerError``. The tick
+    still contains any exception to the one source, or the one worker, that raised it.
+    """
 
     #: The type name as written in ``[[source]] type = ...``.
     type: str = ""
