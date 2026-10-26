@@ -52,6 +52,9 @@ from chargehand.errors import ClaudeError, ConfigError, WorkspaceNotTrusted
 from chargehand.runtime import (
     AT_REST,
     BLOCKED,
+    CHECK_FAIL,
+    CHECK_OK,
+    CHECK_WARN,
     DONE,
     FAILED,
     SESSION_STATES,
@@ -60,6 +63,7 @@ from chargehand.runtime import (
     WORKING,
     Capabilities,
     CommandResult,
+    HealthCheck,
     LaunchResult,
     LaunchSpec,
     Runtime,
@@ -79,6 +83,9 @@ log = logging.getLogger(__name__)
 TRUST_LAUNCH_ATTEMPTS = 3
 
 DEFAULT_PERMISSION_MODE = "auto"
+
+# The listed states that prove a session has no live process, which a resume needs.
+_PROCESS_GONE = (STOPPED, FAILED)
 
 # Claude Code's vocabulary is not contractual, so recognize the plausible spellings
 # and fall back to UNKNOWN rather than mapping something unexpected onto DONE.
@@ -566,6 +573,8 @@ class ClaudeRuntime(Runtime):
     """Claude Code background sessions, hosted by Claude Code's own supervisor."""
 
     name = "claude"
+    # What Claude Code supports. In-place wake, board permissions and usage readings go
+    # through the in-session channel and hooks, not through wake() and the CLI here.
     capabilities = Capabilities(
         live_attach=True,
         in_place_wake=True,
@@ -620,6 +629,34 @@ class ClaudeRuntime(Runtime):
             raise ConfigError(
                 f"{role.source or role.name}: agent '{role.agent}' not found; looked for {looked}"
             )
+
+    def health_checks(self) -> list[HealthCheck]:
+        """The binary and its version, the session listing, and whether `--settings` exists."""
+        if not self.cli.is_available():
+            return [HealthCheck("claude", CHECK_FAIL, f"'{self.cli.binary}' not found on PATH")]
+        try:
+            checks = [HealthCheck("claude", CHECK_OK, self.cli.version())]
+        except ClaudeError as exc:
+            return [HealthCheck("claude", CHECK_FAIL, str(exc))]
+        try:
+            sessions = self.cli.list_sessions()
+            checks.append(HealthCheck("claude agents", CHECK_OK, f"{len(sessions)} session(s) listed"))
+        except ClaudeError as exc:
+            checks.append(HealthCheck("claude agents", CHECK_FAIL, str(exc)))
+        if self.deny_rules:
+            supported = self.cli.supports_flag("--settings")
+            checks.append(
+                HealthCheck(
+                    "launch deny rules",
+                    CHECK_OK if supported else CHECK_WARN,
+                    "passed per launch with --settings"
+                    if supported
+                    else "this Claude Code build does not advertise --settings; put the "
+                    "deny rules in user settings instead, or set "
+                    "pass_deny_rules_at_launch = false",
+                )
+            )
+        return checks
 
     # ----- sessions ---------------------------------------------------------
 
@@ -696,18 +733,31 @@ class ClaudeRuntime(Runtime):
         """Stop the live process, confirm it stopped, then resume by the full session id.
 
         A resume against a running process, or by the short job id, starts a copy under a
-        new id. Both are ruled out first, and a copy that starts anyway is a fault.
+        new id, and the copy works in the same worktree. Both are ruled out first, and a
+        copy that starts anyway is a fault.
+
+        Only ``stopped`` or ``failed`` proves that no process is left. An idle session
+        lists as ``done`` while its process is still alive, so ``done`` after a stop, or a
+        stop that exits non-zero, refuses the wake rather than risk a copy.
         """
         session = self._find(session_id)
         if session is None:
             return WakeResult(False, f"session {session_id} is not in the listing")
-        if session.state != STOPPED:
-            self.cli.stop(session_id)
+        if session.state not in _PROCESS_GONE:
+            stopped = self.cli.stop(session_id)
+            if stopped.returncode != 0:
+                return WakeResult(
+                    False,
+                    f"the stop of session {session_id} exited {stopped.returncode}: "
+                    f"{sanitize.one_line(stopped.stderr or stopped.stdout, limit=200)}",
+                )
             session = self._find(session_id)
             if session is None:
                 return WakeResult(False, f"session {session_id} is gone after the stop")
-            if session.state not in AT_REST:
-                return WakeResult(False, f"session {session_id} did not stop")
+            if session.state not in _PROCESS_GONE:
+                return WakeResult(
+                    False, f"session {session_id} did not stop; it lists as {session.state}"
+                )
         uuid = session_uuid or session.uuid
         if not uuid:
             return WakeResult(False, f"session {session_id} has no full session id to resume by")

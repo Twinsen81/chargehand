@@ -199,6 +199,37 @@ def test_a_wake_that_cannot_stop_the_session_does_not_resume(claude_runtime, cla
     assert "resumes" not in claude_state.read()
 
 
+def test_a_wake_does_not_resume_a_session_that_still_lists_as_done_after_the_stop(
+    claude_runtime, claude_state
+):
+    # An idle session lists as done while its process is alive; a resume would start a copy.
+    claude_state.set(sessions=[session("done")], stop_state="done")
+
+    result = claude_runtime.wake("s1", "hello")
+
+    assert not result.ok
+    assert "did not stop" in result.detail
+    assert claude_state.commands == [["stop", "s1"]]
+    assert "resumes" not in claude_state.read()
+
+
+def test_a_wake_does_not_resume_when_the_stop_fails(claude_runtime, claude_state):
+    claude_state.set(sessions=[session("working")], stop_returncode=1)
+
+    result = claude_runtime.wake("s1", "hello")
+
+    assert not result.ok
+    assert "exited 1" in result.detail
+    assert "resumes" not in claude_state.read()
+
+
+def test_a_wake_of_a_failed_session_resumes_without_a_stop(claude_runtime, claude_state):
+    claude_state.set(sessions=[session("failed")])
+
+    assert claude_runtime.wake("s1", "hello").ok
+    assert claude_state.commands == []
+
+
 def test_a_wake_that_starts_a_copy_is_a_fault(claude_runtime, claude_state):
     claude_state.set(sessions=[session("stopped")], resume_copy_id="9abc0def")
 
@@ -236,7 +267,36 @@ def test_the_attach_command_names_the_session(claude_runtime):
     assert claude_runtime.attach_command("s1") == "claude attach s1"
 
 
+def test_the_claude_health_checks_cover_the_binary_the_listing_and_the_settings_flag(
+    claude_runtime, claude_state
+):
+    checks = {c.name: c for c in claude_runtime.health_checks()}
+
+    assert checks["claude"].status == runtime_mod.CHECK_OK
+    assert checks["claude agents"].status == runtime_mod.CHECK_OK
+    assert checks["launch deny rules"].status == runtime_mod.CHECK_OK
+
+
+def test_a_missing_claude_binary_is_one_failed_check(tmp_path):
+    runtime = ClaudeRuntime(ClaudeCLI(str(tmp_path / "no-such-claude")))
+
+    (check,) = runtime.health_checks()
+
+    assert (check.name, check.status) == ("claude", runtime_mod.CHECK_FAIL)
+
+
 # ----- the fake runtime -----------------------------------------------------
+
+
+def test_the_default_health_check_reports_the_listing():
+    world = fake_runtime.world()
+    world.add_session(name="r/ABC-1", cwd="/tmp/x", state="working")
+
+    assert FakeRuntime().health_checks() == [
+        runtime_mod.HealthCheck("fake sessions", runtime_mod.CHECK_OK, "1 session(s) listed")
+    ]
+    world.set(list_fails=True)
+    assert FakeRuntime().health_checks()[0].status == runtime_mod.CHECK_FAIL
 
 
 def test_the_fake_runtime_wakes_only_a_session_at_rest():
@@ -253,7 +313,7 @@ def test_the_fake_runtime_wakes_only_a_session_at_rest():
 # ----- only the runtime modules know a command line -------------------------
 
 
-@pytest.mark.parametrize("module", ["tick.py", "cli.py", "roles.py"])
+@pytest.mark.parametrize("module", ["tick.py", "cli.py", "roles.py", "install.py"])
 def test_the_tick_the_cli_and_the_roles_reach_claude_code_only_through_the_interface(module):
     text = (SRC / module).read_text()
 
