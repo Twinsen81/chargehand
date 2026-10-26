@@ -467,12 +467,19 @@ def iso(epoch: float) -> str:
 
 
 class PollTransport:
-    """Answers the poll's two queries and records their variables."""
+    """Answers the poll's queries and records their variables.
+
+    Comments come in pages of 50 with a `pageInfo`, filtered by `createdAt`, oldest first
+    or, with `newest_first`, newest first: the adapter must not depend on the order.
+    """
+
+    PAGE = 50
 
     def __init__(self):
         self.queue: list[dict] = []
         self.followed: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
+        self.newest_first = False
 
     def __call__(self, query: str, variables=None):
         variables = variables or {}
@@ -482,8 +489,30 @@ class PollTransport:
             return {"issues": {"nodes": self.queue, "pageInfo": {"hasNextPage": False}}}
         if name == "Followed":
             wanted = set(variables["filter"]["id"]["in"])
-            return {"issues": {"nodes": [n for n in self.followed if n["id"] in wanted]}}
+            nodes = [
+                {**n, "comments": self._page(n, variables.get("comments"), None)}
+                for n in self.followed if n["id"] in wanted
+            ]
+            return {"issues": {"nodes": nodes}}
+        if name == "Comments":
+            found = next(n for n in self.followed if n["id"] == variables["id"])
+            return {"issue": {"comments": self._page(found, variables["comments"],
+                                                     variables["after"])}}
         raise AssertionError(f"unexpected query: {query[:60]}")
+
+    def _page(self, issue_node, comment_filter, after):
+        entries = list(issue_node["comments"]["nodes"])
+        if comment_filter:
+            gt = datetime.fromisoformat(comment_filter["createdAt"]["gt"]).timestamp()
+            entries = [e for e in entries
+                       if datetime.fromisoformat(e["createdAt"].replace("Z", "+00:00")).timestamp() > gt]
+        entries.sort(key=lambda e: e["createdAt"], reverse=self.newest_first)
+        start = int(after) if after else 0
+        end = start + self.PAGE
+        return {
+            "nodes": entries[start:end],
+            "pageInfo": {"hasNextPage": end < len(entries), "endCursor": str(end)},
+        }
 
 
 def poll_node(identifier, *, updated, labels=("chargehand",), state_type="unstarted", comments=()):
@@ -628,12 +657,14 @@ def test_a_cursor_that_does_not_parse_starts_over(polling):
     assert json.loads(result.cursor) == {"polled_at": NOW, "items": {"id-ABC-1": NOW}}
 
 
-def test_an_issue_with_a_full_page_of_comments_is_read_from_the_same_point_again(polling):
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_every_page_of_comments_is_read_whatever_their_order(polling, newest_first):
     tracker, transport = polling
+    transport.newest_first = newest_first
     cursor = tracker.poll(None, []).cursor
     transport.followed = [
         poll_node("ABC-1", updated=NOW, comments=[
-            comment(f"c{n}", created=NOW + n) for n in range(50)
+            comment(f"c{n}", created=NOW + n) for n in range(1, 121)
         ]),
         poll_node("ABC-2", updated=NOW, comments=[comment("d1", created=NOW + 1)]),
     ]
@@ -641,8 +672,48 @@ def test_an_issue_with_a_full_page_of_comments_is_read_from_the_same_point_again
 
     result = tracker.poll(cursor, ["id-ABC-1", "id-ABC-2"])
 
-    assert len(result.comments) == 51
-    assert json.loads(result.cursor)["items"] == {"id-ABC-1": NOW, "id-ABC-2": NOW + 600}
+    assert sorted(c.id for c in result.comments if c.issue.identifier == "ABC-1") == sorted(
+        f"c{n}" for n in range(1, 121)
+    )
+    assert [after for name, v in transport.calls if name == "Comments"
+            for after in [v["after"]]] == ["50", "100"]
+    assert json.loads(result.cursor)["items"] == {"id-ABC-1": NOW + 600, "id-ABC-2": NOW + 600}
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_a_second_poll_reads_comment_51_and_later(polling, newest_first):
+    tracker, transport = polling
+    transport.newest_first = newest_first
+    cursor = tracker.poll(None, []).cursor
+    busy = poll_node("ABC-1", updated=NOW, comments=[
+        comment(f"c{n}", created=NOW + n) for n in range(1, 51)
+    ])
+    transport.followed = [busy]
+    tracker.clock = lambda: NOW + 100
+    first = tracker.poll(cursor, ["id-ABC-1"])
+    busy["comments"]["nodes"] += [comment(f"c{n}", created=NOW + 100 + n) for n in range(51, 71)]
+    tracker.clock = lambda: NOW + 1000
+
+    second = tracker.poll(first.cursor, ["id-ABC-1"])
+
+    assert len(first.comments) == 50
+    assert {f"c{n}" for n in range(51, 71)} <= {c.id for c in second.comments}
+
+
+def test_an_issue_with_more_comments_than_one_poll_reads_is_read_from_the_same_point(polling):
+    tracker, transport = polling
+    cursor = tracker.poll(None, []).cursor
+    transport.followed = [
+        poll_node("ABC-1", updated=NOW, comments=[
+            comment(f"c{n}", created=NOW + n) for n in range(1, 50 * 20 + 2)
+        ]),
+    ]
+    tracker.clock = lambda: NOW + 3000
+
+    result = tracker.poll(cursor, ["id-ABC-1"])
+
+    assert len(result.comments) == 50 * 20
+    assert json.loads(result.cursor)["items"] == {"id-ABC-1": NOW}
 
 
 def test_the_linear_tracker_as_a_source_gives_labeled_comment_and_done_events(polling):

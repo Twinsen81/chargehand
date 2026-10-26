@@ -83,17 +83,31 @@ query Followed($filter: IssueFilter!, $comments: CommentFilter) {
       %s
       comments(first: 50, filter: $comments) {
         nodes { id createdAt body user { id name email } }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
 }
 """ % _ISSUE_FIELDS
 
+# The next pages of one issue's comments, with the same filter as the first page.
+_COMMENTS_QUERY = """
+query Comments($id: String!, $comments: CommentFilter, $after: String) {
+  issue(id: $id) {
+    comments(first: 50, after: $after, filter: $comments) {
+      nodes { id createdAt body user { id name email } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
 # Pages of the queue read in one poll. Far more than one account has queued at once.
 _MAX_QUEUE_PAGES = 10
 _FOLLOWED_CHUNK = 50
-# Must match `comments(first: ...)` in the query above.
-_COMMENT_PAGE = 50
+# Pages of one issue's comments read in one poll. An issue with more left is read from
+# the same point again on the next poll.
+_MAX_COMMENT_PAGES = 20
 
 # A comment can become readable a moment after a later one was already read, so every
 # poll reads this far back again. The overlap costs nothing: the router drops what it has
@@ -359,7 +373,8 @@ class LinearTracker(Tracker):
         since = {issue_id: state.items.get(issue_id, start) for issue_id in followed}
         if followed:
             issues, comments, unfinished = self._read_followed(since)
-        # An issue whose page of comments was full is read from the same point again.
+        # An issue with comments left after the pages read here is read from the same
+        # point again.
         state.items = {
             issue_id: since[issue_id] if issue_id in unfinished else now for issue_id in followed
         }
@@ -389,16 +404,20 @@ class LinearTracker(Tracker):
         self, since: Mapping[str, float]
     ) -> tuple[list[Issue], list[Comment], set[str]]:
         """The followed issues, their comments since each one's time, and the issues whose
-        page of comments was full."""
+        comments did not fit in the pages one poll reads.
+
+        Every page of comments is read through ``pageInfo``, so nothing depends on the
+        order in which Linear returns them.
+        """
         ids = sorted(since)
-        oldest = min(since.values()) - OVERLAP_SECS
+        comment_filter = {"createdAt": {"gt": _iso(min(since.values()) - OVERLAP_SECS)}}
         issues: list[Issue] = []
         comments: list[Comment] = []
         unfinished: set[str] = set()
         for offset in range(0, len(ids), _FOLLOWED_CHUNK):
             variables = {
                 "filter": {"id": {"in": ids[offset : offset + _FOLLOWED_CHUNK]}},
-                "comments": {"createdAt": {"gt": _iso(oldest)}},
+                "comments": comment_filter,
             }
             page = self._post(_FOLLOWED_QUERY, variables).get("issues") or {}
             for node in page.get("nodes") or []:
@@ -407,8 +426,10 @@ class LinearTracker(Tracker):
                     continue
                 issues.append(issue)
                 after = since[issue.id] - OVERLAP_SECS
-                entries = (node.get("comments") or {}).get("nodes") or []
-                if len(entries) >= _COMMENT_PAGE:
+                entries, complete = self._all_comments(
+                    issue.id, node.get("comments") or {}, comment_filter
+                )
+                if not complete:
                     unfinished.add(issue.id)
                 for entry in entries:
                     created = _timestamp(entry.get("createdAt"))
@@ -424,6 +445,24 @@ class LinearTracker(Tracker):
                         )
                     )
         return issues, comments, unfinished
+
+    def _all_comments(
+        self, issue_id: str, first: Mapping[str, Any], comment_filter: Mapping[str, Any]
+    ) -> tuple[list[Mapping[str, Any]], bool]:
+        """The comment entries of *first* and of the pages after it; False when more are
+        left after the last page this poll reads."""
+        entries = list(first.get("nodes") or [])
+        info = first.get("pageInfo") or {}
+        for _ in range(_MAX_COMMENT_PAGES - 1):
+            if not info.get("hasNextPage") or not info.get("endCursor"):
+                return entries, True
+            variables = {"id": issue_id, "comments": comment_filter, "after": info["endCursor"]}
+            connection = (
+                (self._post(_COMMENTS_QUERY, variables).get("issue") or {}).get("comments") or {}
+            )
+            entries += connection.get("nodes") or []
+            info = connection.get("pageInfo") or {}
+        return entries, not (info.get("hasNextPage") and info.get("endCursor"))
 
     def get(self, issue_id: str) -> Issue | None:
         node = self._post(_ISSUE_QUERY, {"id": issue_id}).get("issue")
