@@ -6,8 +6,8 @@ to verify a write. Anything more would put attacker-controlled text on the trust
 side of the prompt boundary.
 
 The tick reaches a tracker through :class:`chargehand.sources.tracker.TrackerSource`,
-which turns :meth:`Tracker.poll` into events. An adapter that can ask "what changed
-since" overrides ``poll``; the default lists the whole queue on every poll.
+which turns :meth:`Tracker.poll` into events. An adapter that can read the followed
+issues' comments overrides ``poll``; every poll lists the whole queue.
 """
 
 from __future__ import annotations
@@ -103,10 +103,13 @@ class Tracker(abc.ABC):
         """Re-read one issue. ``None`` when it no longer exists."""
 
     def poll(self, cursor: str | None, followed: Sequence[str]) -> TrackerPoll:
-        """The queue, and the issues in *followed* (ids), since *cursor*.
+        """The whole queue, and the issues in *followed* (ids) with their comments since
+        *cursor*.
 
-        The default lists the whole queue and re-reads each followed issue on every poll,
-        reports no comments, and keeps no cursor. The router drops what it has seen before.
+        ``queued`` is always the whole queue: a start that waited too long is offered again
+        from it, and a waiting start checks against it that its issue is still queued. The
+        default re-reads each followed issue, reports no comments, and keeps no cursor. The
+        router drops what it has seen before.
         """
         queued = self.list(Status.QUEUED)
         issues = [issue for issue in (self.get(issue_id) for issue_id in followed) if issue]

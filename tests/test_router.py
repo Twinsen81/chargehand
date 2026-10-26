@@ -348,8 +348,7 @@ def test_a_start_the_caps_defer_is_not_lost(tmp_path, repo, claude_state, board)
 
     deferred = harness.next_tick()
     claude_state.set_session_state("ABC-1", "blocked")
-    # The waiting starts are offered again after the state diff, so the tick that frees
-    # the slot uses it.
+    harness.next_tick()
     started = harness.next_tick()
 
     assert deferred.launched == []

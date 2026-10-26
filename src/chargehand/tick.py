@@ -280,9 +280,9 @@ class Runner:
         self._source_factory = source_factory
         self._sources: dict[str, Source | Exception | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
-        # (source, dedupe id) of the tracker events polled in this tick. A queue start not
-        # among them waited for a slot, and is checked against the queue before it starts.
-        self._polled: set[tuple[str, str]] = set()
+        # Which starts this step tries: a `[[source]]`'s in the route step, a tracker's in
+        # the tracker step. Each waiting start is tried once per tick.
+        self._trackers_turn = False
         self._sessions: dict[str, list[Session]] = {}
 
     # ----- collaborators ----------------------------------------------------
@@ -373,7 +373,6 @@ class Runner:
 
     def tick(self, *, crash_after_step: int | None = None) -> TickReport:
         report = TickReport()
-        self._polled.clear()
         for context in self._contexts.values():
             if context.source is not None:
                 context.source.forget_queue()
@@ -986,8 +985,10 @@ class Runner:
         """Poll every source, then filter, deliver and start, through the router.
 
         A source that fails is one error in the report and keeps its cursor, so its
-        events arrive on the next tick; the other sources are routed as usual.
+        events arrive on the next tick; the other sources are routed as usual. The starts
+        of a repository's tracker wait for the tracker step.
         """
+        self._trackers_turn = False
         router = router_mod.Router(
             self.ledger,
             start=lambda event: self._start_from_event(
@@ -1051,8 +1052,12 @@ class Runner:
         The queue label is a ``labeled`` event from the repository's own tracker. Only a
         worker it starts drives the label, and an issue that any live worker holds stays
         with it, whatever the rule's ``unless_subscribed`` says: a second worker driving
-        the one label per issue would clear it when either finished.
+        the one label per issue would clear it when either finished. The start waits while
+        that worker lives, and is dropped once the issue has left the queue.
         """
+        if TrackerSource.produced(event) != self._trackers_turn:
+            # Not this step's start: it is tried in the other one, once per tick.
+            return True
         context = self.tracker_context(event)
         if context is not None:
             repository = context.repository
@@ -1073,8 +1078,13 @@ class Runner:
             # Reported by reconciliation; the start waits until the repository is usable.
             return True
         queue = event.kind == roles_mod.LABELED
-        if queue and (event.source, event.dedupe_id) not in self._polled:
-            # A start that waited for a slot: the issue may have left the queue since.
+        if queue and self.ledger.is_paused(repository.name):
+            # Not polled while paused, so the queue is not read for it either.
+            report.skipped.append(f"{event.item.key}: repository {repository.name} is paused")
+            return True
+        if queue:
+            # A start that waited may have left the queue since. The tracker step polls
+            # before it retries, so this reads the listing of this tick's poll.
             try:
                 if not context.source.still_queued(event.item):  # type: ignore[union-attr]
                     return False
@@ -1087,13 +1097,16 @@ class Runner:
             try:
                 role = context.role(role_name)
             except ConfigError:
-                # Reported by the tracker poll, once per tick.
+                # Reported by the tracker step, once per tick. The role might start on this
+                # event, so the start waits until the role file loads again.
+                deferred = True
                 continue
             rule = role.start_rule_for(event.kind, event.source, repository.name)
             if rule is None:
                 continue
             if queue:
                 if self.ledger.live_worker_for(item) is not None:
+                    deferred = True
                     continue
             elif router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
                 continue
@@ -1355,16 +1368,40 @@ class Runner:
     def _route_trackers(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
         """Poll each repository's tracker as a source, and route its events.
 
-        The starts that waited for a slot go first, because the state diff may have freed
-        one. A paused repository is not polled; its cursor stays, so nothing is lost.
+        Every tracker is polled first, so a start that waited checks the queue against
+        this poll's listing. Then the waiting starts go, before the new ones and after
+        the state diff, which may have freed a slot. A paused repository is not polled.
         """
+        self._trackers_turn = True
         router = router_mod.Router(
             self.ledger,
             start=lambda event: self._start_from_event(
                 event, report, crash_after_step=crash_after_step
             ),
         )
+        polled = self._poll_trackers(report)
         router.retry_pending_starts()
+        for repository, events, cursor in polled:
+            source = self.context(repository).source
+            assert source is not None
+            try:
+                # Asked only when the marker filter needs it, so a quiet poll stays one call.
+                signed_in = source.whoami() if any(event.marked for event in events) else ""
+            except TRACKER_FAILURES as exc:
+                report.errors.append(f"repository {repository.name}: {exc}")
+                continue
+            result = router.route(events, signed_in=signed_in)
+            self.ledger.set_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}", cursor)
+            if result.delivered or result.own:
+                report.routed.append(
+                    f"{repository.name}: {len(events)} tracker event(s), {result.own} by "
+                    f"chargehand, {result.delivered} inbox row(s)"
+                )
+
+    def _poll_trackers(
+        self, report: TickReport
+    ) -> list[tuple[Repository, list[Event], str | None]]:
+        polled: list[tuple[Repository, list[Event], str | None]] = []
         for repository in self.config.repositories:
             if self.ledger.is_paused(repository.name):
                 report.skipped.append(f"repository {repository.name} is paused")
@@ -1381,15 +1418,11 @@ class Runner:
                     report.errors.append(f"repository {repository.name}: {exc}")
             source = context.source
             assert source is not None
-            cursor_key = f"{TRACKER_CURSOR_PREFIX}{repository.name}"
             try:
                 events, cursor = source.poll(
-                    self.ledger.get_cursor(cursor_key), self._followed_items(context)
+                    self.ledger.get_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}"),
+                    self._followed_items(context),
                 )
-                # Asked only when the marker filter needs it, so a quiet poll stays one call.
-                signed_in = source.whoami() if any(event.marked for event in events) else ""
-            except LaunchAborted:
-                raise
             except TRACKER_FAILURES as exc:
                 report.errors.append(f"repository {repository.name}: {exc}")
                 continue
@@ -1399,22 +1432,20 @@ class Runner:
                     f"repository {repository.name}: {sanitize.one_line(str(exc), limit=300)}"
                 )
                 continue
-            self._polled.update((event.source, event.dedupe_id) for event in events)
-            result = router.route(events, signed_in=signed_in)
-            self.ledger.set_cursor(cursor_key, cursor)
-            if result.delivered or result.own:
-                report.routed.append(
-                    f"{repository.name}: {len(events)} tracker event(s), {result.own} by "
-                    f"chargehand, {result.delivered} inbox row(s)"
-                )
+            polled.append((repository, events, cursor))
+        return polled
 
     def _followed_items(self, context: RepositoryContext) -> list[WorkItem]:
         """The items of this repository's tracker that live workers subscribe to.
 
         Every repository's tracker of one type is one source by name, so the ledger's list
-        is narrowed to the workers of this repository.
+        is narrowed to the workers of this repository. A ``[[source]]`` with the tracker's
+        name, such as ``github`` next to a GitHub Issues queue, already polls these items,
+        so the tracker leaves them to it.
         """
         name = context.repository.tracker.type
+        if self.config.source_by_name(name) is not None:
+            return []
         return [
             item
             for item in self.ledger.subscribed_items(name)

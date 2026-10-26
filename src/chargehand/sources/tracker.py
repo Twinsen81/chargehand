@@ -83,10 +83,10 @@ class TrackerSource(Source):
         self._queue = None
 
     def still_queued(self, item: WorkItem) -> bool:
-        """Whether the item is in the queue, as the latest listing of this tick shows it.
+        """Whether the item is in the queue, as this tick's poll listed it.
 
-        A start that waited for a launch slot asks this first, so an issue taken out of
-        the queue while it waited does not start.
+        A queue start asks this first, so an issue taken out of the queue while it waited
+        does not start. Without a poll in this tick, the queue is listed once.
         """
         if self._queue is None:
             self._queue = {issue.id for issue in self.tracker.list(Status.QUEUED)}

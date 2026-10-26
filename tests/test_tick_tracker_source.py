@@ -125,6 +125,74 @@ def test_a_closed_issue_ends_its_worker_and_clears_the_labels(harness):
     assert harness.labels("ABC-1") == ()
 
 
+def test_a_queued_issue_starts_once_a_broken_role_file_is_fixed(harness):
+    role_file = harness.repo / ".chargehand" / "roles" / "implementer.toml"
+    role_file.parent.mkdir(parents=True)
+    role_file.write_text("prompt = 1\n")
+    harness.board.add("ABC-1")
+
+    broken = harness.tick()
+
+    assert broken.launched == []
+    assert any("implementer.toml" in error for error in broken.errors)
+
+    role_file.unlink()
+    for _ in range(2):
+        report = harness.next_tick()
+        if report.launched:
+            break
+
+    assert report.launched == ["ABC-1"]
+
+
+def test_a_queue_start_given_up_after_a_week_comes_back_from_the_queue(harness):
+    for index in range(3):
+        harness.board.add(f"ABC-{index}")
+    harness.tick()
+    assert [e.item.key for e in harness.ledger.pending_start_events()] == ["ABC-2"]
+
+    # Held back for more than a week: the router gives the start up.
+    harness.ledger._conn.execute("UPDATE events SET seen_at = seen_at - 8 * 24 * 3600")
+    given_up = harness.next_tick()
+    harness.claude_state.set_session_state("ABC-0", "blocked")
+    report = harness.next_tick()
+
+    assert any("gave up 1 start" in warning for warning in given_up.warnings)
+    assert report.launched == ["ABC-2"]
+
+
+def test_a_waiting_start_is_tried_once_per_tick(harness):
+    for index in range(3):
+        harness.board.add(f"ABC-{index}")
+    harness.tick()
+
+    report = harness.next_tick()
+
+    assert [line for line in report.skipped if line.startswith("ABC-2:")] == [
+        "ABC-2: launch throttle (2/2)"
+    ]
+
+
+def test_a_source_with_the_trackers_name_reads_the_followed_issues(
+    tmp_path, repo, claude_state, board
+):
+    from chargehand.config import SourceConfig
+
+    source = SourceConfig(name="fake", type="fake", options={"board": "default", "repository": "test"})
+    harness = harness_with(tmp_path, repo, claude_state, board, sources=(source,))
+    board.add("ABC-1")
+    harness.tick()
+    board.calls.clear()
+    board.comment("ABC-1")
+
+    harness.next_tick()
+
+    issue_id = board.by_identifier("ABC-1").id
+    assert ("get", issue_id) not in board.calls
+    assert inbox(harness, "ABC-1") == []
+    harness.ledger.close()
+
+
 def test_the_tracker_cursor_is_kept_per_repository(harness):
     harness.board.add("ABC-1")
 

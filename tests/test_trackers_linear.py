@@ -507,7 +507,7 @@ def polling():
     return tracker, transport
 
 
-def test_the_first_poll_reads_the_whole_queue_and_keeps_the_latest_updated_at(polling):
+def test_the_poll_reads_the_queue_with_its_last_change_time(polling):
     tracker, transport = polling
     transport.queue = [poll_node("ABC-1", updated=NOW - 50), poll_node("ABC-2", updated=NOW - 10)]
 
@@ -516,28 +516,25 @@ def test_the_first_poll_reads_the_whole_queue_and_keeps_the_latest_updated_at(po
     assert [issue.identifier for issue in result.queued] == ["ABC-1", "ABC-2"]
     assert result.queued[1].updated_at == NOW - 10
     ((name, variables),) = transport.calls
-    assert name == "Poll" and "updatedAt" not in variables["filter"]
+    assert name == "Poll"
     assert variables["filter"]["labels"] == {"name": {"eq": "chargehand"}}
     assert variables["filter"]["assignee"] == {"isMe": {"eq": True}}
     assert variables["filter"]["team"] == {"key": {"eq": "ABC"}}
-    assert json.loads(result.cursor)["updated_at"] == NOW - 10
 
 
-def test_a_later_poll_asks_only_for_what_changed_since_the_cursor(polling):
+def test_every_poll_reads_the_whole_queue(polling):
+    """A queue start that waited longer than the router keeps it must come back, and an
+    unchanged issue would never come back from a query for what changed."""
     tracker, transport = polling
     transport.queue = [poll_node("ABC-1", updated=NOW - 10)]
     cursor = tracker.poll(None, []).cursor
     transport.calls.clear()
-    transport.queue = []
 
     result = tracker.poll(cursor, [])
 
     ((name, variables),) = transport.calls
-    # Read a little further back than the cursor: the router drops what it has seen.
-    since = datetime.fromisoformat(variables["filter"]["updatedAt"]["gt"]).timestamp()
-    assert since == NOW - 10 - OVERLAP_SECS
-    # A quiet team keeps its cursor and costs one query.
-    assert json.loads(result.cursor)["updated_at"] == NOW - 10
+    assert name == "Poll" and "updatedAt" not in variables["filter"]
+    assert [issue.identifier for issue in result.queued] == ["ABC-1"]
 
 
 def test_the_queue_is_read_page_by_page(polling):
@@ -624,10 +621,28 @@ def test_no_followed_issue_means_no_second_query(polling):
 
 def test_a_cursor_that_does_not_parse_starts_over(polling):
     tracker, transport = polling
+    transport.followed = [poll_node("ABC-1", updated=NOW)]
 
-    tracker.poll("not json", [])
+    result = tracker.poll("not json", ["id-ABC-1"])
 
-    assert "updatedAt" not in transport.calls[0][1]["filter"]
+    assert json.loads(result.cursor) == {"polled_at": NOW, "items": {"id-ABC-1": NOW}}
+
+
+def test_an_issue_with_a_full_page_of_comments_is_read_from_the_same_point_again(polling):
+    tracker, transport = polling
+    cursor = tracker.poll(None, []).cursor
+    transport.followed = [
+        poll_node("ABC-1", updated=NOW, comments=[
+            comment(f"c{n}", created=NOW + n) for n in range(50)
+        ]),
+        poll_node("ABC-2", updated=NOW, comments=[comment("d1", created=NOW + 1)]),
+    ]
+    tracker.clock = lambda: NOW + 600
+
+    result = tracker.poll(cursor, ["id-ABC-1", "id-ABC-2"])
+
+    assert len(result.comments) == 51
+    assert json.loads(result.cursor)["items"] == {"id-ABC-1": NOW, "id-ABC-2": NOW + 600}
 
 
 def test_the_linear_tracker_as_a_source_gives_labeled_comment_and_done_events(polling):
