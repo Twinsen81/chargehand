@@ -220,6 +220,7 @@ class TrackerConfig:
 
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_GITHUB_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}/[A-Za-z0-9._-]{1,100}")
 
 
 @dataclass(frozen=True)
@@ -270,11 +271,15 @@ class Repository:
     labels: Labels
     max_concurrent: int | None = None
     roles: tuple[str, ...] = DEFAULT_ROLES
+    # The repository on GitHub, as owner/repo: what github source events are mapped by.
+    github: str | None = None
 
     @classmethod
     def parse(cls, table: Mapping[str, object], where: str, defaults: Labels) -> "Repository":
         _unknown_keys(
-            table, ("name", "path", "repo", "tracker", "labels", "max_concurrent", "roles"), where
+            table,
+            ("name", "path", "repo", "tracker", "labels", "max_concurrent", "roles", "github"),
+            where,
         )
         if "path" in table and "repo" in table:
             raise ConfigError(f"{where}: give either path or repo, not both")
@@ -298,6 +303,11 @@ class Repository:
             if role in roles:
                 raise ConfigError(f"{where}.roles: '{role}' is listed twice")
             roles.append(role)
+        github = None
+        if "github" in table:
+            github = _as_str(table["github"], f"{where}.github")
+            if not _GITHUB_REPO.fullmatch(github) or github.split("/")[1] in (".", ".."):
+                raise ConfigError(f"{where}.github: expected the repository as owner/repo")
         return cls(
             name=name,
             path=path,
@@ -305,6 +315,7 @@ class Repository:
             labels=Labels.parse(table.get("labels"), f"{where}.labels", defaults),
             max_concurrent=max_concurrent,
             roles=tuple(roles),
+            github=github,
         )
 
 
