@@ -509,6 +509,7 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
         payload: dict[str, object] = {
             "item": issue,
             "role": "implementer",
+            "runtime": "claude",
             "repository": "main",
             "state": state,
             "session_state": session_state,
@@ -551,6 +552,7 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
     sessions: list[dict[str, object]] = []
     for entry in attempts + recent:
         session: dict[str, object] = {
+            "runtime": "claude",
             "id": entry["session_id"],
             "state": entry["session_state"],
             "raw_state": entry["session_state"],
@@ -571,6 +573,7 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
         "queued_issues": ["ABC-4"],
         "roles": {
             "implementer": {
+                "runtime": "claude",
                 "prompt": "Work on {item}.",
                 "permission_mode": "auto",
                 "agent": None,

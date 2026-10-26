@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Claude Code adapter passes `--agent`, `--model`, `--effort` and `--plugin-dir` at
   launch, and can wake a stopped background session with a new prompt by its full
   session id, recognising when Claude Code started a copy instead.
+- Claude Code is now the `claude` runtime behind a runtime interface (launch, wake, stop,
+  session states, attach command, fork) with declared capabilities. The tick, the control
+  commands and reconciliation reach it only through that interface, and a role's runtime
+  checks its own role-file keys. `status --json` reports each worker's and session's
+  `runtime`.
 
 ### Added
 

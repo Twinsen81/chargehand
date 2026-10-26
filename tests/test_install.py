@@ -138,6 +138,19 @@ def test_doctor_flags_a_bypass_permissions_route(capsys, config_file, harness, r
     assert "dedicated machine" in checks["repository test role implementer"]["detail"]
 
 
+def test_doctor_checks_every_runtime_a_role_uses(capsys, config_file, harness, repo):
+    role = repo / ".chargehand" / "roles" / "implementer.toml"
+    role.parent.mkdir(parents=True)
+    role.write_text('runtime = "fake"\nprompt = "{item}"\n\n[[start]]\non = "labeled"\n')
+
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
+    assert checks["claude"]["status"] == install.OK
+    assert checks["fake sessions"]["status"] == install.OK
+    assert checks["repository test role implementer"]["detail"] == "runtime fake"
+
+
 def test_doctor_warns_when_the_launch_deny_rules_cannot_be_passed(capsys, config_file, harness):
     harness.claude_state.set(version="claude 1.0.0-fake")
     main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])

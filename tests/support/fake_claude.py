@@ -25,6 +25,7 @@ Options:
   --plugin-dir <path>      load a plugin directory for the session
   --settings <json>        per-session settings
   --resume <id>            with --bg: wake a stopped session with a new prompt
+  --fork-session           with --resume: continue a copy of the conversation
   --version
 
 Commands:
@@ -81,6 +82,25 @@ def drop_trust(cwd: str) -> None:
     path.write_text(json.dumps(config, indent=2))
 
 
+# Above the largest pid Linux (2**22) and macOS allow, so a liveness check of a fake
+# session's pid never finds a real process.
+FAKE_PID_BASE = 5_000_000
+
+
+def run_process(session: dict, serial: int) -> None:
+    """Give *session* the live-process fields the real listing shows: `pid` and `status`."""
+    session["pid"] = FAKE_PID_BASE + serial
+    session["status"] = "busy" if session.get("state") == "working" else "idle"
+
+
+def next_serial(state: dict) -> int:
+    # Monotonic, never reused: a recycled id would hide a session being adopted
+    # when a fresh one should have been started.
+    serial = state.get("session_serial", 0) + 1
+    state["session_serial"] = serial
+    return serial
+
+
 def main(argv: list[str]) -> int:
     state = load()
     if state.get("fail_every_call"):
@@ -113,11 +133,23 @@ def main(argv: list[str]) -> int:
             if session.get("id") != session_id:
                 continue
             if action == "stop" and not failed:
-                # stop_state lets a test model a stop that reports success while the
-                # listing goes on saying something the runner does not recognise.
-                session["state"] = state.get("stop_state", "stopped")
+                if "stop_state" in state:
+                    # A stop that reports success while the process goes on: the
+                    # listing keeps its pid and status and says stop_state.
+                    session["state"] = state["stop_state"]
+                else:
+                    # Observed in Claude Code 2.1.310: an idle session keeps `state: done`
+                    # after the stop, and `pid` and `status` leave the entry. The state is
+                    # the last turn's, so a session whose turn has ended (done, blocked,
+                    # failed) keeps it the same way. A stop in the middle of a turn has not
+                    # been observed; that one reads `stopped` here.
+                    if session.get("state") == "working":
+                        session["state"] = "stopped"
+                    session.pop("pid", None)
+                    session.pop("status", None)
             elif action == "respawn" and not failed:
                 session["state"] = state.get("respawn_state", "working")
+                run_process(session, next_serial(state))
         if action == "rm" and not failed:
             state["sessions"] = [s for s in sessions if s.get("id") != session_id]
         save(state)
@@ -127,6 +159,26 @@ def main(argv: list[str]) -> int:
         record(state, "commands", ["logs", argv[1]])
         save(state)
         sys.stdout.write(state.get("logs", "plain log line\n"))
+        return 0
+
+    if "--resume" in argv and "--fork-session" in argv and "--bg" in argv:
+        # `claude --resume <id> --fork-session --bg "<prompt>"`: a new session that
+        # continues a copy of the conversation.
+        target = argv[argv.index("--resume") + 1]
+        record(state, "forks", {"argv": argv, "target": target, "prompt": argv[-1]})
+        original = next(
+            (s for s in state.get("sessions", []) if target in (s.get("uuid"), s.get("sessionId"), s.get("id"))), None
+        )
+        if original is None:
+            save(state)
+            sys.stderr.write(f"No conversation found with session ID: {target}\n")
+            return 1
+        serial = next_serial(state)
+        copy = {**original, "id": f"s{serial}", "uuid": f"uuid-{serial}", "state": "working"}
+        run_process(copy, serial)
+        state["sessions"].append(copy)
+        save(state)
+        sys.stdout.write(f"backgrounded · s{serial}\n")
         return 0
 
     if "--resume" in argv and "--bg" in argv:
@@ -145,8 +197,9 @@ def main(argv: list[str]) -> int:
             save(state)
             return 0
         for session in state.get("sessions", []):
-            if session.get("uuid") == target or session.get("id") == target:
+            if target in (session.get("uuid"), session.get("sessionId"), session.get("id")):
                 session["state"] = state.get("resume_state", "working")
+                run_process(session, next_serial(state))
                 sys.stdout.write(f"backgrounded · {session.get('id')} · {session.get('name')}\n")
                 sys.stdout.write("note: woke session with its saved options\n")
                 save(state)
@@ -179,21 +232,18 @@ def main(argv: list[str]) -> int:
             if flag in argv:
                 name = argv[argv.index(flag) + 1]
         sessions = state.setdefault("sessions", [])
-        # Monotonic, never reused: a recycled id would hide a session being adopted
-        # when a fresh one should have been started.
-        serial = state.get("session_serial", 0) + 1
-        state["session_serial"] = serial
+        serial = next_serial(state)
         if not state.get("launch_invisible"):
-            sessions.append(
-                {
-                    "id": state.get("next_session_id", f"s{serial}"),
-                    "uuid": f"uuid-{serial}",
-                    "name": name,
-                    "cwd": os.getcwd(),
-                    "state": state.get("launch_state", "working"),
-                    "startedAt": state.get("launch_started_at"),
-                }
-            )
+            session = {
+                "id": state.get("next_session_id", f"s{serial}"),
+                "uuid": f"uuid-{serial}",
+                "name": name,
+                "cwd": os.getcwd(),
+                "state": state.get("launch_state", "working"),
+                "startedAt": state.get("launch_started_at"),
+            }
+            run_process(session, serial)
+            sessions.append(session)
         state.pop("next_session_id", None)
         save(state)
         return 0

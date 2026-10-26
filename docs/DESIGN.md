@@ -59,6 +59,7 @@ Components:
 |---|---|
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised workers |
 | Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
+| Runtimes | The coding agent behind one interface; `claude` is the only one that ships |
 | Control CLI | See and steer the runner; no server |
 | Tracker adapters | `linear`, `github`, and a `command` adapter for anything else |
 | A lease tool such as banksman (external, optional, never called by chargehand) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
@@ -221,7 +222,7 @@ Role files — `.chargehand/roles/<name>.toml` in the repository, or
 
 ```toml
 # .chargehand/roles/implementer.toml
-runtime = "claude"                  # the coding agent; claude is the only one so far
+runtime = "claude"                  # the coding agent, see "Runtimes"; claude is the default
 agent = "implementer"               # optional: .claude/agents/implementer.md, passed as --agent
 model = "opus"                      # optional, passed as --model
 effort = "high"                     # optional, passed as --effort
@@ -261,6 +262,31 @@ A start rule creates a worker on its own. A start event arrives again on every p
 ledger allows at most one live worker per role and item among the workers that start rules
 created, enforced by the database. The ledger already records each worker's origin, so a
 later way to create workers by hand is not held to that limit.
+
+### Runtimes
+
+A runtime is the coding agent a role's workers run on. Each runtime is one module, and only
+that module knows the agent's command line. The interface is small: launch a session in a
+worktree, wake it with a message, stop it, list the sessions with their states, the command
+an operator runs to open one, and fork. Session ids are opaque text that only the runtime
+reads.
+
+Each runtime declares its capabilities: live attach, in-place wake, permission prompts that
+can be answered from outside the session, usage readings, fork, and whether a supervisor
+outside chargehand hosts its processes. The tick and the CLI check a capability, never the
+runtime's name, and the board will show what a worker's runtime cannot do.
+
+Role files stay flat. The common keys (`runtime`, `prompt`, `model`, `effort`, `checkout`,
+`setup`, `status_file`, `[[start]]`, `[policy]`) sit next to the keys of the role's runtime,
+and the runtime checks its own: `agent`, `permission_mode` and `allow` belong to `claude`.
+A key that neither the common set nor the runtime knows is an error, so a role written for
+one runtime does not start silently on another.
+
+`claude` is the only runtime that ships and the default. It wakes a session by stopping its
+process, confirming that it stopped, and resuming it by the full session id with stdin
+closed; a resume that starts a copy instead is reported as a fault. The test suite has a
+second runtime with fewer capabilities, whose processes chargehand hosts, and the tick tests
+that must behave the same run on both.
 
 A command template is split into arguments *before* its variables are substituted, and nothing
 is run through a shell, so a value containing spaces or shell metacharacters stays one argument.
@@ -552,6 +578,8 @@ Done:
   its operator commands.
 - Roles and workers: role files with an agent, model, effort and allow rules, start rules,
   several roles per repository, and a ledger of workers and their sessions.
+- The runtime interface, with Claude Code as the `claude` runtime behind it and declared
+  capabilities.
 
 Next:
 

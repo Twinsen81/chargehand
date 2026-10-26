@@ -12,7 +12,6 @@ from conftest import Harness, make_config
 from chargehand import ledger as ledger_mod
 from chargehand import roles as roles_mod
 from chargehand import sources as sources_mod
-from chargehand.claude import ClaudeCLI
 from chargehand.config import SourceConfig
 from chargehand.errors import LaunchAborted
 from chargehand.gitutil import Git
@@ -228,7 +227,7 @@ def routed(tmp_path, repo, claude_state, board):
     )
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(), notifier=notifier)
+    runner = Runner(config, ledger, git=Git(), notifier=notifier)
     harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
     yield harness
     ledger.close()
@@ -339,7 +338,7 @@ def test_a_start_the_caps_defer_is_not_lost(tmp_path, repo, claude_state, board)
     )
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(), notifier=notifier)
+    runner = Runner(config, ledger, git=Git(), notifier=notifier)
     harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
     board.add("ABC-1")
     harness.tick()
@@ -390,7 +389,7 @@ def test_an_unknown_source_type_is_one_error(tmp_path, repo, claude_state, board
     worktree_root.mkdir()
     config = make_config(repo, worktree_root, sources=(SourceConfig(name="x", type="nope"),))
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
+    runner = Runner(config, ledger, git=Git(),
                     notifier=Notifier(config.notify))
     board.add("ABC-1")
 
@@ -548,7 +547,7 @@ def test_a_source_that_cannot_be_built_is_one_error(tmp_path, repo, claude_state
     def broken(config):
         raise RuntimeError("boom")
 
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
+    runner = Runner(config, ledger, git=Git(),
                     notifier=Notifier(config.notify), source_factory=broken)
     board.add("ABC-1")
 

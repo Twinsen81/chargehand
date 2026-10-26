@@ -1,8 +1,9 @@
-"""The only module that knows the Claude Code command line.
+"""The ``claude`` runtime, and the only module that knows the Claude Code command line.
 
-Everything else works on :class:`Session` values. Swapping in a second agent backend
-means reimplementing this interface — launch, list, stop, respawn, remove, logs — and
-nothing else.
+:class:`ClaudeCLI` is a thin wrapper around the binary. :class:`ClaudeRuntime` puts it
+behind the runtime interface of :mod:`chargehand.runtime`, together with what only a
+Claude Code launch needs: the workspace trust entry, the per-launch permission settings,
+and the role keys ``agent``, ``permission_mode`` and ``allow``.
 
 Two notes on robustness. The listing is parsed defensively: envelope shape, field
 names, and state vocabulary are all accepted in several spellings and an unrecognized
@@ -33,29 +34,76 @@ not a documented contract. None of them is a guess about the shape in use.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import time
 import unicodedata
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from chargehand import runtime as runtime_mod
 from chargehand import sanitize
-from chargehand.errors import ClaudeError, WorkspaceNotTrusted
+from chargehand.config import PERMISSION_MODES, validate_permission_rule
+from chargehand.errors import ClaudeError, ConfigError, WorkspaceNotTrusted
+from chargehand.runtime import (
+    BLOCKED,
+    CHECK_FAIL,
+    CHECK_OK,
+    CHECK_WARN,
+    DONE,
+    FAILED,
+    SESSION_STATES,
+    STOPPED,
+    UNKNOWN,
+    WORKING,
+    Capabilities,
+    CommandResult,
+    HealthCheck,
+    LaunchResult,
+    LaunchSpec,
+    Runtime,
+    Session,
+    WakeResult,
+    worker_from_session,
+)
 
-WORKING = "working"
-BLOCKED = "blocked"
-DONE = "done"
-FAILED = "failed"
-STOPPED = "stopped"
-UNKNOWN = "unknown"
+if TYPE_CHECKING:
+    from chargehand.config import MachineConfig
+    from chargehand.roles import Role
 
-SESSION_STATES = (WORKING, BLOCKED, DONE, FAILED, STOPPED, UNKNOWN)
+log = logging.getLogger(__name__)
+
+# How many times one launch writes the worktree's trust entry and starts the session,
+# when Claude Code refuses the worktree as untrusted each time.
+TRUST_LAUNCH_ATTEMPTS = 3
+
+DEFAULT_PERMISSION_MODE = "auto"
+
+# How long a wake waits, after a stop, for the listing and the old process to confirm it.
+STOP_WAIT_SECS = 10.0
+STOP_POLL_SECS = 0.25
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OverflowError, ValueError, OSError):
+        return False
+    return True
+
+
+def _listed_pid(session: Session) -> int | None:
+    value = session.raw.get("pid")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 # Claude Code's vocabulary is not contractual, so recognize the plausible spellings
 # and fall back to UNKNOWN rather than mapping something unexpected onto DONE.
@@ -126,30 +174,6 @@ def _parse_time(value: Any) -> float | None:
     return None
 
 
-@dataclass(frozen=True)
-class Session:
-    id: str
-    uuid: str | None = None
-    name: str | None = None
-    cwd: str | None = None
-    state: str = UNKNOWN
-    raw_state: str = ""
-    waiting_for: str | None = None
-    started_at: float | None = None
-    pr_url: str | None = None
-    kind: str | None = None
-    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
-
-    @property
-    def cwd_path(self) -> Path | None:
-        return Path(self.cwd) if self.cwd else None
-
-    def age_secs(self, now: float | None = None) -> float | None:
-        if self.started_at is None:
-            return None
-        return (time.time() if now is None else now) - self.started_at
-
-
 def parse_session(node: Mapping[str, Any]) -> Session | None:
     identifier = _first(node, _ID_KEYS)
     uuid = _first(node, _UUID_KEYS)
@@ -215,14 +239,6 @@ def parse_sessions(payload: str) -> list[Session]:
             if session is not None:
                 sessions.append(session)
     return sessions
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    argv: tuple[str, ...]
-    returncode: int
-    stdout: str
-    stderr: str
 
 
 # The start of the refusal Claude Code prints when a background session would start in a
@@ -358,6 +374,24 @@ class ClaudeCLI:
         """
         return self._run(["--resume", session_uuid, "--bg", prompt], timeout=timeout_secs, check=False)
 
+    def fork(
+        self,
+        session_uuid: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        timeout_secs: float = 180.0,
+    ) -> CommandResult:
+        """Start a new background session that continues a copy of *session_uuid*'s conversation."""
+        args = ["--resume", session_uuid, "--fork-session", "--bg"]
+        if model:
+            args += ["--model", model]
+        if effort:
+            args += ["--effort", effort]
+        args.append(prompt)
+        return self._run(args, timeout=timeout_secs, check=False)
+
     def one_shot(
         self,
         prompt: str,
@@ -393,23 +427,7 @@ class ClaudeCLI:
         cwd: Path | None = None,
         exclude: Collection[str] = (),
     ) -> Session | None:
-        """Adoption lookup, shared by launch step 4 and reconciliation.
-
-        *exclude* keeps a session that another attempt already owns out of the match. A
-        stopped session keeps its name and working directory, so without it a retry of
-        the same issue would adopt the run it is replacing.
-        """
-        candidates = [s for s in sessions if s.id not in exclude]
-        resolved = _resolve(cwd) if cwd else None
-        if resolved is not None:
-            for session in candidates:
-                if session.cwd and _resolve(Path(session.cwd)) == resolved:
-                    return session
-        if name:
-            for session in candidates:
-                if session.name == name:
-                    return session
-        return None
+        return runtime_mod.find_session(sessions, name=name, cwd=cwd, exclude=exclude)
 
     def stop(self, session_id: str) -> CommandResult:
         return self._run(["stop", session_id], timeout=60, check=False)
@@ -539,13 +557,6 @@ def _check(result: CommandResult) -> CommandResult:
     return result
 
 
-def _resolve(path: Path) -> str:
-    try:
-        return str(path.resolve())
-    except OSError:
-        return str(path)
-
-
 _COPY_NOTE = re.compile(r"started a copy (?:of that conversation )?as ([0-9a-f]{8})")
 
 
@@ -565,39 +576,302 @@ def agent_file_candidates(repo: Path, name: str) -> list[Path]:
     return [repo / ".claude" / "agents" / f"{name}.md", user_claude_dir() / "agents" / f"{name}.md"]
 
 
-_ROLE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
-_ITEM = r"[A-Za-z0-9][A-Za-z0-9._-]*"
-_HANDLE = re.compile(rf"({_ROLE_NAME})/({_ITEM})")
-_LEGACY_IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9]*-\d+")
+def launch_settings(options: Mapping[str, Any], deny_rules: Sequence[str]) -> dict[str, object] | None:
+    """The per-launch settings payload: the machine's deny rules and the role's allow rules."""
+    permissions: dict[str, list[str]] = {}
+    if deny_rules:
+        permissions["deny"] = list(deny_rules)
+    allow = options.get("allow") or ()
+    if allow:
+        permissions["allow"] = list(allow)
+    return {"permissions": permissions} if permissions else None
 
-LEGACY_ROLE = "implementer"
 
+class ClaudeRuntime(Runtime):
+    """Claude Code background sessions, hosted by Claude Code's own supervisor."""
 
-def worker_from_session(session: Session, worktree_root: Path) -> tuple[str, str] | None:
-    """Derive ``(role, item)`` from an unadopted session's name or path.
+    name = "claude"
+    # What Claude Code supports. In-place wake, board permissions and usage readings go
+    # through the in-session channel and hooks, not through wake() and the CLI here.
+    capabilities = Capabilities(
+        live_attach=True,
+        in_place_wake=True,
+        board_permissions=True,
+        usage_readings=True,
+        fork=True,
+        external_supervisor=True,
+    )
+    role_keys = ("agent", "permission_mode", "allow")
 
-    Used by the session side of reconciliation, so a session started by a tick that
-    died before recording its ids is adopted instead of left unsupervised. A session
-    named after its worker reads ``role/item``; a session from before roles existed is
-    named after the issue alone and sits in ``<root>/<issue>``, so that shape maps to
-    the ``implementer`` role.
-    """
-    if session.name:
-        name = session.name.strip()
-        match = _HANDLE.fullmatch(name)
-        if match:
-            return match.group(1), match.group(2)
-        if _LEGACY_IDENTIFIER.fullmatch(name):
-            return LEGACY_ROLE, name
-    if session.cwd:
+    def __init__(
+        self,
+        cli: ClaudeCLI | None = None,
+        *,
+        deny_rules: Sequence[str] = (),
+        trust_worktrees: bool = True,
+        stop_wait_secs: float = STOP_WAIT_SECS,
+        stop_poll_secs: float = STOP_POLL_SECS,
+        pid_alive: Callable[[int], bool] = _pid_alive,
+    ) -> None:
+        self.cli = cli or ClaudeCLI()
+        self.deny_rules = tuple(deny_rules)
+        self.trust_worktrees = trust_worktrees
+        self.stop_wait_secs = stop_wait_secs
+        self.stop_poll_secs = stop_poll_secs
+        self.pid_alive = pid_alive
+
+    @classmethod
+    def from_config(cls, config: "MachineConfig") -> "ClaudeRuntime":
+        return cls(
+            ClaudeCLI(config.claude_bin),
+            deny_rules=config.deny_rules if config.pass_deny_rules_at_launch else (),
+            trust_worktrees=config.trust_worktrees,
+        )
+
+    @classmethod
+    def parse_role_options(cls, table: Mapping[str, object], where: str) -> dict[str, object]:
+        mode = table.get("permission_mode", DEFAULT_PERMISSION_MODE)
+        if not isinstance(mode, str) or mode not in PERMISSION_MODES:
+            raise ConfigError(
+                f"{where}.permission_mode: unknown mode '{mode}'; "
+                f"expected one of {', '.join(PERMISSION_MODES)}"
+            )
+        agent = table.get("agent")
+        if agent is not None and (not isinstance(agent, str) or not agent.strip()):
+            raise ConfigError(f"{where}.agent: expected a non-empty string")
+        allow = table.get("allow", [])
+        if not isinstance(allow, list) or any(not isinstance(r, str) or not r.strip() for r in allow):
+            raise ConfigError(f"{where}.allow: expected a list of strings")
+        for rule in allow:
+            validate_permission_rule(rule, where=f"{where}.allow")
+        return {"permission_mode": mode, "agent": agent, "allow": tuple(allow)}
+
+    @classmethod
+    def check_role(cls, role: "Role", repo: Path) -> None:
+        if role.agent and not any(path.is_file() for path in agent_file_candidates(repo, role.agent)):
+            looked = ", ".join(str(c) for c in agent_file_candidates(repo, role.agent))
+            raise ConfigError(
+                f"{role.source or role.name}: agent '{role.agent}' not found; looked for {looked}"
+            )
+
+    def health_checks(self) -> list[HealthCheck]:
+        """The binary and its version, the session listing, and whether `--settings` exists."""
+        if not self.cli.is_available():
+            return [HealthCheck("claude", CHECK_FAIL, f"'{self.cli.binary}' not found on PATH")]
         try:
-            relative = Path(session.cwd).resolve().relative_to(worktree_root.resolve())
-        except (ValueError, OSError):
-            relative = None
-        if relative is not None:
-            parts = relative.parts
-            if len(parts) >= 2 and re.fullmatch(_ROLE_NAME, parts[0]) and re.fullmatch(_ITEM, parts[1]):
-                return parts[0], parts[1]
-            if len(parts) == 1 and _LEGACY_IDENTIFIER.fullmatch(parts[0]):
-                return LEGACY_ROLE, parts[0]
-    return None
+            checks = [HealthCheck("claude", CHECK_OK, self.cli.version())]
+        except ClaudeError as exc:
+            return [HealthCheck("claude", CHECK_FAIL, str(exc))]
+        try:
+            sessions = self.cli.list_sessions()
+            checks.append(HealthCheck("claude agents", CHECK_OK, f"{len(sessions)} session(s) listed"))
+        except ClaudeError as exc:
+            checks.append(HealthCheck("claude agents", CHECK_FAIL, str(exc)))
+        if self.deny_rules:
+            supported = self.cli.supports_flag("--settings")
+            checks.append(
+                HealthCheck(
+                    "launch deny rules",
+                    CHECK_OK if supported else CHECK_WARN,
+                    "passed per launch with --settings"
+                    if supported
+                    else "this Claude Code build does not advertise --settings; put the "
+                    "deny rules in user settings instead, or set "
+                    "pass_deny_rules_at_launch = false",
+                )
+            )
+        return checks
+
+    # ----- sessions ---------------------------------------------------------
+
+    def list_sessions(self) -> list[Session]:
+        return self.cli.list_sessions()
+
+    def launch(self, spec: LaunchSpec, *, warn: Callable[[str], None] | None = None) -> LaunchResult:
+        """Record the worktree as trusted, then start its session.
+
+        Claude Code will not start a background session in a directory nobody has
+        accepted a trust dialog for, and every worktree here was made seconds ago. There
+        is no dialog a runner can answer, so the flag is written instead.
+
+        A Claude Code process that is already running can write its configuration file
+        back without the entry written a moment before, and the launch is then refused.
+        When that was seen, writing the entry again and launching at once succeeded, so
+        that is done here a few times, rather than leaving it to the next tick. A retry
+        helps only when the entry is gone: a refusal while the entry is still in the
+        file has another cause, and is reported at once.
+        """
+        attempt = 1
+        while True:
+            trusted = self._trust(spec, warn)
+            try:
+                result = self.cli.launch(
+                    worktree=spec.worktree,
+                    name=spec.name,
+                    prompt=spec.prompt,
+                    permission_mode=str(spec.options.get("permission_mode") or DEFAULT_PERMISSION_MODE),
+                    agent=spec.options.get("agent") or None,
+                    model=spec.model,
+                    effort=spec.effort,
+                    settings=launch_settings(spec.options, self.deny_rules),
+                )
+            except WorkspaceNotTrusted as exc:
+                if not trusted:
+                    raise
+                config_file = self.cli.config_file()
+                if self.cli.is_trusted(spec.worktree):
+                    raise WorkspaceNotTrusted(
+                        f"{exc} (the trust entry is still in {config_file}, so writing it "
+                        f"again would change nothing; Claude Code may be checking another "
+                        f"path or an older copy of the file)"
+                    ) from exc
+                if attempt >= TRUST_LAUNCH_ATTEMPTS:
+                    raise WorkspaceNotTrusted(
+                        f"{exc} (refused {attempt} times in a row, and each time the trust "
+                        f"entry was gone from {config_file} afterwards; another Claude Code "
+                        f"process may be writing the file back without it)"
+                    ) from exc
+                log.warning(
+                    "%s: launch refused as untrusted and the trust entry was gone from %s; "
+                    "writing it again (attempt %s of %s)",
+                    spec.name, config_file, attempt + 1, TRUST_LAUNCH_ATTEMPTS,
+                )
+                attempt += 1
+                continue
+            return LaunchResult(output=result.stdout or result.stderr)
+
+    def _trust(self, spec: LaunchSpec, warn: Callable[[str], None] | None) -> bool:
+        """True when the worktree's trust entry is in place, False when it was not written."""
+        if not self.trust_worktrees:
+            return False
+        if self.cli.trust_worktree(spec.worktree):
+            return True
+        if warn is not None:
+            warn(
+                f"{spec.name}: could not record {spec.worktree} as a trusted workspace; "
+                f"the launch may be refused"
+            )
+        return False
+
+    def is_stopped(self, session: Session) -> bool:
+        """No process is left: the entry has neither ``pid`` nor ``status``, whatever its state.
+
+        ``state`` is the state of the last turn, not of the process. Observed in Claude Code
+        2.1.310: an idle session lists as ``done`` with ``pid`` and ``status: idle`` while
+        its process lives, and after ``claude stop`` it still lists as ``done``, with ``pid``
+        and ``status`` gone. A turn that ended in an error can list as ``failed`` with its
+        process still alive. So only the live fields decide.
+        """
+        return _listed_pid(session) is None and session.raw.get("status") in (None, "")
+
+    def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
+        """Stop the live process, confirm it is gone, then resume by the full session id.
+
+        A resume against a running process, or by the short job id, starts a copy under a
+        new id, and the copy works in the same worktree. Both are ruled out first, and a
+        copy that starts anyway is a fault.
+
+        A stop that exits non-zero refuses the wake. Otherwise the wake waits, up to
+        ``stop_wait_secs``, until the listing shows the job stopped (see
+        :meth:`is_stopped`) and the process the listing named before the stop has exited:
+        the listing drops ``pid`` about a second before that process ends.
+        """
+        session = self._find(session_id)
+        if session is None:
+            return WakeResult(False, f"session {session_id} is not in the listing")
+        old_pid = _listed_pid(session)
+        if not self.is_stopped(session):
+            stopped = self.cli.stop(session_id)
+            if stopped.returncode != 0:
+                return WakeResult(
+                    False,
+                    f"the stop of session {session_id} exited {stopped.returncode}: "
+                    f"{sanitize.one_line(stopped.stderr or stopped.stdout, limit=200)}",
+                )
+        deadline = time.monotonic() + self.stop_wait_secs
+        while True:
+            session = self._find(session_id)
+            if session is None:
+                return WakeResult(False, f"session {session_id} is gone after the stop")
+            listed_stopped = self.is_stopped(session)
+            process_alive = old_pid is not None and self.pid_alive(old_pid)
+            if listed_stopped and not process_alive:
+                break
+            if time.monotonic() >= deadline:
+                if not listed_stopped:
+                    return WakeResult(
+                        False,
+                        f"session {session_id} did not stop; it lists as {session.state} "
+                        f"with a live process",
+                    )
+                return WakeResult(
+                    False, f"session {session_id} stopped, but its process {old_pid} is still running"
+                )
+            time.sleep(self.stop_poll_secs)
+        uuid = session_uuid or session.uuid
+        if not uuid:
+            return WakeResult(False, f"session {session_id} has no full session id to resume by")
+        result = self.cli.resume(uuid, message)
+        copy = copy_started_by(result)
+        if copy is not None:
+            return WakeResult(False, f"the resume started a copy as {copy}", copy_id=copy)
+        if result.returncode != 0:
+            return WakeResult(
+                False,
+                f"the resume exited {result.returncode}: "
+                f"{sanitize.one_line(result.stderr or result.stdout, limit=200)}",
+            )
+        return WakeResult(True, "resumed")
+
+    def _find(self, session_id: str) -> Session | None:
+        return next((s for s in self.cli.list_sessions() if s.id == session_id), None)
+
+    def stop(self, session_id: str) -> CommandResult:
+        return self.cli.stop(session_id)
+
+    def respawn(self, session_id: str) -> CommandResult:
+        return self.cli.respawn(session_id)
+
+    def remove(self, session_id: str) -> CommandResult:
+        return self.cli.remove(session_id)
+
+    def logs(self, session_id: str, *, lines: int = 200) -> str:
+        return self.cli.logs(session_id, lines=lines)
+
+    def attach_command(self, session_id: str) -> str:
+        return f"claude attach {session_id}"
+
+    def fork(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        session_uuid: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> CommandResult:
+        return self.cli.fork(session_uuid or session_id, prompt, model=model, effort=effort)
+
+
+runtime_mod.register(ClaudeRuntime)
+
+
+__all__ = [
+    "BLOCKED",
+    "ClaudeCLI",
+    "ClaudeRuntime",
+    "CommandResult",
+    "DONE",
+    "FAILED",
+    "SESSION_STATES",
+    "STOPPED",
+    "Session",
+    "UNKNOWN",
+    "WORKING",
+    "agent_file_candidates",
+    "copy_started_by",
+    "launch_settings",
+    "parse_session",
+    "parse_sessions",
+    "worker_from_session",
+]

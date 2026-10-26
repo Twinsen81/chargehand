@@ -17,8 +17,8 @@ from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 from chargehand import __version__, paths
-from chargehand.claude import ClaudeCLI
 from chargehand import roles as roles_mod
+from chargehand import runtime as runtime_mod
 from chargehand.config import MachineConfig, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError
 from chargehand.gitutil import Git
@@ -217,6 +217,26 @@ def init_repo(repo: Path, *, force: bool = False) -> list[Path]:
     return written
 
 
+def _runtimes_in_use(config: MachineConfig) -> list[str]:
+    """The default runtime and every runtime an enabled role names. A role that fails to load is reported later."""
+    names = {roles_mod.DEFAULT_RUNTIME}
+    for repository in config.repositories:
+        try:
+            repo_config = load_repo_config(repository.path)
+        except ConfigError:
+            continue
+        for name in repository.roles:
+            try:
+                role = roles_mod.load_role(
+                    repository.path, name, repo_config=repo_config,
+                    tracker_type=repository.tracker.type, check_agent=False,
+                )
+            except ConfigError:
+                continue
+            names.add(role.runtime)
+    return sorted(names)
+
+
 def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list[Check]:
     checks: list[Check] = [
         Check("chargehand", OK, f"version {__version__}"),
@@ -236,35 +256,14 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
     for key in config.ignored_keys:
         checks.append(Check("config", INFO, f"{key} is ignored and can be removed"))
 
-    claude = ClaudeCLI(config.claude_bin)
-    if not claude.is_available():
-        checks.append(Check("claude", FAIL, f"'{config.claude_bin}' not found on PATH"))
-    else:
+    for name in _runtimes_in_use(config):
         try:
-            checks.append(Check("claude", OK, claude.version()))
+            runtime = runtime_mod.create(name, config)
+            results = runtime.health_checks()
         except ChargehandError as exc:
-            checks.append(Check("claude", FAIL, str(exc)))
-        else:
-            try:
-                sessions = claude.list_sessions()
-                checks.append(
-                    Check("claude agents", OK, f"{len(sessions)} session(s) listed")
-                )
-            except ChargehandError as exc:
-                checks.append(Check("claude agents", FAIL, str(exc)))
-            if config.pass_deny_rules_at_launch:
-                supported = claude.supports_flag("--settings")
-                checks.append(
-                    Check(
-                        "launch deny rules",
-                        OK if supported else WARN,
-                        "passed per launch with --settings"
-                        if supported
-                        else "this Claude Code build does not advertise --settings; put the "
-                        "deny rules in user settings instead, or set "
-                        "pass_deny_rules_at_launch = false",
-                    )
-                )
+            checks.append(Check(f"runtime {name}", FAIL, str(exc)))
+            continue
+        checks.extend(Check(result.name, result.status, result.detail) for result in results)
 
     git = Git(config.git_bin)
     checks.append(
@@ -334,7 +333,9 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
             except ConfigError as exc:
                 checks.append(Check(role_label, FAIL, str(exc)))
                 continue
-            parts = [role.permission_mode]
+            parts = [f"runtime {role.runtime}"] if role.runtime != roles_mod.DEFAULT_RUNTIME else []
+            if role.permission_mode:
+                parts.append(role.permission_mode)
             if role.agent:
                 parts.append(f"agent {role.agent}")
             if role.model:
