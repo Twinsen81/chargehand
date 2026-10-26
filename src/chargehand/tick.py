@@ -443,7 +443,7 @@ class Runner:
             role, item = derived
             if self.ledger.live_worker_for(item, role) is not None:
                 continue
-            adopted = self._adopt_orphan(role, item, session, report)
+            adopted = self._adopt_orphan(role, item, session, report, previous=previous)
             if adopted is None:
                 report.warnings.append(
                     f"session {session.id} looks like {role}/{item} but no configured "
@@ -531,9 +531,20 @@ class Runner:
         return worker
 
     def _adopt_orphan(
-        self, role_name: str, item: str, session: Session, report: TickReport
+        self,
+        role_name: str,
+        item: str,
+        session: Session,
+        report: TickReport,
+        *,
+        previous: Worker | None = None,
     ) -> Worker | None:
-        """Bring a session started by a tick that died before recording ids under supervision."""
+        """Bring a session started by a tick that died before recording ids under supervision.
+
+        The new row inherits *previous*'s label ownership and primary subscription, so a
+        worker that a source event started does not become the label's owner by being
+        adopted. With no previous row, the role's own start rules decide.
+        """
         worktree = Path(session.cwd) if session.cwd else None
         if worktree is None:
             return None
@@ -541,8 +552,13 @@ class Runner:
         if repository is None or role_name not in repository.roles:
             return None
         context = self.context(repository)
+        owns_label = (
+            bool(previous.owns_label) if previous else self._queue_starts(context, role_name)
+        )
         item_id, url = item, None
-        if context.usable:
+        if previous is not None:
+            item_id, url = previous.item_id or item, previous.url
+        elif owns_label:
             try:
                 issue = context.tracker.get(item)  # type: ignore[union-attr]
             except TRACKER_FAILURES:
@@ -552,19 +568,36 @@ class Runner:
         branch = self.git.worktree_branch(repository.path, worktree) or self._branch_for(
             context.repo_config, role_name, item
         )
-        worker = self.ledger.create_worker(
-            role=role_name,
-            item=item,
-            item_id=item_id,
-            url=url,
-            repository=repository.name,
-            repo=repository.path,
-            worktree=worktree,
-            branch=branch,
-        )
+        primary = self.ledger.primary_subscription(previous) if previous else None
+        with self.ledger.transaction():
+            worker = self.ledger.create_worker(
+                role=role_name,
+                item=item,
+                item_id=item_id,
+                url=url,
+                repository=repository.name,
+                repo=repository.path,
+                worktree=worktree,
+                branch=branch,
+                owns_label=owns_label,
+            )
+            if primary is not None:
+                self.ledger.subscribe(worker, primary.work_item, primary.kinds, primary=True)
         worker = self._adopt(worker, session, report)
         report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
         return worker
+
+    @staticmethod
+    def _queue_starts(context: RepositoryContext, role_name: str) -> bool:
+        """Whether the queue label starts workers of this role. Unknown counts as no."""
+        if not context.usable:
+            return False
+        try:
+            role = context.role(role_name)
+        except ConfigError:
+            return False
+        tracker_type = context.tracker.type  # type: ignore[union-attr]
+        return role.start_rule_for(roles_mod.LABELED, tracker_type, context.repository.name) is not None
 
     def _repository_owning(self, worktree: Path) -> Repository | None:
         for repository in self.config.repositories:
@@ -935,9 +968,11 @@ class Runner:
             # tracker's queue rather than events.
             return False
         source = self.source(event.source)
-        repository = (
-            source.repository_for(event.item, self.config.repositories) if source else None
-        )
+        if source is None:
+            # A configured source that cannot be built this tick keeps its starts; the
+            # weekly prune ends the wait. A source no longer configured drops them.
+            return self.config.source_by_name(event.source) is not None
+        repository = source.repository_for(event.item, self.config.repositories)
         if repository is None:
             return False
         context = self.context(repository)

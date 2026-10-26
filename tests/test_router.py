@@ -573,3 +573,64 @@ def test_a_pending_label_write_of_the_queue_worker_is_still_seen_behind_another_
     routed.ledger.update(reviewer, state=ledger_mod.RUNNING, label_state="running")
 
     assert routed.runner._label_sync_pending("ABC-1") is True
+
+
+def test_an_adopted_session_of_a_worker_another_event_started_does_not_own_the_label(routed):
+    routed.board.add("ABC-1", labels=())
+    fake_source.feed().emit("review_requested", "ABC-1")
+    routed.tick()
+    routed.ledger.record_request("cancel", "ABC-1", role="reviewer")
+    routed.next_tick()
+    cancelled = routed.worker("ABC-1", "reviewer")
+    assert cancelled.state == ledger_mod.CANCELLED
+    routed.claude_state.set_session_state("ABC-1", "working")
+
+    report = routed.next_tick()
+
+    adopted = routed.ledger.live_worker_for("ABC-1", "reviewer")
+    assert adopted is not None and adopted.id != cancelled.id
+    assert report.adopted == ["ABC-1"]
+    assert adopted.owns_label == 0
+    assert adopted.item_id == cancelled.item_id
+    (subscription,) = routed.ledger.subscriptions_of(adopted)
+    assert (subscription.source, subscription.kinds, subscription.is_primary) == (
+        "fake", ("comment",), True,
+    )
+    assert not any(call[0] == "mark" for call in routed.board.calls)
+    assert routed.labels("ABC-1") == ()
+
+
+@pytest.mark.parametrize("role, owns", [("reviewer", 0), ("implementer", 1)])
+def test_an_orphan_with_no_previous_row_owns_the_label_only_when_the_queue_starts_its_role(
+    routed, role, owns
+):
+    routed.board.add("ABC-5", labels=())
+    worktree = routed.worktree_root / role / "ABC-5"
+    routed.runner.git.add_worktree(routed.repo, worktree, f"chargehand/{role}/ABC-5", "origin/main")
+    routed.claude_state.set(
+        sessions=[{"id": "orphan", "uuid": "u9", "name": f"{role}/ABC-5", "cwd": str(worktree),
+                   "state": "working"}]
+    )
+
+    routed.next_tick()
+
+    adopted = routed.worker("ABC-5", role)
+    assert adopted is not None and adopted.session_id == "orphan"
+    assert adopted.owns_label == owns
+
+
+def test_a_deferred_start_waits_while_its_source_cannot_be_built(routed, monkeypatch):
+    routed.ledger.record_event(event(kind="review_requested"), start_pending=True)
+    routed.board.add("ABC-1", labels=())
+
+    def broken(self, name, options):
+        raise RuntimeError("boom")
+
+    working = FakeSource.__init__
+    monkeypatch.setattr(FakeSource, "__init__", broken)
+    report = routed.tick()
+
+    assert "source fake: boom" in report.errors
+    assert [e.dedupe_id for e in routed.ledger.pending_start_events()] == ["e1"]
+    monkeypatch.setattr(FakeSource, "__init__", working)
+    assert routed.next_tick().launched == ["ABC-1"]
