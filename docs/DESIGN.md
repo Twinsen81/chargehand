@@ -188,9 +188,11 @@ name, and a name that GitHub itself would refuse is skipped. A start event belon
 starts nothing. `gh_bin` and `timeout_secs` are its options.
 
 The `command` source connects any other system without a plugin framework: chargehand runs
-a configured executable that reads the cursor on stdin and prints one JSON object per event
-and a last line with the new cursor. Optional commands answer `mark` (exit 3 means the write
-may or may not have landed) and `item_open`. The commands run as subprocesses with a
+a configured executable that reads the cursor on stdin, and the refs of the followed items
+in `CHARGEHAND_REFS`, and prints one JSON object per event and a last line with the new
+cursor. Optional commands answer `item_open` and `mark` (exit 3 means the write may or may
+not have landed); the tick changes labels only for workers that a repository's queue label
+started, so it does not call a source's `mark` yet. The commands run as subprocesses with a
 timeout and without a shell, each output line is checked against a closed event shape, and a
 line that does not fit is logged and skipped. A start event belongs to one of the
 repositories listed in the source's `repositories`. The contract is a public surface and is

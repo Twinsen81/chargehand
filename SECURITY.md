@@ -47,7 +47,9 @@ public location.
   but what they print comes from the system they poll. chargehand runs them without a
   shell, with a timeout and a cap on the output, and checks every line against a closed
   event shape: an item key must be a safe path name and a URL a plain http(s) URL. A
-  line that does not fit is skipped, and its text is not logged.
+  line that does not fit is skipped. The log names the reason and, for an unknown field,
+  the field names, sanitized and cut to 80 characters; it does not contain the line's
+  values.
 
 ### Defenses
 

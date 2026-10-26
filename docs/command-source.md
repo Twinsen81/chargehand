@@ -53,8 +53,11 @@ configuration.
 ## poll
 
 chargehand writes the cursor that the previous poll printed to the command's stdin, without
-a newline. The first poll gets an empty stdin. The command prints one JSON object per line
-and exits 0:
+a newline. The first poll gets an empty stdin. The environment variable `CHARGEHAND_REFS`
+holds the `ref` of each item from this source that a live worker follows, one per line, and
+is empty when no worker follows any. A system that must be asked item by item, for example
+for the comments on an issue, reads it; any other command can ignore it. The command prints
+one JSON object per line and exits 0:
 
 ```json
 {"kind": "comment", "item": "APP-12", "actor": "ana@example.com", "occurred_at": "2026-10-27T09:12:00Z", "dedupe_id": "comment:88213", "pointer": "https://jira.example.com/browse/APP-12?focusedCommentId=88213"}
@@ -72,7 +75,7 @@ skipped:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `kind` | yes | What happened, as a bare lower-case name (`comment`, `assigned`). A role's start rule or subscription names it bare, or qualified by the source's name (`jira.assigned`). |
+| `kind` | yes | What happened, as a bare lower-case name (`comment`, `assigned`). A role's start rule or subscription names it bare, or qualified by the source's name (`jira.assigned`). `labeled` is reserved for a repository's own queue label: from a command source it can be delivered, but it starts no worker. |
 | `item` | yes | The work item's key. It becomes a worker's item, its worktree and branch name, and its session name, so it is 1 to 64 characters of letters, digits, `.`, `_` and `-`, starting with a letter or digit. |
 | `actor` | yes | Who did it, as text; may be empty. Used only for the authorship filter. |
 | `occurred_at` | yes | When it happened: seconds since the epoch, or an ISO 8601 time with a time zone. |
