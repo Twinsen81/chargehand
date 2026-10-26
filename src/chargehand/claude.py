@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from chargehand import sanitize
-from chargehand.errors import ClaudeError
+from chargehand.errors import ClaudeError, WorkspaceNotTrusted
 
 WORKING = "working"
 BLOCKED = "blocked"
@@ -225,6 +225,13 @@ class CommandResult:
     stderr: str
 
 
+# The start of the refusal Claude Code prints when a background session would start in a
+# directory without a persisted trust entry. Observed in Claude Code 2.1.306:
+# "Workspace not trusted. Run `claude` in <path> once and accept the trust prompt, then
+# retry."
+_UNTRUSTED_WORKSPACE = "Workspace not trusted"
+
+
 class ClaudeCLI:
     """A thin, testable wrapper. The fake `claude` in the test suite replaces the binary."""
 
@@ -266,11 +273,8 @@ class ClaudeCLI:
         except OSError as exc:
             raise ClaudeError(f"could not run `{' '.join(argv)}`: {exc}") from exc
         result = CommandResult(argv, completed.returncode, completed.stdout, completed.stderr)
-        if check and completed.returncode != 0:
-            raise ClaudeError(
-                f"`{' '.join(argv)}` exited {completed.returncode}: "
-                f"{(completed.stderr or completed.stdout).strip()[:500]}"
-            )
+        if check:
+            _check(result)
         return result
 
     def is_available(self) -> bool:
@@ -318,6 +322,9 @@ class ClaudeCLI:
         Claude Code stores these flags with the job and applies them again when the
         session is woken with ``--resume --bg`` or ``respawn``, so what is passed here
         holds for the worker's whole life.
+
+        Raises :class:`WorkspaceNotTrusted` when Claude Code refuses *worktree* as an
+        untrusted workspace, so the caller can record the trust again and retry.
         """
         args = ["--bg", "-n", name, "--permission-mode", permission_mode]
         if agent:
@@ -331,7 +338,13 @@ class ClaudeCLI:
         if settings:
             args += ["--settings", json.dumps(settings, sort_keys=True)]
         args.append(prompt)
-        return self._run(args, cwd=worktree, timeout=timeout_secs)
+        result = self._run(args, cwd=worktree, timeout=timeout_secs, check=False)
+        if result.returncode != 0 and _UNTRUSTED_WORKSPACE in result.stdout + result.stderr:
+            raise WorkspaceNotTrusted(
+                f"Claude Code refused {worktree} as an untrusted workspace: "
+                f"{sanitize.one_line(result.stderr or result.stdout, limit=200)}"
+            )
+        return _check(result)
 
     def resume(self, session_uuid: str, prompt: str, *, timeout_secs: float = 180.0) -> CommandResult:
         """Wake a stopped background session with *prompt* as its next turn.
@@ -515,6 +528,15 @@ def _write_json_atomically(path: Path, data: Mapping[str, Any]) -> bool:
         temporary.unlink(missing_ok=True)
         return False
     return True
+
+
+def _check(result: CommandResult) -> CommandResult:
+    if result.returncode != 0:
+        raise ClaudeError(
+            f"`{' '.join(result.argv)}` exited {result.returncode}: "
+            f"{(result.stderr or result.stdout).strip()[:500]}"
+        )
+    return result
 
 
 def _resolve(path: Path) -> str:

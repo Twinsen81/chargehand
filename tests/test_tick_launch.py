@@ -263,3 +263,66 @@ def test_trust_is_not_recorded_when_the_operator_turned_it_off(harness, monkeypa
     harness.tick()
 
     assert harness.runner.claude.is_trusted(harness.worktree("ABC-1")) is False
+
+
+# A Claude Code process that is already running can write its configuration file back
+# without the trust entry a launch has just written, and the launch is then refused.
+
+
+def test_a_trust_entry_dropped_before_the_launch_is_written_again_in_the_same_tick(harness):
+    """Two workers back to back, and the second one's entry is gone when it launches."""
+    harness.claude_state.set(require_trust=True, drop_trust_at_launches=[2])
+    harness.board.add("ABC-1")
+    harness.board.add("ABC-2")
+
+    report = harness.tick()
+
+    assert sorted(report.launched) == ["ABC-1", "ABC-2"]
+    assert report.errors == []
+    assert len(harness.claude_state.launches) == 3
+    assert harness.worker("ABC-2").launch_attempts == 1
+
+
+def test_a_launch_refused_as_untrusted_every_time_is_left_to_the_next_tick(harness):
+    from chargehand.tick import TRUST_LAUNCH_ATTEMPTS
+
+    harness.claude_state.set(require_trust=True, drop_trust_at_launches=list(range(1, 10)))
+    harness.board.add("ABC-1")
+
+    report = harness.tick()
+
+    assert report.launched == []
+    assert len(harness.claude_state.launches) == TRUST_LAUNCH_ATTEMPTS
+    assert any(f"refused {TRUST_LAUNCH_ATTEMPTS} times in a row" in error for error in report.errors)
+    assert harness.worker("ABC-1").state == ledger_mod.LAUNCHING
+
+    harness.claude_state.set(drop_trust_at_launches=[])
+    report = harness.next_tick()
+
+    assert report.launched == ["ABC-1"]
+
+
+def test_an_untrusted_refusal_is_not_retried_when_the_operator_turned_trust_off(harness):
+    from dataclasses import replace
+
+    harness.runner.config = replace(harness.runner.config, trust_worktrees=False)
+    harness.claude_state.set(require_trust=True)
+    harness.board.add("ABC-1")
+
+    report = harness.tick()
+
+    assert report.launched == []
+    assert len(harness.claude_state.launches) == 1
+    assert any("untrusted workspace" in error for error in report.errors)
+
+
+def test_an_untrusted_refusal_is_not_retried_when_trust_cannot_be_recorded(harness, monkeypatch):
+    monkeypatch.setattr(type(harness.runner.claude), "trust_worktree", lambda self, path: False)
+    harness.claude_state.set(require_trust=True)
+    harness.board.add("ABC-1")
+
+    report = harness.tick()
+
+    assert report.launched == []
+    assert len(harness.claude_state.launches) == 1
+    assert any("trusted workspace" in warning for warning in report.warnings)

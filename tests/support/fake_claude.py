@@ -55,6 +55,32 @@ def record(state: dict, key: str, value) -> None:
     state.setdefault(key, []).append(value)
 
 
+def claude_config() -> Path:
+    # Never the operator's own file: the suite always points this at a temporary directory.
+    return Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+
+
+def is_trusted(cwd: str) -> bool:
+    path = claude_config()
+    projects = json.loads(path.read_text()).get("projects", {}) if path.exists() else {}
+    return any(
+        projects.get(key, {}).get("hasTrustDialogAccepted") is True
+        for key in (cwd, os.path.realpath(cwd))
+    )
+
+
+def drop_trust(cwd: str) -> None:
+    """What another Claude Code process does when it writes back a copy from before the entry."""
+    path = claude_config()
+    if not path.exists():
+        return
+    config = json.loads(path.read_text())
+    projects = config.get("projects", {})
+    for key in [k for k in projects if os.path.realpath(k) == os.path.realpath(cwd)]:
+        del projects[key]
+    path.write_text(json.dumps(config, indent=2))
+
+
 def main(argv: list[str]) -> int:
     state = load()
     if state.get("fail_every_call"):
@@ -131,6 +157,15 @@ def main(argv: list[str]) -> int:
 
     if "--bg" in argv:
         record(state, "launches", {"argv": argv, "cwd": os.getcwd()})
+        if len(state["launches"]) in state.get("drop_trust_at_launches", []):
+            drop_trust(os.getcwd())
+        if state.get("require_trust") and not is_trusted(os.getcwd()):
+            save(state)
+            sys.stderr.write(
+                f"Workspace not trusted. Run `claude` in {os.getcwd()} once and accept the "
+                f"trust prompt, then retry.\n"
+            )
+            return 1
         if state.get("launch_fails"):
             save(state)
             sys.stderr.write("fake claude: launch refused\n")

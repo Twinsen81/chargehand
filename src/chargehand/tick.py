@@ -44,6 +44,7 @@ from chargehand.errors import (
     LaunchAborted,
     TickBusy,
     TrackerError,
+    WorkspaceNotTrusted,
 )
 from chargehand.ledger import Ledger, Worker
 from chargehand.notify import Notification, Notifier
@@ -62,6 +63,10 @@ TRACKER_FAILURES = (TrackerError,)
 # 2 a hard stop was attempted and did not take.
 WATCHDOG_LONG_RUN = 1
 WATCHDOG_STOP_FAILED = 2
+
+# How many times one launch step writes the worktree's trust entry and starts the
+# session, when Claude Code refuses the worktree as untrusted each time.
+TRUST_LAUNCH_ATTEMPTS = 3
 
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
@@ -1297,26 +1302,7 @@ class Runner:
                 self._template_values(worker),
                 where=f"{role.source or 'role ' + role.name}.prompt",
             )
-            # Claude Code will not start a background session in a directory nobody has
-            # accepted a trust dialog for, and every worktree here was made seconds ago.
-            # There is no dialog a runner can answer, so the flag is written instead.
-            if self.config.trust_worktrees and not self.claude.trust_worktree(
-                worker.worktree_path
-            ):
-                report.warnings.append(
-                    f"{worker.handle}: could not record {worker.worktree_path} as a "
-                    f"trusted workspace; the launch may be refused"
-                )
-            result = self.claude.launch(
-                worktree=worker.worktree_path,
-                name=worker.handle,
-                prompt=prompt,
-                permission_mode=role.permission_mode,
-                agent=role.agent,
-                model=role.model,
-                effort=role.effort,
-                settings=self._launch_settings(role),
-            )
+            result = self._launch_session(role, worker, prompt, report)
             self.sessions(refresh=True)
             existing = self._find_worker_session(worker, exclude=owned_elsewhere)
             if existing is None:
@@ -1340,6 +1326,62 @@ class Runner:
         )
         report.launched.append(worker.item)
         return worker
+
+    def _launch_session(
+        self, role: Role, worker: Worker, prompt: str, report: TickReport
+    ) -> claude_mod.CommandResult:
+        """Record the worktree as trusted, then start its session.
+
+        Claude Code will not start a background session in a directory nobody has
+        accepted a trust dialog for, and every worktree here was made seconds ago. There
+        is no dialog a runner can answer, so the flag is written instead.
+
+        A Claude Code process that is already running can write its configuration file
+        back without the entry written a moment before, and the launch is then refused.
+        Writing the entry again and launching at once has been enough, so that is done
+        here a few times, rather than leaving it to the next tick.
+        """
+        attempt = 1
+        while True:
+            trusted = self._trust_worktree(worker, report)
+            try:
+                return self.claude.launch(
+                    worktree=worker.worktree_path,
+                    name=worker.handle,
+                    prompt=prompt,
+                    permission_mode=role.permission_mode,
+                    agent=role.agent,
+                    model=role.model,
+                    effort=role.effort,
+                    settings=self._launch_settings(role),
+                )
+            except WorkspaceNotTrusted as exc:
+                if not trusted:
+                    raise
+                if attempt >= TRUST_LAUNCH_ATTEMPTS:
+                    raise WorkspaceNotTrusted(
+                        f"{exc} (refused {attempt} times in a row, each time just after "
+                        f"the trust entry was written; another Claude Code process may be "
+                        f"writing {self.claude.config_file()} back without it)"
+                    ) from exc
+                log.warning(
+                    "%s: launch refused as untrusted although the trust entry was written; "
+                    "writing it again (attempt %s of %s)",
+                    worker.handle, attempt + 1, TRUST_LAUNCH_ATTEMPTS,
+                )
+                attempt += 1
+
+    def _trust_worktree(self, worker: Worker, report: TickReport) -> bool:
+        """True when the worktree's trust entry is written, False when it is not ours to write."""
+        if not self.config.trust_worktrees:
+            return False
+        if self.claude.trust_worktree(worker.worktree_path):
+            return True
+        report.warnings.append(
+            f"{worker.handle}: could not record {worker.worktree_path} as a "
+            f"trusted workspace; the launch may be refused"
+        )
+        return False
 
     def _find_worker_session(self, worker: Worker, *, exclude: Collection[str] = ()) -> Session | None:
         """The worker's session in the current listing, by worktree or by name.
