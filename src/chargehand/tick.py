@@ -11,7 +11,7 @@ Order, once per tick:
 7. admit newly queued issues within the launch throttle, and launch them, ledger row first
 8. collect garbage
 
-A control command never calls Claude Code, git, or a tracker itself; it records a
+A control command never calls a runtime, git, or a tracker itself; it records a
 request and the tick applies it. Together with the tick lock that gives one writer of
 side effects, so a cancel cannot race a launch in progress.
 """
@@ -25,33 +25,32 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chargehand import claude as claude_mod
 from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import gitutil, ledger as ledger_mod, paths, sanitize, trackers
 from chargehand import router as router_mod
+from chargehand import runtime as runtime_mod
 from chargehand import sources as sources_mod
-from chargehand.claude import ClaudeCLI, Session
 from chargehand.config import MachineConfig, RepoConfig, Repository
 from chargehand.errors import (
+    AgentRuntimeError,
     AmbiguousWrite,
     ChargehandError,
-    ClaudeError,
     ConfigError,
     GitError,
     LaunchAborted,
     TickBusy,
     TrackerError,
-    WorkspaceNotTrusted,
 )
 from chargehand.ledger import Ledger, Worker
 from chargehand.notify import Notification, Notifier
 from chargehand.roles import Role, StartRule
+from chargehand.runtime import LaunchSpec, Runtime, Session
 from chargehand.sources import Event, Source, WorkItem
 from chargehand.trackers import Issue, Status, Tracker
 
@@ -67,10 +66,6 @@ TRACKER_FAILURES = (TrackerError,)
 # 2 a hard stop was attempted and did not take.
 WATCHDOG_LONG_RUN = 1
 WATCHDOG_STOP_FAILED = 2
-
-# How many times one launch step writes the worktree's trust entry and starts the
-# session, when Claude Code refuses the worktree as untrusted each time.
-TRUST_LAUNCH_ATTEMPTS = 3
 
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
@@ -249,7 +244,7 @@ class Runner:
         config: MachineConfig,
         ledger: Ledger,
         *,
-        claude: ClaudeCLI | None = None,
+        runtimes: Mapping[str, Runtime] | None = None,
         git: gitutil.Git | None = None,
         notifier: Notifier | None = None,
         tracker_factory=trackers.build,
@@ -257,28 +252,54 @@ class Runner:
     ) -> None:
         self.config = config
         self.ledger = ledger
-        self.claude = claude or ClaudeCLI(config.claude_bin)
+        self._runtimes: dict[str, Runtime] = dict(runtimes or {})
         self.git = git or gitutil.Git(config.git_bin)
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
         self._source_factory = source_factory
         self._sources: dict[str, Source | Exception | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
-        self._sessions: list[Session] | None = None
+        self._sessions: dict[str, list[Session]] = {}
 
     # ----- collaborators ----------------------------------------------------
 
-    def sessions(self, *, refresh: bool = False) -> list[Session]:
-        if refresh or self._sessions is None:
-            try:
-                self._sessions = self.claude.list_sessions()
-            except ClaudeError as exc:
-                log.error("could not list sessions: %s", exc)
-                raise
-        return self._sessions
+    def runtime(self, name: str) -> Runtime:
+        """The runtime *name*, as the machine configuration sets it up. ConfigError when unknown."""
+        cached = self._runtimes.get(name)
+        if cached is None:
+            cached = runtime_mod.create(name, self.config)
+            self._runtimes[name] = cached
+        return cached
 
-    def invalidate_sessions(self) -> None:
-        self._sessions = None
+    def runtime_names(self) -> list[str]:
+        """Every runtime that may hold a session of ours: the default, the live workers', the roles'."""
+        names = {runtime_mod.DEFAULT_RUNTIME, *self._runtimes}
+        names.update(worker.runtime for worker in self.ledger.live_workers())
+        for repository in self.config.repositories:
+            context = self.context(repository)
+            if context.repo_config is None:
+                continue
+            for role_name in repository.roles:
+                try:
+                    names.add(context.role(role_name).runtime)
+                except ConfigError:
+                    continue
+        return sorted(names)
+
+    def sessions(self, runtime: str, *, refresh: bool = False) -> list[Session]:
+        if refresh or runtime not in self._sessions:
+            try:
+                self._sessions[runtime] = self.runtime(runtime).list_sessions()
+            except AgentRuntimeError as exc:
+                log.error("could not list the sessions of runtime %s: %s", runtime, exc)
+                raise
+        return self._sessions[runtime]
+
+    def invalidate_sessions(self, runtime: str | None = None) -> None:
+        if runtime is None:
+            self._sessions.clear()
+        else:
+            self._sessions.pop(runtime, None)
 
     def context(self, repository: Repository) -> RepositoryContext:
         cached = self._contexts.get(repository.name)
@@ -314,12 +335,17 @@ class Runner:
 
     def tick(self, *, crash_after_step: int | None = None) -> TickReport:
         report = TickReport()
-        try:
-            self.sessions(refresh=True)
-        except ClaudeError as exc:
-            # Without the session listing nothing below can be decided safely.
-            report.errors.append(f"claude: {exc}")
-            return report
+        for name in self.runtime_names():
+            try:
+                self.sessions(name, refresh=True)
+            except AgentRuntimeError as exc:
+                # Without the session listing nothing below can be decided safely.
+                report.errors.append(f"{name}: {exc}")
+                return report
+            except ConfigError as exc:
+                # A worker or a role names a runtime this build does not have. Its own
+                # workers fail where they use it; the others go on.
+                report.errors.append(str(exc))
 
         phases = (
             ("reconcile", lambda: self._reconcile(report)),
@@ -409,16 +435,29 @@ class Runner:
 
     def _reconcile_sessions(self, report: TickReport) -> None:
         """No session under the worktree root runs outside the watchdog."""
+        for name in self.runtime_names():
+            try:
+                sessions = self.sessions(name)
+            except ConfigError:
+                continue
+            self._reconcile_runtime_sessions(name, sessions, report)
+
+    def _reconcile_runtime_sessions(
+        self, runtime: str, sessions: list[Session], report: TickReport
+    ) -> None:
         root = self.config.worktree_root
-        live = self.ledger.live_workers()
+        live = [w for w in self.ledger.live_workers() if w.runtime == runtime]
         known = {str(Path(w.worktree)) for w in live} | {w.session_id for w in live if w.session_id}
-        for session in self.sessions():
+        for session in sessions:
             if session.id in known or (session.cwd and str(Path(session.cwd)) in known):
                 continue
             if not self._under(root, session.cwd):
                 continue
-            derived = claude_mod.worker_from_session(session, root)
-            previous = self.ledger.worker_by_session_id(session.id) or (
+            derived = runtime_mod.worker_from_session(session, root)
+            by_id = self.ledger.worker_by_session_id(session.id)
+            if by_id is not None and by_id.runtime != runtime:
+                by_id = None
+            previous = by_id or (
                 self.ledger.latest_worker_for(derived[1], derived[0]) if derived else None
             )
             # `cancel` stops a session but keeps its worktree, so a stopped session
@@ -427,7 +466,7 @@ class Runner:
             if (
                 previous is not None
                 and previous.is_terminal
-                and session.state != claude_mod.WORKING
+                and session.state != runtime_mod.WORKING
             ):
                 continue
             if derived is None:
@@ -443,7 +482,7 @@ class Runner:
             role, item = derived
             if self.ledger.live_worker_for(item, role) is not None:
                 continue
-            adopted = self._adopt_orphan(role, item, session, report, previous=previous)
+            adopted = self._adopt_orphan(runtime, role, item, session, report, previous=previous)
             if adopted is None:
                 report.warnings.append(
                     f"session {session.id} looks like {role}/{item} but no configured "
@@ -490,25 +529,25 @@ class Runner:
         """
         if not worker.session_id:
             return True
-        self.claude.stop(worker.session_id)
-        self.invalidate_sessions()
+        self.runtime(worker.runtime).stop(worker.session_id)
+        self.invalidate_sessions(worker.runtime)
         try:
-            sessions = self.sessions(refresh=True)
-        except ClaudeError:
+            sessions = self.sessions(worker.runtime, refresh=True)
+        except AgentRuntimeError:
             return False
         session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is None:
             return True
-        return session.state in (claude_mod.DONE, claude_mod.STOPPED, claude_mod.FAILED)
+        return session.state in runtime_mod.AT_REST
 
     def _remove_session(self, worker: Worker) -> bool:
         if not worker.session_id:
             return True
-        self.claude.remove(worker.session_id)
-        self.invalidate_sessions()
+        self.runtime(worker.runtime).remove(worker.session_id)
+        self.invalidate_sessions(worker.runtime)
         try:
-            sessions = self.sessions(refresh=True)
-        except ClaudeError:
+            sessions = self.sessions(worker.runtime, refresh=True)
+        except AgentRuntimeError:
             return False
         return all(s.id != worker.session_id for s in sessions)
 
@@ -532,6 +571,7 @@ class Runner:
 
     def _adopt_orphan(
         self,
+        runtime: str,
         role_name: str,
         item: str,
         session: Session,
@@ -580,6 +620,7 @@ class Runner:
                 worktree=worktree,
                 branch=branch,
                 owns_label=owns_label,
+                runtime=runtime,
             )
             if primary is not None:
                 self.ledger.subscribe(worker, primary.work_item, primary.kinds, primary=True)
@@ -696,7 +737,7 @@ class Runner:
         if not self._stop_session(worker):
             return False, (
                 f"{worker.item}: the session did not stop; it is still working. "
-                f"Check it with `claude attach {worker.session_id}`."
+                f"Check it with `{self._attach_command(worker)}`."
             )
         worker = self.ledger.update(worker, state=ledger_mod.CANCELLED, session_state=None)
         self._sync_labels(worker, context, report)
@@ -724,15 +765,16 @@ class Runner:
             return False, f"{worker.item} has no session to respawn"
         if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED):
             return False, f"{worker.item} is {worker.state}, not paused or blocked"
-        result = self.claude.respawn(worker.session_id)
-        self.invalidate_sessions()
+        result = self.runtime(worker.runtime).respawn(worker.session_id)
+        self.invalidate_sessions(worker.runtime)
         if result.returncode != 0:
             return False, f"respawn failed: {sanitize.one_line(result.stderr or result.stdout, limit=200)}"
         # Same rule as stopping: confirm by re-reading rather than trusting the exit code.
         session = next(
-            (s for s in self.sessions(refresh=True) if s.id == worker.session_id), None
+            (s for s in self.sessions(worker.runtime, refresh=True) if s.id == worker.session_id),
+            None,
         )
-        if session is None or session.state in (claude_mod.STOPPED, claude_mod.FAILED):
+        if session is None or session.state in (runtime_mod.STOPPED, runtime_mod.FAILED):
             return False, (
                 f"{worker.item}: respawn reported success but the session is "
                 f"{session.state if session else 'gone'}"
@@ -772,9 +814,9 @@ class Runner:
             self._stop_session(worker)
             if not self._remove_session(worker):
                 return False, (
-                    f"{worker.item}: the previous session could not be removed; "
-                    f"a new worker would adopt it instead of starting. Remove it with "
-                    f"`claude rm {worker.session_id}`."
+                    f"{worker.item}: the previous session {worker.session_id} could not be "
+                    f"removed; a new worker would adopt it instead of starting. Remove it, "
+                    f"then retry."
                 )
             worker = self.ledger.update(worker, session_id=None, session_uuid=None)
         if not self._drives_label(worker):
@@ -805,7 +847,7 @@ class Runner:
         if not self._stop_session(worker) and not force:
             return False, (
                 f"{worker.item}: the session did not stop, so its worktree is still "
-                f"in use. Check it with `claude attach {worker.session_id}`, or re-run with "
+                f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
             )
         removed = self._remove_session(worker)
@@ -821,7 +863,7 @@ class Runner:
         if not removed:
             return True, (
                 "worktree and branch deleted, but the session could not be removed; "
-                f"remove it with `claude rm`{kept}"
+                f"remove session {worker.session_id} by hand{kept}"
             )
         return True, f"session removed, worktree and branch deleted{kept}"
 
@@ -1029,11 +1071,17 @@ class Runner:
         # Before the diff, so a send that fails below waits for the next tick rather than
         # being tried twice in this one.
         self._retry_pending_notifications(report)
-        sessions = {s.id: s for s in self.sessions()}
+        listings: dict[str, dict[str, Session]] = {}
         for worker in self.ledger.live_workers():
             if worker.state == ledger_mod.LAUNCHING:
                 continue
-            session = sessions.get(worker.session_id or "")
+            if worker.runtime not in listings:
+                try:
+                    listings[worker.runtime] = {s.id: s for s in self.sessions(worker.runtime)}
+                except ConfigError as exc:
+                    report.errors.append(f"{worker.item}: {exc}")
+                    continue
+            session = listings[worker.runtime].get(worker.session_id or "")
             if session is None:
                 session = self._find_worker_session(worker)
                 if session is not None:
@@ -1063,23 +1111,23 @@ class Runner:
         detail: str | None = None
         target_state = worker.state
 
-        if observed == claude_mod.WORKING:
+        if observed == runtime_mod.WORKING:
             target_state = ledger_mod.RUNNING
             if worker.state != ledger_mod.RUNNING:
                 # A reply landed in agent view; the run is live again.
                 worker = self.ledger.update(
                     worker, working_since=time.time(), watchdog_notified=0, last_error=None
                 )
-        elif observed == claude_mod.BLOCKED:
+        elif observed == runtime_mod.BLOCKED:
             # waiting_for comes from the session listing and can quote whatever the
             # agent was about to run. It stays in the ledger and in `status`; it never
             # reaches a notification.
             target_state, detail = ledger_mod.BLOCKED, "needs input"
-        elif observed == claude_mod.DONE:
+        elif observed == runtime_mod.DONE:
             target_state, detail = self._resolve_done(worker, context)
-        elif observed == claude_mod.FAILED:
+        elif observed == runtime_mod.FAILED:
             target_state, detail = ledger_mod.BLOCKED, "session failed"
-        elif observed == claude_mod.STOPPED:
+        elif observed == runtime_mod.STOPPED:
             if worker.state == ledger_mod.PAUSED:
                 return worker
             target_state, detail = ledger_mod.BLOCKED, "session stopped"
@@ -1095,7 +1143,7 @@ class Runner:
             report.transitions.append(f"{worker.item}: {observed} -> {target_state}")
         self._sync_labels(worker, context, report)
 
-        if observed != worker.notified_state and observed != claude_mod.WORKING:
+        if observed != worker.notified_state and observed != runtime_mod.WORKING:
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
@@ -1104,7 +1152,7 @@ class Runner:
             elif worker.is_terminal:
                 # A finished worker leaves the live loop, so nothing would visit it again.
                 self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{worker.id}", detail or "")
-        elif observed == claude_mod.WORKING and worker.notified_state != observed:
+        elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
         return worker
 
@@ -1512,8 +1560,14 @@ class Runner:
     ) -> Worker:
         # Adoption first: a previous run of this step may have started the session and
         # died before recording its ids.
+        if role.runtime != worker.runtime:
+            raise ConfigError(
+                f"{worker.handle}: the role now names runtime '{role.runtime}', but this "
+                f"worker was created on '{worker.runtime}'"
+            )
+        runtime = self.runtime(worker.runtime)
         owned_elsewhere = self._sessions_owned_by_other_workers(worker)
-        self.sessions(refresh=True)
+        self.sessions(worker.runtime, refresh=True)
         existing = self._find_worker_session(worker, exclude=owned_elsewhere)
         if existing is None:
             prompt = config_mod.render(
@@ -1521,14 +1575,24 @@ class Runner:
                 self._template_values(worker),
                 where=f"{role.source or 'role ' + role.name}.prompt",
             )
-            result = self._launch_session(role, worker, prompt, report)
-            self.sessions(refresh=True)
+            result = runtime.launch(
+                LaunchSpec(
+                    worktree=worker.worktree_path,
+                    name=worker.handle,
+                    prompt=prompt,
+                    options=role.options,
+                    model=role.model,
+                    effort=role.effort,
+                ),
+                warn=report.warnings.append,
+            )
+            self.sessions(worker.runtime, refresh=True)
             existing = self._find_worker_session(worker, exclude=owned_elsewhere)
             if existing is None:
-                raise ClaudeError(
-                    f"started a session for {worker.handle} but it did not appear in "
-                    f"`claude agents --json --all`; the launch printed: "
-                    f"{sanitize.one_line(result.stdout or result.stderr, limit=200)!r}"
+                raise AgentRuntimeError(
+                    f"started a session for {worker.handle} but it did not appear in the "
+                    f"session listing of runtime {worker.runtime}; the launch printed: "
+                    f"{sanitize.one_line(result.output, limit=200)!r}"
                 )
         worker = self.ledger.update(
             worker,
@@ -1546,100 +1610,33 @@ class Runner:
         report.launched.append(worker.item)
         return worker
 
-    def _launch_session(
-        self, role: Role, worker: Worker, prompt: str, report: TickReport
-    ) -> claude_mod.CommandResult:
-        """Record the worktree as trusted, then start its session.
-
-        Claude Code will not start a background session in a directory nobody has
-        accepted a trust dialog for, and every worktree here was made seconds ago. There
-        is no dialog a runner can answer, so the flag is written instead.
-
-        A Claude Code process that is already running can write its configuration file
-        back without the entry written a moment before, and the launch is then refused.
-        When that was seen, writing the entry again and launching at once succeeded, so
-        that is done here a few times, rather than leaving it to the next tick. A retry
-        helps only when the entry is gone: a refusal while the entry is still in the
-        file has another cause, and is reported at once.
-        """
-        attempt = 1
-        while True:
-            trusted = self._trust_worktree(worker, report)
-            try:
-                return self.claude.launch(
-                    worktree=worker.worktree_path,
-                    name=worker.handle,
-                    prompt=prompt,
-                    permission_mode=role.permission_mode,
-                    agent=role.agent,
-                    model=role.model,
-                    effort=role.effort,
-                    settings=self._launch_settings(role),
-                )
-            except WorkspaceNotTrusted as exc:
-                if not trusted:
-                    raise
-                config_file = self.claude.config_file()
-                if self.claude.is_trusted(worker.worktree_path):
-                    raise WorkspaceNotTrusted(
-                        f"{exc} (the trust entry is still in {config_file}, so writing it "
-                        f"again would change nothing; Claude Code may be checking another "
-                        f"path or an older copy of the file)"
-                    ) from exc
-                if attempt >= TRUST_LAUNCH_ATTEMPTS:
-                    raise WorkspaceNotTrusted(
-                        f"{exc} (refused {attempt} times in a row, and each time the trust "
-                        f"entry was gone from {config_file} afterwards; another Claude Code "
-                        f"process may be writing the file back without it)"
-                    ) from exc
-                log.warning(
-                    "%s: launch refused as untrusted and the trust entry was gone from %s; "
-                    "writing it again (attempt %s of %s)",
-                    worker.handle, config_file, attempt + 1, TRUST_LAUNCH_ATTEMPTS,
-                )
-                attempt += 1
-
-    def _trust_worktree(self, worker: Worker, report: TickReport) -> bool:
-        """True when the worktree's trust entry is in place, False when it was not written."""
-        if not self.config.trust_worktrees:
-            return False
-        if self.claude.trust_worktree(worker.worktree_path):
-            return True
-        report.warnings.append(
-            f"{worker.handle}: could not record {worker.worktree_path} as a "
-            f"trusted workspace; the launch may be refused"
-        )
-        return False
-
     def _find_worker_session(self, worker: Worker, *, exclude: Collection[str] = ()) -> Session | None:
         """The worker's session in the current listing, by worktree or by name.
 
         A session is named after its worker (`role/item`). Sessions from before roles
         existed were named after the issue alone, so that name is tried second.
         """
-        sessions = self.sessions()
-        found = self.claude.find_session(
+        runtime = self.runtime(worker.runtime)
+        sessions = self.sessions(worker.runtime)
+        found = runtime.find_session(
             sessions, name=worker.handle, cwd=worker.worktree_path, exclude=exclude
         )
         if found is None:
-            found = self.claude.find_session(sessions, name=worker.item, exclude=exclude)
+            found = runtime.find_session(sessions, name=worker.item, exclude=exclude)
         return found
 
     def _sessions_owned_by_other_workers(self, worker: Worker) -> set[str]:
         return {
             other.session_id
             for other in self.ledger.recent_workers(200)
-            if other.session_id and other.id != worker.id
+            if other.session_id and other.id != worker.id and other.runtime == worker.runtime
         }
 
-    def _launch_settings(self, role: Role) -> dict[str, object] | None:
-        """Deny rules for runner-launched sessions, and the role's own allow rules.
-
-        A guardrail, not a sandbox: sessions run as the operator's user, so this only
-        stops the easy case of a session steering the runner or stopping its siblings.
-        """
-        deny = self.config.deny_rules if self.config.pass_deny_rules_at_launch else ()
-        return role.launch_settings(tuple(deny))
+    def _attach_command(self, worker: Worker) -> str:
+        try:
+            return self.runtime(worker.runtime).attach_command(worker.session_id or "")
+        except ConfigError:
+            return f"session {worker.session_id} of runtime {worker.runtime}"
 
     def _branch_for(self, repo_config: RepoConfig | None, role: str, item: str) -> str:
         # Two roles can take the same item, and git refuses to check one branch out in

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from chargehand import roles as roles_mod
+from chargehand.claude import launch_settings
 from chargehand.config import DEFAULT_DENY_RULES, RepoConfig
 from chargehand.errors import ConfigError
 from chargehand.roles import Role, StartRule, load_role
@@ -183,14 +184,14 @@ def test_a_bad_role_file_is_rejected_when_it_is_read(tmp_path, text, match):
 
 
 def test_launch_settings_carry_the_deny_rules_and_the_roles_allow_rules():
-    role = Role(name="r", prompt="{item}", allow=("Bash(gh pr *)",))
+    role = Role(name="r", prompt="{item}", options={"allow": ("Bash(gh pr *)",)})
 
-    settings = role.launch_settings(DEFAULT_DENY_RULES)
+    settings = launch_settings(role.options, DEFAULT_DENY_RULES)
 
     assert settings == {
         "permissions": {"deny": list(DEFAULT_DENY_RULES), "allow": ["Bash(gh pr *)"]}
     }
-    assert Role(name="r", prompt="{item}").launch_settings(()) is None
+    assert launch_settings(Role(name="r", prompt="{item}").options, ()) is None
 
 
 def test_role_names_are_kept_boring():

@@ -25,6 +25,7 @@ Options:
   --plugin-dir <path>      load a plugin directory for the session
   --settings <json>        per-session settings
   --resume <id>            with --bg: wake a stopped session with a new prompt
+  --fork-session           with --resume: continue a copy of the conversation
   --version
 
 Commands:
@@ -127,6 +128,27 @@ def main(argv: list[str]) -> int:
         record(state, "commands", ["logs", argv[1]])
         save(state)
         sys.stdout.write(state.get("logs", "plain log line\n"))
+        return 0
+
+    if "--resume" in argv and "--fork-session" in argv and "--bg" in argv:
+        # `claude --resume <id> --fork-session --bg "<prompt>"`: a new session that
+        # continues a copy of the conversation.
+        target = argv[argv.index("--resume") + 1]
+        record(state, "forks", {"argv": argv, "target": target, "prompt": argv[-1]})
+        original = next(
+            (s for s in state.get("sessions", []) if target in (s.get("uuid"), s.get("id"))), None
+        )
+        if original is None:
+            save(state)
+            sys.stderr.write(f"No conversation found with session ID: {target}\n")
+            return 1
+        serial = state.get("session_serial", 0) + 1
+        state["session_serial"] = serial
+        state["sessions"].append(
+            {**original, "id": f"s{serial}", "uuid": f"uuid-{serial}", "state": "working"}
+        )
+        save(state)
+        sys.stdout.write(f"backgrounded · s{serial}\n")
         return 0
 
     if "--resume" in argv and "--bg" in argv:

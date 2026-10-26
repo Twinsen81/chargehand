@@ -84,7 +84,6 @@ def test_the_launch_throttle_caps_working_runs(harness):
 
 def test_a_route_limit_applies_on_top_of_the_global_one(tmp_path, repo, claude_state, board):
     from conftest import Harness, make_config
-    from chargehand.claude import ClaudeCLI
     from chargehand.gitutil import Git
     from chargehand.ledger import Ledger
     from chargehand.notify import Notifier
@@ -95,7 +94,7 @@ def test_a_route_limit_applies_on_top_of_the_global_one(tmp_path, repo, claude_s
     config = make_config(repo, worktree_root, max_concurrent=3, repository_max_concurrent=1)
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
+    runner = Runner(config, ledger, git=Git(),
                     notifier=notifier)
     harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root,
                       notifier)
@@ -240,12 +239,12 @@ def test_the_launch_marks_its_worktree_as_a_trusted_workspace(harness):
     harness.tick()
 
     worktree = harness.worktree("ABC-1")
-    assert harness.runner.claude.is_trusted(worktree) is True
+    assert harness.runner.runtime("claude").cli.is_trusted(worktree) is True
 
 
 def test_a_launch_still_happens_when_trust_cannot_be_recorded(harness, monkeypatch):
     """The refusal is Claude Code's to make. A warning is more use than a skipped run."""
-    monkeypatch.setattr(type(harness.runner.claude), "trust_worktree", lambda self, path: False)
+    monkeypatch.setattr(type(harness.runner.runtime("claude").cli), "trust_worktree", lambda self, path: False)
     harness.board.add("ABC-1")
 
     report = harness.tick()
@@ -262,7 +261,7 @@ def test_trust_is_not_recorded_when_the_operator_turned_it_off(harness, monkeypa
 
     harness.tick()
 
-    assert harness.runner.claude.is_trusted(harness.worktree("ABC-1")) is False
+    assert harness.runner.runtime("claude").cli.is_trusted(harness.worktree("ABC-1")) is False
 
 
 # A Claude Code process that is already running can write its configuration file back
@@ -284,7 +283,7 @@ def test_a_trust_entry_dropped_before_the_launch_is_written_again_in_the_same_ti
 
 
 def test_a_launch_refused_as_untrusted_every_time_is_left_to_the_next_tick(harness):
-    from chargehand.tick import TRUST_LAUNCH_ATTEMPTS
+    from chargehand.claude import TRUST_LAUNCH_ATTEMPTS
 
     harness.claude_state.set(require_trust=True, drop_trust_at_launches=list(range(1, 10)))
     harness.board.add("ABC-1")
@@ -314,7 +313,7 @@ def test_a_refusal_while_the_trust_entry_is_still_there_is_not_retried(harness):
 
     assert report.launched == []
     assert len(harness.claude_state.launches) == 1
-    assert harness.runner.claude.is_trusted(harness.worktree("ABC-1")) is True
+    assert harness.runner.runtime("claude").cli.is_trusted(harness.worktree("ABC-1")) is True
     assert any("still in" in error for error in report.errors)
     assert not any("times in a row" in error for error in report.errors)
 
@@ -334,7 +333,7 @@ def test_an_untrusted_refusal_is_not_retried_when_the_operator_turned_trust_off(
 
 
 def test_an_untrusted_refusal_is_not_retried_when_trust_cannot_be_recorded(harness, monkeypatch):
-    monkeypatch.setattr(type(harness.runner.claude), "trust_worktree", lambda self, path: False)
+    monkeypatch.setattr(type(harness.runner.runtime("claude").cli), "trust_worktree", lambda self, path: False)
     harness.claude_state.set(require_trust=True)
     harness.board.add("ABC-1")
 

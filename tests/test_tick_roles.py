@@ -8,7 +8,6 @@ import stat
 
 from conftest import FAKE_CLAUDE, Harness, make_config
 from chargehand import ledger as ledger_mod
-from chargehand.claude import ClaudeCLI
 from chargehand.config import DEFAULT_DENY_RULES
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger
@@ -34,7 +33,7 @@ def harness_with(tmp_path, repo, claude_state, board, **overrides) -> Harness:
     config = make_config(repo, worktree_root, **overrides)
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
+    runner = Runner(config, ledger, git=Git(),
                     notifier=notifier)
     return Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
 

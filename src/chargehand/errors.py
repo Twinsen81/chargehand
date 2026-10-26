@@ -30,7 +30,11 @@ class AmbiguousWrite(TrackerError):
     """
 
 
-class ClaudeError(ChargehandError):
+class AgentRuntimeError(ChargehandError):
+    """A runtime's agent is missing, failed, or returned output its adapter cannot use."""
+
+
+class ClaudeError(AgentRuntimeError):
     """The Claude Code CLI is missing, failed, or returned unparseable output."""
 
 

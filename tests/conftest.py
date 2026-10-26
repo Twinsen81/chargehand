@@ -14,13 +14,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from chargehand import paths  # noqa: E402
-from chargehand.claude import ClaudeCLI  # noqa: E402
 from chargehand.config import Labels, MachineConfig, NotifyConfig, Repository, TrackerConfig  # noqa: E402
 from chargehand.gitutil import Git  # noqa: E402
 from chargehand.ledger import Ledger  # noqa: E402
 from chargehand.notify import Notifier  # noqa: E402
 from chargehand.tick import Runner  # noqa: E402
-from support import fake_source, fake_tracker  # noqa: E402
+from support import fake_runtime, fake_source, fake_tracker  # noqa: E402
 
 FAKE_CLAUDE = Path(__file__).parent / "support" / "fake_claude.py"
 
@@ -124,7 +123,6 @@ class Harness:
         self.runner = Runner(
             self.config,
             self.ledger,
-            claude=ClaudeCLI(self.config.claude_bin),
             git=Git(self.config.git_bin),
             notifier=self.notifier,
         )
@@ -178,9 +176,11 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config))
     fake_tracker.reset()
     fake_source.reset()
+    fake_runtime.reset()
     yield state
     fake_tracker.reset()
     fake_source.reset()
+    fake_runtime.reset()
 
 
 @pytest.fixture
@@ -253,7 +253,6 @@ def harness(tmp_path, repo, origin_repo, claude_state, board) -> Harness:
     runner = Runner(
         config,
         ledger,
-        claude=ClaudeCLI(config.claude_bin),
         git=Git(config.git_bin),
         notifier=notifier,
     )
