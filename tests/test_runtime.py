@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from chargehand import claude as claude_mod
 from chargehand import runtime as runtime_mod
 from chargehand.claude import ClaudeCLI, ClaudeRuntime
 from chargehand.config import DEFAULT_DENY_RULES
@@ -138,9 +139,21 @@ def test_only_the_claude_runtime_looks_for_an_agent_file(tmp_path):
 # ----- the claude runtime ---------------------------------------------------
 
 
+# Pids of old processes that a test says are still running. The fake binary's pids are
+# above any real pid, so the default liveness check would always say "gone".
+ALIVE: set[int] = set()
+
+
 @pytest.fixture
 def claude_runtime(claude_state) -> ClaudeRuntime:
-    return ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)), deny_rules=DEFAULT_DENY_RULES)
+    ALIVE.clear()
+    return ClaudeRuntime(
+        ClaudeCLI(str(FAKE_CLAUDE)),
+        deny_rules=DEFAULT_DENY_RULES,
+        stop_wait_secs=0.3,
+        stop_poll_secs=0.05,
+        pid_alive=ALIVE.__contains__,
+    )
 
 
 def test_a_claude_launch_passes_the_roles_keys_and_the_settings(claude_runtime, claude_state, tmp_path):
@@ -164,46 +177,96 @@ def test_a_claude_launch_passes_the_roles_keys_and_the_settings(claude_runtime, 
     assert claude_runtime.list_sessions()[0].name == "pr-reviewer/ABC-1"
 
 
+UUID = "11111111-2222-3333-4444-555555555555"
+
+
 def session(state="working", **extra):
-    return {"id": "s1", "uuid": "11111111-2222-3333-4444-555555555555", "name": "r/ABC-1",
+    """A listing entry in the shape of Claude Code 2.1.310."""
+    return {"id": "s1", "sessionId": UUID, "name": "r/ABC-1", "kind": "background",
             "state": state, **extra}
 
 
-def test_a_wake_stops_the_live_process_and_resumes_by_the_full_session_id(claude_runtime, claude_state):
-    claude_state.set(sessions=[session("done")])
+def live(state="done", pid=86470):
+    """An entry whose process runs: `pid`, and `status` idle or busy."""
+    return session(state, pid=pid, status="busy" if state == "working" else "idle")
+
+
+def stopped_job():
+    """The entry after `claude stop` of an idle session: still `done`, no `pid`, no `status`."""
+    return session("done")
+
+
+def test_the_claude_stop_rule_reads_the_live_fields():
+    runtime = ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)))
+    parse = claude_mod.parse_session
+
+    assert runtime.is_stopped(parse(stopped_job()))
+    assert runtime.is_stopped(parse(session("stopped")))
+    assert runtime.is_stopped(parse(session("failed")))
+    assert not runtime.is_stopped(parse(live("done")))
+    assert not runtime.is_stopped(parse(session("done", status="idle")))
+    assert not runtime.is_stopped(parse(session("done", pid=86470)))
+    assert not runtime.is_stopped(parse(session("working")))
+    assert not runtime.is_stopped(parse(session("blocked")))
+
+
+def test_a_wake_of_an_idle_session_stops_it_and_resumes_by_the_full_session_id(
+    claude_runtime, claude_state
+):
+    # The real shape: after the stop the entry still says done, without pid and status.
+    claude_state.set(sessions=[live("done")])
 
     result = claude_runtime.wake("s1", "new events: 2")
 
     assert result.ok and result.copy_id is None
     assert claude_state.commands == [["stop", "s1"]]
     resume = claude_state.read()["resumes"][0]
-    assert resume["target"] == "11111111-2222-3333-4444-555555555555"
+    assert resume["target"] == UUID
     assert resume["prompt"] == "new events: 2"
     assert claude_runtime.list_sessions()[0].state == runtime_mod.WORKING
 
 
-def test_a_wake_of_a_stopped_session_does_not_stop_it_again(claude_runtime, claude_state):
-    claude_state.set(sessions=[session("stopped")])
+def test_a_wake_of_a_stopped_job_does_not_stop_it_again(claude_runtime, claude_state):
+    claude_state.set(sessions=[stopped_job()])
 
     assert claude_runtime.wake("s1", "hello").ok
     assert claude_state.commands == []
+    assert claude_state.read()["resumes"][0]["target"] == UUID
 
 
-def test_a_wake_that_cannot_stop_the_session_does_not_resume(claude_runtime, claude_state):
-    claude_state.set(sessions=[session("working")], stop_state="working")
+def test_a_wake_waits_for_the_old_process_to_exit(claude_runtime, claude_state, monkeypatch):
+    # The listing drops pid about a second before the old process ends.
+    claude_state.set(sessions=[live("done", pid=86470)])
+    ALIVE.add(86470)
+    checks = []
+
+    def alive(pid):
+        checks.append(pid)
+        if len(checks) >= 3:
+            ALIVE.discard(pid)
+        return pid in ALIVE
+
+    claude_runtime.pid_alive = alive
+
+    assert claude_runtime.wake("s1", "hello").ok
+    assert checks[:3] == [86470, 86470, 86470]
+    assert len(claude_state.read()["resumes"]) == 1
+
+
+def test_a_wake_does_not_resume_while_the_old_process_lives(claude_runtime, claude_state):
+    claude_state.set(sessions=[live("done", pid=86470)])
+    ALIVE.add(86470)
 
     result = claude_runtime.wake("s1", "hello")
 
     assert not result.ok
-    assert "did not stop" in result.detail
+    assert "process 86470 is still running" in result.detail
     assert "resumes" not in claude_state.read()
 
 
-def test_a_wake_does_not_resume_a_session_that_still_lists_as_done_after_the_stop(
-    claude_runtime, claude_state
-):
-    # An idle session lists as done while its process is alive; a resume would start a copy.
-    claude_state.set(sessions=[session("done")], stop_state="done")
+def test_a_wake_does_not_resume_an_entry_that_keeps_its_live_fields(claude_runtime, claude_state):
+    # A stop that reports success while the listing keeps pid and status: the process runs.
+    claude_state.set(sessions=[live("done")], stop_state="done")
 
     result = claude_runtime.wake("s1", "hello")
 
@@ -213,8 +276,18 @@ def test_a_wake_does_not_resume_a_session_that_still_lists_as_done_after_the_sto
     assert "resumes" not in claude_state.read()
 
 
+def test_a_wake_that_cannot_stop_a_working_session_does_not_resume(claude_runtime, claude_state):
+    claude_state.set(sessions=[live("working")], stop_state="working")
+
+    result = claude_runtime.wake("s1", "hello")
+
+    assert not result.ok
+    assert "did not stop" in result.detail
+    assert "resumes" not in claude_state.read()
+
+
 def test_a_wake_does_not_resume_when_the_stop_fails(claude_runtime, claude_state):
-    claude_state.set(sessions=[session("working")], stop_returncode=1)
+    claude_state.set(sessions=[live("working")], stop_returncode=1)
 
     result = claude_runtime.wake("s1", "hello")
 
@@ -231,7 +304,7 @@ def test_a_wake_of_a_failed_session_resumes_without_a_stop(claude_runtime, claud
 
 
 def test_a_wake_that_starts_a_copy_is_a_fault(claude_runtime, claude_state):
-    claude_state.set(sessions=[session("stopped")], resume_copy_id="9abc0def")
+    claude_state.set(sessions=[stopped_job()], resume_copy_id="9abc0def")
 
     result = claude_runtime.wake("s1", "hello")
 
@@ -283,6 +356,37 @@ def test_a_missing_claude_binary_is_one_failed_check(tmp_path):
     (check,) = runtime.health_checks()
 
     assert (check.name, check.status) == ("claude", runtime_mod.CHECK_FAIL)
+
+
+def _cancel(harness, item):
+    request_id = harness.ledger.record_request("cancel", item)
+    harness.next_tick()
+    return harness.ledger.get_request(request_id)
+
+
+def test_the_tick_confirms_a_stop_with_the_runtimes_rule(harness):
+    # An idle session after a real `claude stop`: still done, without pid and status.
+    harness.board.add("ABC-1")
+    harness.tick()
+    harness.claude_state.set_session_state("ABC-1", "done")
+
+    result = _cancel(harness, "ABC-1")
+
+    assert result["ok"] == 1
+    entry = harness.claude_state.sessions[0]
+    assert entry["state"] == "done" and "pid" not in entry and "status" not in entry
+
+
+def test_the_tick_does_not_take_done_with_a_live_process_as_stopped(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.claude_state.set(stop_state="done")
+
+    result = _cancel(harness, "ABC-1")
+
+    assert result["ok"] == 0
+    assert "did not stop" in result["message"]
 
 
 # ----- the fake runtime -----------------------------------------------------

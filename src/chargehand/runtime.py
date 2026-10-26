@@ -41,9 +41,6 @@ UNKNOWN = "unknown"
 
 SESSION_STATES = (WORKING, BLOCKED, DONE, FAILED, STOPPED, UNKNOWN)
 
-# The states in which a stop counts as confirmed: no turn is running.
-AT_REST = (DONE, STOPPED, FAILED)
-
 
 @dataclass(frozen=True)
 class Session:
@@ -208,7 +205,11 @@ class Runtime(ABC):
 
     @abstractmethod
     def stop(self, session_id: str) -> CommandResult:
-        """Stop the session's process and keep the session. The caller confirms in the listing."""
+        """Stop the session's process and keep the session. The caller confirms with is_stopped."""
+
+    def is_stopped(self, session: Session) -> bool:
+        """Whether the listed *session* has no process left. The one rule for confirming a stop."""
+        return session.state in (STOPPED, FAILED)
 
     @abstractmethod
     def respawn(self, session_id: str) -> CommandResult:
@@ -363,7 +364,6 @@ def create(name: str, config: "MachineConfig") -> Runtime:
 
 
 __all__ = [
-    "AT_REST",
     "BLOCKED",
     "Capabilities",
     "CommandResult",

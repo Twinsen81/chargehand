@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
@@ -50,7 +51,6 @@ from chargehand import sanitize
 from chargehand.config import PERMISSION_MODES, validate_permission_rule
 from chargehand.errors import ClaudeError, ConfigError, WorkspaceNotTrusted
 from chargehand.runtime import (
-    AT_REST,
     BLOCKED,
     CHECK_FAIL,
     CHECK_OK,
@@ -84,8 +84,26 @@ TRUST_LAUNCH_ATTEMPTS = 3
 
 DEFAULT_PERMISSION_MODE = "auto"
 
-# The listed states that prove a session has no live process, which a resume needs.
-_PROCESS_GONE = (STOPPED, FAILED)
+# How long a wake waits, after a stop, for the listing and the old process to confirm it.
+STOP_WAIT_SECS = 10.0
+STOP_POLL_SECS = 0.25
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OverflowError, ValueError, OSError):
+        return False
+    return True
+
+
+def _listed_pid(session: Session) -> int | None:
+    value = session.raw.get("pid")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 # Claude Code's vocabulary is not contractual, so recognize the plausible spellings
 # and fall back to UNKNOWN rather than mapping something unexpected onto DONE.
@@ -591,10 +609,16 @@ class ClaudeRuntime(Runtime):
         *,
         deny_rules: Sequence[str] = (),
         trust_worktrees: bool = True,
+        stop_wait_secs: float = STOP_WAIT_SECS,
+        stop_poll_secs: float = STOP_POLL_SECS,
+        pid_alive: Callable[[int], bool] = _pid_alive,
     ) -> None:
         self.cli = cli or ClaudeCLI()
         self.deny_rules = tuple(deny_rules)
         self.trust_worktrees = trust_worktrees
+        self.stop_wait_secs = stop_wait_secs
+        self.stop_poll_secs = stop_poll_secs
+        self.pid_alive = pid_alive
 
     @classmethod
     def from_config(cls, config: "MachineConfig") -> "ClaudeRuntime":
@@ -729,21 +753,39 @@ class ClaudeRuntime(Runtime):
             )
         return False
 
+    def is_stopped(self, session: Session) -> bool:
+        """No process is left: ``stopped`` or ``failed``, or ``done`` without the live fields.
+
+        Observed in Claude Code 2.1.310: an idle session lists as ``done`` with ``pid`` and
+        ``status: idle`` while its process lives, and after ``claude stop`` it still lists
+        as ``done``, with ``pid`` and ``status`` gone. So ``done`` alone proves nothing, and
+        ``done`` without both fields is the stopped job.
+        """
+        if session.state in (STOPPED, FAILED):
+            return True
+        return (
+            session.state == DONE
+            and _listed_pid(session) is None
+            and session.raw.get("status") in (None, "")
+        )
+
     def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
-        """Stop the live process, confirm it stopped, then resume by the full session id.
+        """Stop the live process, confirm it is gone, then resume by the full session id.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
         copy that starts anyway is a fault.
 
-        Only ``stopped`` or ``failed`` proves that no process is left. An idle session
-        lists as ``done`` while its process is still alive, so ``done`` after a stop, or a
-        stop that exits non-zero, refuses the wake rather than risk a copy.
+        A stop that exits non-zero refuses the wake. Otherwise the wake waits, up to
+        ``stop_wait_secs``, until the listing shows the job stopped (see
+        :meth:`is_stopped`) and the process the listing named before the stop has exited:
+        the listing drops ``pid`` about a second before that process ends.
         """
         session = self._find(session_id)
         if session is None:
             return WakeResult(False, f"session {session_id} is not in the listing")
-        if session.state not in _PROCESS_GONE:
+        old_pid = _listed_pid(session)
+        if not self.is_stopped(session):
             stopped = self.cli.stop(session_id)
             if stopped.returncode != 0:
                 return WakeResult(
@@ -751,13 +793,26 @@ class ClaudeRuntime(Runtime):
                     f"the stop of session {session_id} exited {stopped.returncode}: "
                     f"{sanitize.one_line(stopped.stderr or stopped.stdout, limit=200)}",
                 )
+        deadline = time.monotonic() + self.stop_wait_secs
+        while True:
             session = self._find(session_id)
             if session is None:
                 return WakeResult(False, f"session {session_id} is gone after the stop")
-            if session.state not in _PROCESS_GONE:
+            listed_stopped = self.is_stopped(session)
+            process_alive = old_pid is not None and self.pid_alive(old_pid)
+            if listed_stopped and not process_alive:
+                break
+            if time.monotonic() >= deadline:
+                if not listed_stopped:
+                    return WakeResult(
+                        False,
+                        f"session {session_id} did not stop; it lists as {session.state} "
+                        f"with a live process",
+                    )
                 return WakeResult(
-                    False, f"session {session_id} did not stop; it lists as {session.state}"
+                    False, f"session {session_id} stopped, but its process {old_pid} is still running"
                 )
+            time.sleep(self.stop_poll_secs)
         uuid = session_uuid or session.uuid
         if not uuid:
             return WakeResult(False, f"session {session_id} has no full session id to resume by")
@@ -807,7 +862,6 @@ runtime_mod.register(ClaudeRuntime)
 
 
 __all__ = [
-    "AT_REST",
     "BLOCKED",
     "ClaudeCLI",
     "ClaudeRuntime",

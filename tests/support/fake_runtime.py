@@ -14,7 +14,8 @@ from pathlib import Path
 
 from chargehand.errors import AgentRuntimeError, ConfigError
 from chargehand.runtime import (
-    AT_REST,
+    DONE,
+    FAILED,
     STOPPED,
     WORKING,
     Capabilities,
@@ -28,6 +29,9 @@ from chargehand.runtime import (
 )
 
 NAME = "fake"
+
+# A hosted turn has ended in these states, so a new one may start.
+AT_REST = (DONE, STOPPED, FAILED)
 
 
 class World:

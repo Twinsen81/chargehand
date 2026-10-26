@@ -538,7 +538,7 @@ class Runner:
         session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is None:
             return True
-        return session.state in runtime_mod.AT_REST
+        return self.runtime(worker.runtime).is_stopped(session)
 
     def _remove_session(self, worker: Worker) -> bool:
         if not worker.session_id:
