@@ -143,7 +143,7 @@ def test_discard_removes_the_session_and_the_worktree(harness, runtime_name, dri
     assert all(s.get("id") != worker.session_id for s in driver.sessions)
 
 
-def test_an_orphan_session_under_the_worktree_root_is_adopted(harness, runtime_name, driver):
+def test_an_orphan_session_outside_a_repository_worktree_is_reported_not_adopted(harness, runtime_name, driver):
     harness.worktree("ABC-9").mkdir(parents=True)
     harness.runner.runtime(runtime_name).launch(
         LaunchSpec(
