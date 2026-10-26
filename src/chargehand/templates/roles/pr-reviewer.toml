@@ -1,30 +1,40 @@
 # chargehand role: pr-reviewer
 #
 # A worker in this role reviews a pull request you were asked to review and answers
-# replies on its own comments. It starts from events of the `github` source, which
-# the runner does not deliver yet: the role is a template for what is coming, and a
-# repository that enables it today gets a worker only when that source exists.
+# replies on its own comments. It starts from events of the `github` source, so the
+# machine configuration needs a `[[source]]` of type "github", and the repository needs
+# its `github = "owner/repo"` key. `chargehand init --role pr-reviewer` writes this file
+# and the agent file it names, .claude/agents/pr-reviewer.md.
 
-# agent = "pr-reviewer"
+# The agent file holds the reviewer's instructions. It tells the worker to end every
+# comment it posts with chargehand's authorship marker: workers post as you, and the
+# marker is how the runner keeps a worker's own comments from waking it.
+agent = "pr-reviewer"
 # model = "opus"
 # effort = "high"
-prompt = "/pr-review {item_url}"
+prompt = "Review the pull request {item_url}"
 permission_mode = "auto"
 allow = ["Bash(gh pr *)", "Bash(gh api *)"]
 
-# Branch the worktree from the pull request head rather than from `base`.
+# The worktree is created from `base`, then this step checks out the pull request head.
+# Detached, so git does not refuse a branch that is checked out in another worktree. It
+# runs without a shell, in the worktree.
 checkout = "item"
+setup = "gh pr checkout {item_url} --detach"
 
 # Start a reviewer when you are asked to review a pull request and no reviewer has it
 # yet. A second request for the same pull request wakes the reviewer that has it.
 [[start]]
 on = "github.review_requested"
 unless_subscribed = "role"
-# The events on the pull request that wake the worker, and the ones that end it.
+# The events on the pull request that wake the worker, and the ones that end it. A
+# closed or merged pull request ends the worker once its turn is over; garbage
+# collection then removes its session and worktree, never over unpushed commits.
 subscribe = ["comment", "review", "ci_status"]
 close_on = ["pr_closed"]
 
 [policy]
 max_workers = 4
+# A comment without the marker wakes the worker once. This cap stops a loop.
 max_wakes_per_day = 12
 debounce_secs = 120

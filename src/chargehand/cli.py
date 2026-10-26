@@ -651,14 +651,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     repo = Path(args.repo or ".").expanduser().resolve()
     try:
-        written = install.init_repo(repo, force=args.force)
+        written = install.init_repo(repo, force=args.force, roles=args.role)
     except ChargehandError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_REFUSED
     for target in written:
         _print(f"wrote {target}")
-    _print("Edit `base` in the repository configuration and `prompt` in the role, then add "
-           "the repository to your machine configuration.")
+    if args.role:
+        _print(f"Add {', '.join(args.role)} to the repository's `roles` in your machine "
+               "configuration. The comments at the top of each role file say what else it needs.")
+    else:
+        _print("Edit `base` in the repository configuration and `prompt` in the role, then add "
+               "the repository to your machine configuration.")
     return EXIT_OK
 
 
@@ -769,6 +773,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--repo", help="repository root (default: the current directory)")
     init.add_argument("--output", help="where to write the machine config")
     init.add_argument("--force", action="store_true")
+    init.add_argument(
+        "--role", action="append", default=[], metavar="NAME",
+        help="write this starter role and its agent file instead of the implementer; "
+             "repeatable (e.g. pr-reviewer)",
+    )
 
     templates = add("templates", cmd_templates, "print a bundled template")
     templates.add_argument("name", nargs="?", help="e.g. skill/SKILL.md, roles/implementer.toml")

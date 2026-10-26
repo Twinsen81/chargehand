@@ -11,7 +11,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from xml.parsers.expat import ExpatError
@@ -199,13 +199,30 @@ def kickstart(*, force: bool = False) -> subprocess.CompletedProcess[str]:
     return launchctl(*args)
 
 
-def init_repo(repo: Path, *, force: bool = False) -> list[Path]:
-    """Write the repository configuration and a starter `implementer` role."""
-    targets = (
-        (repo / paths.REPO_CONFIG_NAME, "chargehand.toml"),
-        (repo / ".chargehand" / "roles" / f"{roles_mod.DEFAULT_ROLE}.toml",
-         f"roles/{roles_mod.DEFAULT_ROLE}.toml"),
-    )
+def starter_roles() -> list[str]:
+    """The roles chargehand ships a template for."""
+    return sorted(path.stem for path in (paths.templates_dir() / "roles").glob("*.toml"))
+
+
+def init_repo(repo: Path, *, force: bool = False, roles: Sequence[str] = ()) -> list[Path]:
+    """Write the repository configuration and a starter `implementer` role.
+
+    With *roles*, write those starter roles instead, each with the agent file it names
+    when chargehand ships one, and the repository configuration only when it is missing.
+    """
+    unknown = sorted(set(roles) - set(starter_roles()))
+    if unknown:
+        raise ChargehandError(
+            f"no starter role named {', '.join(unknown)}; available: {', '.join(starter_roles())}"
+        )
+    targets: list[tuple[Path, str]] = []
+    config = repo / paths.REPO_CONFIG_NAME
+    if not roles or not config.exists():
+        targets.append((config, "chargehand.toml"))
+    for name in roles or (roles_mod.DEFAULT_ROLE,):
+        targets.append((repo / ".chargehand" / "roles" / f"{name}.toml", f"roles/{name}.toml"))
+        if (paths.templates_dir() / "agents" / f"{name}.md").is_file():
+            targets.append((repo / ".claude" / "agents" / f"{name}.md", f"agents/{name}.md"))
     for target, _ in targets:
         if target.exists() and not force:
             raise ChargehandError(f"{target} already exists; pass --force to overwrite")
