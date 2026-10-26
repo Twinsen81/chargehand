@@ -14,7 +14,6 @@ from conftest import Harness, make_config
 from chargehand import sanitize
 from chargehand import sources as sources_mod
 from chargehand import trackers as trackers_mod
-from chargehand.claude import ClaudeCLI
 from chargehand.config import MachineConfig, SourceConfig
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
 from chargehand.gitutil import Git
@@ -624,7 +623,7 @@ def ticking(tmp_path, repo, claude_state, board, gh):
     )
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(), notifier=notifier)
+    runner = Runner(config, ledger, git=Git(), notifier=notifier)
     harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
     yield harness
     ledger.close()
