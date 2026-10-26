@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from chargehand.errors import ConfigError
+from chargehand.errors import AgentRuntimeError, ConfigError
 
 if TYPE_CHECKING:
     from chargehand.config import MachineConfig
@@ -79,7 +79,13 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class Capabilities:
-    """What a runtime can do. A missing capability is a feature the board and delivery skip.
+    """What a runtime's agent supports. A missing capability is a feature the board and delivery skip.
+
+    A flag describes the agent, not a method of this interface: a feature that uses it
+    brings its own call when it is built. In particular ``wake()`` is always the
+    stop-and-resume path; a wake into a live session, for a runtime with
+    ``in_place_wake``, goes through the in-session channel, which is a separate path.
+    Usage readings and board permissions have no call here yet for the same reason.
 
     ``live_attach``: an operator can open the running session without stopping it.
     ``in_place_wake``: a message reaches a live session without a restart.
@@ -99,6 +105,22 @@ class Capabilities:
 
     def as_dict(self) -> dict[str, bool]:
         return asdict(self)
+
+
+# Statuses of a health check, as `doctor` prints them.
+CHECK_OK = "ok"
+CHECK_INFO = "info"
+CHECK_WARN = "warn"
+CHECK_FAIL = "fail"
+
+
+@dataclass(frozen=True)
+class HealthCheck:
+    """One line of `doctor` output about a runtime. *detail* is written by the runtime module."""
+
+    name: str
+    status: str
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -175,7 +197,14 @@ class Runtime(ABC):
 
     @abstractmethod
     def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
-        """Give the session *message* as its next turn, so that the same session continues."""
+        """Give the session *message* as its next turn, so that the same session continues.
+
+        A result with ``ok`` False is a fault the runtime detected, such as a session that
+        did not stop or a copy that started. A failure to run the agent at all (missing
+        binary, timeout, unreadable listing) raises AgentRuntimeError; then nothing is
+        known about whether the message arrived, and the caller treats it like a failed
+        call to the agent, not like a refused wake.
+        """
 
     @abstractmethod
     def stop(self, session_id: str) -> CommandResult:
@@ -208,6 +237,15 @@ class Runtime(ABC):
         effort: str | None = None,
     ) -> CommandResult:
         """Start a new session that continues a copy of this one's conversation."""
+
+    def health_checks(self) -> list[HealthCheck]:
+        """What `doctor` reports about this runtime. By default: whether the listing works."""
+        label = f"{self.name} sessions"
+        try:
+            sessions = self.list_sessions()
+        except AgentRuntimeError as exc:
+            return [HealthCheck(label, CHECK_FAIL, str(exc))]
+        return [HealthCheck(label, CHECK_OK, f"{len(sessions)} session(s) listed")]
 
     def find_session(
         self,
@@ -331,7 +369,12 @@ __all__ = [
     "CommandResult",
     "DEFAULT_RUNTIME",
     "DONE",
+    "CHECK_FAIL",
+    "CHECK_INFO",
+    "CHECK_OK",
+    "CHECK_WARN",
     "FAILED",
+    "HealthCheck",
     "LaunchResult",
     "LaunchSpec",
     "Runtime",
