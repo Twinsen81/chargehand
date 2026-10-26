@@ -1,6 +1,11 @@
 """Linear adapter: GraphQL over an API key.
 
-Two things drive the shape of this module. Label writes are single-label add/remove
+The poll asks for the queue changed since the cursor, the latest ``updatedAt`` it has
+seen, so a quiet team costs one small query. The issues that live workers follow are
+read in one more query, with their comments since the previous poll. A comment body is
+read only to find the authorship marker; it does not leave this module.
+
+Two things drive the shape of the label writes. Label writes are single-label add/remove
 mutations rather than a whole-list update, so a concurrent label edit by a human is
 not clobbered. And every write is followed by a re-read, because the two mutations
 run serially rather than atomically and a reported failure may still have landed.
@@ -11,14 +16,17 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit, urlunsplit
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
-from chargehand.trackers.base import Issue, Status, Tracker
+from chargehand.trackers.base import Comment, Issue, Status, Tracker, TrackerPoll
 
 DEFAULT_ENDPOINT = "https://api.linear.app/graphql"
 DEFAULT_KEY_ENV = "CHARGEHAND_LINEAR_API_KEY"
@@ -32,6 +40,7 @@ _ISSUE_FIELDS = """
   branchName
   labels { nodes { id name } }
   state { name type }
+  updatedAt
 """
 
 _QUEUE_QUERY = """
@@ -53,6 +62,41 @@ query Issue($id: String!) {
 """ % _ISSUE_FIELDS
 
 _VIEWER_QUERY = "query { viewer { id name email } }"
+
+_POLL_QUERY = """
+query Poll($filter: IssueFilter!, $after: String) {
+  issues(first: 50, after: $after, filter: $filter) {
+    nodes {
+      %s
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+""" % _ISSUE_FIELDS
+
+# The body is asked for only to find the authorship marker.
+_FOLLOWED_QUERY = """
+query Followed($filter: IssueFilter!, $comments: CommentFilter) {
+  issues(first: 50, filter: $filter) {
+    nodes {
+      %s
+      comments(first: 50, filter: $comments) {
+        nodes { id createdAt body user { id name email } }
+      }
+    }
+  }
+}
+""" % _ISSUE_FIELDS
+
+# Pages of the queue read in one poll. Far more than one account has queued at once.
+_MAX_QUEUE_PAGES = 10
+_FOLLOWED_CHUNK = 50
+
+# A change can become readable a moment after a later one was already read, so every
+# poll reads this far back again. The overlap costs nothing: the router drops what it has
+# seen before. Comment times come from Linear's clock and are compared with this
+# machine's, which the overlap also covers.
+OVERLAP_SECS = 300
 
 # `first` is a ceiling, not an expectation: with a team filter the answer is one label,
 # and without one a workspace can hold a great many with the same name. A full page is
@@ -84,6 +128,77 @@ def _lookup_keychain(service: str, account: str | None) -> str | None:
     return result.stdout.strip() or None
 
 
+def _timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _author(user: object) -> str:
+    """The comment's author, named the way :meth:`LinearTracker.whoami` names the viewer."""
+    if not isinstance(user, Mapping):
+        return ""
+    return str(user.get("email") or user.get("name") or user.get("id") or "")
+
+
+def _marked(body: object) -> bool:
+    # Imported here: the sources package imports the trackers package.
+    from chargehand.sources.base import AUTHORSHIP_MARKER
+
+    return isinstance(body, str) and AUTHORSHIP_MARKER in body
+
+
+def _number(raw: object) -> float | None:
+    return float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+
+
+@dataclass
+class _Cursor:
+    """Where the poll stopped: the queue's latest ``updatedAt``, and when each followed
+    issue was last read for comments. A followed issue seen for the first time is read
+    from the previous poll on: its worker started after that poll and reads the issue
+    itself."""
+
+    updated_at: float | None = None
+    polled_at: float | None = None
+    items: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, value: str | None) -> "_Cursor":
+        try:
+            data = json.loads(value) if value else {}
+        except ValueError:
+            return cls()
+        if not isinstance(data, dict):
+            return cls()
+        items = data.get("items")
+        return cls(
+            updated_at=_number(data.get("updated_at")),
+            polled_at=_number(data.get("polled_at")),
+            items={
+                str(key): float(since)
+                for key, since in (items.items() if isinstance(items, dict) else ())
+                if _number(since) is not None
+            },
+        )
+
+    def dump(self) -> str:
+        return json.dumps(
+            {"updated_at": self.updated_at, "polled_at": self.polled_at, "items": self.items},
+            sort_keys=True,
+        )
+
+
 class LinearTracker(Tracker):
     type = "linear"
 
@@ -113,6 +228,7 @@ class LinearTracker(Tracker):
         self._api_key: str | None = None
         self._label_ids: dict[str, str] = {}
         self._viewer: str | None = None
+        self.clock: Callable[[], float] = time.time
 
     def describe(self) -> str:
         bits = [self.type]
@@ -207,6 +323,12 @@ class LinearTracker(Tracker):
         return self._viewer
 
     def list(self, status: Status) -> list[Issue]:
+        nodes = (
+            self._post(_QUEUE_QUERY, {"filter": self._filter_for(status)}).get("issues") or {}
+        ).get("nodes", [])
+        return [self._to_issue(node) for node in nodes]
+
+    def _filter_for(self, status: Status) -> dict[str, Any]:
         label = self._label_for(status)
         if label is None:
             raise TrackerError("linear: cannot list issues by the 'done' status")
@@ -222,10 +344,76 @@ class LinearTracker(Tracker):
         # running has been moved on by whatever the prompt runs, and must still be found.
         if self._state and status is Status.QUEUED:
             issue_filter["state"] = {"name": {"eq": self._state}}
-        nodes = (self._post(_QUEUE_QUERY, {"filter": issue_filter}).get("issues") or {}).get(
-            "nodes", []
-        )
-        return [self._to_issue(node) for node in nodes]
+        return issue_filter
+
+    # ----- the poll -----------------------------------------------------------
+
+    def poll(self, cursor: str | None, followed: Sequence[str]) -> TrackerPoll:
+        state = _Cursor.load(cursor)
+        now = self.clock()
+        queued = self._queue_since(state.updated_at)
+        seen = [issue.updated_at for issue in queued if issue.updated_at is not None]
+        if seen:
+            state.updated_at = max(seen + [state.updated_at or 0.0])
+        issues: list[Issue] = []
+        comments: list[Comment] = []
+        if followed:
+            start = state.polled_at if state.polled_at is not None else now
+            since = {issue_id: state.items.get(issue_id, start) for issue_id in followed}
+            issues, comments = self._read_followed(since)
+        state.items = {issue_id: now for issue_id in followed}
+        state.polled_at = now
+        return TrackerPoll(queued=queued, followed=issues, comments=comments, cursor=state.dump())
+
+    def _queue_since(self, updated_at: float | None) -> list[Issue]:
+        issue_filter = self._filter_for(Status.QUEUED)
+        if updated_at is not None:
+            issue_filter["updatedAt"] = {"gt": _iso(updated_at - OVERLAP_SECS)}
+        issues: list[Issue] = []
+        after: str | None = None
+        for _ in range(_MAX_QUEUE_PAGES):
+            page = (
+                self._post(_POLL_QUERY, {"filter": issue_filter, "after": after}).get("issues")
+                or {}
+            )
+            issues += [self._to_issue(node) for node in page.get("nodes") or []]
+            info = page.get("pageInfo") or {}
+            after = info.get("endCursor")
+            if not info.get("hasNextPage") or not after:
+                break
+        return issues
+
+    def _read_followed(self, since: Mapping[str, float]) -> tuple[list[Issue], list[Comment]]:
+        ids = sorted(since)
+        oldest = min(since.values()) - OVERLAP_SECS
+        issues: list[Issue] = []
+        comments: list[Comment] = []
+        for offset in range(0, len(ids), _FOLLOWED_CHUNK):
+            variables = {
+                "filter": {"id": {"in": ids[offset : offset + _FOLLOWED_CHUNK]}},
+                "comments": {"createdAt": {"gt": _iso(oldest)}},
+            }
+            page = self._post(_FOLLOWED_QUERY, variables).get("issues") or {}
+            for node in page.get("nodes") or []:
+                issue = self._to_issue(node)
+                if issue.id not in since:
+                    continue
+                issues.append(issue)
+                after = since[issue.id] - OVERLAP_SECS
+                for entry in (node.get("comments") or {}).get("nodes") or []:
+                    created = _timestamp(entry.get("createdAt"))
+                    if not entry.get("id") or created is None or created <= after:
+                        continue
+                    comments.append(
+                        Comment(
+                            id=str(entry["id"]),
+                            issue=issue,
+                            author=_author(entry.get("user")),
+                            created_at=created,
+                            marked=_marked(entry.get("body")),
+                        )
+                    )
+        return issues, comments
 
     def get(self, issue_id: str) -> Issue | None:
         node = self._post(_ISSUE_QUERY, {"id": issue_id}).get("issue")
@@ -401,4 +589,5 @@ class LinearTracker(Tracker):
             labels=labels,
             state=state.get("name"),
             closed=state_type in ("completed", "canceled"),
+            updated_at=_timestamp(node.get("updatedAt")),
         )

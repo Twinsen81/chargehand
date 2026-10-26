@@ -880,6 +880,7 @@ class GithubTracker(Tracker):
             labels=labels,
             state=state,
             closed=state == "closed",
+            updated_at=_timestamp(entry.get("updated_at")),
         )
 
 

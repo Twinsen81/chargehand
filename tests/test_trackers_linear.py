@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
 
+from chargehand.config import Labels, Repository, TrackerConfig
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
+from chargehand.sources import AUTHORSHIP_MARKER, WorkItem
+from chargehand.sources.tracker import TrackerSource
 from chargehand.trackers.base import Issue, Status
-from chargehand.trackers.linear import LinearTracker
+from chargehand.trackers.linear import OVERLAP_SECS, LinearTracker
 
 LABELS = {"queued": "chargehand", "running": "chargehand-running", "blocked": "chargehand-blocked"}
 
@@ -448,3 +455,203 @@ def test_the_issue_url_drops_the_title_slug(tracker_and_transport):
 )
 def test_url_canonicalisation_cases(raw, expected):
     assert LinearTracker._canonical_url(raw) == expected
+
+
+# ----- the poll -------------------------------------------------------------------
+
+NOW = 1_800_000_000.0
+
+
+def iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class PollTransport:
+    """Answers the poll's two queries and records their variables."""
+
+    def __init__(self):
+        self.queue: list[dict] = []
+        self.followed: list[dict] = []
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, query: str, variables=None):
+        variables = variables or {}
+        name = query.strip().split("(")[0].removeprefix("query ").strip()
+        self.calls.append((name, variables))
+        if name == "Poll":
+            return {"issues": {"nodes": self.queue, "pageInfo": {"hasNextPage": False}}}
+        if name == "Followed":
+            wanted = set(variables["filter"]["id"]["in"])
+            return {"issues": {"nodes": [n for n in self.followed if n["id"] in wanted]}}
+        raise AssertionError(f"unexpected query: {query[:60]}")
+
+
+def poll_node(identifier, *, updated, labels=("chargehand",), state_type="unstarted", comments=()):
+    entry = node(identifier, labels, state_type=state_type)
+    entry["updatedAt"] = iso(updated)
+    entry["comments"] = {"nodes": list(comments)}
+    return entry
+
+
+def comment(cid, *, created, author="other@example.invalid", body="please also fix X"):
+    return {"id": cid, "createdAt": iso(created), "body": body, "user": {"email": author}}
+
+
+@pytest.fixture
+def polling():
+    tracker = LinearTracker({"team": "ABC"}, LABELS)
+    transport = PollTransport()
+    tracker._post = transport
+    tracker._api_key = "test-key"
+    tracker.clock = lambda: NOW
+    return tracker, transport
+
+
+def test_the_first_poll_reads_the_whole_queue_and_keeps_the_latest_updated_at(polling):
+    tracker, transport = polling
+    transport.queue = [poll_node("ABC-1", updated=NOW - 50), poll_node("ABC-2", updated=NOW - 10)]
+
+    result = tracker.poll(None, [])
+
+    assert [issue.identifier for issue in result.queued] == ["ABC-1", "ABC-2"]
+    assert result.queued[1].updated_at == NOW - 10
+    ((name, variables),) = transport.calls
+    assert name == "Poll" and "updatedAt" not in variables["filter"]
+    assert variables["filter"]["labels"] == {"name": {"eq": "chargehand"}}
+    assert variables["filter"]["assignee"] == {"isMe": {"eq": True}}
+    assert variables["filter"]["team"] == {"key": {"eq": "ABC"}}
+    assert json.loads(result.cursor)["updated_at"] == NOW - 10
+
+
+def test_a_later_poll_asks_only_for_what_changed_since_the_cursor(polling):
+    tracker, transport = polling
+    transport.queue = [poll_node("ABC-1", updated=NOW - 10)]
+    cursor = tracker.poll(None, []).cursor
+    transport.calls.clear()
+    transport.queue = []
+
+    result = tracker.poll(cursor, [])
+
+    ((name, variables),) = transport.calls
+    # Read a little further back than the cursor: the router drops what it has seen.
+    since = datetime.fromisoformat(variables["filter"]["updatedAt"]["gt"]).timestamp()
+    assert since == NOW - 10 - OVERLAP_SECS
+    # A quiet team keeps its cursor and costs one query.
+    assert json.loads(result.cursor)["updated_at"] == NOW - 10
+
+
+def test_the_queue_is_read_page_by_page(polling):
+    tracker, _ = polling
+    pages = iter([
+        {"issues": {"nodes": [poll_node("ABC-1", updated=NOW)],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "p2"}}},
+        {"issues": {"nodes": [poll_node("ABC-2", updated=NOW)],
+                    "pageInfo": {"hasNextPage": False}}},
+    ])
+    afters = []
+
+    def paged(query, variables=None):
+        afters.append(variables["after"])
+        return next(pages)
+
+    tracker._post = paged
+
+    assert [i.identifier for i in tracker.poll(None, []).queued] == ["ABC-1", "ABC-2"]
+    assert afters == [None, "p2"]
+
+
+def test_followed_issues_give_their_new_comments_and_their_state(polling):
+    tracker, transport = polling
+    first = tracker.poll(None, []).cursor
+    transport.followed = [
+        poll_node(
+            "ABC-1", updated=NOW, labels=("chargehand-running",),
+            comments=[
+                comment("c-old", created=NOW - 3 * OVERLAP_SECS),
+                comment("c-new", created=NOW - 5),
+                comment("c-own", created=NOW - 4, author="me@example.invalid",
+                        body=f"done.\n\n{AUTHORSHIP_MARKER}"),
+            ],
+        ),
+        poll_node("ABC-2", updated=NOW - 1, state_type="completed"),
+    ]
+    tracker.clock = lambda: NOW + 60
+
+    result = tracker.poll(first, ["id-ABC-1", "id-ABC-2"])
+
+    # Read from the previous poll on, less the overlap; an older comment is not news.
+    assert [(c.id, c.issue.identifier, c.author, c.marked) for c in result.comments] == [
+        ("c-new", "ABC-1", "other@example.invalid", False),
+        ("c-own", "ABC-1", "me@example.invalid", True),
+    ]
+    assert not any(hasattr(c, "body") for c in result.comments)
+    assert [(i.identifier, i.closed) for i in result.followed] == [
+        ("ABC-1", False), ("ABC-2", True)
+    ]
+    name, variables = transport.calls[-1]
+    assert name == "Followed"
+    assert variables["filter"] == {"id": {"in": ["id-ABC-1", "id-ABC-2"]}}
+    since = datetime.fromisoformat(variables["comments"]["createdAt"]["gt"]).timestamp()
+    assert since == NOW - OVERLAP_SECS
+    assert json.loads(result.cursor)["items"] == {"id-ABC-1": NOW + 60, "id-ABC-2": NOW + 60}
+
+
+def test_a_followed_issue_is_read_from_its_own_last_poll(polling):
+    tracker, transport = polling
+    transport.followed = [
+        poll_node("ABC-1", updated=NOW, comments=[
+            comment("before", created=NOW - 1000), comment("c1", created=NOW + 500),
+        ])
+    ]
+    cursor = tracker.poll(None, []).cursor
+    # Followed from the second poll on: read from the first poll, not from the beginning.
+    tracker.clock = lambda: NOW + 1000
+    second = tracker.poll(cursor, ["id-ABC-1"])
+    tracker.clock = lambda: NOW + 3000
+    third = tracker.poll(second.cursor, ["id-ABC-1"])
+
+    assert [c.id for c in second.comments] == ["c1"]
+    assert third.comments == []
+
+
+def test_no_followed_issue_means_no_second_query(polling):
+    tracker, transport = polling
+
+    tracker.poll(None, [])
+
+    assert [name for name, _ in transport.calls] == ["Poll"]
+
+
+def test_a_cursor_that_does_not_parse_starts_over(polling):
+    tracker, transport = polling
+
+    tracker.poll("not json", [])
+
+    assert "updatedAt" not in transport.calls[0][1]["filter"]
+
+
+def test_the_linear_tracker_as_a_source_gives_labeled_comment_and_done_events(polling):
+    tracker, transport = polling
+    repository = Repository(
+        name="app", path=Path("/repo"), tracker=TrackerConfig(type="linear", options={}),
+        labels=Labels(**LABELS),
+    )
+    source = TrackerSource(tracker, repository)
+    transport.queue = [poll_node("ABC-3", updated=NOW - 1)]
+    transport.followed = [
+        poll_node("ABC-1", updated=NOW, comments=[comment("c1", created=NOW + 1)]),
+        poll_node("ABC-2", updated=NOW - 2, state_type="canceled"),
+    ]
+    items = [WorkItem("linear", "ABC-1", "id-ABC-1"), WorkItem("linear", "ABC-2", "id-ABC-2")]
+
+    events, cursor = source.poll(None, items)
+
+    assert [(e.source, e.kind, e.item.key, e.item.ref, e.item.hint) for e in events] == [
+        ("linear", "labeled", "ABC-3", "id-ABC-3", "app"),
+        ("linear", "done", "ABC-2", "id-ABC-2", "app"),
+        ("linear", "comment", "ABC-1", "id-ABC-1", "app"),
+    ]
+    assert all(TrackerSource.produced(e) for e in events)
+    assert events[2].actor == "other@example.invalid"
+    assert events[2].pointer == "https://linear.app/x/issue/ABC-1"
+    assert cursor is not None
