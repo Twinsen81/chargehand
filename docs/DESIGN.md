@@ -100,22 +100,24 @@ that start on it, the first one listed in the repository's `roles` takes the iss
 The runner needs four operations and never reads issue bodies: `whoami`, `list(status)`,
 `mark(issue, status)` with status ∈ queued / running / blocked / done, and `get(issue)` for
 the verify-by-re-read after every write. An adapter may add `poll(cursor, followed)`, which
-returns the queue changed since the cursor, the followed issues as they are now, and their
-new comments without their text; the default lists the whole queue and re-reads each
-followed issue.
+returns the whole queue, the followed issues as they are now, and their comments since the
+cursor without their text; the default re-reads each followed issue and has no comments.
 
 The tick reaches a repository's tracker only as an event source named after the tracker
 type (see "Event sources and the router"). The queue becomes a `labeled` event for each
 queued issue, and the issues that live workers follow give `comment` and `done` events. A
 `labeled` event is news again once the issue changed, so a re-armed issue starts a new
-worker. The cursor is kept per repository. The tracker is polled after the state diff, so
-a slot that a finished worker frees is used in the same tick, and a paused repository is not
-polled. A queue start that waited for a slot is dropped when the issue has left the queue in
-the meantime.
+worker. Every poll lists the whole queue, as admission always did: a queue start that the
+router gave up after a week comes back from the next listing. The cursor is kept per
+repository. The tracker step polls every tracker after the state diff, then tries the
+waiting queue starts, then the new ones, so a slot that a finished worker frees is used in
+the same tick; each waiting start is tried once per tick. A paused repository is not
+polled. A queue start waits while a live worker holds the issue or while a role file does
+not load, and is dropped once the issue has left the queue.
 
 | Adapter | Notes |
 |---|---|
-| `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. The poll asks for the queue with `updatedAt` after the latest one it has seen, so a quiet team costs one small query, and reads the followed issues and their comments since each issue's previous poll in one more query, both with a five-minute overlap that the router's dedupe absorbs. A comment body is read only for the authorship marker. |
+| `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. The poll lists the queue in one paged query, and reads the followed issues and their comments since each issue's previous poll in one more query, with a five-minute overlap that the router's dedupe absorbs; an issue whose page of comments was full is read from the same point again. A comment body is read only for the authorship marker. |
 | `github` | Through the `gh` CLI, so there is no token handling. No workflow states: the trigger is label + assignee + open. `tracker = { type = "github", repo = "owner/repo" }`; labels change with `gh issue edit` and are verified by a re-read. |
 | `command` | The escape hatch: you configure `list`, `mark`, `get`, and `whoami` commands that print a small JSON contract. |
 
@@ -182,10 +184,12 @@ The source's cursor is saved after its events are routed, so a source that fails
 error in the report and its events arrive on a later tick. The queue label starts its
 workers through the same router, as a `labeled` event from the repository's tracker; a
 `labeled` event from a `[[source]]` starts nothing. The implementer role starts on it,
-subscribes to `comment` and closes on `done`. A `[[source]]` may share its name with a
-tracker type, such as a `github` source next to a GitHub Issues queue: they share
-subscriptions, so a comment either one reports reaches the worker, and the tracker's dedupe
-ids carry their own prefix. Only a worker the queue label started changes the label;
+subscribes to `comment` and declares `close_on = ["done"]`; no code acts on `close_on`
+yet, and a worker ends when the tick finds its issue closed, as before. A `[[source]]` may
+share its name with a tracker type, such as a `github` source next to a GitHub Issues
+queue: they share subscriptions, so a comment that the source reports reaches the worker,
+the tracker leaves the followed items to that source, and the tracker's dedupe ids carry
+their own prefix. Only a worker the queue label started changes the label;
 every other worker on the issue only reads it. The ledger records this when the worker is
 created, so an edit of a role file cannot move the label to another worker. A worker started
 by another event ends when its source reports its primary item closed. A start URL from a

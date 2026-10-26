@@ -55,7 +55,8 @@ unless_subscribed = "role"
 # The events on the issue that reach the worker's inbox: here, new comments. A comment a
 # chargehand worker posted carries a marker and reaches nobody.
 subscribe = ["comment"]
-# The worker ends when the issue is closed.
+# The event that ends the worker. For now the tick ends a worker that is not working
+# once it finds the issue closed, with or without this key.
 close_on = ["done"]
 
 [policy]

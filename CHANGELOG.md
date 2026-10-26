@@ -66,12 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The queue becomes `labeled` events through the router, and the issues that live workers
   follow give `comment` and `done` events, so a comment on an issue lands in the inbox of
   every worker that follows it; a comment a worker posted with the authorship marker does
-  not. The `linear` adapter asks only for the queue changed since the latest `updatedAt`
-  it has seen, and reads the followed issues and their comments in one more query. The
-  implementer role of a pre-roles `.chargehand.toml` subscribes to `comment` and closes
-  on `done`. A start that the caps defer is now offered again after the state diff, so
-  the tick that frees a slot uses it; a deferred queue start is dropped when its issue has
-  left the queue.
+  not. The `linear` adapter still lists the whole queue on each poll, and reads the
+  followed issues and their comments since each one's previous poll in one more query.
+  The implementer role, from a pre-roles `.chargehand.toml` or from the starter role file,
+  subscribes to `comment` and declares `close_on = ["done"]`. A queue start waits in the
+  router while the caps, a pause, a live worker on the issue or a broken role file hold it
+  back, is tried after the state diff so the tick that frees a slot uses it, and is
+  dropped once its issue has left the queue.
 - A `github` event source and a `github` tracker, both through the `gh` CLI. The source
   polls the account's notifications with `If-Modified-Since` at the pace that GitHub's
   `X-Poll-Interval` asks for, and the pull requests that workers follow for comments,
