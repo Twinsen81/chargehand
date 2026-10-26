@@ -88,13 +88,15 @@ def test_a_blocked_run_shows_how_to_attach(capsys, config_file, harness):
     assert "claude attach" in capsys.readouterr().out
 
 
-def test_an_idle_worker_shows_how_to_attach(capsys, config_file, harness):
+@pytest.mark.parametrize("state", [ledger_mod.IDLE, ledger_mod.QUEUED])
+def test_an_idle_or_queued_worker_shows_how_to_attach(capsys, config_file, harness, state):
     """Its turn ended; what the turn left is in the session."""
     harness.board.add("ABC-1")
     run(["tick"], config_file)
     harness.claude_state.set_session_state("ABC-1", "done")
     run(["tick"], config_file)
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    harness.ledger.update(harness.worker("ABC-1"), state=state)
     capsys.readouterr()
 
     run(["status", "--json", "--no-queue"], config_file)
