@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `command` event source for any system without a built-in source: a configured
+  executable reads the cursor on stdin and prints events as JSON lines, with optional
+  `mark` and `item_open` commands. The contract is documented in `docs/command-source.md`.
 - Delivery. Once per tick, each idle worker with events in its inbox gets one wake that
   lists the events' pointers and continues the same session, admitted against
   `max_concurrent`, the role's `max_wakes_per_day` and the usage reserve. The events are
