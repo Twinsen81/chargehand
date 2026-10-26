@@ -159,7 +159,11 @@ def main(argv: list[str]) -> int:
         record(state, "launches", {"argv": argv, "cwd": os.getcwd()})
         if len(state["launches"]) in state.get("drop_trust_at_launches", []):
             drop_trust(os.getcwd())
-        if state.get("require_trust") and not is_trusted(os.getcwd()):
+        # refuse_as_untrusted models a refusal with another cause: the entry is in the
+        # file, and the launch is refused anyway.
+        if state.get("refuse_as_untrusted") or (
+            state.get("require_trust") and not is_trusted(os.getcwd())
+        ):
             save(state)
             sys.stderr.write(
                 f"Workspace not trusted. Run `claude` in {os.getcwd()} once and accept the "

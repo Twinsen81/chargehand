@@ -1338,8 +1338,10 @@ class Runner:
 
         A Claude Code process that is already running can write its configuration file
         back without the entry written a moment before, and the launch is then refused.
-        Writing the entry again and launching at once has been enough, so that is done
-        here a few times, rather than leaving it to the next tick.
+        When that was seen, writing the entry again and launching at once succeeded, so
+        that is done here a few times, rather than leaving it to the next tick. A retry
+        helps only when the entry is gone: a refusal while the entry is still in the
+        file has another cause, and is reported at once.
         """
         attempt = 1
         while True:
@@ -1358,21 +1360,28 @@ class Runner:
             except WorkspaceNotTrusted as exc:
                 if not trusted:
                     raise
+                config_file = self.claude.config_file()
+                if self.claude.is_trusted(worker.worktree_path):
+                    raise WorkspaceNotTrusted(
+                        f"{exc} (the trust entry is still in {config_file}, so writing it "
+                        f"again would change nothing; Claude Code may be checking another "
+                        f"path or an older copy of the file)"
+                    ) from exc
                 if attempt >= TRUST_LAUNCH_ATTEMPTS:
                     raise WorkspaceNotTrusted(
-                        f"{exc} (refused {attempt} times in a row, each time just after "
-                        f"the trust entry was written; another Claude Code process may be "
-                        f"writing {self.claude.config_file()} back without it)"
+                        f"{exc} (refused {attempt} times in a row, and each time the trust "
+                        f"entry was gone from {config_file} afterwards; another Claude Code "
+                        f"process may be writing the file back without it)"
                     ) from exc
                 log.warning(
-                    "%s: launch refused as untrusted although the trust entry was written; "
+                    "%s: launch refused as untrusted and the trust entry was gone from %s; "
                     "writing it again (attempt %s of %s)",
-                    worker.handle, attempt + 1, TRUST_LAUNCH_ATTEMPTS,
+                    worker.handle, config_file, attempt + 1, TRUST_LAUNCH_ATTEMPTS,
                 )
                 attempt += 1
 
     def _trust_worktree(self, worker: Worker, report: TickReport) -> bool:
-        """True when the worktree's trust entry is written, False when it is not ours to write."""
+        """True when the worktree's trust entry is in place, False when it was not written."""
         if not self.config.trust_worktrees:
             return False
         if self.claude.trust_worktree(worker.worktree_path):

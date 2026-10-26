@@ -293,13 +293,30 @@ def test_a_launch_refused_as_untrusted_every_time_is_left_to_the_next_tick(harne
 
     assert report.launched == []
     assert len(harness.claude_state.launches) == TRUST_LAUNCH_ATTEMPTS
-    assert any(f"refused {TRUST_LAUNCH_ATTEMPTS} times in a row" in error for error in report.errors)
+    assert any(
+        f"refused {TRUST_LAUNCH_ATTEMPTS} times in a row, and each time the trust entry was gone"
+        in error for error in report.errors
+    )
     assert harness.worker("ABC-1").state == ledger_mod.LAUNCHING
 
     harness.claude_state.set(drop_trust_at_launches=[])
     report = harness.next_tick()
 
     assert report.launched == ["ABC-1"]
+
+
+def test_a_refusal_while_the_trust_entry_is_still_there_is_not_retried(harness):
+    """Writing the entry again cannot help, and blaming a write-back would mislead."""
+    harness.claude_state.set(refuse_as_untrusted=True)
+    harness.board.add("ABC-1")
+
+    report = harness.tick()
+
+    assert report.launched == []
+    assert len(harness.claude_state.launches) == 1
+    assert harness.runner.claude.is_trusted(harness.worktree("ABC-1")) is True
+    assert any("still in" in error for error in report.errors)
+    assert not any("times in a row" in error for error in report.errors)
 
 
 def test_an_untrusted_refusal_is_not_retried_when_the_operator_turned_trust_off(harness):
