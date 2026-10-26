@@ -173,6 +173,37 @@ def test_a_waiting_start_is_tried_once_per_tick(harness):
     ]
 
 
+def test_waiting_starts_make_no_tracker_call_while_the_poll_fails(harness, monkeypatch):
+    from chargehand.errors import TrackerError
+    from support import fake_tracker
+
+    for index in range(5):
+        harness.board.add(f"ABC-{index}")
+    harness.tick()
+    assert len(harness.ledger.pending_start_events()) == 3
+
+    working = fake_tracker.FakeTracker.list
+
+    def down(self, status):
+        if status.value != "queued":
+            return working(self, status)
+        self.board.calls.append(("list", status.value))
+        raise TrackerError("tracker is down")
+
+    monkeypatch.setattr(fake_tracker.FakeTracker, "list", down)
+    harness.board.calls.clear()
+    harness.claude_state.set_session_state("ABC-0", "blocked")
+    report = harness.next_tick()
+
+    queue_reads = [call for call in harness.board.calls if call == ("list", "queued")]
+    assert len(queue_reads) == 1
+    assert [error for error in report.errors if "tracker is down" in error] == [
+        "repository test: tracker is down"
+    ]
+    assert report.launched == []
+    assert len(harness.ledger.pending_start_events()) == 3
+
+
 def test_a_source_with_the_trackers_name_reads_the_followed_issues(
     tmp_path, repo, claude_state, board
 ):

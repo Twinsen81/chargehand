@@ -283,6 +283,9 @@ class Runner:
         # Which starts this step tries: a `[[source]]`'s in the route step, a tracker's in
         # the tracker step. Each waiting start is tried once per tick.
         self._trackers_turn = False
+        # The repositories whose tracker this tick polled. A queue start of any other
+        # waits, with no tracker call: its poll failed and was reported once.
+        self._polled_trackers: set[str] = set()
         self._sessions: dict[str, list[Session]] = {}
 
     # ----- collaborators ----------------------------------------------------
@@ -995,9 +998,11 @@ class Runner:
                 event, report, crash_after_step=crash_after_step
             ),
         )
+        # The tracker starts are kept for the tracker step, so they are not counted here.
+        later = sum(TrackerSource.produced(event) for event in self.ledger.pending_start_events())
         retried = router.retry_pending_starts()
-        if retried.deferred:
-            report.routed.append(f"{retried.deferred} start(s) still deferred")
+        if retried.deferred > later:
+            report.routed.append(f"{retried.deferred - later} start(s) still deferred")
         for config in self.config.sources:
             source = self.source(config.name)
             if source is None:
@@ -1038,7 +1043,8 @@ class Runner:
         _, given_up = self.ledger.prune_events()
         if given_up:
             report.warnings.append(
-                f"gave up {given_up} start(s) that waited longer than a week for a launch slot"
+                f"gave up {given_up} start(s) that waited longer than a week for a launch slot; "
+                f"an issue still in a tracker's queue is offered again from the queue"
             )
 
     def _start_from_event(
@@ -1083,6 +1089,9 @@ class Runner:
             report.skipped.append(f"{event.item.key}: repository {repository.name} is paused")
             return True
         if queue:
+            if repository.name not in self._polled_trackers:
+                # This tick's poll failed and is reported; the queue cannot be checked.
+                return True
             # A start that waited may have left the queue since. The tracker step polls
             # before it retries, so this reads the listing of this tick's poll.
             try:
@@ -1433,6 +1442,7 @@ class Runner:
                 )
                 continue
             polled.append((repository, events, cursor))
+        self._polled_trackers = {repository.name for repository, _, _ in polled}
         return polled
 
     def _followed_items(self, context: RepositoryContext) -> list[WorkItem]:
