@@ -62,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `github` event source and a `github` tracker, both through the `gh` CLI. The source
+  polls the account's notifications with `If-Modified-Since` at the pace that GitHub's
+  `X-Poll-Interval` asks for, and the pull requests that workers follow for comments,
+  reviews, commit statuses, check runs and the close; a `[[repository]]` maps its events by
+  `github = "owner/repo"`. The tracker lets GitHub Issues be a repository's queue.
 - Event sources and a publish-and-subscribe router. A `[[source]]` table in the machine
   configuration names a poller (`name`, `type`, and the type's own options); each tick
   polls every source after the watchdog, drops events seen before and comments that a
