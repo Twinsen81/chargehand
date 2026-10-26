@@ -67,6 +67,9 @@ _PLAIN_OWNER = re.compile(r"[a-z0-9-]+")
 _API_PATH = re.compile(r"/repos/([^/]+)/([^/]+)/(pulls|issues)/([0-9]{1,10})$")
 
 
+_UNKNOWN = object()
+
+
 class NotFound(TrackerError):
     """gh answered 404 (or 410): the object is gone or this account cannot see it."""
 
@@ -391,6 +394,7 @@ class GithubSource(Source):
         self.gh = _gh_from(options, f"source {name}")
         self.clock: Callable[[], float] = time.time
         self._login: str | None = None
+        self._teams: set[object] | None | object = _UNKNOWN
 
     def whoami(self) -> str:
         if self._login is None:
@@ -414,7 +418,17 @@ class GithubSource(Source):
             # worker that follows it was started after that poll and reads the item
             # itself, so what came before is not news to it.
             since = state.items.get(item.key, state.polled_at if state.polled_at else now)
-            events += self._poll_item(ref, since)
+            try:
+                events += self._poll_item(ref, since)
+            except TrackerAuthError:
+                raise
+            except TrackerError as exc:
+                # One item this account can no longer read (SSO, a server error) must not
+                # hold back the review requests of every other repository. The item keeps
+                # its old time, so the next poll reads it again from there.
+                log.warning("github: could not read %s: %s", ref, exc)
+                state.items[item.key] = since
+                continue
             state.items[item.key] = now
         state.items = {key: value for key, value in state.items.items() if key in followed}
         state.polled_at = now
@@ -448,7 +462,12 @@ class GithubSource(Source):
 
     def _poll_notifications(self, state: Cursor, followed: set[str], now: float) -> list[Event]:
         path = f"notifications?per_page={PAGE_SIZE}"
+        # The first poll reads the unread threads only, so that turning the source on does
+        # not replay the account's history. Later polls read the threads that were read
+        # too: the operator receives the review requests, and opening one in a browser
+        # before the next poll must not hide it. `since` keeps that list short.
         if state.last_modified:
+            path += "&all=true"
             try:
                 since = parsedate_to_datetime(state.last_modified).timestamp()
             except (TypeError, ValueError):
@@ -512,8 +531,9 @@ class GithubSource(Source):
         A thread keeps its reason when later activity updates it, so a comment on a pull
         request whose review was finished long ago would otherwise read as a new review
         request. GitHub drops the account from the requested reviewers once it submits a
-        review, and adds it again on a re-request. A team request cannot be checked
-        without the account's teams, so any requested team counts.
+        review, and adds it again on a re-request. A team request counts when the account
+        is in the team; when gh may not list the account's teams (the token lacks the
+        org scope), any requested team counts.
         """
         try:
             pull = self.gh.api_one(f"repos/{ref.full_name}/pulls/{ref.number}")
@@ -524,7 +544,28 @@ class GithubSource(Source):
         reviewers = pull.get("requested_reviewers") or []
         teams = pull.get("requested_teams") or []
         me = self.whoami().lower()
-        return bool(teams) or any(_login(user).lower() == me for user in reviewers)
+        if any(_login(user).lower() == me for user in reviewers):
+            return True
+        if not teams:
+            return False
+        mine = self._team_ids()
+        return mine is None or any(
+            isinstance(team, Mapping) and team.get("id") in mine for team in teams
+        )
+
+    def _team_ids(self) -> set[object] | None:
+        """The ids of the account's teams, once per source; None when gh may not list them."""
+        if self._teams is _UNKNOWN:
+            try:
+                self._teams = {
+                    team.get("id") for team in self.gh.api_list(f"user/teams?per_page={PAGE_SIZE}")
+                }
+            except TrackerAuthError:
+                raise
+            except TrackerError as exc:
+                log.warning("github: cannot list the account's teams, so any team counts: %s", exc)
+                self._teams = None
+        return self._teams  # type: ignore[return-value]
 
     # ----- one followed item --------------------------------------------------
 
@@ -553,9 +594,17 @@ class GithubSource(Source):
             return self._comments(item, f"{base}/issues/{ref.number}/comments", since, "issue_comment")
 
         item = self._work_item(ref, pull=True, url=pull.get("html_url"))
-        events = self._comments(item, f"{base}/pulls/{ref.number}/comments", since, "review_comment")
+        review_comments = self._list_since(f"{base}/pulls/{ref.number}/comments", since)
+        events = self._comment_events(item, review_comments, since, "review_comment")
         events += self._comments(item, f"{base}/issues/{ref.number}/comments", since, "issue_comment")
-        events += self._reviews(item, f"{base}/pulls/{ref.number}/reviews", since)
+        # A review with no body (inline comments only, or a plain approval) cannot carry
+        # the marker itself; its inline comments can.
+        marked_reviews = {
+            entry.get("pull_request_review_id")
+            for entry in review_comments
+            if _marked(entry.get("body"))
+        }
+        events += self._reviews(item, f"{base}/pulls/{ref.number}/reviews", since, marked_reviews)
         sha = (pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), Mapping) else None
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
             events += self._statuses(item, f"{base}/commits/{sha}/statuses", since)
@@ -590,10 +639,19 @@ class GithubSource(Source):
             marked=marked,
         )
 
+    def _list_since(self, path: str, since: float) -> list[Mapping[str, Any]]:
+        return self.gh.api_list(
+            f"{path}?per_page={PAGE_SIZE}&since={_iso(since - CLOCK_SKEW_SECS)}"
+        )
+
     def _comments(self, item: WorkItem, path: str, since: float, prefix: str) -> list[Event]:
-        query = f"{path}?per_page={PAGE_SIZE}&since={_iso(since - CLOCK_SKEW_SECS)}"
+        return self._comment_events(item, self._list_since(path, since), since, prefix)
+
+    def _comment_events(
+        self, item: WorkItem, entries: Iterable[Mapping[str, Any]], since: float, prefix: str
+    ) -> list[Event]:
         events = []
-        for entry in self.gh.api_list(query):
+        for entry in entries:
             at = _timestamp(entry.get("created_at"))
             if at is None or at < since - CLOCK_SKEW_SECS or entry.get("id") is None:
                 continue
@@ -606,7 +664,9 @@ class GithubSource(Source):
             )
         return events
 
-    def _reviews(self, item: WorkItem, path: str, since: float) -> list[Event]:
+    def _reviews(
+        self, item: WorkItem, path: str, since: float, marked_reviews: set[object]
+    ) -> list[Event]:
         events = []
         for entry in self.gh.api_list(f"{path}?per_page={PAGE_SIZE}"):
             # A pending review has no submission time and is visible to its author only.
@@ -617,7 +677,7 @@ class GithubSource(Source):
                 self._event(
                     item, "review", dedupe=f"review:{entry['id']}",
                     actor=_login(entry.get("user")), at=at, url=entry.get("html_url"),
-                    marked=_marked(entry.get("body")),
+                    marked=_marked(entry.get("body")) or entry["id"] in marked_reviews,
                 )
             )
         return events
@@ -713,7 +773,11 @@ class GithubTracker(Tracker):
         return issues
 
     def get(self, issue_id: str) -> Issue | None:
-        ref = parse_ref(issue_id)
+        """Re-read one issue by its ``owner/repo#number``, or by its item key.
+
+        A session adopted with no ledger row behind it knows only its item key.
+        """
+        ref = parse_ref(issue_id) or self._ref_for_key(issue_id)
         if ref is None:
             return None
         try:
@@ -770,6 +834,14 @@ class GithubTracker(Tracker):
                 f"shows labels {sorted(fresh.labels)}"
             )
         return fresh
+
+    def _ref_for_key(self, key: str) -> Ref | None:
+        match = re.search(r"_([0-9]{1,10})(?:-[0-9a-f]{8})?$", key or "")
+        if not match:
+            return None
+        owner, repo = self.repo.split("/")
+        ref = make_ref(owner, repo, match.group(1))
+        return ref if ref is not None and item_key(ref) == key else None
 
     def _matches(self, issue: Issue, status: Status) -> bool:
         target = self._label_for(status)

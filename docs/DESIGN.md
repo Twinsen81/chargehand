@@ -146,14 +146,19 @@ The `github` source works through the `gh` CLI, so chargehand handles no token, 
 the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
 signed-in account gives `review_requested`, `comment`, `mention` and `ci_status` (GitHub's
 `ci_activity`); it is asked with `If-Modified-Since`, so an unchanged list costs nothing
-against the rate limit, and no more often than its `X-Poll-Interval` header allows. A review
-request counts only while the pull request is open and still asks the account (or one of
-its teams) for a review, because a notification thread keeps its reason when later activity
-updates it. Then, for each pull request a live worker subscribes to, the source reads the
+against the rate limit, and no more often than its `X-Poll-Interval` header allows. The
+first poll reads the unread threads only, so turning the source on does not replay the
+account's history; later polls read the threads you have already read too, so a review
+request opened in a browser before the poll still arrives. A review request counts only
+while the pull request is open and still asks the account, or a team it is in, for a review,
+because a notification thread keeps its reason when later activity updates it. When `gh`
+may not list the account's teams, any requested team counts. Then, for each pull request a live worker subscribes to, the source reads the
 review comments, the reviews, the issue comments, and the commit statuses and check runs on
 the head commit, which gives `comment`, `review`, `ci_status` and `pr_closed`; a followed
-item gets only review requests from the notifications, so nothing arrives twice. Dedupe ids
-are GitHub's object ids. An item is `owner/repo#number`; its key is `owner_repo_number` in
+item gets only review requests from the notifications, so nothing arrives twice. An item
+that `gh` cannot read is logged and read again from the same point on the next poll; it
+does not hold back the other items. A review counts as marked when its body or one of its
+inline comments carries the authorship marker. Dedupe ids are GitHub's object ids. An item is `owner/repo#number`; its key is `owner_repo_number` in
 lower case, or a shortened form with a digest when a name does not fit a path or a branch
 name, and a name that GitHub itself would refuse is skipped. A start event belongs to the
 `[[repository]]` whose `github` key names its `owner/repo`; on any other repository it

@@ -214,16 +214,46 @@ def test_a_followed_item_gets_only_review_requests_from_notifications(source, gh
 
 
 def test_a_review_request_counts_only_while_it_is_still_asked_of_me(source, gh):
+    gh.set(teams=[100])
     gh.add_pull("octo/app#1")
     gh.add_pull("octo/app#2", reviewers=("someone-else",))
-    gh.add_pull("octo/app#3", reviewers=(), teams=("reviewers",))
+    gh.add_pull("octo/app#3", reviewers=(), teams=(100,))
     gh.add_pull("octo/app#4", state="closed")
-    for number in range(1, 6):
+    gh.add_pull("octo/app#6", reviewers=(), teams=(200,))
+    for number in range(1, 7):
         gh.notify("review_requested", f"octo/app#{number}")
 
     events, _ = source.poll(None, [])
 
     assert [e.item.ref for e in events] == ["octo/app#1", "octo/app#3"]
+    # The account's teams are listed once per source, not once per notification.
+    assert api_paths(gh).count("user/teams?per_page=100") == 1
+
+
+def test_any_requested_team_counts_when_the_teams_cannot_be_listed(source, gh):
+    gh.add_pull("octo/app#6", reviewers=(), teams=(200,))
+    gh.notify("review_requested", "octo/app#6")
+
+    events, _ = source.poll(None, [])
+
+    assert [e.item.ref for e in events] == ["octo/app#6"]
+
+
+def test_a_thread_read_before_the_poll_is_not_lost(source, gh, clock):
+    gh.add_pull(PR)
+    gh.notify("mention", "octo/app#9", kind="Issue")
+    gh.notify("review_requested", "octo/app#5", unread=False)
+    _, cursor = source.poll(None, [])
+    # The first poll reads only the unread threads, so it does not replay the history.
+    assert "all=true" not in api_paths(gh)[0]
+
+    # The operator opens the review request in a browser before the next poll.
+    gh.notify("review_requested", PR, updated_at="2026-10-26T10:05:00Z", unread=False)
+    clock.now += 61
+    events, _ = source.poll(cursor, [])
+
+    assert ("review_requested", PR_KEY) in [(e.kind, e.item.key) for e in events]
+    assert "all=true" in [p for p in api_paths(gh) if p.startswith("notifications")][-1]
 
 
 # ----- per pull request ------------------------------------------------------------
@@ -336,6 +366,57 @@ def test_a_followed_issue_gives_its_comments(source, gh, clock):
 
 def test_a_followed_item_that_is_gone_gives_nothing(source, gh):
     assert source.poll(None, followed())[0] == []
+
+
+def test_a_review_without_a_body_is_marked_by_its_marked_inline_comments(source, gh, clock):
+    _, cursor = source.poll(None, [])
+    gh.add_pull(PR)
+    gh.add("reviews", PR, {"id": 51, "user": {"login": "operator"}, "body": "",
+                           "state": "COMMENTED", "submitted_at": iso(NOW + 10)})
+    gh.add("review_comments", PR, {"id": 52, "pull_request_review_id": 51,
+                                   "user": {"login": "operator"},
+                                   "body": f"nit {AUTHORSHIP_MARKER}", "created_at": iso(NOW + 10)})
+    gh.add("reviews", PR, {"id": 53, "user": {"login": "operator"}, "body": "",
+                           "state": "APPROVED", "submitted_at": iso(NOW + 10)})
+    clock.now += 60
+
+    events, _ = source.poll(cursor, followed())
+
+    marked = {e.dedupe_id: e.marked for e in events}
+    assert marked == {"review:51": True, "review_comment:52": True, "review:53": False}
+
+
+def test_one_unreadable_item_does_not_hold_back_the_others(source, gh, clock):
+    _, cursor = source.poll(None, [])
+    gh.add_pull(PR)
+    gh.add_pull("octo/app#8")
+    gh.add("issue_comments", PR, {"id": 61, "user": {"login": "a"}, "created_at": iso(NOW + 10)})
+    gh.add("issue_comments", "octo/app#8", {"id": 62, "user": {"login": "a"},
+                                            "created_at": iso(NOW + 10)})
+    gh.set(fail=[{"match": "pulls/8", "stderr": "Resource protected by SAML (HTTP 403)"}])
+    gh.notify("mention", "octo/app#9", kind="Issue")
+    clock.now += 61
+
+    events, cursor = source.poll(cursor, followed() + followed("octo/app#8"))
+
+    assert sorted(e.dedupe_id for e in events) == [
+        "issue_comment:61", "notification:1:2026-10-26T10:00:00Z",
+    ]
+    # The failed item keeps its old time and is read from there once it recovers.
+    times = json.loads(cursor)["items"]
+    assert times[PR_KEY] == clock.now and times["octo_app_8"] == NOW
+    gh.set(fail=[])
+    clock.now += 60
+    events, _ = source.poll(cursor, followed() + followed("octo/app#8"))
+    assert "issue_comment:62" in {e.dedupe_id for e in events}
+
+
+def test_an_auth_failure_on_an_item_still_fails_the_poll(source, gh):
+    gh.add_pull(PR)
+    gh.set(fail=[{"match": "pulls/7", "exit": 4, "stderr": "gh auth login"}])
+
+    with pytest.raises(TrackerAuthError):
+        source.poll(None, followed())
 
 
 def test_item_open(source, gh):
@@ -495,6 +576,18 @@ def test_a_write_that_cannot_be_verified_is_ambiguous(tracker, gh):
 def test_get_of_an_issue_that_is_gone_is_none(tracker, gh):
     assert tracker.get("octo/app#404") is None
     assert tracker.get("not a ref") is None
+
+
+def test_get_by_item_key_for_an_adopted_session(tracker, gh):
+    """A session adopted with no ledger row behind it knows only its item key."""
+    gh.add_issue("octo/app#1", labels=["chargehand-running"])
+
+    issue = tracker.get("octo_app_1")
+
+    assert issue is not None and (issue.id, issue.identifier) == ("octo/app#1", "octo_app_1")
+    # A key of another repository, or one that only ends like a key, is not this one.
+    assert tracker.get("other_app_1") is None
+    assert tracker.get("octo_app_1-deadbeef") is None
 
 
 def test_the_github_tracker_needs_owner_repo(gh):

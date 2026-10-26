@@ -66,6 +66,7 @@ class GhState:
     def notify(
         self, reason: str, ref: str, *, kind: str = "PullRequest", thread: str | None = None,
         updated_at: str = "2026-10-26T10:00:00Z", last_modified: str | None = None,
+        unread: bool = True,
     ) -> None:
         """Add or update a notification thread, and move Last-Modified on."""
         owner_repo, number = ref.split("#")
@@ -79,6 +80,7 @@ class GhState:
                 {
                     "id": thread_id,
                     "reason": reason,
+                    "unread": unread,
                     "updated_at": updated_at,
                     "subject": {
                         "type": kind,
@@ -107,7 +109,7 @@ class GhState:
                 "html_url": f"https://github.com/{owner_repo}/pull/{number}",
                 "head": {"sha": sha},
                 "requested_reviewers": [{"login": login} for login in reviewers],
-                "requested_teams": [{"slug": slug} for slug in teams],
+                "requested_teams": [{"id": team, "slug": f"team-{team}"} for team in teams],
                 **extra,
             }
 
@@ -174,6 +176,9 @@ def notifications(state: dict, args: list[str], query: dict) -> int:
         sys.stdout.write(f"HTTP/2.0 304 Not Modified\r\nX-Poll-Interval: {interval}\r\n\r\n")
         return fail("HTTP 304")
     body = since_filter(state.get("notifications", []), query, "updated_at")
+    # Without all=true, GitHub lists the unread threads only.
+    if query.get("all", ["false"])[0] != "true":
+        body = [thread for thread in body if thread.get("unread", True)]
     sys.stdout.write(
         f"HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
         f"Last-Modified: {last_modified}\r\nX-Poll-Interval: {interval}\r\n\r\n"
@@ -204,6 +209,11 @@ def api(state: dict, args: list[str]) -> int:
         return 0
     if path == "notifications":
         return notifications(state, args, query)
+    if path == "user/teams":
+        if state.get("teams") is None:
+            return fail("Resource not accessible by integration (HTTP 403)")
+        emit_pages([{"id": team} for team in state["teams"]], page_size, paginate)
+        return 0
     if len(segments) < 4 or segments[0] != "repos":
         return fail("Not Found (HTTP 404)")
     owner_repo = f"{segments[1]}/{segments[2]}"
