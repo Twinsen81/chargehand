@@ -754,20 +754,15 @@ class ClaudeRuntime(Runtime):
         return False
 
     def is_stopped(self, session: Session) -> bool:
-        """No process is left: ``stopped`` or ``failed``, or ``done`` without the live fields.
+        """No process is left: the entry has neither ``pid`` nor ``status``, whatever its state.
 
-        Observed in Claude Code 2.1.310: an idle session lists as ``done`` with ``pid`` and
-        ``status: idle`` while its process lives, and after ``claude stop`` it still lists
-        as ``done``, with ``pid`` and ``status`` gone. So ``done`` alone proves nothing, and
-        ``done`` without both fields is the stopped job.
+        ``state`` is the state of the last turn, not of the process. Observed in Claude Code
+        2.1.310: an idle session lists as ``done`` with ``pid`` and ``status: idle`` while
+        its process lives, and after ``claude stop`` it still lists as ``done``, with ``pid``
+        and ``status`` gone. A turn that ended in an error can list as ``failed`` with its
+        process still alive. So only the live fields decide.
         """
-        if session.state in (STOPPED, FAILED):
-            return True
-        return (
-            session.state == DONE
-            and _listed_pid(session) is None
-            and session.raw.get("status") in (None, "")
-        )
+        return _listed_pid(session) is None and session.raw.get("status") in (None, "")
 
     def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
         """Stop the live process, confirm it is gone, then resume by the full session id.

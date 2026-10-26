@@ -200,14 +200,12 @@ def test_the_claude_stop_rule_reads_the_live_fields():
     runtime = ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)))
     parse = claude_mod.parse_session
 
-    assert runtime.is_stopped(parse(stopped_job()))
-    assert runtime.is_stopped(parse(session("stopped")))
-    assert runtime.is_stopped(parse(session("failed")))
-    assert not runtime.is_stopped(parse(live("done")))
-    assert not runtime.is_stopped(parse(session("done", status="idle")))
-    assert not runtime.is_stopped(parse(session("done", pid=86470)))
-    assert not runtime.is_stopped(parse(session("working")))
-    assert not runtime.is_stopped(parse(session("blocked")))
+    # Only the live fields decide; the state is the last turn's.
+    for state in ("done", "blocked", "failed", "stopped", "working"):
+        assert runtime.is_stopped(parse(session(state))), state
+        assert not runtime.is_stopped(parse(live(state))), state
+        assert not runtime.is_stopped(parse(session(state, status="idle"))), state
+        assert not runtime.is_stopped(parse(session(state, pid=86470))), state
 
 
 def test_a_wake_of_an_idle_session_stops_it_and_resumes_by_the_full_session_id(
@@ -234,7 +232,7 @@ def test_a_wake_of_a_stopped_job_does_not_stop_it_again(claude_runtime, claude_s
     assert claude_state.read()["resumes"][0]["target"] == UUID
 
 
-def test_a_wake_waits_for_the_old_process_to_exit(claude_runtime, claude_state, monkeypatch):
+def test_a_wake_waits_for_the_old_process_to_exit(claude_runtime, claude_state):
     # The listing drops pid about a second before the old process ends.
     claude_state.set(sessions=[live("done", pid=86470)])
     ALIVE.add(86470)
@@ -294,6 +292,27 @@ def test_a_wake_does_not_resume_when_the_stop_fails(claude_runtime, claude_state
     assert not result.ok
     assert "exited 1" in result.detail
     assert "resumes" not in claude_state.read()
+
+
+def test_a_wake_of_a_failed_turn_with_a_live_process_stops_it_first(claude_runtime, claude_state):
+    # A turn that ended in an error can leave its process idle and alive.
+    claude_state.set(sessions=[live("failed")])
+
+    result = claude_runtime.wake("s1", "hello")
+
+    assert result.ok
+    assert claude_state.commands == [["stop", "s1"]]
+    assert claude_state.read()["resumes"][0]["target"] == UUID
+
+
+def test_a_wake_of_a_blocked_session_stops_it_and_resumes(claude_runtime, claude_state):
+    claude_state.set(sessions=[live("blocked")])
+
+    result = claude_runtime.wake("s1", "the operator answered: yes")
+
+    assert result.ok
+    assert claude_state.commands == [["stop", "s1"]]
+    assert claude_state.read()["resumes"][0]["prompt"] == "the operator answered: yes"
 
 
 def test_a_wake_of_a_failed_session_resumes_without_a_stop(claude_runtime, claude_state):
