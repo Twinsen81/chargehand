@@ -72,6 +72,9 @@ class Source(abc.ABC):
 
     #: The type name as written in ``[[source]] type = ...``.
     type: str = ""
+    #: Whether :meth:`pull_request_for` can find anything. The tick reads each worker's
+    #: branch only when a source has pull requests.
+    has_pull_requests: bool = False
 
     def __init__(self, name: str, options: Mapping[str, object]) -> None:
         self.name = name
@@ -109,6 +112,14 @@ class Source(abc.ABC):
         such as ``owner/repo``, overrides this.
         """
         return next((r for r in repositories if r.name == item.hint), None)
+
+    def pull_request_for(self, repository: Repository, branch: str) -> WorkItem | None:
+        """The open pull request of *branch* in *repository*, for a source that has them.
+
+        The tick subscribes a worker to the pull request of its own branch, so that a
+        comment or a CI result on it wakes the worker. Other sources have none.
+        """
+        return None
 
     def describe(self) -> str:
         return f"{self.name} ({self.type})"

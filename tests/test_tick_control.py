@@ -443,14 +443,53 @@ def test_continue_refuses_when_the_respawn_did_not_take(harness):
     assert harness.worker("ABC-1").state == ledger_mod.PAUSED
 
 
-def test_an_unrecognised_session_state_is_not_taken_as_stopped(harness):
-    """`unknown` means "go look" everywhere else; it must not authorise deleting a worktree."""
+@pytest.mark.parametrize("process_left", [True, False])
+def test_an_unrecognised_session_state_never_counts_as_stopped(harness, process_left):
+    """`unknown` means "go look" everywhere else; it must not authorise deleting a worktree.
+
+    It fails closed also when the entry has no pid and no status, which for a known state
+    means the process is gone.
+    """
     launch(harness)
-    # The stop reports success, but the listing still says something unrecognised.
-    harness.claude_state.set(stop_state="reticulating-splines")
+    if process_left:
+        # The stop reports success, but the listing keeps the process and says something
+        # unrecognised.
+        harness.claude_state.set(stop_state="reticulating-splines")
+    else:
+        # The stop drops pid and status, and the state is one chargehand does not know.
+        harness.claude_state.set_session_state("ABC-1", "reticulating-splines")
 
     result = apply_request(harness, "discard", "ABC-1")
 
     assert result["ok"] == 0
     assert "still in use" in result["message"]
     assert (harness.worktree("ABC-1")).is_dir()
+
+
+def test_continue_refuses_a_respawn_that_started_no_process(harness):
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    apply_request(harness, "stop", "ABC-1")
+    harness.claude_state.set(respawn_starts_no_process=True)
+
+    result = apply_request(harness, "continue", "ABC-1")
+
+    assert result["ok"] == 0
+    assert harness.worker("ABC-1").state == ledger_mod.PAUSED
+
+
+def test_a_stopped_idle_session_keeps_its_worker_paused(harness):
+    """A stopped Claude Code session still lists `done`, the state of its last turn."""
+    attempt = launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+
+    assert apply_request(harness, "stop", "ABC-1")["ok"] == 1
+    (entry,) = harness.claude_state.sessions
+    assert entry["state"] == "done" and "pid" not in entry
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.PAUSED
+    assert harness.worker("ABC-1").id == attempt.id

@@ -754,18 +754,35 @@ class ClaudeRuntime(Runtime):
         return False
 
     def is_stopped(self, session: Session) -> bool:
-        """No process is left: the entry has neither ``pid`` nor ``status``, whatever its state.
+        """No process is left: the entry has neither ``pid`` nor ``status``, in a known state.
 
         ``state`` is the state of the last turn, not of the process. Observed in Claude Code
         2.1.310: an idle session lists as ``done`` with ``pid`` and ``status: idle`` while
         its process lives, and after ``claude stop`` it still lists as ``done``, with ``pid``
-        and ``status`` gone. A turn that ended in an error can list as ``failed`` with its
-        process still alive. So only the live fields decide.
+        and ``status`` gone. A session stopped in the middle of a turn lists as ``working``
+        without ``pid`` and ``status`` for about a second, then as ``stopped``. A turn that
+        ended in an error can list as ``failed`` with its process still alive. So the live
+        fields decide.
+
+        A state that chargehand does not recognise fails closed: a confirmed stop allows a
+        resume and the removal of a worktree, so a listing it cannot read never counts.
         """
+        if session.state == UNKNOWN:
+            return False
         return _listed_pid(session) is None and session.raw.get("status") in (None, "")
 
-    def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
-        """Stop the live process, confirm it is gone, then resume by the full session id.
+    def wake(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        session_uuid: str | None = None,
+        if_idle: bool = False,
+    ) -> WakeResult:
+        """Stop the live idle process, confirm it is gone, then resume by the full session id.
+
+        With *if_idle*, only a stopped session, or a live one whose last turn ended
+        ``done``, is woken.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -780,6 +797,14 @@ class ClaudeRuntime(Runtime):
         if session is None:
             return WakeResult(False, f"session {session_id} is not in the listing")
         old_pid = _listed_pid(session)
+        if if_idle and not self.is_stopped(session) and session.state != DONE:
+            # A turn runs, or a question or a permission prompt waits; a stop would
+            # interrupt the turn or discard the prompt. The caller's listing may be older:
+            # a leftover background shell starts a turn by itself, and the operator can
+            # answer in agent view.
+            return WakeResult(
+                False, f"session {session_id} is {session.state}, not idle", busy=True
+            )
         if not self.is_stopped(session):
             stopped = self.cli.stop(session_id)
             if stopped.returncode != 0:

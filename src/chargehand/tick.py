@@ -5,15 +5,19 @@ Order, once per tick:
 1. reconcile interrupted launches, from three sides
 2. apply recorded control requests
 3. run the watchdog
-4. poll the event sources and route their events: inboxes, then start rules
-5. diff session states against the ledger and notify on change
-6. sync the tracker labels
-7. poll each repository's tracker and route its events the same way: the queue label is
+4. subscribe each worker to the pull request of its branch, once one exists
+5. poll the event sources and route their events: inboxes, then start rules
+6. diff session states against the ledger and notify on change
+7. deliver: wake each idle worker once for the events in its inbox
+8. sync the tracker labels
+9. poll each repository's tracker and route its events the same way: the queue label is
    a start rule, launched within the caps, ledger row first
-8. collect garbage
+10. collect garbage
 
-The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 7 comes after
+The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 9 comes after
 the state diff so that a slot freed by a finished worker is used in the same tick.
+Delivery comes before it, so a waiting worker gets a free slot before the queue starts a
+new one; a start from a ``[[source]]`` launches earlier, in step 5.
 
 A control command never calls a runtime, git, or a tracker itself; it records a
 request and the tick applies it. Together with the tick lock that gives one writer of
@@ -29,7 +33,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +41,7 @@ from pathlib import Path
 from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import gitutil, ledger as ledger_mod, paths, sanitize, trackers
+from chargehand import delivery as delivery_mod
 from chargehand import router as router_mod
 from chargehand import runtime as runtime_mod
 from chargehand import sources as sources_mod
@@ -46,6 +51,7 @@ from chargehand.errors import (
     AmbiguousWrite,
     ChargehandError,
     ConfigError,
+    DeliveryAborted,
     GitError,
     ItemGone,
     LaunchAborted,
@@ -77,6 +83,17 @@ TRACKER_CURSOR_PREFIX = "tracker:"
 WATCHDOG_LONG_RUN = 1
 WATCHDOG_STOP_FAILED = 2
 
+# A worker whose branch got a pull request is subscribed to it once; this runner-state
+# key, with the worker id, records that the check found one.
+FOLLOWS_PULL_REQUEST_PREFIX = "follows-pr:"
+
+# What wakes a worker on the pull request of its own branch. Not `pr_closed`: the pull
+# request is not the worker's primary item, so its close does not end the worker.
+PULL_REQUEST_KINDS = (roles_mod.COMMENT, "review", "ci_status")
+
+# The notification detail of a worker whose turn ended without a question.
+TURN_ENDED = "turn ended; waits for events"
+
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
 PENDING_NOTIFICATION_PREFIX = "notify-pending:"
@@ -93,6 +110,9 @@ KEPT_BRANCH = (
 _STATUS_FOR_STATE = {
     ledger_mod.LAUNCHING: Status.RUNNING,
     ledger_mod.RUNNING: Status.RUNNING,
+    # A turn ended: the operator may need to look, as before workers could wait for events.
+    ledger_mod.IDLE: Status.BLOCKED,
+    ledger_mod.QUEUED: Status.BLOCKED,
     ledger_mod.BLOCKED: Status.BLOCKED,
     ledger_mod.PAUSED: Status.BLOCKED,
     ledger_mod.FAILED: Status.BLOCKED,
@@ -142,6 +162,7 @@ class TickReport:
     notified: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
     routed: list[str] = field(default_factory=list)
+    woken: list[str] = field(default_factory=list)
     collected: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -159,6 +180,7 @@ class TickReport:
             "notified": self.notified,
             "requests": self.requests,
             "routed": self.routed,
+            "woken": self.woken,
             "collected": self.collected,
             "skipped": self.skipped,
             "warnings": self.warnings,
@@ -270,6 +292,7 @@ class Runner:
         notifier: Notifier | None = None,
         tracker_factory=trackers.build,
         source_factory=sources_mod.build,
+        usage: Callable[[], delivery_mod.UsageReading | None] | None = None,
     ) -> None:
         self.config = config
         self.ledger = ledger
@@ -278,6 +301,8 @@ class Runner:
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
         self._source_factory = source_factory
+        # The provider's usage windows for the wake reserve. None until a reading exists.
+        self._usage = usage or (lambda: None)
         self._sources: dict[str, Source | Exception | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
         # Which starts this step tries: a `[[source]]`'s in the route step, a tracker's in
@@ -374,7 +399,9 @@ class Runner:
 
     # ----- the tick ---------------------------------------------------------
 
-    def tick(self, *, crash_after_step: int | None = None) -> TickReport:
+    def tick(
+        self, *, crash_after_step: int | None = None, crash_after_wake: bool = False
+    ) -> TickReport:
         report = TickReport()
         for context in self._contexts.values():
             if context.source is not None:
@@ -395,8 +422,10 @@ class Runner:
             ("reconcile", lambda: self._reconcile(report)),
             ("requests", lambda: self._apply_requests(report)),
             ("watchdog", lambda: self._watchdog(report)),
+            ("follow", lambda: self._follow_pull_requests(report)),
             ("route", lambda: self._route_events(report, crash_after_step=crash_after_step)),
             ("supervise", lambda: self._diff_and_notify(report)),
+            ("deliver", lambda: self._deliver(report, crash_after_wake=crash_after_wake)),
             ("labels", lambda: self._sync_all_labels(report)),
             ("admit", lambda: self._route_trackers(report, crash_after_step=crash_after_step)),
             ("collect", lambda: self._collect_garbage(report)),
@@ -404,7 +433,7 @@ class Runner:
         for name, phase in phases:
             try:
                 phase()
-            except LaunchAborted:
+            except (LaunchAborted, DeliveryAborted):
                 raise
             except Exception as exc:
                 log.exception("tick phase %s failed", name)
@@ -820,7 +849,7 @@ class Runner:
             (s for s in self.sessions(worker.runtime, refresh=True) if s.id == worker.session_id),
             None,
         )
-        if session is None or session.state in (runtime_mod.STOPPED, runtime_mod.FAILED):
+        if session is None or self.runtime(worker.runtime).is_stopped(session):
             return False, (
                 f"{worker.item}: respawn reported success but the session is "
                 f"{session.state if session else 'gone'}"
@@ -982,7 +1011,82 @@ class Runner:
                 self.ledger.update(worker, watchdog_notified=WATCHDOG_LONG_RUN)
                 self._notify(report, worker.item, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
 
-    # ----- 4. sources and routing -------------------------------------------
+    # ----- 4. pull requests of the workers' branches ------------------------
+
+    def _follow_pull_requests(self, report: TickReport) -> None:
+        """Subscribe each worker to the pull request of its own branch, once one exists.
+
+        Decided here in code, never by a model, so that a comment or a CI result on the
+        pull request a worker opened wakes that worker. The pull request is not the
+        worker's primary item. The source is asked only about a branch that was pushed,
+        which a local ref shows, so a worker that never pushes costs no call.
+        """
+        live = self.ledger.live_workers()
+        found = self._forget_ended_follows({worker.id for worker in live})
+        sources = [
+            (config.name, source)
+            for config in self.config.sources
+            if (source := self.source(config.name)) is not None and source.has_pull_requests
+        ]
+        if not sources:
+            return
+        for worker in live:
+            if worker.state == ledger_mod.LAUNCHING:
+                continue
+            key = f"{FOLLOWS_PULL_REQUEST_PREFIX}{worker.id}"
+            if key in found:
+                continue
+            repository = self.config.repository_by_name(worker.repository)
+            if repository is None or not worker.worktree_path.exists():
+                continue
+            branch = self._pushed_branch(worker, repository)
+            if branch is None:
+                continue
+            for name, source in sources:
+                try:
+                    item = source.pull_request_for(repository, branch)
+                except Exception as exc:
+                    log.exception("source %s: pull_request_for failed for %s", name, worker.handle)
+                    report.errors.append(
+                        f"source {name}: {sanitize.one_line(str(exc), limit=300)}"
+                    )
+                    continue
+                if item is None:
+                    continue
+                followed = {(s.source, s.item) for s in self.ledger.subscriptions_of(worker)}
+                with self.ledger.transaction():
+                    if (item.source, item.key) not in followed:
+                        self.ledger.subscribe(worker, item, PULL_REQUEST_KINDS)
+                        report.routed.append(f"{worker.handle}: follows {item.key}")
+                    self.ledger.set_state(key, item.key)
+                break
+
+    def _forget_ended_follows(self, live: set[int]) -> set[str]:
+        """Drop the follow records of workers that ended; return the keys that remain."""
+        kept = set()
+        for key in self.ledger.all_state():
+            if not key.startswith(FOLLOWS_PULL_REQUEST_PREFIX):
+                continue
+            worker_id = key.removeprefix(FOLLOWS_PULL_REQUEST_PREFIX)
+            if worker_id.isdigit() and int(worker_id) in live:
+                kept.add(key)
+            else:
+                self.ledger.delete_state(key)
+        return kept
+
+    def _pushed_branch(self, worker: Worker, repository: Repository) -> str | None:
+        """The worktree's branch when its remote has it, else None. A session may rename it."""
+        context = self.context(repository)
+        remote = gitutil.remote_of(context.repo_config.base) if context.repo_config else "origin"
+        try:
+            branch = self.git.worktree_branch(repository.path, worker.worktree_path) or worker.branch
+        except GitError:
+            return None
+        if not self.git.ref_exists(repository.path, f"refs/remotes/{remote}/{branch}"):
+            return None
+        return branch
+
+    # ----- 5. sources and routing -------------------------------------------
 
     def _route_events(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
         """Poll every source, then filter, deliver and start, through the router.
@@ -1155,7 +1259,7 @@ class Runner:
                 report.errors.append(f"{item}: {exc}")
         return deferred
 
-    # ----- 5. state diff and notification -----------------------------------
+    # ----- 6. state diff and notification -----------------------------------
 
     def _diff_and_notify(self, report: TickReport) -> None:
         # Before the diff, so a send that fails below waits for the next tick rather than
@@ -1192,15 +1296,21 @@ class Runner:
             if changes:
                 worker = self.ledger.update(worker, **changes)
 
-            worker = self._apply_session_state(worker, observed, report)
+            worker = self._apply_session_state(worker, observed, report, session=session)
 
     def _apply_session_state(
-        self, worker: Worker, observed: str, report: TickReport
+        self, worker: Worker, observed: str, report: TickReport, *, session: Session | None = None
     ) -> Worker:
         context = self.context_for_worker(worker)
         detail: str | None = None
         target_state = worker.state
 
+        if worker.state == ledger_mod.PAUSED and session is not None and self._is_stopped(
+            worker, session
+        ):
+            # `stop` keeps the session, and a stopped Claude Code session still lists the
+            # state of its last turn, often `done`. Only a live process ends the pause.
+            return worker
         if observed == runtime_mod.WORKING:
             target_state = ledger_mod.RUNNING
             if worker.state != ledger_mod.RUNNING:
@@ -1215,6 +1325,9 @@ class Runner:
             target_state, detail = ledger_mod.BLOCKED, "needs input"
         elif observed == runtime_mod.DONE:
             target_state, detail = self._resolve_done(worker, context)
+            if target_state == ledger_mod.IDLE and worker.state == ledger_mod.QUEUED:
+                # Still idle, with events that admission held back.
+                target_state = ledger_mod.QUEUED
         elif observed == runtime_mod.FAILED:
             target_state, detail = ledger_mod.BLOCKED, "session failed"
         elif observed == runtime_mod.STOPPED:
@@ -1267,13 +1380,20 @@ class Runner:
     def _resolve_done(
         self, worker: Worker, context: RepositoryContext | None
     ) -> tuple[str, str | None]:
-        """`done` is ambiguous: a session that asked in plain text also reads done."""
+        """A `done` session ended its turn. The status file, when the role has one, says more.
+
+        Without a question in the status file, the worker is idle: it waits for events on
+        the items it follows, and the operator may look at what the turn left. A status
+        file that this worker did not write says nothing about this turn.
+        """
         try:
             role = context.role(worker.role) if context and context.usable else None
         except ConfigError:
             role = None
-        if role is None or not role.status_file:
-            return ledger_mod.BLOCKED, "finished or waiting — no status file, go look"
+        if role is None:
+            return ledger_mod.BLOCKED, "finished or waiting; its role does not load, go look"
+        if not role.status_file:
+            return ledger_mod.IDLE, TURN_ENDED
         path = Path(
             config_mod.render(
                 role.status_file,
@@ -1282,10 +1402,8 @@ class Runner:
             )
         ).expanduser()
         status = StatusFile.read(path, not_before=worker.created_at)
-        if status.stale:
-            return ledger_mod.BLOCKED, "its status file predates this worker — go look"
-        if not status.present:
-            return ledger_mod.BLOCKED, "finished but wrote no status file — go look"
+        if status.stale or not status.present:
+            return ledger_mod.IDLE, TURN_ENDED
         if status.pr_url and status.pr_url != worker.pr_url:
             self.ledger.update(worker, pr_url=status.pr_url)
         if status.state == "complete":
@@ -1299,6 +1417,45 @@ class Runner:
                 self.ledger.update(worker, last_error=f"aborted: {status.stop_reason}"[:500])
             return ledger_mod.FAILED, "aborted"
         return ledger_mod.BLOCKED, "status file did not name a known state — go look"
+
+    def _is_stopped(self, worker: Worker, session: Session) -> bool:
+        try:
+            return self.runtime(worker.runtime).is_stopped(session)
+        except ConfigError:
+            return False
+
+    # ----- 7. delivery ------------------------------------------------------
+
+    def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
+        """Wake each idle worker once, for every event waiting in its inbox."""
+        result = delivery_mod.Delivery(
+            self.ledger,
+            max_concurrent=self.config.max_concurrent,
+            runtime=self.runtime,
+            policy=self._policy_of,
+            usage=self._usage,
+            crash_after_wake=crash_after_wake,
+        ).run()
+        report.woken.extend(worker.handle for worker in result.woken)
+        report.skipped.extend(result.held)
+        report.warnings.extend(result.warnings)
+        report.errors.extend(result.errors)
+        if result.woken or result.faults:
+            self.invalidate_sessions()
+        for worker in result.woken:
+            # The tick log prints transitions, so a wake shows there too.
+            report.transitions.append(f"{worker.item or worker.handle}: wake -> {worker.state}")
+            log.info("woke %s in session %s", worker.handle, worker.session_id)
+        for worker, detail in result.faults:
+            self._sync_labels(worker, self.context_for_worker(worker), report)
+            self._notify(report, worker.item or worker.handle, "wake-fault", worker.url,
+                         worker.repository, role=worker.role, detail=detail)
+
+    def _policy_of(self, worker: Worker) -> roles_mod.Policy:
+        context = self.context_for_worker(worker)
+        if context is None or not context.usable:
+            raise ConfigError(f"repository '{worker.repository}' is unavailable")
+        return context.role(worker.role).policy
 
     # ----- labels -----------------------------------------------------------
 
@@ -1359,7 +1516,7 @@ class Runner:
         # about why the worker failed, and that reason is what `--verbose-titles` shows.
         return self.ledger.update(worker, label_state=desired.value)
 
-    # ----- 5/6. admission and launch ----------------------------------------
+    # ----- 9. admission and launch ------------------------------------------
 
     def _counts(self) -> tuple[int, int, dict[str, int]]:
         """(working, open, per-repository working) as the admission rules define them."""
@@ -1779,7 +1936,7 @@ class Runner:
                      detail=notify_detail)
         return worker
 
-    # ----- 7. garbage collection --------------------------------------------
+    # ----- 10. garbage collection -------------------------------------------
 
     def _collect_garbage(self, report: TickReport) -> None:
         self._check_disk(report)
@@ -1811,10 +1968,10 @@ class Runner:
             report.collected.append(worker.item)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:
-        """A closed issue ends its worker, even one parked as blocked.
+        """A closed issue ends its worker, even one that is idle or parked as blocked.
 
-        Without this, a repository with no status file never reaches a terminal state — `done`
-        alone means "go look" — so its worktree would sit there until someone discarded it
+        Without this, a repository with no status file never reaches a terminal state: `done`
+        alone makes a worker idle, so its worktree would sit there until someone discarded it
         by hand. A run that is still working is reported rather than stopped: the issue
         closing is not a reason to destroy work in progress.
         """

@@ -362,6 +362,32 @@ def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
         assert ledger.get(12).item == "ABC-1"
 
 
+@pytest.mark.parametrize("state", [ledger_mod.IDLE, ledger_mod.QUEUED])
+def test_the_migrated_one_live_worker_index_covers_the_new_live_states(tmp_path, state):
+    path = tmp_path / "v2.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V2_SCHEMA)
+    conn.close()
+
+    with Ledger(path) as ledger:
+        first = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        ledger.update(first, state=state)
+        with pytest.raises(sqlite3.IntegrityError):
+            make(ledger, item="ABC-1", worktree="/w/ABC-1-again")
+
+
+def test_each_wake_is_its_own_session_row_and_counts_within_the_window(ledger):
+    worker = make(ledger)
+    ledger.record_session(worker, kind=ledger_mod.SESSION_INITIAL, session_id="s1", session_uuid="u1")
+
+    ledger.record_wake(worker, session_id="s1", session_uuid="u1", now=100.0)
+    ledger.record_wake(worker, session_id="s1", session_uuid="u1", now=200.0)
+
+    assert [s.kind for s in ledger.sessions_of(worker)] == ["initial", "wake", "wake"]
+    assert ledger.wakes_since(worker, 150.0) == 1
+    assert ledger.wakes_since(worker, 0.0) == 2
+
+
 def event(kind="comment", item="ABC-1", dedupe_id="e1", source="fake", **extra) -> Event:
     return Event(
         source=source, kind=kind, item=WorkItem(source, item, f"id-{item}", hint="test"),

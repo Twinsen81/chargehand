@@ -206,6 +206,8 @@ def test_the_claude_stop_rule_reads_the_live_fields():
         assert not runtime.is_stopped(parse(live(state))), state
         assert not runtime.is_stopped(parse(session(state, status="idle"))), state
         assert not runtime.is_stopped(parse(session(state, pid=86470))), state
+    # A state chargehand does not recognise fails closed, even without the live fields.
+    assert not runtime.is_stopped(parse(session("reticulating-splines")))
 
 
 def test_a_wake_of_an_idle_session_stops_it_and_resumes_by_the_full_session_id(
@@ -222,6 +224,29 @@ def test_a_wake_of_an_idle_session_stops_it_and_resumes_by_the_full_session_id(
     assert resume["target"] == UUID
     assert resume["prompt"] == "new events: 2"
     assert claude_runtime.list_sessions()[0].state == runtime_mod.WORKING
+
+
+@pytest.mark.parametrize("state", ["working", "blocked", "failed"])
+def test_a_wake_for_an_idle_session_leaves_a_live_turn_or_prompt_alone(
+    claude_runtime, claude_state, state
+):
+    claude_state.set(sessions=[live(state)])
+
+    result = claude_runtime.wake("s1", "new events: 2", if_idle=True)
+
+    assert not result.ok and result.busy and result.copy_id is None
+    assert claude_state.commands == []
+    assert "resumes" not in claude_state.read()
+
+
+@pytest.mark.parametrize("entry", [live("done"), stopped_job()])
+def test_a_wake_for_an_idle_session_wakes_an_idle_or_stopped_one(claude_runtime, claude_state, entry):
+    claude_state.set(sessions=[entry])
+
+    result = claude_runtime.wake("s1", "hello", if_idle=True)
+
+    assert result.ok and not result.busy
+    assert claude_state.read()["resumes"][0]["target"] == UUID
 
 
 def test_a_wake_of_a_stopped_job_does_not_stop_it_again(claude_runtime, claude_state):

@@ -65,6 +65,8 @@ _REPO = re.compile(r"[A-Za-z0-9._-]{1,100}")
 _REF = re.compile(r"([^/#\s]+)/([^/#\s]+)#([0-9]{1,10})")
 _PLAIN_OWNER = re.compile(r"[a-z0-9-]+")
 _API_PATH = re.compile(r"/repos/([^/]+)/([^/]+)/(pulls|issues)/([0-9]{1,10})$")
+# A branch name as it reaches a query string: plain characters only, no leading dash.
+_BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
 
 
 _UNKNOWN = object()
@@ -386,6 +388,7 @@ class GithubSource(Source):
     """
 
     type = "github"
+    has_pull_requests = True
     _OPTIONS = ("gh_bin", "timeout_secs")
 
     def __init__(self, name: str, options: Mapping[str, object]) -> None:
@@ -454,6 +457,20 @@ class GithubSource(Source):
         return next(
             (r for r in repositories if r.github is not None and r.github.lower() == name), None
         )
+
+    def pull_request_for(self, repository: Repository, branch: str) -> WorkItem | None:
+        if repository.github is None or not _BRANCH.fullmatch(branch):
+            return None
+        owner, repo = repository.github.split("/")
+        head = quote(f"{owner}:{branch}", safe="")
+        pulls = self.gh.api_list(
+            f"repos/{owner}/{repo}/pulls?state=open&head={head}&per_page={PAGE_SIZE}"
+        )
+        for pull in pulls:
+            ref = make_ref(owner, repo, pull.get("number"))
+            if ref is not None:
+                return self._work_item(ref, pull=True, url=pull.get("html_url"))
+        return None
 
     def describe(self) -> str:
         return f"{self.name} (github through {self.gh.binary})"

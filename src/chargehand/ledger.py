@@ -32,16 +32,21 @@ from chargehand.sources.base import Event, WorkItem
 SCHEMA_VERSION = 3
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
-# until it reaches a terminal state.
+# until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
+# ended without a question and the worker waits for events. `queued`: events wait in its
+# inbox for a wake that admission held back. `blocked` needs the operator, and delivery
+# never wakes it: a stop and resume would discard an open prompt.
 LAUNCHING = "launching"
 RUNNING = "running"
+IDLE = "idle"
+QUEUED = "queued"
 BLOCKED = "blocked"
 PAUSED = "paused"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
-NON_TERMINAL = (LAUNCHING, RUNNING, BLOCKED, PAUSED)
+NON_TERMINAL = (LAUNCHING, RUNNING, IDLE, QUEUED, BLOCKED, PAUSED)
 TERMINAL = (DONE, FAILED, CANCELLED)
 WORKER_STATES = NON_TERMINAL + TERMINAL
 
@@ -57,10 +62,13 @@ SESSION_MISSING = "missing"
 LAST_STEP = 4
 
 # Why a session row exists: the launch, an adoption, a continuation after a refresh,
-# a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`.
+# a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`. A wake
+# continues the same session, so each wake has its own `wake` row: the daily wake cap
+# counts them.
 SESSION_INITIAL = "initial"
 SESSION_ADOPTED = "adopted"
 SESSION_MIGRATED = "migrated"
+SESSION_WAKE = "wake"
 
 # How a worker came to exist. Only `source` workers are held to one per role and item.
 ORIGIN_SOURCE = "source"
@@ -284,9 +292,11 @@ FROM workers WHERE session_id IS NOT NULL;
 # Version 3 adds subscriptions, the inbox, the seen events and the source cursors, and the
 # `owns_label` column. It only adds, so the existing rows and their ids stay as they are.
 # The ALTER is not idempotent on its own; it runs only on a version 2 file, in the same
-# transaction as the version bump.
+# transaction as the version bump. The one-live-worker index is dropped and created
+# again, because version 3 has more live states and the index names them.
 _MIGRATE_V2_TO_V3 = f"""
 ALTER TABLE workers ADD COLUMN owns_label INTEGER NOT NULL DEFAULT 1;
+DROP INDEX IF EXISTS workers_one_live_per_role_item;
 {_SCHEMA}
 """
 
@@ -661,6 +671,29 @@ class Ledger:
             (worker.id, session_id, session_uuid, kind, time.time() if now is None else now),
         )
 
+    def record_wake(
+        self,
+        worker: Worker,
+        *,
+        session_id: str | None,
+        session_uuid: str | None,
+        now: float | None = None,
+    ) -> None:
+        """One row per wake. Not idempotent: a resume keeps the session id."""
+        self._conn.execute(
+            "INSERT INTO sessions (worker_id, session_id, session_uuid, kind, started_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (worker.id, session_id, session_uuid, SESSION_WAKE, time.time() if now is None else now),
+        )
+
+    def wakes_since(self, worker: Worker, since: float) -> int:
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND started_at >= ?",
+                (worker.id, SESSION_WAKE, since),
+            ).fetchone()[0]
+        )
+
     def sessions_of(self, worker: Worker) -> list[SessionRecord]:
         rows = self._conn.execute(
             "SELECT * FROM sessions WHERE worker_id = ? ORDER BY id", (worker.id,)
@@ -766,6 +799,16 @@ class Ledger:
             query += " AND delivered_at IS NULL"
         rows = self._conn.execute(query + " ORDER BY id", (worker.id,)).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
+
+    def mark_delivered(self, entries: Iterable[InboxEntry], *, now: float | None = None) -> None:
+        ids = [entry.id for entry in entries]
+        if not ids:
+            return
+        self._conn.execute(
+            f"UPDATE inbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN "
+            f"({', '.join('?' * len(ids))})",
+            (time.time() if now is None else now, *ids),
+        )
 
     # ----- seen events and cursors ------------------------------------------
 
