@@ -771,8 +771,18 @@ class ClaudeRuntime(Runtime):
             return False
         return _listed_pid(session) is None and session.raw.get("status") in (None, "")
 
-    def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
-        """Stop the live process, confirm it is gone, then resume by the full session id.
+    def wake(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        session_uuid: str | None = None,
+        if_idle: bool = False,
+    ) -> WakeResult:
+        """Stop the live idle process, confirm it is gone, then resume by the full session id.
+
+        With *if_idle*, only a stopped session, or a live one whose last turn ended
+        ``done``, is woken.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -787,6 +797,14 @@ class ClaudeRuntime(Runtime):
         if session is None:
             return WakeResult(False, f"session {session_id} is not in the listing")
         old_pid = _listed_pid(session)
+        if if_idle and not self.is_stopped(session) and session.state != DONE:
+            # A turn runs, or a question or a permission prompt waits; a stop would
+            # interrupt the turn or discard the prompt. The caller's listing may be older:
+            # a leftover background shell starts a turn by itself, and the operator can
+            # answer in agent view.
+            return WakeResult(
+                False, f"session {session_id} is {session.state}, not idle", busy=True
+            )
         if not self.is_stopped(session):
             stopped = self.cli.stop(session_id)
             if stopped.returncode != 0:

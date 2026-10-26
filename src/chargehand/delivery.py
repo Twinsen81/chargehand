@@ -166,7 +166,7 @@ class Delivery:
 
         try:
             outcome = self._runtime(worker.runtime).wake(
-                worker.session_id, message, session_uuid=worker.session_uuid
+                worker.session_id, message, session_uuid=worker.session_uuid, if_idle=True
             )
         except (AgentRuntimeError, ConfigError) as exc:
             # Nothing is known about whether the message arrived. The events stay; if it
@@ -176,6 +176,12 @@ class Delivery:
             return
         if not outcome.ok:
             detail = sanitize.one_line(outcome.detail, limit=300)
+            if outcome.busy:
+                # The session started a turn, or opened a prompt, after the listing this
+                # tick read. The events wait for the turn to end; the state diff of a
+                # later tick records the new state.
+                result.held.append(f"{worker.handle}: wake held, {detail}")
+                return
             if outcome.copy_id is not None:
                 # The message went to a new session that works in the same worktree. The
                 # worker keeps its own session and its events; the operator decides. Paused

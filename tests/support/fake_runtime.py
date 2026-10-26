@@ -163,13 +163,20 @@ class FakeRuntime(Runtime):
             )
         return LaunchResult(output="started")
 
-    def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
+    def wake(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        session_uuid: str | None = None,
+        if_idle: bool = False,
+    ) -> WakeResult:
         session = _WORLD.find(session_id)
         _WORLD.wakes.append({"id": session_id, "message": message})
         if session is None:
             return WakeResult(False, f"session {session_id} is not hosted")
         if session.get("state") not in AT_REST:
-            return WakeResult(False, f"session {session_id} is still running a turn")
+            return WakeResult(False, f"session {session_id} is still running a turn", busy=True)
         session["state"] = WORKING
         return WakeResult(True, "new turn")
 

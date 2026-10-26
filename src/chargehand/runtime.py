@@ -145,11 +145,15 @@ class WakeResult:
 
     *copy_id* is set when the runtime started a new session instead of continuing the
     old one. That is a fault: the worker's session did not get the message.
+
+    *busy* is set when a wake asked only for an idle session found it in a turn or at a
+    prompt, and left it alone. That is no fault: the message waits.
     """
 
     ok: bool
     detail: str = ""
     copy_id: str | None = None
+    busy: bool = False
 
 
 class Runtime(ABC):
@@ -193,8 +197,21 @@ class Runtime(ABC):
         """
 
     @abstractmethod
-    def wake(self, session_id: str, message: str, *, session_uuid: str | None = None) -> WakeResult:
+    def wake(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        session_uuid: str | None = None,
+        if_idle: bool = False,
+    ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
+
+        With *if_idle*, a session whose turn has not ended idle (a turn runs, or a
+        question or a permission prompt waits) is not interrupted, and the result has
+        ``busy`` set. The runtime decides from its own fresh look, because the caller's
+        view of the session can be older. Delivery asks this way; an answer to a question
+        does not.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing

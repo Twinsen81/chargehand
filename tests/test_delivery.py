@@ -240,6 +240,32 @@ def test_a_crash_between_the_wake_and_the_ledger_write_loses_no_event(wired):
     assert wired.ledger.get(reviewer.id).wakes == 1
 
 
+@pytest.mark.parametrize("later_state", ["working", "blocked"])
+def test_a_turn_or_prompt_that_starts_after_the_listing_is_not_interrupted(
+    wired, monkeypatch, later_state
+):
+    """The tick's listing said done; by the wake a leftover shell or the operator started more."""
+    reviewer = start_reviewer(wired)
+    end_turn(wired)
+    pointers = emit_three()
+    wired.fresh_runner()
+    diff = wired.runner._diff_and_notify
+
+    def diff_then_change(report):
+        diff(report)
+        wired.claude_state.set_session_state("PR-7", later_state, status="busy")
+
+    monkeypatch.setattr(wired.runner, "_diff_and_notify", diff_then_change)
+    report = wired.runner.tick()
+
+    assert report.errors == [] and report.woken == []
+    assert any("wake held" in line for line in report.skipped)
+    assert ["stop", reviewer.session_id] not in wired.claude_state.commands
+    assert resumes(wired) == []
+    assert pending(wired, reviewer) == pointers
+    assert wired.ledger.get(reviewer.id).state == ledger_mod.IDLE
+
+
 def test_a_running_worker_gets_its_events_when_the_turn_ends(wired):
     reviewer = start_reviewer(wired)
     pointers = emit_three()
@@ -460,3 +486,25 @@ def test_a_comment_on_the_pull_request_of_the_workers_branch_wakes_it(on_github,
     assert resume["prompt"].splitlines() == [
         MESSAGE_HEADER, "- https://github.com/octo/app/pull/9#issuecomment-77",
     ]
+
+    # The record that the pull request was found goes when the worker ends.
+    assert on_github.ledger.get_state(f"follows-pr:{implementer.id}") == "octo_app_9"
+    on_github.ledger.record_request("cancel", "ABC-1")
+    on_github.next_tick()
+    on_github.next_tick()
+    assert on_github.ledger.get_state(f"follows-pr:{implementer.id}") is None
+
+
+def test_no_branch_is_read_when_no_source_has_pull_requests(wired, monkeypatch):
+    start_reviewer(wired)
+    wired.fresh_runner()
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("the follow step read a branch")
+
+    monkeypatch.setattr(wired.runner.git, "worktree_branch", unexpected)
+    monkeypatch.setattr(wired.runner.git, "ref_exists", unexpected)
+
+    report = wired.runner.tick()
+
+    assert report.errors == []
