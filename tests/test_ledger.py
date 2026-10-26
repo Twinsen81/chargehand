@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 
 from chargehand import ledger as ledger_mod
 from chargehand.ledger import Ledger
+from chargehand.sources import Event, WorkItem
 
 
 @pytest.fixture
@@ -282,4 +284,151 @@ def test_an_unknown_origin_is_rejected(ledger):
             role="implementer", item="ABC-1", item_id="id", url=None, repository="test",
             repo=Path("/repo"), worktree=Path("/w/x"), branch="b", origin="magic",
         )
+
+
+# ----- version 3: subscriptions, the inbox, seen events, cursors ----------------
+
+V2_SCHEMA = """
+CREATE TABLE workers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'source', start_rule TEXT,
+    runtime TEXT NOT NULL DEFAULT 'claude', item TEXT, item_id TEXT, url TEXT,
+    repository TEXT NOT NULL, repo TEXT NOT NULL, worktree TEXT NOT NULL, branch TEXT NOT NULL,
+    session_id TEXT, session_uuid TEXT, state TEXT NOT NULL, label_state TEXT,
+    step INTEGER NOT NULL DEFAULT 0, launch_attempts INTEGER NOT NULL DEFAULT 1,
+    session_state TEXT, waiting_for TEXT, notified_state TEXT, working_since REAL,
+    watchdog_notified INTEGER NOT NULL DEFAULT 0, last_error TEXT, pr_url TEXT,
+    gc_done INTEGER NOT NULL DEFAULT 0, wakes INTEGER NOT NULL DEFAULT 0, last_wake_at REAL,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL, finished_at REAL
+);
+CREATE UNIQUE INDEX workers_one_live_per_role_item ON workers (role, item)
+    WHERE origin = 'source' AND state IN ('launching', 'running', 'blocked', 'paused');
+CREATE INDEX workers_state ON workers (state);
+CREATE INDEX workers_worktree ON workers (worktree);
+CREATE INDEX workers_item ON workers (item);
+CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    session_id TEXT, session_uuid TEXT, kind TEXT NOT NULL, started_at REAL NOT NULL,
+    ended_at REAL
+);
+CREATE INDEX sessions_worker ON sessions (worker_id);
+CREATE TABLE requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, target TEXT,
+    args TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, applied_at REAL, ok INTEGER,
+    message TEXT
+);
+CREATE INDEX requests_pending ON requests (applied_at);
+CREATE TABLE runner_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL);
+PRAGMA user_version = 2;
+"""
+
+
+def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
+    path = tmp_path / "v2.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V2_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at) VALUES (12, 'implementer', 'ABC-1', 'id-1', "
+        "'test', '/repo', '/w/ABC-1', 'b', 'running', 4, 1.0, 2.0)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, worker_id, session_id, kind, started_at) "
+        "VALUES (5, 12, 's1', 'initial', 1.0)"
+    )
+    conn.execute("INSERT INTO runner_state VALUES ('notify-pending:12', 'x', 1.0)")
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        worker = ledger.get(12)
+        assert (worker.role, worker.item, worker.state) == ("implementer", "ABC-1", "running")
+        assert [(s.id, s.session_id) for s in ledger.sessions_of(worker)] == [(5, "s1")]
+        assert ledger.get_state("notify-pending:12") == "x"
+        tables = {
+            row[0] for row in ledger._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert {"subscriptions", "inbox", "events", "cursors"} <= tables
+        ledger.subscribe(worker, WorkItem("fake", "ABC-1", "id-1"), ["comment"], primary=True)
+        assert ledger.primary_subscription(worker).kinds == ("comment",)
+        # The next worker continues after the kept ids.
+        assert make(ledger, item="ABC-2", worktree="/w/ABC-2").id == 13
+
+    # Opening it again is a no-op.
+    with Ledger(path) as ledger:
+        assert ledger.get(12).item == "ABC-1"
+
+
+def event(kind="comment", item="ABC-1", dedupe_id="e1", source="fake", **extra) -> Event:
+    return Event(
+        source=source, kind=kind, item=WorkItem(source, item, f"id-{item}", hint="test"),
+        actor=extra.pop("actor", "someone"), occurred_at=1.0, dedupe_id=dedupe_id,
+        pointer=f"https://t.invalid/{item}#{dedupe_id}", **extra,
+    )
+
+
+def test_subscribing_again_replaces_the_kinds_and_keeps_the_primary_flag(ledger):
+    worker = make(ledger)
+    item = WorkItem("fake", "ABC-1", "id-ABC-1")
+
+    ledger.subscribe(worker, item, ["comment"], primary=True)
+    ledger.subscribe(worker, item, ["comment", "review"])
+
+    (subscription,) = ledger.subscriptions_of(worker)
+    assert subscription.kinds == ("comment", "review")
+    assert subscription.is_primary
+    assert ledger.subscribed_items("fake") == [WorkItem("fake", "ABC-1", "id-ABC-1")]
+
+
+def test_only_live_workers_are_subscribers(ledger):
+    live = make(ledger)
+    gone = make(ledger, role="pr-reviewer", worktree="/w/pr-reviewer/ABC-1")
+    for worker in (live, gone):
+        ledger.subscribe(worker, WorkItem("fake", "ABC-1", "id-ABC-1"), ["comment"])
+    ledger.update(gone, state=ledger_mod.DONE)
+
+    assert [w.id for _, w in ledger.live_subscriptions("fake", "ABC-1")] == [live.id]
+    ledger.update(live, state=ledger_mod.CANCELLED)
+    assert ledger.subscribed_items("fake") == []
+
+
+def test_an_event_enters_one_inbox_once(ledger):
+    worker = make(ledger)
+
+    assert ledger.enqueue(worker.id, event()) is True
+    assert ledger.enqueue(worker.id, event()) is False
+
+    (entry,) = ledger.inbox(worker)
+    assert (entry.kind, entry.item, entry.dedupe_id, entry.delivered_at) == ("comment", "ABC-1", "e1", None)
+
+
+def test_a_pending_start_keeps_its_event_until_it_is_settled(ledger):
+    original = event(kind="review_requested")
+
+    ledger.record_event(original, start_pending=True)
+
+    assert ledger.event_seen("fake", "e1")
+    assert ledger.pending_start_events() == [original]
+    ledger.settle_start(original)
+    assert ledger.pending_start_events() == []
+    assert ledger.event_seen("fake", "e1")
+
+
+def test_old_events_and_long_deferred_starts_are_forgotten(ledger):
+    ledger.record_event(event(dedupe_id="old"), now=time.time() - 40 * 24 * 3600)
+    ledger.record_event(event(dedupe_id="stuck"), start_pending=True, now=time.time() - 8 * 24 * 3600)
+    ledger.record_event(event(dedupe_id="fresh"), start_pending=True)
+
+    assert ledger.prune_events() == 2
+    assert [e.dedupe_id for e in ledger.pending_start_events()] == ["fresh"]
+
+
+def test_a_cursor_is_kept_per_source(ledger):
+    assert ledger.get_cursor("fake") is None
+    ledger.set_cursor("fake", "3")
+    ledger.set_cursor("fake", "5")
+    ledger.set_cursor("other", None)
+
+    assert (ledger.get_cursor("fake"), ledger.get_cursor("other")) == ("5", None)
 
