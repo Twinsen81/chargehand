@@ -3,8 +3,7 @@
 **Status:** the runner and the control surface are implemented and tested against a fake
 Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
 and real Claude Code on a scratch repository, including a crash after every launch step and a
-reboot that killed a session mid-turn. The `github` and `command` adapters are not
-written. It has not
+reboot that killed a session mid-turn. The `command` adapter is not written. It has not
 yet been left running unattended for a working day. The unit of work is a *worker* of a
 *role* (section 4); event sources other than the tracker queue, a resident daemon and a
 board are not built yet.
@@ -103,7 +102,7 @@ the verify-by-re-read after every write.
 | Adapter | Notes |
 |---|---|
 | `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. |
-| `github` | Through the `gh` CLI, so there is no token handling. No workflow states: the trigger is label + assignee + open. |
+| `github` | Through the `gh` CLI, so there is no token handling. No workflow states: the trigger is label + assignee + open. `tracker = { type = "github", repo = "owner/repo" }`; labels change with `gh issue edit` and are verified by a re-read. |
 | `command` | The escape hatch: you configure `list`, `mark`, `get`, and `whoami` commands that print a small JSON contract. |
 
 Tracker writes are treated as unreliable: a write that reports failure may have been applied,
@@ -143,6 +142,23 @@ The router runs once per tick after the polls, in this order:
    primary subscription carrying the rule's `subscribe` kinds. A start that the caps, a pause
    or a previous worktree hold back is kept and offered to the rules again on the next tick.
 
+The `github` source works through the `gh` CLI, so chargehand handles no token, and it is
+the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
+signed-in account gives `review_requested`, `comment`, `mention` and `ci_status` (GitHub's
+`ci_activity`); it is asked with `If-Modified-Since`, so an unchanged list costs nothing
+against the rate limit, and no more often than its `X-Poll-Interval` header allows. A review
+request counts only while the pull request is open and still asks the account (or one of
+its teams) for a review, because a notification thread keeps its reason when later activity
+updates it. Then, for each pull request a live worker subscribes to, the source reads the
+review comments, the reviews, the issue comments, and the commit statuses and check runs on
+the head commit, which gives `comment`, `review`, `ci_status` and `pr_closed`; a followed
+item gets only review requests from the notifications, so nothing arrives twice. Dedupe ids
+are GitHub's object ids. An item is `owner/repo#number`; its key is `owner_repo_number` in
+lower case, or a shortened form with a digest when a name does not fit a path or a branch
+name, and a name that GitHub itself would refuse is skipped. A start event belongs to the
+`[[repository]]` whose `github` key names its `owner/repo`; on any other repository it
+starts nothing. `gh_bin` and `timeout_secs` are its options.
+
 The source's cursor is saved after its events are routed, so a source that fails is one
 error in the report and its events arrive on a later tick. The queue label still starts its
 workers through admission, and only a worker the queue label started changes the label;
@@ -172,6 +188,7 @@ command = "~/.config/chargehand/notify.sh"   # receives ITEM, ROLE, STATE, URL, 
 [[repository]]
 name = "my-app"
 path = "~/code/my-app"
+github = "me/my-app"                # owner/repo: what github source events are mapped by
 tracker = { type = "github", repo = "me/my-app" }
 roles = ["implementer"]             # role files enabled in this repository
 
