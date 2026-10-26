@@ -150,6 +150,7 @@ def test_two_comments_and_a_ci_result_in_one_tick_give_one_wake(wired):
 
     assert report.errors == []
     assert report.woken == ["reviewer/PR-7"]
+    assert "PR-7: wake -> running" in report.transitions
     (resume,) = resumes(wired)
     # The live idle process is stopped first, then resumed by the full session id.
     assert ["stop", reviewer.session_id] in wired.claude_state.commands

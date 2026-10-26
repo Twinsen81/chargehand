@@ -1427,6 +1427,8 @@ class Runner:
         if result.woken or result.faults:
             self.invalidate_sessions()
         for worker in result.woken:
+            # The tick log prints transitions, so a wake shows there too.
+            report.transitions.append(f"{worker.item or worker.handle}: wake -> {worker.state}")
             log.info("woke %s in session %s", worker.handle, worker.session_id)
         for worker, detail in result.faults:
             self._sync_labels(worker, self.context_for_worker(worker), report)
