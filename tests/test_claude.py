@@ -17,7 +17,7 @@ from chargehand.claude import (
     parse_sessions,
     worker_from_session,
 )
-from chargehand.errors import ClaudeError
+from chargehand.errors import ClaudeError, WorkspaceNotTrusted
 from conftest import FAKE_CLAUDE
 
 
@@ -410,6 +410,25 @@ def test_the_configuration_directory_can_be_relocated(tmp_path, monkeypatch):
     (tmp_path / "elsewhere").mkdir()
 
     assert ClaudeCLI().config_file() == tmp_path / "elsewhere" / ".claude.json"
+
+
+def test_a_launch_into_an_untrusted_worktree_is_told_apart_from_other_failures(
+    tmp_path, claude_state
+):
+    """The caller can only write the entry again and retry if it knows that was the cause."""
+    cli = ClaudeCLI(str(FAKE_CLAUDE))
+    worktree = tmp_path / "ABC-1"
+    worktree.mkdir()
+    claude_state.set(require_trust=True)
+
+    with pytest.raises(WorkspaceNotTrusted, match="untrusted workspace"):
+        cli.launch(worktree=worktree, name="ABC-1", prompt="go", permission_mode="auto")
+
+    cli.trust_worktree(worktree)
+    claude_state.set(launch_fails=True)
+    with pytest.raises(ClaudeError) as failure:
+        cli.launch(worktree=worktree, name="ABC-1", prompt="go", permission_mode="auto")
+    assert not isinstance(failure.value, WorkspaceNotTrusted)
 
 
 def test_a_launch_passes_the_roles_flags_in_a_stable_order(tmp_path, claude_state):

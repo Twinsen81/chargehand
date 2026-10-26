@@ -126,6 +126,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A launch that Claude Code refuses as an untrusted workspace writes the worktree's trust
+  entry again and retries at once, up to three times in the same launch step. A Claude
+  Code process that is already running can write `~/.claude.json` back without the entry
+  that the launch wrote a moment before. With several workers starting close together,
+  the second launch could fail this way and wait for the next tick. The refusal is not
+  retried when `trust_worktrees = false`, when the entry cannot be written, or when the
+  entry is still in the file after the refusal, because the cause is then something else.
 - Sessions that the scheduled job starts run at the priority a terminal gives. The job was
   a launchd `Background` job, and everything it starts inherits that type: the daemon that
   `claude --bg` starts when none is running, every session the daemon hosts, and every

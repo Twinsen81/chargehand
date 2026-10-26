@@ -34,6 +34,14 @@ class ClaudeError(ChargehandError):
     """The Claude Code CLI is missing, failed, or returned unparseable output."""
 
 
+class WorkspaceNotTrusted(ClaudeError):
+    """Claude Code refused to start a session because its directory is not trusted.
+
+    A subclass of ClaudeError so that a caller that does not handle it gets the usual
+    launch failure.
+    """
+
+
 class GitError(ChargehandError):
     """A git command failed."""
 
