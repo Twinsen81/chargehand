@@ -8,6 +8,7 @@ import pytest
 
 from chargehand import config as config_mod
 from chargehand import roles as roles_mod
+from chargehand import sources as sources_mod
 from chargehand.config import MachineConfig, RepoConfig, render, render_argv
 from chargehand.errors import ConfigError
 
@@ -182,3 +183,55 @@ def test_a_valid_template_still_parses():
     })
 
     assert config.setup.startswith("scripts/setup.sh")
+
+
+# ----- [[source]] ----------------------------------------------------------
+
+
+def test_a_source_passes_its_own_options_through_and_is_named_after_its_type():
+    config = MachineConfig.parse({
+        **MINIMAL,
+        "source": [
+            {"type": "github", "poll_secs": 60},
+            {"name": "work", "type": "linear", "team": "ABC"},
+        ],
+    })
+
+    assert [(s.name, s.type) for s in config.sources] == [("github", "github"), ("work", "linear")]
+    assert dict(config.sources[0].options) == {"poll_secs": 60}
+    assert dict(config.sources[1].options) == {"team": "ABC"}
+    assert config.source_by_name("work").type == "linear"
+    assert config.source_by_name("nope") is None
+
+
+def test_no_source_is_configured_by_default():
+    assert MachineConfig.parse(MINIMAL).sources == ()
+
+
+def test_a_repositorys_tracker_keeps_working_next_to_sources():
+    config = MachineConfig.parse({**MINIMAL, "source": [{"type": "github"}]})
+
+    assert config.repositories[0].tracker.type == "linear"
+    assert config.sources[0].type == "github"
+
+
+@pytest.mark.parametrize(
+    "sources, message",
+    [
+        ({"type": "github"}, r"\[\[source\]\] entries must be tables"),
+        (["github"], "expected a table"),
+        ([{"name": "github"}], "type"),
+        ([{"type": "github"}, {"type": "github"}], "duplicate source name 'github'"),
+        ([{"name": "Git-Hub", "type": "github"}], "lower-case"),
+    ],
+)
+def test_a_bad_source_table_is_a_configuration_error(sources, message):
+    with pytest.raises(ConfigError, match=message):
+        MachineConfig.parse({**MINIMAL, "source": sources})
+
+
+def test_an_unknown_source_type_is_named_when_the_source_is_built():
+    config = MachineConfig.parse({**MINIMAL, "source": [{"name": "x", "type": "nope"}]})
+
+    with pytest.raises(ConfigError, match="unknown source type 'nope'"):
+        sources_mod.build(config.sources[0])

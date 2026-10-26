@@ -221,6 +221,34 @@ class TrackerConfig:
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
+
+@dataclass(frozen=True)
+class SourceConfig:
+    """One ``[[source]]`` table: a poller that produces events.
+
+    Keys other than ``name`` and ``type`` belong to the source type and are passed to it
+    unchanged; the source checks them itself. ``name`` defaults to the type, and event
+    kinds are qualified by it, as in ``github.review_requested``.
+    """
+
+    name: str
+    type: str
+    options: Mapping[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def parse(cls, table: object, where: str) -> "SourceConfig":
+        if not isinstance(table, Mapping):
+            raise ConfigError(f"{where}: expected a table, e.g. {{ name = \"github\", type = \"github\" }}")
+        kind = _as_str(_require(table, "type", where), f"{where}.type")
+        name = _as_str(table.get("name", kind), f"{where}.name")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ConfigError(
+                f"{where}.name: use lower-case letters, digits and underscore, starting with a "
+                f"letter, because event kinds are qualified by it"
+            )
+        options = {k: v for k, v in table.items() if k not in ("name", "type")}
+        return cls(name=name, type=kind, options=options)
+
 DEFAULT_ROLES = ("implementer",)
 
 # chargehand no longer runs a lease tool: banksman finds a worker's leases by itself and
@@ -319,6 +347,7 @@ class MachineConfig:
     # Keys that are accepted for one release and have no effect, for `doctor` to name.
     ignored_keys: tuple[str, ...] = ()
     source: Path | None = None
+    sources: tuple[SourceConfig, ...] = ()
 
     _TOP_LEVEL = (
         "poll_interval_secs",
@@ -340,6 +369,7 @@ class MachineConfig:
         "labels",
         "repository",
         "route",
+        "source",
     )
 
     def repository_by_name(self, name: str) -> Repository | None:
@@ -373,6 +403,19 @@ class MachineConfig:
         duplicate = next((n for n in names if names.count(n) > 1), None)
         if duplicate:
             raise ConfigError(f"config: duplicate repository name '{duplicate}'")
+
+        raw_sources = data.get("source", [])
+        if not isinstance(raw_sources, list):
+            raise ConfigError("config: [[source]] entries must be tables")
+        sources = tuple(
+            SourceConfig.parse(entry, f"source[{index}]") for index, entry in enumerate(raw_sources)
+        )
+        source_names = [s.name for s in sources]
+        duplicate = next((n for n in source_names if source_names.count(n) > 1), None)
+        if duplicate:
+            raise ConfigError(
+                f"config: duplicate source name '{duplicate}'; give each [[source]] its own `name`"
+            )
 
         worktree_root = _expand(
             _as_str(data.get("worktree_root", "~/chargehand-worktrees"), "config.worktree_root")
@@ -424,7 +467,11 @@ class MachineConfig:
             git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
             ignored_keys=tuple(key for key in _IGNORED_KEYS if key in data),
             source=source,
+            sources=sources,
         )
+
+    def source_by_name(self, name: str) -> SourceConfig | None:
+        return next((s for s in self.sources if s.name == name), None)
 
 
 @dataclass(frozen=True)
