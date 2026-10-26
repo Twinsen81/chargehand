@@ -388,6 +388,7 @@ class GithubSource(Source):
     """
 
     type = "github"
+    has_pull_requests = True
     _OPTIONS = ("gh_bin", "timeout_secs")
 
     def __init__(self, name: str, options: Mapping[str, object]) -> None:

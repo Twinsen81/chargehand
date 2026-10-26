@@ -16,7 +16,8 @@ Order, once per tick:
 
 The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 9 comes after
 the state diff so that a slot freed by a finished worker is used in the same tick.
-Delivery comes before it, so a waiting worker gets a free slot before a new one starts.
+Delivery comes before it, so a waiting worker gets a free slot before the queue starts a
+new one; a start from a ``[[source]]`` launches earlier, in step 5.
 
 A control command never calls a runtime, git, or a tracker itself; it records a
 request and the tick applies it. Together with the tick lock that gives one writer of
@@ -1020,18 +1021,20 @@ class Runner:
         worker's primary item. The source is asked only about a branch that was pushed,
         which a local ref shows, so a worker that never pushes costs no call.
         """
+        live = self.ledger.live_workers()
+        found = self._forget_ended_follows({worker.id for worker in live})
         sources = [
             (config.name, source)
             for config in self.config.sources
-            if (source := self.source(config.name)) is not None
+            if (source := self.source(config.name)) is not None and source.has_pull_requests
         ]
         if not sources:
             return
-        for worker in self.ledger.live_workers():
+        for worker in live:
             if worker.state == ledger_mod.LAUNCHING:
                 continue
             key = f"{FOLLOWS_PULL_REQUEST_PREFIX}{worker.id}"
-            if self.ledger.get_state(key):
+            if key in found:
                 continue
             repository = self.config.repository_by_name(worker.repository)
             if repository is None or not worker.worktree_path.exists():
@@ -1057,6 +1060,19 @@ class Runner:
                         report.routed.append(f"{worker.handle}: follows {item.key}")
                     self.ledger.set_state(key, item.key)
                 break
+
+    def _forget_ended_follows(self, live: set[int]) -> set[str]:
+        """Drop the follow records of workers that ended; return the keys that remain."""
+        kept = set()
+        for key in self.ledger.all_state():
+            if not key.startswith(FOLLOWS_PULL_REQUEST_PREFIX):
+                continue
+            worker_id = key.removeprefix(FOLLOWS_PULL_REQUEST_PREFIX)
+            if worker_id.isdigit() and int(worker_id) in live:
+                kept.add(key)
+            else:
+                self.ledger.delete_state(key)
+        return kept
 
     def _pushed_branch(self, worker: Worker, repository: Repository) -> str | None:
         """The worktree's branch when its remote has it, else None. A session may rename it."""
@@ -1500,7 +1516,7 @@ class Runner:
         # about why the worker failed, and that reason is what `--verbose-titles` shows.
         return self.ledger.update(worker, label_state=desired.value)
 
-    # ----- 5/6. admission and launch ----------------------------------------
+    # ----- 9. admission and launch ------------------------------------------
 
     def _counts(self) -> tuple[int, int, dict[str, int]]:
         """(working, open, per-repository working) as the admission rules define them."""
@@ -1920,7 +1936,7 @@ class Runner:
                      detail=notify_detail)
         return worker
 
-    # ----- 7. garbage collection --------------------------------------------
+    # ----- 10. garbage collection -------------------------------------------
 
     def _collect_garbage(self, report: TickReport) -> None:
         self._check_disk(report)

@@ -72,6 +72,9 @@ class Source(abc.ABC):
 
     #: The type name as written in ``[[source]] type = ...``.
     type: str = ""
+    #: Whether :meth:`pull_request_for` can find anything. The tick reads each worker's
+    #: branch only when a source has pull requests.
+    has_pull_requests: bool = False
 
     def __init__(self, name: str, options: Mapping[str, object]) -> None:
         self.name = name

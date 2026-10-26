@@ -141,8 +141,9 @@ def main(argv: list[str]) -> int:
                     # Observed in Claude Code 2.1.310: an idle session keeps `state: done`
                     # after the stop, and `pid` and `status` leave the entry. The state is
                     # the last turn's, so a session whose turn has ended (done, blocked,
-                    # failed) keeps it the same way. A stop in the middle of a turn has not
-                    # been observed; that one reads `stopped` here.
+                    # failed) keeps it the same way. A stop in the middle of a turn reads
+                    # `working` for about a second and then `stopped`; here it reads
+                    # `stopped` at once.
                     if session.get("state") == "working":
                         session["state"] = "stopped"
                     session.pop("pid", None)

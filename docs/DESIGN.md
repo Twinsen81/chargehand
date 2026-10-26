@@ -39,11 +39,15 @@ launchd timer ──► chargehand tick
    1. reconcile incomplete launches
    2. apply recorded control requests
    3. watchdog long runs
-   4. poll the event sources, route: inboxes, then start rules
-   5. diff session states, notify on change      ◄── claude agents --json --all
-   6. poll each repository's tracker as a source: the queue label is a start rule
+   4. follow the pull request of each worker's pushed branch
+   5. poll the event sources, route: inboxes, then start rules
+   6. diff session states, notify on change      ◄── claude agents --json --all
+   7. deliver: one wake per idle worker with events (stop, then claude --resume)
+   8. sync the tracker labels
+   9. poll each repository's tracker as a source: the queue label is a start rule
       (repositories, roles' start rules, ledger, capacity)
-   7. ledger → label → worktree → setup → claude --bg "<prompt>"
+  10. collect garbage
+   launch: ledger → label → worktree → setup → claude --bg "<prompt>"
         │
         ▼
 Claude Code supervisor (background sessions, one per worker)
@@ -436,7 +440,9 @@ wake must pass admission: the number of working turns below `max_concurrent`, th
 `max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
 no reserve). A worker that is not admitted becomes `queued` and keeps its events. The
 runtime then wakes the same session: `claude` stops a live idle process, confirms that it
-stopped, and resumes it by the full session id. After the wake, one ledger transaction marks
+stopped, and resumes it by the full session id. It reads the listing again first: a session
+that started a turn or opened a prompt since the tick's listing is left alone, and its
+events wait. After the wake, one ledger transaction marks
 the events delivered and records the wake on the worker and as a `wake` row in `sessions`.
 A crash between the two leaves the events in the inbox, and a later tick wakes the worker
 with them again, which costs one turn. A resume that starts a copy is a fault: the worker
