@@ -68,3 +68,7 @@ class LaunchAborted(ChargehandError):
     def __init__(self, step: int) -> None:
         super().__init__(f"launch aborted after step {step}")
         self.step = step
+
+
+class DeliveryAborted(ChargehandError):
+    """Fault injection stopped a delivery after the wake and before its ledger write."""

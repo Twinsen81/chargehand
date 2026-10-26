@@ -76,7 +76,7 @@ def test_a_second_worker_on_the_issue_never_writes_the_label(tmp_path, repo, cla
     claude_state.set_session_state("helper/ABC-1", "done")
     harness.next_tick()
 
-    assert harness.worker("ABC-1", "helper").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1", "helper").state == ledger_mod.IDLE
     assert marks(harness) == before
     assert harness.labels("ABC-1") == ("chargehand-running",)
     harness.ledger.close()

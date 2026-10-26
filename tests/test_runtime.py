@@ -206,6 +206,8 @@ def test_the_claude_stop_rule_reads_the_live_fields():
         assert not runtime.is_stopped(parse(live(state))), state
         assert not runtime.is_stopped(parse(session(state, status="idle"))), state
         assert not runtime.is_stopped(parse(session(state, pid=86470))), state
+    # A state chargehand does not recognise fails closed, even without the live fields.
+    assert not runtime.is_stopped(parse(session("reticulating-splines")))
 
 
 def test_a_wake_of_an_idle_session_stops_it_and_resumes_by_the_full_session_id(

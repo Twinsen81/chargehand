@@ -148,6 +148,9 @@ def main(argv: list[str]) -> int:
                     session.pop("pid", None)
                     session.pop("status", None)
             elif action == "respawn" and not failed:
+                if state.get("respawn_starts_no_process"):
+                    # Exit 0, and the listing still shows the stopped job.
+                    continue
                 session["state"] = state.get("respawn_state", "working")
                 run_process(session, next_serial(state))
         if action == "rm" and not failed:
