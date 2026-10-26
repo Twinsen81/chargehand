@@ -41,7 +41,11 @@ from chargehand.errors import ConfigError
 
 DEFAULT_ROLE = "implementer"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-CHECKOUTS = ("base", "item")
+CHECKOUT_BASE = "base"
+# The session works in a checkout of `base`; the item's head is checked out separately,
+# by the role's setup step, and the prompt names it as {item_checkout}.
+CHECKOUT_ITEM = "item"
+CHECKOUTS = (CHECKOUT_BASE, CHECKOUT_ITEM)
 DEFAULT_RUNTIME = runtime_mod.DEFAULT_RUNTIME
 
 # The event kind every tracker adapter produces for "an issue got the queue label".

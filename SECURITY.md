@@ -30,7 +30,8 @@ public location.
 - The operator: the person who installs chargehand, owns the machine, and owns the tracker
   credentials it uses.
 - The repository's own configuration and instructions (its chargehand config, its agent
-  instruction files, its permission rules).
+  instruction files, its permission rules), as the base branch the operator configured
+  holds them.
 
 ### What is not trusted
 
@@ -38,6 +39,12 @@ public location.
   an issue. They are attacker-controlled input to an agent.
 - **Agent output.** Logs and messages produced by a session can echo anything the session
   read.
+- **The head of a pull request under review.** Its author controls every file in it,
+  including `.claude/settings.json` (hooks and permission rules), `.mcp.json`, `CLAUDE.md`
+  and `.claude/agents/`. A review request needs no triage rights: a code-owners rule can
+  ask the operator to review a pull request from any fork. Claude Code loads those files
+  from the working directory of a session it trusts, and a hook runs as the operator's
+  user before the model reads anything.
 - **Event fields.** An event's actor and pointer come from the source. An event has no
   body: a source reads a comment only to find the authorship marker, and the text does
   not leave the source. The marker filter is a convenience against workers waking each
@@ -56,6 +63,18 @@ public location.
   a notification. Claude Code's auto-mode
   classifier trusts user messages and does not see tool results, so this keeps
   attacker-controlled text on the untrusted side of that boundary.
+- **A pull request head is never a session's workspace.** A role with `checkout = "item"`,
+  such as the shipped `pr-reviewer`, starts its session in a fresh checkout of the base
+  branch, the only directory chargehand marks as a trusted workspace. The pull request
+  head goes into a second, detached checkout outside that directory, under
+  `<worktree_root>/.items/`, which the role's setup step fills and the launch prompt names.
+  The session gets a read permission for it and nothing else: it is not passed as an
+  added directory, because Claude Code loads skills from one, and a setup program is
+  never looked up in it. The shipped agent file tells the reviewer to treat those files as
+  data, not to run them, and not to check the head out in its own working directory; its
+  allow rules leave out `gh pr checkout`, merge, close and approve. That instruction and
+  those rules are guardrails. The separate checkout is the defense: nothing from the head
+  is loaded unless the session itself moves it into its working directory.
 - **A wake carries pointers only.** The message that wakes a worker is a fixed line that
   chargehand writes, followed by the events' pointers. A pointer that is not a plain
   http(s) URL or a plain identifier is left out, and no actor name, title or body is

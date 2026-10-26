@@ -278,8 +278,10 @@ A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` 
 `status_file`, and has no role file, gets an `implementer` role built from them, so a
 configuration from before roles keeps working.
 
-Template variables are `{item}`, `{item_url}`, `{worktree}`, `{branch}`, and `{repo}`;
-`{issue}` and `{url}` are the older names for the first two. There is deliberately no
+Template variables are `{item}`, `{item_url}`, `{item_checkout}`, `{worktree}`, `{branch}`,
+and `{repo}`; `{issue}` and `{url}` are the older names for the first two. `{item_checkout}`
+is the separate checkout of the item's head for a role with `checkout = "item"`, and the
+worktree for any other role. There is deliberately no
 `{title}` or `{body}`: the prompt is a trusted user message, so issue text must reach the
 agent as a tool result it fetches itself, never inlined. A configured template that names any
 other variable is a configuration error, not a literal.
@@ -301,15 +303,24 @@ chargehand ships two starter roles, which `chargehand init --role <name>` writes
 repository. `implementer` takes issues from the queue. `pr-reviewer` starts on
 `github.review_requested`, follows `comment`, `review` and `ci_status` on its pull request
 and ends on `pr_closed`; it comes with a Claude Code agent file,
-`.claude/agents/pr-reviewer.md`. With `checkout = "item"` the worktree is created from
-`base` and the role's `setup` step, `gh pr checkout {item_url} --detach`, checks out the
-pull request head. The commit that step leaves the worktree on is recorded, so garbage
-collection does not count the pull request's own commits as unpushed work, also when they
-come from a fork or a fetch pruned their branch.
+`.claude/agents/pr-reviewer.md`, which must be on the base branch or in `~/.claude/agents`,
+because the session starts in a checkout of `base`.
 
-Workers post as you. Both starter roles tell the worker to end every comment it posts with
-the authorship marker, so its own comments wake no worker; a comment without the marker
-wakes the worker once, and the role's daily wake cap stops a loop.
+With `checkout = "item"` the session's worktree is still a checkout of `base`: the pull
+request head is its author's content, and Claude Code loads settings, hooks and
+instructions from a session's working directory (see SECURITY.md). The head goes into a
+second, detached worktree, `<worktree_root>/.items/<role>/<item>`, where the role's
+`setup` step runs; for the reviewer that is `gh pr checkout {item_url} --detach`. The
+prompt names it as `{item_checkout}`, and the session may read it without a prompt. The
+commit the setup step leaves it on is recorded, so garbage collection does not count the
+pull request's own commits as unpushed work, also when they come from a fork or a fetch
+pruned their branch; a newer head that a later `gh pr checkout` fetched counts as the pull
+request's too. Garbage collection removes both checkouts, and either one with commits of
+the session's own keeps both.
+
+Workers post as you. Both starter roles tell the worker in the prompt to end every comment
+it posts with the authorship marker, so its own comments wake no worker; a comment without
+the marker wakes the worker once, and the role's daily wake cap stops a loop.
 
 ### Runtimes
 

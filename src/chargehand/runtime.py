@@ -122,7 +122,12 @@ class HealthCheck:
 
 @dataclass(frozen=True)
 class LaunchSpec:
-    """One new session. *options* are the role's runtime-owned keys, already checked."""
+    """One new session. *options* are the role's runtime-owned keys, already checked.
+
+    *read_paths* are directories outside the worktree that the session must be able to
+    read without asking, such as the checkout of a pull request it reviews. They are not
+    workspaces: a runtime must not load configuration or instructions from them.
+    """
 
     worktree: Path
     name: str
@@ -130,6 +135,7 @@ class LaunchSpec:
     options: Mapping[str, Any] = field(default_factory=dict)
     model: str | None = None
     effort: str | None = None
+    read_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

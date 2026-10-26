@@ -576,14 +576,22 @@ def agent_file_candidates(repo: Path, name: str) -> list[Path]:
     return [repo / ".claude" / "agents" / f"{name}.md", user_claude_dir() / "agents" / f"{name}.md"]
 
 
-def launch_settings(options: Mapping[str, Any], deny_rules: Sequence[str]) -> dict[str, object] | None:
-    """The per-launch settings payload: the machine's deny rules and the role's allow rules."""
+def launch_settings(
+    options: Mapping[str, Any], deny_rules: Sequence[str], read_paths: Sequence[Path] = ()
+) -> dict[str, object] | None:
+    """The per-launch settings payload: the machine's deny rules and the role's allow rules.
+
+    Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
+    not passed as `--add-dir`: Claude Code loads skills from an added directory, and these
+    paths hold content the operator did not write.
+    """
     permissions: dict[str, list[str]] = {}
     if deny_rules:
         permissions["deny"] = list(deny_rules)
-    allow = options.get("allow") or ()
+    # `//` starts an absolute path in a Claude Code permission rule.
+    allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
     if allow:
-        permissions["allow"] = list(allow)
+        permissions["allow"] = allow
     return {"permissions": permissions} if permissions else None
 
 
@@ -713,7 +721,7 @@ class ClaudeRuntime(Runtime):
                     agent=spec.options.get("agent") or None,
                     model=spec.model,
                     effort=spec.effort,
-                    settings=launch_settings(spec.options, self.deny_rules),
+                    settings=launch_settings(spec.options, self.deny_rules, spec.read_paths),
                 )
             except WorkspaceNotTrusted as exc:
                 if not trusted:

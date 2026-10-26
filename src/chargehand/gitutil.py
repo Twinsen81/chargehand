@@ -125,9 +125,9 @@ class Git:
         result = self.run(["status", "--porcelain"], cwd=worktree, check=False)
         return result.returncode == 0 and bool(result.stdout.strip())
 
-    def head_commit(self, worktree: Path) -> str | None:
-        """The full id of the commit HEAD names in *worktree*, or None."""
-        result = self.run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    def head_commit(self, worktree: Path, ref: str = "HEAD") -> str | None:
+        """The full id of the commit *ref* (``HEAD``, ``FETCH_HEAD``) names in *worktree*, or None."""
+        result = self.run(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
                           cwd=worktree, check=False)
         commit = result.stdout.strip()
         return commit if result.returncode == 0 and is_commit_id(commit) else None
@@ -185,6 +185,18 @@ class Git:
         else:
             args += ["-b", branch, str(worktree), base]
         self.run(args, cwd=repo, timeout=600)
+
+    def add_detached_worktree(self, repo: Path, worktree: Path, base: str) -> None:
+        """Create a worktree with a detached HEAD at *base*, or accept an existing one."""
+        existing = self.list_worktrees(repo)
+        if str(worktree) in existing or (
+            worktree.exists() and str(worktree.resolve()) in existing
+        ):
+            return
+        if worktree.exists() and any(worktree.iterdir()):
+            raise GitError(f"{worktree} already exists and is not empty, but git does not know it")
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        self.run(["worktree", "add", "--detach", str(worktree), base], cwd=repo, timeout=600)
 
     def remove_worktree(self, repo: Path, worktree: Path, *, force: bool = False) -> None:
         args = ["worktree", "remove"]

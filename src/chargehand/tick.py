@@ -91,9 +91,15 @@ FOLLOWS_PULL_REQUEST_PREFIX = "follows-pr:"
 # request is not the worker's primary item, so its close does not end the worker.
 PULL_REQUEST_KINDS = (roles_mod.COMMENT, "review", "ci_status")
 
-# A role with `checkout = "item"` gets its item's head from its setup step. The commit the
-# worktree was on after that step is kept under this prefix and the worker id, so that
-# garbage collection does not count the item's own commits as unpushed work.
+# A role with `checkout = "item"` gets a second, detached checkout of its item's head, made
+# by its setup step, at <worktree_root>/<ITEM_CHECKOUTS>/<role>/<item>. The session never
+# runs there: the head is the item author's content, and Claude Code would load its
+# settings, hooks and instructions from a working directory it trusts. A role name starts
+# with a letter or digit, so this directory never holds a worker's worktree.
+ITEM_CHECKOUTS = ".items"
+# The commit the item checkout was on after the setup step is kept under this prefix and
+# the worker id, so that garbage collection does not count the item's own commits as
+# unpushed work.
 CHECKOUT_HEAD_PREFIX = "checkout-head:"
 
 # A start event for a repository that no `[[repository]]` names is ignored. It is reported
@@ -128,6 +134,12 @@ _STATUS_FOR_STATE = {
     ledger_mod.CANCELLED: Status.BLOCKED,
     ledger_mod.DONE: Status.DONE,
 }
+
+
+def item_checkout_path(worker: Worker) -> Path:
+    """Where a `checkout = "item"` role keeps its item's head, next to the worktree root."""
+    worktree = worker.worktree_path
+    return worktree.parent.parent / ITEM_CHECKOUTS / worktree.parent.name / worktree.name
 
 
 @contextmanager
@@ -951,20 +963,30 @@ class Runner:
         return True, f"session removed, worktree and branch deleted{kept}"
 
     def _worktree_holds_work(self, worker: Worker) -> str | None:
-        worktree = worker.worktree_path
-        if not worktree.exists():
+        found = self._checkout_holds_work(worker.worktree_path, (), "its worktree")
+        checkout = item_checkout_path(worker)
+        if found is None and checkout.exists():
+            # The item's checkout sits on its head commit, which no remote-tracking ref
+            # may contain: a fork's commits, or a squash-merged branch that a fetch pruned.
+            # Those commits are not the session's work, and neither is a newer head that
+            # `gh pr checkout` fetched again.
+            given = self.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}")
+            fetched = self.git.head_commit(checkout, "FETCH_HEAD")
+            found = self._checkout_holds_work(
+                checkout, tuple(c for c in (given, fetched) if c), "its item checkout"
+            )
+        return found
+
+    def _checkout_holds_work(self, path: Path, not_in: tuple[str, ...], name: str) -> str | None:
+        if not path.exists():
             return None
-        # A worker given a pull request to review sits on its head commit, which no
-        # remote-tracking ref may contain: a fork's commits, or a squash-merged branch
-        # that a fetch pruned. Those commits are not the session's work.
-        given = self.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}")
-        unpushed = self.git.unpushed_commits(worktree, not_in=(given,) if given else ())
+        unpushed = self.git.unpushed_commits(path, not_in=not_in)
         if unpushed < 0:
-            return "its worktree could not be inspected"
+            return f"{name} could not be inspected"
         if unpushed > 0:
-            return f"its worktree holds {unpushed} unpushed commit(s)"
-        if self.git.is_dirty(worktree):
-            return "its worktree has uncommitted changes"
+            return f"{name} holds {unpushed} unpushed commit(s)"
+        if self.git.is_dirty(path):
+            return f"{name} has uncommitted changes"
         return None
 
     def _remove_worktree(self, worker: Worker, *, force: bool) -> bool:
@@ -978,6 +1000,9 @@ class Runner:
         """
         repo = worker.repo_path
         current = None
+        checkout = item_checkout_path(worker)
+        if checkout.exists():
+            self.git.remove_worktree(repo, checkout, force=force)
         if worker.worktree_path.exists():
             current = self.git.worktree_branch(repo, worker.worktree_path)
             self.git.remove_worktree(repo, worker.worktree_path, force=force)
@@ -1156,7 +1181,7 @@ class Runner:
                 report.routed.append(
                     f"{config.name}: {len(own)} event(s), {result.duplicates} seen before, "
                     f"{result.own} by chargehand, {result.delivered} inbox row(s), "
-                    f"{result.deferred} start(s) deferred"
+                    f"{result.closed} worker(s) closed, {result.deferred} start(s) deferred"
                 )
         _, given_up = self.ledger.prune_events()
         if given_up:
@@ -1660,10 +1685,10 @@ class Runner:
                 continue
             result = router.route(events, signed_in=signed_in)
             self.ledger.set_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}", cursor)
-            if result.delivered or result.own:
+            if result.delivered or result.own or result.closed:
                 report.routed.append(
                     f"{repository.name}: {len(events)} tracker event(s), {result.own} by "
-                    f"chargehand, {result.delivered} inbox row(s)"
+                    f"chargehand, {result.delivered} inbox row(s), {result.closed} worker(s) closed"
                 )
 
     def _poll_trackers(
@@ -1839,30 +1864,40 @@ class Runner:
             worker = self.ledger.update(worker, step=1, label_state=Status.RUNNING.value)
             self._check_crash(1, crash_after_step)
 
-        # Step 2: fetch, then create the worktree on a placeholder branch.
+        # Step 2: fetch, then create the worktree on a placeholder branch. A role that
+        # reviews its item gets a second, detached worktree for the item's head.
         if worker.step < 2:
             self.git.fetch(context.repository.path, gitutil.remote_of(repo_config.base))
             self.git.add_worktree(
                 context.repository.path, worker.worktree_path, worker.branch, repo_config.base
             )
+            if role.checkout == roles_mod.CHECKOUT_ITEM:
+                self.git.add_detached_worktree(
+                    context.repository.path, item_checkout_path(worker), repo_config.base
+                )
             worker = self.ledger.update(worker, step=2)
             self._check_crash(2, crash_after_step)
 
         # Step 3: the repository's own setup script, then the role's. A role that reviews
-        # an item, `checkout = "item"`, checks out the item's head in its own step.
+        # its item runs its setup in the item checkout, which the setup moves to the
+        # item's head.
         if worker.step < 3:
-            for template, where in (
-                (repo_config.setup, f"{repo_config.source or 'repo config'}.setup"),
-                (role.setup, f"{role.source or 'role ' + role.name}.setup"),
+            item_checkout = role.checkout == roles_mod.CHECKOUT_ITEM
+            for template, where, cwd in (
+                (repo_config.setup, f"{repo_config.source or 'repo config'}.setup", None),
+                (role.setup, f"{role.source or 'role ' + role.name}.setup",
+                 item_checkout_path(worker) if item_checkout else None),
             ):
-                failure = self._run_script(template, worker, repo_config.setup_timeout_secs, where)
+                failure = self._run_script(
+                    template, worker, repo_config.setup_timeout_secs, where, cwd=cwd
+                )
                 if failure is not None:
                     # `failure` can quote the script's stderr, so it stays local.
                     return self._fail_worker(
                         worker, context, failure, report, notify_detail="setup script failed"
                     )
-            if role.checkout == "item":
-                head = self.git.head_commit(worker.worktree_path)
+            if item_checkout:
+                head = self.git.head_commit(item_checkout_path(worker))
                 if head is not None:
                     self.ledger.set_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}", head)
             worker = self.ledger.update(worker, step=3)
@@ -1876,8 +1911,14 @@ class Runner:
         return worker
 
     def _run_script(
-        self, template: str | None, worker: Worker, timeout_secs: float, where: str
+        self, template: str | None, worker: Worker, timeout_secs: float, where: str,
+        *, cwd: Path | None = None,
     ) -> str | None:
+        """Run a setup command in the worktree, or in *cwd*.
+
+        A relative program is looked up in the worktree and the main checkout only, never
+        in *cwd*: an item checkout holds the item author's files.
+        """
         if not template:
             return None
         argv = config_mod.render_argv(template, self._template_values(worker), where=where)
@@ -1893,7 +1934,7 @@ class Runner:
         try:
             result = subprocess.run(
                 argv,
-                cwd=str(worker.worktree_path),
+                cwd=str(cwd or worker.worktree_path),
                 capture_output=True,
                 text=True,
                 timeout=timeout_secs,
@@ -1940,6 +1981,10 @@ class Runner:
                     options=role.options,
                     model=role.model,
                     effort=role.effort,
+                    read_paths=(
+                        (item_checkout_path(worker),)
+                        if role.checkout == roles_mod.CHECKOUT_ITEM else ()
+                    ),
                 ),
                 warn=report.warnings.append,
             )
@@ -2002,9 +2047,11 @@ class Runner:
         return f"{prefix}{role}/{item}"
 
     def _template_values(self, worker: Worker) -> dict[str, str]:
+        checkout = item_checkout_path(worker)
         values = {
             "item": worker.item,
             "item_url": worker.url or "",
+            "item_checkout": str(checkout if checkout.exists() else worker.worktree_path),
             "worktree": str(worker.worktree_path),
             "branch": worker.branch,
             "repo": str(worker.repo_path),

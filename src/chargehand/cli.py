@@ -667,7 +667,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         _print(f"wrote {target}")
     if args.role:
         _print(f"Add {', '.join(args.role)} to the repository's `roles` in your machine "
-               "configuration. The comments at the top of each role file say what else it needs.")
+               "configuration. Commit an agent file to the base branch, or copy it to "
+               "~/.claude/agents: sessions start in a checkout of the base branch. The "
+               "comments at the top of each role file say what else it needs.")
     else:
         _print("Edit `base` in the repository configuration and `prompt` in the role, then add "
                "the repository to your machine configuration.")

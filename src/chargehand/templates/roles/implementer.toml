@@ -20,7 +20,7 @@
 
 # The first turn: a slash command, a skill, or a plain instruction.
 #
-# Available variables: {item} {item_url} {worktree} {branch} {repo}
+# Available variables: {item} {item_url} {item_checkout} {worktree} {branch} {repo}
 #
 # There is deliberately no {title} and no {body}. The prompt is a trusted user
 # message, so issue text has to reach the agent as a tool result it fetches itself.

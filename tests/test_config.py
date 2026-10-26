@@ -123,8 +123,9 @@ def test_render_argv_does_not_let_a_value_become_more_arguments():
 def test_the_available_template_variables_exclude_issue_text():
     assert "title" not in config_mod.TEMPLATE_VARS
     assert "body" not in config_mod.TEMPLATE_VARS
+    # Every variable is an identifier, a URL or a path that chargehand writes.
     assert set(config_mod.TEMPLATE_VARS) == {
-        "item", "item_url", "worktree", "branch", "repo", "issue", "url",
+        "item", "item_url", "item_checkout", "worktree", "branch", "repo", "issue", "url",
     }
 
 
