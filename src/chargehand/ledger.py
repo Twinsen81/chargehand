@@ -27,8 +27,9 @@ from pathlib import Path
 from typing import Any
 
 from chargehand import paths
+from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state.
@@ -99,6 +100,7 @@ _WORKER_COLUMNS = (
     "created_at",
     "updated_at",
     "finished_at",
+    "owns_label",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -138,7 +140,10 @@ CREATE TABLE IF NOT EXISTS workers (
     last_wake_at     REAL,
     created_at       REAL    NOT NULL,
     updated_at       REAL    NOT NULL,
-    finished_at      REAL
+    finished_at      REAL,
+    -- Whether this worker drives the tracker's queue label: set when the queue label
+    -- started it. Every worker before version 3 was started that way.
+    owns_label       INTEGER NOT NULL DEFAULT 1
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -183,6 +188,72 @@ CREATE TABLE IF NOT EXISTS runner_state (
     value      TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+
+-- A worker's interest in a work item: every live subscriber gets every event of a kind
+-- in `kinds` (a JSON list) on that item. The primary item is the one the worker was
+-- created for. A group topic later is a subscription to a group key.
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id   INTEGER NOT NULL REFERENCES workers (id),
+    source      TEXT    NOT NULL,
+    item        TEXT    NOT NULL,
+    item_ref    TEXT    NOT NULL,
+    kinds       TEXT    NOT NULL DEFAULT '[]',
+    is_primary  INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL    NOT NULL,
+    UNIQUE (worker_id, source, item)
+);
+
+CREATE INDEX IF NOT EXISTS subscriptions_item ON subscriptions (source, item);
+
+-- Per-worker queue of events not yet delivered. The unique key makes routing the same
+-- event twice harmless, which a start event deferred by the caps relies on.
+CREATE TABLE IF NOT EXISTS inbox (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    source       TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+    item         TEXT    NOT NULL,
+    item_ref     TEXT    NOT NULL,
+    actor        TEXT    NOT NULL,
+    occurred_at  REAL    NOT NULL,
+    dedupe_id    TEXT    NOT NULL,
+    pointer      TEXT    NOT NULL,
+    queued_at    REAL    NOT NULL,
+    delivered_at REAL,
+    UNIQUE (worker_id, source, dedupe_id)
+);
+
+CREATE INDEX IF NOT EXISTS inbox_pending ON inbox (worker_id, delivered_at);
+
+-- Every event the router has handled, for the dedupe filter, including events that
+-- matched no subscriber. A start event that the caps deferred stays `start_pending`
+-- and is offered to the start rules again on the next tick.
+CREATE TABLE IF NOT EXISTS events (
+    source        TEXT    NOT NULL,
+    dedupe_id     TEXT    NOT NULL,
+    kind          TEXT    NOT NULL,
+    item          TEXT    NOT NULL,
+    item_ref      TEXT    NOT NULL,
+    item_url      TEXT,
+    item_hint     TEXT,
+    actor         TEXT    NOT NULL,
+    occurred_at   REAL    NOT NULL,
+    pointer       TEXT    NOT NULL,
+    marked        INTEGER NOT NULL DEFAULT 0,
+    seen_at       REAL    NOT NULL,
+    start_pending INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, dedupe_id)
+);
+
+CREATE INDEX IF NOT EXISTS events_pending ON events (start_pending);
+
+-- Where each source's last poll stopped.
+CREATE TABLE IF NOT EXISTS cursors (
+    source     TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at REAL NOT NULL
+);
 """
 
 # Version 1 kept one row per attempt at an issue. Every attempt becomes a worker in the
@@ -208,6 +279,15 @@ FROM attempts_v1 ORDER BY id;
 INSERT INTO sessions (worker_id, session_id, session_uuid, kind, started_at)
 SELECT id, session_id, session_uuid, '{SESSION_MIGRATED}', created_at
 FROM workers WHERE session_id IS NOT NULL;
+"""
+
+# Version 3 adds subscriptions, the inbox, the seen events and the source cursors, and the
+# `owns_label` column. It only adds, so the existing rows and their ids stay as they are.
+# The ALTER is not idempotent on its own; it runs only on a version 2 file, in the same
+# transaction as the version bump.
+_MIGRATE_V2_TO_V3 = f"""
+ALTER TABLE workers ADD COLUMN owns_label INTEGER NOT NULL DEFAULT 1;
+{_SCHEMA}
 """
 
 
@@ -244,6 +324,7 @@ class Worker:
     created_at: float
     updated_at: float
     finished_at: float | None
+    owns_label: int = 1
 
     @property
     def is_terminal(self) -> bool:
@@ -272,6 +353,74 @@ class SessionRecord:
     kind: str
     started_at: float
     ended_at: float | None
+
+
+@dataclass(frozen=True)
+class Subscription:
+    id: int
+    worker_id: int
+    source: str
+    item: str
+    item_ref: str
+    kinds: tuple[str, ...]
+    is_primary: bool
+    created_at: float
+
+    @property
+    def work_item(self) -> WorkItem:
+        return WorkItem(source=self.source, key=self.item, ref=self.item_ref)
+
+
+@dataclass(frozen=True)
+class InboxEntry:
+    id: int
+    worker_id: int
+    source: str
+    kind: str
+    item: str
+    item_ref: str
+    actor: str
+    occurred_at: float
+    dedupe_id: str
+    pointer: str
+    queued_at: float
+    delivered_at: float | None
+
+
+def _row_to_subscription(row: Mapping[str, Any]) -> Subscription:
+    try:
+        kinds = json.loads(row["kinds"])
+    except (TypeError, ValueError):
+        kinds = []
+    return Subscription(
+        id=row["id"],
+        worker_id=row["worker_id"],
+        source=row["source"],
+        item=row["item"],
+        item_ref=row["item_ref"],
+        kinds=tuple(k for k in kinds if isinstance(k, str)) if isinstance(kinds, list) else (),
+        is_primary=bool(row["is_primary"]),
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_event(row: sqlite3.Row) -> Event:
+    return Event(
+        source=row["source"],
+        kind=row["kind"],
+        item=WorkItem(
+            source=row["source"],
+            key=row["item"],
+            ref=row["item_ref"],
+            url=row["item_url"],
+            hint=row["item_hint"],
+        ),
+        actor=row["actor"],
+        occurred_at=row["occurred_at"],
+        dedupe_id=row["dedupe_id"],
+        pointer=row["pointer"],
+        marked=bool(row["marked"]),
+    )
 
 
 def _row_to_worker(row: sqlite3.Row) -> Worker:
@@ -312,7 +461,9 @@ class Ledger:
         # One transaction for the schema, the copied rows and the version, because SQLite's
         # DDL and user_version are transactional: a migration that dies half way leaves the
         # old ledger as it was, instead of a renamed table that the next open cannot rename.
-        script = _MIGRATE_V1_TO_V2 if version == 1 else _SCHEMA
+        # Every statement of the schema is idempotent: the version 1 copy includes the
+        # whole schema, and a version 2 ledger only gains the tables it lacks.
+        script = _MIGRATE_V1_TO_V2 if version == 1 else _MIGRATE_V2_TO_V3 if version == 2 else _SCHEMA
         try:
             self._conn.executescript(
                 f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;"
@@ -348,6 +499,7 @@ class Ledger:
         origin: str = ORIGIN_SOURCE,
         start_rule: str | None = None,
         runtime: str = "claude",
+        owns_label: bool = True,
         now: float | None = None,
     ) -> Worker:
         """Step 0 of the launch sequence: the row exists before any side effect."""
@@ -358,11 +510,11 @@ class Ledger:
             """
             INSERT INTO workers (role, origin, start_rule, runtime, item, item_id, url,
                                  repository, repo, worktree, branch, state, step,
-                                 launch_attempts, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+                                 launch_attempts, created_at, updated_at, owns_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
             """,
             (role, origin, start_rule, runtime, item, item_id, url, repository, str(repo),
-             str(worktree), branch, LAUNCHING, stamp, stamp),
+             str(worktree), branch, LAUNCHING, stamp, stamp, 1 if owns_label else 0),
         )
         worker = self.get(int(cursor.lastrowid))
         assert worker is not None
@@ -386,6 +538,14 @@ class Ledger:
             (item, *NON_TERMINAL),
         ).fetchall()
         return [_row_to_worker(row) for row in rows]
+
+    def latest_label_owner(self, item: str) -> Worker | None:
+        """The newest worker on *item* that drives the queue label."""
+        row = self._conn.execute(
+            "SELECT * FROM workers WHERE item = ? AND owns_label = 1 ORDER BY id DESC LIMIT 1",
+            (item,),
+        ).fetchone()
+        return _row_to_worker(row) if row else None
 
     def latest_worker_for(self, item: str, role: str | None = None) -> Worker | None:
         if role is None:
@@ -507,6 +667,172 @@ class Ledger:
         ).fetchall()
         return [SessionRecord(**dict(row)) for row in rows]
 
+    # ----- subscriptions and the inbox --------------------------------------
+
+    def subscribe(
+        self,
+        worker: Worker,
+        item: WorkItem,
+        kinds: Iterable[str],
+        *,
+        primary: bool = False,
+        now: float | None = None,
+    ) -> Subscription:
+        """Subscribe *worker* to *item*. Subscribing again replaces the kinds."""
+        self._conn.execute(
+            """
+            INSERT INTO subscriptions (worker_id, source, item, item_ref, kinds, is_primary,
+                                       created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (worker_id, source, item) DO UPDATE SET
+                kinds = excluded.kinds,
+                item_ref = excluded.item_ref,
+                is_primary = MAX(is_primary, excluded.is_primary)
+            """,
+            (worker.id, item.source, item.key, item.ref, json.dumps(list(kinds)),
+             1 if primary else 0, time.time() if now is None else now),
+        )
+        row = self._conn.execute(
+            "SELECT * FROM subscriptions WHERE worker_id = ? AND source = ? AND item = ?",
+            (worker.id, item.source, item.key),
+        ).fetchone()
+        return _row_to_subscription(row)
+
+    def subscriptions_of(self, worker: Worker) -> list[Subscription]:
+        rows = self._conn.execute(
+            "SELECT * FROM subscriptions WHERE worker_id = ? ORDER BY id", (worker.id,)
+        ).fetchall()
+        return [_row_to_subscription(row) for row in rows]
+
+    def primary_subscription(self, worker: Worker) -> Subscription | None:
+        row = self._conn.execute(
+            "SELECT * FROM subscriptions WHERE worker_id = ? AND is_primary = 1 "
+            "ORDER BY id LIMIT 1",
+            (worker.id,),
+        ).fetchone()
+        return _row_to_subscription(row) if row else None
+
+    def live_subscriptions(self, source: str, item: str) -> list[tuple[Subscription, Worker]]:
+        """The subscriptions of live workers to one item, each with its worker."""
+        rows = self._conn.execute(
+            f"SELECT w.*, s.id AS s_id, s.worker_id AS s_worker_id, s.source AS s_source, "
+            f"s.item AS s_item, s.item_ref AS s_item_ref, s.kinds AS s_kinds, "
+            f"s.is_primary AS s_is_primary, s.created_at AS s_created_at "
+            f"FROM subscriptions s JOIN workers w ON w.id = s.worker_id "
+            f"WHERE s.source = ? AND s.item = ? AND w.state IN "
+            f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY s.id",
+            (source, item, *NON_TERMINAL),
+        ).fetchall()
+        return [
+            (
+                _row_to_subscription(
+                    {key: row[f"s_{key}"] for key in (
+                        "id", "worker_id", "source", "item", "item_ref", "kinds", "is_primary",
+                        "created_at",
+                    )}
+                ),
+                _row_to_worker(row),
+            )
+            for row in rows
+        ]
+
+    def subscribed_items(self, source: str) -> list[WorkItem]:
+        """The union of the items that live workers subscribe to on one source."""
+        rows = self._conn.execute(
+            f"SELECT DISTINCT s.item, s.item_ref FROM subscriptions s "
+            f"JOIN workers w ON w.id = s.worker_id WHERE s.source = ? AND w.state IN "
+            f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY s.item",
+            (source, *NON_TERMINAL),
+        ).fetchall()
+        return [WorkItem(source=source, key=row["item"], ref=row["item_ref"]) for row in rows]
+
+    def enqueue(self, worker_id: int, event: Event, *, now: float | None = None) -> bool:
+        """Put *event* into one worker's inbox. False when it is there already."""
+        cursor = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO inbox (worker_id, source, kind, item, item_ref, actor,
+                                         occurred_at, dedupe_id, pointer, queued_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (worker_id, event.source, event.kind, event.item.key, event.item.ref, event.actor,
+             event.occurred_at, event.dedupe_id, event.pointer,
+             time.time() if now is None else now),
+        )
+        return cursor.rowcount > 0
+
+    def inbox(self, worker: Worker, *, pending_only: bool = True) -> list[InboxEntry]:
+        query = "SELECT * FROM inbox WHERE worker_id = ?"
+        if pending_only:
+            query += " AND delivered_at IS NULL"
+        rows = self._conn.execute(query + " ORDER BY id", (worker.id,)).fetchall()
+        return [InboxEntry(**dict(row)) for row in rows]
+
+    # ----- seen events and cursors ------------------------------------------
+
+    def event_seen(self, source: str, dedupe_id: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM events WHERE source = ? AND dedupe_id = ?", (source, dedupe_id)
+        ).fetchone() is not None
+
+    def record_event(
+        self, event: Event, *, start_pending: bool = False, now: float | None = None
+    ) -> None:
+        """Remember that the router handled *event*, so the dedupe filter drops it next time."""
+        self._conn.execute(
+            """
+            INSERT INTO events (source, dedupe_id, kind, item, item_ref, item_url, item_hint,
+                                actor, occurred_at, pointer, marked, seen_at, start_pending)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, dedupe_id) DO UPDATE SET start_pending = excluded.start_pending
+            """,
+            (event.source, event.dedupe_id, event.kind, event.item.key, event.item.ref,
+             event.item.url, event.item.hint, event.actor, event.occurred_at, event.pointer,
+             1 if event.marked else 0, time.time() if now is None else now,
+             1 if start_pending else 0),
+        )
+
+    def pending_start_events(self) -> list[Event]:
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE start_pending = 1 ORDER BY seen_at, rowid"
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def settle_start(self, event: Event) -> None:
+        self._conn.execute(
+            "UPDATE events SET start_pending = 0 WHERE source = ? AND dedupe_id = ?",
+            (event.source, event.dedupe_id),
+        )
+
+    def prune_events(
+        self, *, older_than_secs: float = 30 * 24 * 3600, pending_secs: float = 7 * 24 * 3600
+    ) -> tuple[int, int]:
+        """Forget old events; give up a start deferred for longer than *pending_secs*.
+
+        Returns how many events were forgotten, and how many of them were deferred starts.
+        """
+        now = time.time()
+        condition = "seen_at < ? OR (start_pending = 1 AND seen_at < ?)"
+        values = (now - older_than_secs, now - pending_secs)
+        given_up = self._conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE start_pending = 1 AND ({condition})", values
+        ).fetchone()[0]
+        cursor = self._conn.execute(f"DELETE FROM events WHERE {condition}", values)
+        return cursor.rowcount, int(given_up)
+
+    def get_cursor(self, source: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM cursors WHERE source = ?", (source,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_cursor(self, source: str, value: str | None) -> None:
+        self._conn.execute(
+            "INSERT INTO cursors (source, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(source) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (source, value, time.time()),
+        )
+
     # ----- control requests -------------------------------------------------
 
     def record_request(self, kind: str, target: str | None = None, **args: Any) -> int:
@@ -608,6 +934,8 @@ def summarize(workers: Iterable[Worker]) -> Mapping[str, int]:
 __all__ = [
     "Worker",
     "SessionRecord",
+    "Subscription",
+    "InboxEntry",
     "Ledger",
     "open_ledger",
     "summarize",

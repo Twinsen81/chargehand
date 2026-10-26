@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Event sources and a publish-and-subscribe router. A `[[source]]` table in the machine
+  configuration names a poller (`name`, `type`, and the type's own options); each tick
+  polls every source after the watchdog, drops events seen before and comments that a
+  chargehand worker posted as the signed-in account (by an authorship marker), puts one
+  inbox row per matching live subscriber, and then runs the enabled roles' start rules,
+  which start a worker subscribed to its item unless a suitable worker already has it. A
+  start that the caps defer is kept for up to a week and tried again. Only a worker the
+  queue label started changes the label, recorded as `owns_label` when it is created. The
+  ledger moves to version 3 with `subscriptions`, `inbox`, `events` and `cursors` tables
+  and the `owns_label` column; a version 2 ledger gains them in place.
 - Runner: a `tick` that reconciles interrupted launches, applies recorded control
   requests, runs the watchdog, diffs session states against the ledger, admits queued
   issues within the launch throttle, launches them ledger-row-first, and collects
