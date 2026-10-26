@@ -5,10 +5,11 @@ Order, once per tick:
 1. reconcile interrupted launches, from three sides
 2. apply recorded control requests
 3. run the watchdog
-4. diff session states against the ledger and notify on change
-5. admit new issues within the launch throttle
-6. launch them, ledger row first
-7. collect garbage
+4. poll the event sources and route their events: inboxes, then start rules
+5. diff session states against the ledger and notify on change
+6. sync the tracker labels
+7. admit newly queued issues within the launch throttle, and launch them, ledger row first
+8. collect garbage
 
 A control command never calls Claude Code, git, or a tracker itself; it records a
 request and the tick applies it. Together with the tick lock that gives one writer of
@@ -33,6 +34,8 @@ from chargehand import claude as claude_mod
 from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import gitutil, ledger as ledger_mod, paths, sanitize, trackers
+from chargehand import router as router_mod
+from chargehand import sources as sources_mod
 from chargehand.claude import ClaudeCLI, Session
 from chargehand.config import MachineConfig, RepoConfig, Repository
 from chargehand.errors import (
@@ -49,6 +52,7 @@ from chargehand.errors import (
 from chargehand.ledger import Ledger, Worker
 from chargehand.notify import Notification, Notifier
 from chargehand.roles import Role, StartRule
+from chargehand.sources import Event, Source, WorkItem
 from chargehand.trackers import Issue, Status, Tracker
 
 log = logging.getLogger(__name__)
@@ -132,6 +136,7 @@ class TickReport:
     transitions: list[str] = field(default_factory=list)
     notified: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
+    routed: list[str] = field(default_factory=list)
     collected: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -148,6 +153,7 @@ class TickReport:
             "transitions": self.transitions,
             "notified": self.notified,
             "requests": self.requests,
+            "routed": self.routed,
             "collected": self.collected,
             "skipped": self.skipped,
             "warnings": self.warnings,
@@ -247,6 +253,7 @@ class Runner:
         git: gitutil.Git | None = None,
         notifier: Notifier | None = None,
         tracker_factory=trackers.build,
+        source_factory=sources_mod.build,
     ) -> None:
         self.config = config
         self.ledger = ledger
@@ -254,6 +261,8 @@ class Runner:
         self.git = git or gitutil.Git(config.git_bin)
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
+        self._source_factory = source_factory
+        self._sources: dict[str, Source | ConfigError | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
         self._sessions: list[Session] | None = None
 
@@ -288,6 +297,17 @@ class Runner:
         repository = self.config.repository_by_name(worker.repository)
         return self.context(repository) if repository else None
 
+    def source(self, name: str) -> Source | None:
+        """The configured source *name*, built once per tick; None when it is not usable."""
+        if name not in self._sources:
+            config = self.config.source_by_name(name)
+            try:
+                self._sources[name] = self._source_factory(config) if config else None
+            except ConfigError as exc:
+                self._sources[name] = exc
+        found = self._sources[name]
+        return found if isinstance(found, Source) else None
+
     # ----- the tick ---------------------------------------------------------
 
     def tick(self, *, crash_after_step: int | None = None) -> TickReport:
@@ -303,6 +323,7 @@ class Runner:
             ("reconcile", lambda: self._reconcile(report)),
             ("requests", lambda: self._apply_requests(report)),
             ("watchdog", lambda: self._watchdog(report)),
+            ("route", lambda: self._route_events(report, crash_after_step=crash_after_step)),
             ("supervise", lambda: self._diff_and_notify(report)),
             ("labels", lambda: self._sync_all_labels(report)),
             ("admit", lambda: self._admit(report, crash_after_step=crash_after_step)),
@@ -721,6 +742,12 @@ class Runner:
                     f"`claude rm {worker.session_id}`."
                 )
             worker = self.ledger.update(worker, session_id=None, session_uuid=None)
+        if not self._drives_label(worker, context):
+            # The queue label would start the queue's role, not this one. A new start
+            # event for the item starts a new worker of this role.
+            self.ledger.update(worker, gc_done=1)
+            outcome = "cleared; the next start event for the item starts a new worker"
+            return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
         try:
             issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
             if issue is None:
@@ -833,7 +860,125 @@ class Runner:
                 self.ledger.update(worker, watchdog_notified=WATCHDOG_LONG_RUN)
                 self._notify(report, worker.item, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
 
-    # ----- 4. state diff and notification -----------------------------------
+    # ----- 4. sources and routing -------------------------------------------
+
+    def _route_events(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
+        """Poll every source, then filter, deliver and start, through the router.
+
+        A source that fails is one error in the report and keeps its cursor, so its
+        events arrive on the next tick; the other sources are routed as usual.
+        """
+        router = router_mod.Router(
+            self.ledger,
+            start=lambda event: self._start_from_event(
+                event, report, crash_after_step=crash_after_step
+            ),
+        )
+        retried = router.retry_pending_starts()
+        if retried.deferred:
+            report.routed.append(f"{retried.deferred} start(s) still deferred")
+        for config in self.config.sources:
+            source = self.source(config.name)
+            if source is None:
+                report.errors.append(str(self._sources.get(config.name)))
+                continue
+            try:
+                signed_in = source.whoami()
+                events, cursor = source.poll(
+                    self.ledger.get_cursor(config.name),
+                    self.ledger.subscribed_items(config.name),
+                )
+            except LaunchAborted:
+                raise
+            except Exception as exc:
+                log.exception("source %s failed", config.name)
+                report.errors.append(
+                    f"source {config.name}: {sanitize.one_line(str(exc), limit=300)}"
+                )
+                continue
+            own = [event for event in events if event.source == config.name]
+            if len(own) != len(events):
+                report.warnings.append(
+                    f"source {config.name}: ignored {len(events) - len(own)} event(s) "
+                    f"that named another source"
+                )
+            result = router.route(own, signed_in=signed_in)
+            self.ledger.set_cursor(config.name, cursor)
+            if own:
+                report.routed.append(
+                    f"{config.name}: {len(own)} event(s), {result.duplicates} seen before, "
+                    f"{result.own} by chargehand, {result.delivered} inbox row(s), "
+                    f"{result.deferred} start(s) deferred"
+                )
+        self.ledger.prune_events()
+
+    def _start_from_event(
+        self, event: Event, report: TickReport, *, crash_after_step: int | None = None
+    ) -> bool:
+        """Run the start rules of the enabled roles for one event.
+
+        Returns True when a rule wanted a worker and the launch has to wait, for the caps,
+        a pause or a previous worker's worktree; the router then keeps the event.
+        """
+        if event.kind == roles_mod.LABELED:
+            # The queue label still starts its workers through admission, which reads the
+            # tracker's queue rather than events.
+            return False
+        source = self.source(event.source)
+        repository = (
+            source.repository_for(event.item, self.config.repositories) if source else None
+        )
+        if repository is None:
+            return False
+        context = self.context(repository)
+        if not context.usable:
+            # Reported by reconciliation; the start waits until the repository is usable.
+            return True
+        item = event.item.key
+        deferred = False
+        for role_name in repository.roles:
+            try:
+                role = context.role(role_name)
+            except ConfigError:
+                # Reported by admission, once per tick.
+                continue
+            rule = role.start_rule_for(event.kind, event.source, repository.name)
+            if rule is None:
+                continue
+            if router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
+                continue
+            if not sanitize.is_safe_identifier(item):
+                report.warnings.append(
+                    f"source {event.source}: skipping an item whose key is not usable as a "
+                    f"path or branch name: {sanitize.scrub_identifier(item)!r}"
+                )
+                return False
+            if self.ledger.is_paused(repository.name):
+                report.skipped.append(f"{item}: repository {repository.name} is paused")
+                deferred = True
+                continue
+            stale = self._stale_worktree_for(role.name, item)
+            if stale is not None:
+                report.skipped.append(
+                    f"{item}: the previous {role.name} worker's worktree is still at {stale}"
+                )
+                deferred = True
+                continue
+            refusal = self._launch_refusal(repository, role, item)
+            if refusal is not None:
+                report.skipped.append(refusal)
+                deferred = True
+                continue
+            try:
+                self._launch(context, role, rule, event.item, report,
+                             crash_after_step=crash_after_step)
+            except LaunchAborted:
+                raise
+            except ChargehandError as exc:
+                report.errors.append(f"{item}: {exc}")
+        return deferred
+
+    # ----- 5. state diff and notification -----------------------------------
 
     def _diff_and_notify(self, report: TickReport) -> None:
         # Before the diff, so a send that fails below waits for the next tick rather than
@@ -986,10 +1131,26 @@ class Runner:
 
     def _label_sync_pending(self, item: str) -> bool:
         worker = self.ledger.latest_worker_for(item)
-        if worker is None:
+        if worker is None or not self._drives_label(worker, self.context_for_worker(worker)):
             return False
         desired = _STATUS_FOR_STATE.get(worker.state)
         return desired is not None and worker.label_state != desired.value
+
+    def _drives_label(self, worker: Worker, context: RepositoryContext | None) -> bool:
+        """Only a worker that the queue label started changes the label.
+
+        The label is one per issue and several workers may follow the issue, so a worker
+        that another event started only reads it. A worker whose rule is unknown, such as
+        one adopted or migrated from an older ledger, keeps the label as before.
+        """
+        if worker.start_rule is None or context is None:
+            return True
+        try:
+            role = context.role(worker.role)
+        except ConfigError:
+            return True
+        rule = next((r for r in role.start if r.name == worker.start_rule), None)
+        return rule is None or rule.on.rsplit(".", 1)[-1] == roles_mod.LABELED
 
     def _sync_labels(
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
@@ -1003,6 +1164,8 @@ class Runner:
         if desired is None or worker.label_state == desired.value:
             return worker
         if context is None or not context.usable:
+            return worker
+        if not self._drives_label(worker, context):
             return worker
         try:
             issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
@@ -1097,40 +1260,45 @@ class Runner:
                 )
                 continue
 
-            working, open_workers, per_repository = self._counts()
-            if working >= self.config.max_concurrent:
-                report.skipped.append(
-                    f"{item}: launch throttle ({working}/{self.config.max_concurrent})"
-                )
-                break
-            if open_workers >= self.config.max_open_workers:
-                report.skipped.append(
-                    f"{item}: {open_workers}/{self.config.max_open_workers} open workers"
-                )
-                break
-            if (
-                repository.max_concurrent is not None
-                and per_repository.get(repository.name, 0) >= repository.max_concurrent
-            ):
-                report.skipped.append(
-                    f"{item}: repository {repository.name} is at its own limit "
-                    f"({repository.max_concurrent})"
-                )
-                break
-            in_role = self.ledger.live_count_by_role().get(role.name, 0)
-            if role.policy.max_workers is not None and in_role >= role.policy.max_workers:
-                report.skipped.append(
-                    f"{item}: role {role.name} is at its limit ({role.policy.max_workers} workers)"
-                )
+            refusal = self._launch_refusal(repository, role, item)
+            if refusal is not None:
+                report.skipped.append(refusal)
                 break
 
+            work_item = WorkItem(
+                source=context.tracker.type,  # type: ignore[union-attr]
+                key=item,
+                ref=issue.id,
+                url=issue.url,
+                hint=repository.name,
+            )
             try:
-                self._launch(context, role, rule, issue, report,
+                self._launch(context, role, rule, work_item, report, issue=issue,
                              crash_after_step=crash_after_step)
             except LaunchAborted:
                 raise
             except ChargehandError as exc:
                 report.errors.append(f"{item}: {exc}")
+
+    def _launch_refusal(self, repository: Repository, role: Role, item: str) -> str | None:
+        """Why the caps hold a new launch back now, or None when it may start."""
+        working, open_workers, per_repository = self._counts()
+        if working >= self.config.max_concurrent:
+            return f"{item}: launch throttle ({working}/{self.config.max_concurrent})"
+        if open_workers >= self.config.max_open_workers:
+            return f"{item}: {open_workers}/{self.config.max_open_workers} open workers"
+        if (
+            repository.max_concurrent is not None
+            and per_repository.get(repository.name, 0) >= repository.max_concurrent
+        ):
+            return (
+                f"{item}: repository {repository.name} is at its own limit "
+                f"({repository.max_concurrent})"
+            )
+        in_role = self.ledger.live_count_by_role().get(role.name, 0)
+        if role.policy.max_workers is not None and in_role >= role.policy.max_workers:
+            return f"{item}: role {role.name} is at its limit ({role.policy.max_workers} workers)"
+        return None
 
     def _stale_worktree_for(self, role: str, item: str) -> Path | None:
         """A re-armed item starts a new worker only once the old worktree is gone.
@@ -1149,30 +1317,35 @@ class Runner:
         context: RepositoryContext,
         role: Role,
         rule: StartRule,
-        issue: Issue,
+        item: WorkItem,
         report: TickReport,
         *,
+        issue: Issue | None = None,
         crash_after_step: int | None = None,
     ) -> None:
+        """Start a worker of *role* on *item*. *issue* is the tracker's, for the queue label."""
         repository = context.repository
         repo_config = context.repo_config
         assert repo_config is not None
-        worktree = self.config.worktree_root / role.name / issue.identifier
-        branch = self._branch_for(repo_config, role.name, issue.identifier)
+        worktree = self.config.worktree_root / role.name / item.key
+        branch = self._branch_for(repo_config, role.name, item.key)
 
-        # Step 0: the row exists before any external side effect.
-        worker = self.ledger.create_worker(
-            role=role.name,
-            item=issue.identifier,
-            item_id=issue.id,
-            url=issue.url,
-            repository=repository.name,
-            repo=repository.path,
-            worktree=worktree,
-            branch=branch,
-            start_rule=rule.name,
-            runtime=role.runtime,
-        )
+        # Step 0: the row, and the subscription to its own item, exist before any
+        # external side effect.
+        with self.ledger.transaction():
+            worker = self.ledger.create_worker(
+                role=role.name,
+                item=item.key,
+                item_id=item.ref,
+                url=item.url,
+                repository=repository.name,
+                repo=repository.path,
+                worktree=worktree,
+                branch=branch,
+                start_rule=rule.name,
+                runtime=role.runtime,
+            )
+            self.ledger.subscribe(worker, item, rule.subscribe, primary=True)
         log.info("launching %s in %s", worker.handle, worktree)
         self._check_crash(0, crash_after_step)
         self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step,
@@ -1194,7 +1367,11 @@ class Runner:
         # launch retry counter fails the worker loudly rather than looping.
         role = context.role(worker.role)
 
-        # Step 1: swap the labels, then verify by re-reading.
+        # Step 1: swap the labels, then verify by re-reading. Only for a worker that the
+        # queue label started; another worker on the item leaves the label alone.
+        if worker.step < 1 and not self._drives_label(worker, context):
+            worker = self.ledger.update(worker, step=1)
+            self._check_crash(1, crash_after_step)
         if worker.step < 1:
             if issue is None:
                 # Only reached when resuming an interrupted launch; a tracker or
@@ -1479,11 +1656,7 @@ class Runner:
             context = self.context_for_worker(worker)
             if context is None or not context.usable:
                 continue
-            try:
-                issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
-            except TRACKER_FAILURES:
-                continue
-            if issue is not None and not issue.closed:
+            if not self._item_closed(worker, context):
                 continue
             blocker = self._worktree_holds_work(worker)
             if blocker:
@@ -1519,11 +1692,7 @@ class Runner:
             context = self.context_for_worker(worker)
             if context is None or not context.usable:
                 continue
-            try:
-                issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
-            except TRACKER_FAILURES:
-                continue
-            if issue is not None and not issue.closed:
+            if not self._item_closed(worker, context):
                 continue
             if not self._stop_session(worker):
                 report.warnings.append(
@@ -1533,6 +1702,27 @@ class Runner:
             updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
             self._sync_labels(updated, context, report)
             report.transitions.append(f"{worker.item}: issue closed -> done")
+
+    def _item_closed(self, worker: Worker, context: RepositoryContext) -> bool:
+        """True once the worker's own item is closed or gone; False when open or unknown.
+
+        A worker that the queue label started asks the tracker, as before. Any other asks
+        the source of its primary item, because the tracker does not know a pull request.
+        """
+        if not self._drives_label(worker, context):
+            subscription = self.ledger.primary_subscription(worker)
+            source = self.source(subscription.source) if subscription else None
+            if subscription is None or source is None:
+                return False
+            try:
+                return not source.item_open(subscription.work_item)
+            except ChargehandError:
+                return False
+        try:
+            issue = context.tracker.get(worker.item_id)  # type: ignore[union-attr]
+        except TRACKER_FAILURES:
+            return False
+        return issue is None or issue.closed
 
     def _check_disk(self, report: TickReport) -> None:
         if not self.config.min_free_disk_gb:

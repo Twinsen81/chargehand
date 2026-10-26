@@ -20,7 +20,7 @@ from chargehand.gitutil import Git  # noqa: E402
 from chargehand.ledger import Ledger  # noqa: E402
 from chargehand.notify import Notifier  # noqa: E402
 from chargehand.tick import Runner  # noqa: E402
-from support import fake_tracker  # noqa: E402
+from support import fake_source, fake_tracker  # noqa: E402
 
 FAKE_CLAUDE = Path(__file__).parent / "support" / "fake_claude.py"
 
@@ -177,8 +177,10 @@ def isolated_state(tmp_path, monkeypatch):
     claude_config.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config))
     fake_tracker.reset()
+    fake_source.reset()
     yield state
     fake_tracker.reset()
+    fake_source.reset()
 
 
 @pytest.fixture
