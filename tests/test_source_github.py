@@ -14,7 +14,7 @@ from conftest import Harness, make_config
 from chargehand import sanitize
 from chargehand import sources as sources_mod
 from chargehand import trackers as trackers_mod
-from chargehand.config import MachineConfig, SourceConfig
+from chargehand.config import Labels, MachineConfig, Repository, SourceConfig, TrackerConfig
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger
@@ -426,6 +426,28 @@ def test_item_open(source, gh):
     assert source.item_open(item)
     assert not source.item_open(followed("octo/app#8")[0])
     assert not source.item_open(followed("octo/app#99")[0])
+
+
+def test_the_open_pull_request_of_a_branch(source, gh, tmp_path):
+    gh.add_pull("octo/app#8", state="closed", branch="feature/x")
+    gh.add_pull("octo/app#9", branch="feature/x")
+    gh.add_pull("octo/app#10", branch="other")
+    repository = Repository(
+        name="test", path=tmp_path, tracker=TrackerConfig(type="fake"),
+        labels=Labels(**LABELS), github="octo/app",
+    )
+
+    item = source.pull_request_for(repository, "feature/x")
+
+    assert (item.source, item.key, item.ref, item.url) == (
+        "github", "octo_app_9", "octo/app#9", "https://github.com/octo/app/pull/9",
+    )
+    assert source.pull_request_for(repository, "nothing-here") is None
+    # No call for a repository without a GitHub name, or for a branch name that is not plain.
+    gh.clear_calls()
+    assert source.pull_request_for(dataclasses.replace(repository, github=None), "feature/x") is None
+    assert source.pull_request_for(repository, "-x&state=closed") is None
+    assert gh.calls == []
 
 
 # ----- failures and configuration -----------------------------------------------------

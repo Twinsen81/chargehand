@@ -98,16 +98,17 @@ class GhState:
 
     def add_pull(
         self, ref: str, *, sha: str = "abc1234", state: str = "open",
-        reviewers=("operator",), teams=(), **extra,
+        reviewers=("operator",), teams=(), branch: str | None = None, **extra,
     ) -> None:
         owner_repo, number = ref.split("#")
+        head = {"sha": sha} if branch is None else {"sha": sha, "ref": branch}
 
         def change(data):
             data.setdefault("pulls", {})[ref] = {
                 "number": int(number),
                 "state": state,
                 "html_url": f"https://github.com/{owner_repo}/pull/{number}",
-                "head": {"sha": sha},
+                "head": head,
                 "requested_reviewers": [{"login": login} for login in reviewers],
                 "requested_teams": [{"id": team, "slug": f"team-{team}"} for team in teams],
                 **extra,
@@ -231,6 +232,19 @@ def api(state: dict, args: list[str]) -> int:
             if wanted <= names and (assignee is None or assignee in logins):
                 found.append(issue)
         found += state.get("extra_issue_list_entries", [])
+        emit_pages(found, page_size, paginate)
+        return 0
+
+    if rest == ["pulls"]:
+        # `head` is owner:branch; a pull request from this repository has its owner.
+        head = unquote(query.get("head", [""])[0])
+        found = [
+            pull
+            for ref, pull in state.get("pulls", {}).items()
+            if ref.startswith(owner_repo + "#")
+            and pull["state"] == query.get("state", ["open"])[0]
+            and (not head or head == f"{segments[1]}:{pull['head'].get('ref')}")
+        ]
         emit_pages(found, page_size, paginate)
         return 0
 

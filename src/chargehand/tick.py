@@ -5,15 +5,16 @@ Order, once per tick:
 1. reconcile interrupted launches, from three sides
 2. apply recorded control requests
 3. run the watchdog
-4. poll the event sources and route their events: inboxes, then start rules
-5. diff session states against the ledger and notify on change
-6. deliver: wake each idle worker once for the events in its inbox
-7. sync the tracker labels
-8. poll each repository's tracker and route its events the same way: the queue label is
+4. subscribe each worker to the pull request of its branch, once one exists
+5. poll the event sources and route their events: inboxes, then start rules
+6. diff session states against the ledger and notify on change
+7. deliver: wake each idle worker once for the events in its inbox
+8. sync the tracker labels
+9. poll each repository's tracker and route its events the same way: the queue label is
    a start rule, launched within the caps, ledger row first
-9. collect garbage
+10. collect garbage
 
-The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 8 comes after
+The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 9 comes after
 the state diff so that a slot freed by a finished worker is used in the same tick.
 Delivery comes before it, so a waiting worker gets a free slot before a new one starts.
 
@@ -80,6 +81,14 @@ TRACKER_CURSOR_PREFIX = "tracker:"
 # 2 a hard stop was attempted and did not take.
 WATCHDOG_LONG_RUN = 1
 WATCHDOG_STOP_FAILED = 2
+
+# A worker whose branch got a pull request is subscribed to it once; this runner-state
+# key, with the worker id, records that the check found one.
+FOLLOWS_PULL_REQUEST_PREFIX = "follows-pr:"
+
+# What wakes a worker on the pull request of its own branch. Not `pr_closed`: the pull
+# request is not the worker's primary item, so its close does not end the worker.
+PULL_REQUEST_KINDS = (roles_mod.COMMENT, "review", "ci_status")
 
 # The notification detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
@@ -412,6 +421,7 @@ class Runner:
             ("reconcile", lambda: self._reconcile(report)),
             ("requests", lambda: self._apply_requests(report)),
             ("watchdog", lambda: self._watchdog(report)),
+            ("follow", lambda: self._follow_pull_requests(report)),
             ("route", lambda: self._route_events(report, crash_after_step=crash_after_step)),
             ("supervise", lambda: self._diff_and_notify(report)),
             ("deliver", lambda: self._deliver(report, crash_after_wake=crash_after_wake)),
@@ -1000,7 +1010,67 @@ class Runner:
                 self.ledger.update(worker, watchdog_notified=WATCHDOG_LONG_RUN)
                 self._notify(report, worker.item, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
 
-    # ----- 4. sources and routing -------------------------------------------
+    # ----- 4. pull requests of the workers' branches ------------------------
+
+    def _follow_pull_requests(self, report: TickReport) -> None:
+        """Subscribe each worker to the pull request of its own branch, once one exists.
+
+        Decided here in code, never by a model, so that a comment or a CI result on the
+        pull request a worker opened wakes that worker. The pull request is not the
+        worker's primary item. The source is asked only about a branch that was pushed,
+        which a local ref shows, so a worker that never pushes costs no call.
+        """
+        sources = [
+            (config.name, source)
+            for config in self.config.sources
+            if (source := self.source(config.name)) is not None
+        ]
+        if not sources:
+            return
+        for worker in self.ledger.live_workers():
+            if worker.state == ledger_mod.LAUNCHING:
+                continue
+            key = f"{FOLLOWS_PULL_REQUEST_PREFIX}{worker.id}"
+            if self.ledger.get_state(key):
+                continue
+            repository = self.config.repository_by_name(worker.repository)
+            if repository is None or not worker.worktree_path.exists():
+                continue
+            branch = self._pushed_branch(worker, repository)
+            if branch is None:
+                continue
+            for name, source in sources:
+                try:
+                    item = source.pull_request_for(repository, branch)
+                except Exception as exc:
+                    log.exception("source %s: pull_request_for failed for %s", name, worker.handle)
+                    report.errors.append(
+                        f"source {name}: {sanitize.one_line(str(exc), limit=300)}"
+                    )
+                    continue
+                if item is None:
+                    continue
+                followed = {(s.source, s.item) for s in self.ledger.subscriptions_of(worker)}
+                with self.ledger.transaction():
+                    if (item.source, item.key) not in followed:
+                        self.ledger.subscribe(worker, item, PULL_REQUEST_KINDS)
+                        report.routed.append(f"{worker.handle}: follows {item.key}")
+                    self.ledger.set_state(key, item.key)
+                break
+
+    def _pushed_branch(self, worker: Worker, repository: Repository) -> str | None:
+        """The worktree's branch when its remote has it, else None. A session may rename it."""
+        context = self.context(repository)
+        remote = gitutil.remote_of(context.repo_config.base) if context.repo_config else "origin"
+        try:
+            branch = self.git.worktree_branch(repository.path, worker.worktree_path) or worker.branch
+        except GitError:
+            return None
+        if not self.git.ref_exists(repository.path, f"refs/remotes/{remote}/{branch}"):
+            return None
+        return branch
+
+    # ----- 5. sources and routing -------------------------------------------
 
     def _route_events(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
         """Poll every source, then filter, deliver and start, through the router.
@@ -1173,7 +1243,7 @@ class Runner:
                 report.errors.append(f"{item}: {exc}")
         return deferred
 
-    # ----- 5. state diff and notification -----------------------------------
+    # ----- 6. state diff and notification -----------------------------------
 
     def _diff_and_notify(self, report: TickReport) -> None:
         # Before the diff, so a send that fails below waits for the next tick rather than
@@ -1338,7 +1408,7 @@ class Runner:
         except ConfigError:
             return False
 
-    # ----- 6. delivery ------------------------------------------------------
+    # ----- 7. delivery ------------------------------------------------------
 
     def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
         """Wake each idle worker once, for every event waiting in its inbox."""

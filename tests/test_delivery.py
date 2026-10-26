@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from conftest import Harness, make_config
+from conftest import Harness, make_config, run_git
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
 from chargehand.config import SourceConfig
@@ -18,8 +20,10 @@ from chargehand.ledger import InboxEntry, Ledger
 from chargehand.notify import Notifier
 from chargehand.tick import Runner
 from support import fake_source
+from support.fake_gh import GhState
 
 FAKE_SOURCE = SourceConfig(name="fake", type="fake", options={"board": "default", "repository": "test"})
+FAKE_GH = Path(__file__).parent / "support" / "fake_gh.py"
 
 REVIEWER = """\
 prompt = "/review {item_url}"
@@ -376,3 +380,82 @@ def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     report = harness.runner.tick()
     assert report.woken == ["reviewer/PR-7"]
     harness.ledger.close()
+
+
+# ----- the pull request of a worker's branch ------------------------------------
+
+
+def iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.fixture
+def gh(tmp_path, monkeypatch) -> GhState:
+    path = tmp_path / "gh-state.json"
+    monkeypatch.setenv("FAKE_GH_STATE", str(path))
+    return GhState(path)
+
+
+@pytest.fixture
+def on_github(tmp_path, repo, claude_state, board, gh):
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+    config = make_config(
+        repo, worktree_root, sources=(SourceConfig("github", "github", {"gh_bin": str(FAKE_GH)}),),
+    )
+    config = dataclasses.replace(
+        config, repositories=(dataclasses.replace(config.repositories[0], github="octo/app"),)
+    )
+    ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
+    notifier = Notifier(config.notify)
+    runner = Runner(config, ledger, git=Git(), notifier=notifier)
+    harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
+    yield harness
+    ledger.close()
+
+
+def pull_request_queries(gh: GhState) -> list[list[str]]:
+    return [call for call in gh.calls if any("/pulls?" in arg for arg in call)]
+
+
+def test_a_comment_on_the_pull_request_of_the_workers_branch_wakes_it(on_github, gh):
+    on_github.board.add("ABC-1")
+    on_github.tick()
+    implementer = on_github.worker("ABC-1")
+    worktree = Path(implementer.worktree)
+
+    on_github.next_tick()
+    # Nothing was pushed, so the source was not asked.
+    assert pull_request_queries(gh) == []
+
+    (worktree / "change.txt").write_text("change\n")
+    run_git("add", "-A", cwd=worktree)
+    run_git("commit", "-m", "change", cwd=worktree)
+    run_git("push", "-u", "origin", implementer.branch, cwd=worktree)
+    gh.add_pull("octo/app#9", branch=implementer.branch, reviewers=())
+
+    report = on_github.next_tick()
+
+    assert report.errors == []
+    assert "implementer/ABC-1: follows octo_app_9" in report.routed
+    followed = [s for s in on_github.ledger.subscriptions_of(implementer) if not s.is_primary]
+    assert [(s.source, s.item, s.item_ref, s.kinds) for s in followed] == [
+        ("github", "octo_app_9", "octo/app#9", ("comment", "review", "ci_status"))
+    ]
+    # Found once, asked once.
+    on_github.next_tick()
+    assert len(pull_request_queries(gh)) == 1
+
+    gh.add("issue_comments", "octo/app#9", {
+        "id": 77, "user": {"login": "copilot"}, "body": "nit",
+        "created_at": iso(time.time()),
+        "html_url": "https://github.com/octo/app/pull/9#issuecomment-77",
+    })
+    on_github.claude_state.set_session_state("ABC-1", "done")
+    report = on_github.next_tick()
+
+    assert report.woken == ["implementer/ABC-1"]
+    (resume,) = on_github.claude_state.read()["resumes"]
+    assert resume["prompt"].splitlines() == [
+        MESSAGE_HEADER, "- https://github.com/octo/app/pull/9#issuecomment-77",
+    ]
