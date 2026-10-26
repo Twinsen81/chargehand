@@ -324,8 +324,15 @@ With `checkout = "item"` the session's worktree is still a checkout of `base`: t
 request head is its author's content, and Claude Code loads settings, hooks and
 instructions from a session's working directory (see SECURITY.md). The head goes into a
 second, detached worktree, `<worktree_root>/.items/<role>/<item>`, where the role's
-`setup` step runs; for the reviewer that is `gh pr checkout {item_url} --detach`. The
-prompt names it as `{item_checkout}`, and the session may read it without a prompt. The
+`setup` step runs, with git hooks turned off and its program taken from the base checkout,
+the main checkout or an absolute `PATH` entry; for the reviewer that is
+`gh pr checkout {item_url} --detach`. The prompt names it as `{item_checkout}`, and the
+session may read it without a prompt. Before each wake and each `continue`, the tick
+checks that the session's worktree is still on its branch and that the files its runtime
+loads from a working directory (for Claude Code: `.claude/`, `.mcp.json`, `CLAUDE.md`,
+`CLAUDE.local.md`) still match the commit it started on; otherwise the worker is paused
+with a `wake-fault`. The launch checks that the role's agent file is in the worktree or
+the user's files, because an agent file that is only in the main checkout is not there. The
 commit the setup step leaves it on is recorded, so garbage collection does not count the
 pull request's own commits as unpushed work, also when they come from a fork or a fetch
 pruned their branch; a newer head that a later `gh pr checkout` fetched counts as the pull

@@ -186,6 +186,26 @@ class Git:
             args += ["-b", branch, str(worktree), base]
         self.run(args, cwd=repo, timeout=600)
 
+    def paths_changed(self, worktree: Path, since: str, pathspecs: Sequence[str]) -> bool:
+        """Whether *pathspecs* differ from commit *since*, committed or not.
+
+        Untracked and ignored files count, because an agent reads a file whatever git
+        thinks of it. An answer git cannot give counts as changed.
+        """
+        if not pathspecs:
+            return False
+        if not is_commit_id(since):
+            return True
+        diff = self.run(["diff", "--quiet", since, "HEAD", "--", *pathspecs],
+                        cwd=worktree, check=False)
+        if diff.returncode != 0:
+            return True
+        status = self.run(
+            ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", *pathspecs],
+            cwd=worktree, check=False,
+        )
+        return status.returncode != 0 or bool(status.stdout.strip())
+
     def add_detached_worktree(self, repo: Path, worktree: Path, base: str) -> None:
         """Create a worktree with a detached HEAD at *base*, or accept an existing one."""
         existing = self.list_worktrees(repo)

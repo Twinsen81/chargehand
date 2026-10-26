@@ -610,6 +610,14 @@ class ClaudeRuntime(Runtime):
         external_supervisor=True,
     )
     role_keys = ("agent", "permission_mode", "allow")
+    # Project settings, hooks, agents, skills and commands; MCP servers; instructions,
+    # which Claude Code also reads from subdirectories.
+    workspace_files = (
+        ":(glob)**/.claude/**",
+        ".mcp.json",
+        ":(glob)**/CLAUDE.md",
+        ":(glob)**/CLAUDE.local.md",
+    )
 
     def __init__(
         self,

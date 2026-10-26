@@ -18,18 +18,16 @@ agent = "pr-reviewer"
 # agent file, so a missing agent file does not let the reviewer wake itself.
 prompt = "Review the pull request {item_url}. Its head is checked out at {item_checkout}; read the code there. End every comment, review and reply you post with <!-- chargehand -->"
 permission_mode = "auto"
-# Read the pull request and comment on it. Not merge, close or approve: those are left to
-# the auto-mode classifier or a permission prompt. A pattern matches the command text, so
-# this list is a guardrail, not a boundary.
+# Read the pull request and comment on it without a prompt. Everything else, `gh api`
+# included, goes to the auto-mode classifier or a permission prompt: `gh api` can approve
+# or merge as easily as it can read. A pattern matches the command text, so this list is
+# a guardrail, not a boundary.
 allow = [
   "Bash(gh pr view *)",
   "Bash(gh pr diff *)",
   "Bash(gh pr checks *)",
   "Bash(gh pr comment *)",
   "Bash(gh pr review * --comment *)",
-  "Bash(gh api repos/*/pulls/*/comments*)",
-  "Bash(gh api repos/*/pulls/*/reviews*)",
-  "Bash(gh api repos/*/issues/*/comments*)",
 ]
 
 # The session works in a fresh checkout of `base`, which is yours. The pull request head

@@ -122,6 +122,7 @@ class Delivery:
         reserve_percent: float = DEFAULT_WAKE_RESERVE_PERCENT,
         crash_after_wake: bool = False,
         clock: Callable[[], float] = time.time,
+        guard: Callable[[Worker], str | None] = lambda worker: None,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -131,6 +132,9 @@ class Delivery:
         self.reserve_percent = reserve_percent
         self.crash_after_wake = crash_after_wake
         self._clock = clock
+        # Why a worker's session must not be resumed where it is, or None. The text is
+        # the caller's own, so it may reach a notification.
+        self._guard = guard
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
@@ -162,6 +166,22 @@ class Delivery:
             if worker.state != ledger_mod.QUEUED:
                 self.ledger.update(worker, state=ledger_mod.QUEUED)
             result.held.append(f"{worker.handle}: {reason}")
+            return
+
+        fault = self._guard(worker)
+        if fault is not None:
+            # A resume would load what the worktree now holds. The idle session is
+            # stopped, which loads nothing, so that the state diff leaves the worker
+            # paused, with its events, until the operator has looked.
+            try:
+                self._runtime(worker.runtime).stop(worker.session_id)
+            except (AgentRuntimeError, ConfigError):
+                pass
+            paused = self.ledger.update(
+                worker, state=ledger_mod.PAUSED, last_error=f"wake refused: {fault}"[:500]
+            )
+            result.faults.append((paused, fault))
+            result.errors.append(f"{worker.handle}: wake refused: {fault}")
             return
 
         try:

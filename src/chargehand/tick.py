@@ -101,6 +101,12 @@ ITEM_CHECKOUTS = ".items"
 # the worker id, so that garbage collection does not count the item's own commits as
 # unpushed work.
 CHECKOUT_HEAD_PREFIX = "checkout-head:"
+# The commit the session's own worktree started on, for the same workers. A wake checks
+# that the worktree is still on the worker's branch and that the files the runtime loads
+# from it match this commit, so a session that moved the item's head into its own
+# working directory is not resumed there.
+WORKSPACE_START_PREFIX = "workspace-start:"
+WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_START_PREFIX)
 
 # A start event for a repository that no `[[repository]]` names is ignored. It is reported
 # once per source and repository; this prefix marks the ones reported.
@@ -140,6 +146,41 @@ def item_checkout_path(worker: Worker) -> Path:
     """Where a `checkout = "item"` role keeps its item's head, next to the worktree root."""
     worktree = worker.worktree_path
     return worktree.parent.parent / ITEM_CHECKOUTS / worktree.parent.name / worktree.name
+
+
+def trusted_program(name: str, roots: Sequence[Path]) -> str | None:
+    """The program a setup command names, found where the operator's files are; None if not.
+
+    A relative name is looked up under *roots* first. A bare name is then looked up in the
+    absolute entries of PATH only; a relative name with a directory part is not looked up
+    further, because the process would resolve it against its working directory.
+    """
+    program = Path(name)
+    if program.is_absolute():
+        return name
+    for root in roots:
+        candidate = root / program
+        if candidate.exists():
+            return str(candidate)
+    if "/" in name or name in (".", ".."):
+        return None
+    search = os.pathsep.join(
+        entry for entry in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry)
+    )
+    return shutil.which(name, path=search)
+
+
+def without_git_hooks(environ: Mapping[str, str]) -> dict[str, str]:
+    """*environ* with git's hooks turned off, through git's own environment configuration."""
+    env = dict(environ)
+    try:
+        index = max(int(env.get("GIT_CONFIG_COUNT") or 0), 0)
+    except ValueError:
+        index = 0
+    env[f"GIT_CONFIG_KEY_{index}"] = "core.hooksPath"
+    env[f"GIT_CONFIG_VALUE_{index}"] = os.devnull
+    env["GIT_CONFIG_COUNT"] = str(index + 1)
+    return env
 
 
 @contextmanager
@@ -861,6 +902,12 @@ class Runner:
             return False, f"{worker.item} has no session to respawn"
         if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED):
             return False, f"{worker.item} is {worker.state}, not paused or blocked"
+        fault = self._workspace_fault(worker)
+        if fault is not None:
+            return False, (
+                f"{worker.item}: {fault}, so a respawn would load files the item's author "
+                f"controls. Check the worktree, then discard the worker."
+            )
         result = self.runtime(worker.runtime).respawn(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         if result.returncode != 0:
@@ -1558,6 +1605,7 @@ class Runner:
             policy=self._policy_of,
             usage=self._usage,
             crash_after_wake=crash_after_wake,
+            guard=self._workspace_fault,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -1576,6 +1624,36 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.item or worker.handle, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+
+    def _workspace_fault(self, worker: Worker) -> str | None:
+        """Why the session of a worker with an item checkout must not start again, or None.
+
+        A session that checked the item's head out in its own worktree, or copied the
+        head's settings or instructions there, would have them loaded, trusted, when it
+        is resumed. This text is chargehand's own; it reaches a notification.
+        """
+        if not item_checkout_path(worker).exists():
+            return None
+        start = self.ledger.get_state(f"{WORKSPACE_START_PREFIX}{worker.id}")
+        if start is None:
+            return "the commit its worktree started on is not recorded"
+        try:
+            branch = self.git.worktree_branch(worker.repo_path, worker.worktree_path)
+        except GitError:
+            branch = None
+        if branch != worker.branch:
+            return "its worktree is no longer on its own branch"
+        try:
+            pathspecs = self.runtime(worker.runtime).workspace_files
+        except ConfigError:
+            return "its runtime is unknown"
+        try:
+            changed = self.git.paths_changed(worker.worktree_path, start, pathspecs)
+        except GitError:
+            return "its worktree could not be inspected"
+        if changed:
+            return "the agent's settings or instructions in its worktree changed"
+        return None
 
     def _policy_of(self, worker: Worker) -> roles_mod.Policy:
         context = self.context_for_worker(worker)
@@ -1875,6 +1953,9 @@ class Runner:
                 self.git.add_detached_worktree(
                     context.repository.path, item_checkout_path(worker), repo_config.base
                 )
+                start = self.git.head_commit(worker.worktree_path)
+                if start is not None:
+                    self.ledger.set_state(f"{WORKSPACE_START_PREFIX}{worker.id}", start)
             worker = self.ledger.update(worker, step=2)
             self._check_crash(2, crash_after_step)
 
@@ -1914,27 +1995,29 @@ class Runner:
         self, template: str | None, worker: Worker, timeout_secs: float, where: str,
         *, cwd: Path | None = None,
     ) -> str | None:
-        """Run a setup command in the worktree, or in *cwd*.
+        """Run a setup command in the worktree, or in *cwd*, an item checkout.
 
-        A relative program is looked up in the worktree and the main checkout only, never
-        in *cwd*: an item checkout holds the item author's files.
+        The program is found in the worktree, the main checkout or the absolute entries
+        of PATH, never relative to *cwd*: an item checkout holds the item author's files.
+        A command in an item checkout runs with git hooks turned off, because a
+        repository's relative `core.hooksPath` would name the author's hooks there.
         """
         if not template:
             return None
         argv = config_mod.render_argv(template, self._template_values(worker), where=where)
-        program = Path(argv[0])
-        if not program.is_absolute():
-            # The worktree is a full checkout, so its own copy of the script is the one
-            # the run should use; the main checkout is only a fallback.
-            for root in (worker.worktree_path, worker.repo_path):
-                candidate = root / program
-                if candidate.exists():
-                    argv[0] = str(candidate)
-                    break
+        program = trusted_program(argv[0], (worker.worktree_path, worker.repo_path))
+        if program is None:
+            return (
+                f"setup program {argv[0]!r} is not in the worktree, the main checkout, or an "
+                f"absolute PATH entry"
+            )
+        argv[0] = program
+        env = None if cwd is None else without_git_hooks(os.environ)
         try:
             result = subprocess.run(
                 argv,
                 cwd=str(cwd or worker.worktree_path),
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=timeout_secs,
@@ -1968,6 +2051,19 @@ class Runner:
         self.sessions(worker.runtime, refresh=True)
         existing = self._find_worker_session(worker, exclude=owned_elsewhere)
         if existing is None:
+            # Loading the role checked the main checkout, which may hold files that are
+            # not committed. The session starts in the worktree, a checkout of `base`, so
+            # what it needs, such as an agent file, must be there or in the user's files.
+            try:
+                runtime.check_role(role, worker.worktree_path)
+            except ConfigError as exc:
+                return self._fail_worker(
+                    worker, context,
+                    f"the session starts in a checkout of the base branch, so a file it "
+                    f"needs must be committed there: {exc}",
+                    report,
+                    notify_detail="the role's files are not in the worktree",
+                )
             prompt = config_mod.render(
                 role.prompt,
                 self._template_values(worker),
@@ -2123,11 +2219,12 @@ class Runner:
         self._forget_checkout_heads()
 
     def _forget_checkout_heads(self) -> None:
-        """Drop the checkout head of each worker whose worktree is gone, by any path."""
+        """Drop the recorded commits of each worker whose worktree is gone, by any path."""
         for key in self.ledger.all_state():
-            if not key.startswith(CHECKOUT_HEAD_PREFIX):
+            prefix = next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            if prefix is None:
                 continue
-            worker_id = key.removeprefix(CHECKOUT_HEAD_PREFIX)
+            worker_id = key.removeprefix(prefix)
             worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
             if worker is None or worker.gc_done:
                 self.ledger.delete_state(key)

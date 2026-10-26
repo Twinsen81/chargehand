@@ -72,16 +72,36 @@ public location.
   attacker-controlled text on the untrusted side of that boundary.
 - **A pull request head is never a session's workspace.** A role with `checkout = "item"`,
   such as the shipped `pr-reviewer`, starts its session in a fresh checkout of the base
-  branch, the only directory chargehand marks as a trusted workspace. The pull request
-  head goes into a second, detached checkout outside that directory, under
-  `<worktree_root>/.items/`, which the role's setup step fills and the launch prompt names.
-  The session gets a read permission for it and nothing else: it is not passed as an
-  added directory, because Claude Code loads skills from one, and a setup program is
-  never looked up in it. The shipped agent file tells the reviewer to treat those files as
-  data, not to run them, and not to check the head out in its own working directory; its
-  allow rules leave out `gh pr checkout`, merge, close and approve. That instruction and
-  those rules are guardrails. The separate checkout is the defense: nothing from the head
-  is loaded unless the session itself moves it into its working directory.
+  branch, the only directory chargehand marks as a trusted workspace. Its agent file must
+  be committed there or be in `~/.claude/agents`; the launch checks that checkout, not
+  the main one. The pull request head goes into a second, detached checkout outside that
+  directory, under `<worktree_root>/.items/`, which the role's setup step fills and the
+  launch prompt names. The session gets a read permission for it and nothing else: it is
+  not passed as an added directory, because Claude Code loads skills from one.
+- **The setup step does not run the head's code.** The role's setup command runs in the
+  head checkout. Its program is taken from the base checkout, the main checkout or an
+  absolute `PATH` entry, never from the head: a relative program that is in neither
+  checkout is refused. Git hooks are turned off for the whole step (`core.hooksPath` is
+  set to `/dev/null` through git's environment configuration), because a repository with
+  a relative `core.hooksPath`, as husky sets it, would otherwise run the hooks that the
+  head commits when `gh pr checkout` checks it out.
+- **A changed workspace is not resumed.** Before each wake, and before `continue`, of such
+  a worker, chargehand checks that its working directory is still on the worker's own
+  branch and that the files Claude Code loads from it (`.claude/` and `CLAUDE.md` and
+  `CLAUDE.local.md` at any depth, `.mcp.json`) match the commit it started on, including
+  untracked and ignored files. Otherwise a wake stops the idle session instead of
+  resuming it, pauses the worker with its events kept and sends `wake-fault` to the hook,
+  and `continue` is refused.
+
+  What this does not cover: the session itself. During a turn it can run any command the
+  classifier or a prompt lets through, including git commands in the head checkout,
+  which then run the head's hooks under a relative `core.hooksPath`, and a file it copies
+  into its working directory can be read in that same turn. The shipped agent file tells
+  the reviewer to treat the head as data, never to run it, never to check anything out,
+  and its allow rules leave out `gh api`, `gh pr checkout`, merge, close and approve.
+  Those are guardrails, not a boundary. Git filters that the operator configured, such as
+  Git LFS, still run on the files the head selects through `.gitattributes`, and a
+  session that the operator resumes by hand, outside chargehand, is not checked.
 - **A wake carries pointers only.** The message that wakes a worker is a fixed line that
   chargehand writes, followed by the events' pointers. A pointer that is not a plain
   http(s) URL or a plain identifier is left out, and no actor name, title or body is

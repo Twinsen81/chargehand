@@ -170,6 +170,10 @@ class Runtime(ABC):
     # The role-file keys this runtime owns. Any other key that is not a common one is
     # an error in a role on this runtime.
     role_keys: ClassVar[tuple[str, ...]] = ()
+    # The files, as git pathspecs, that this runtime loads configuration or instructions
+    # from when a session starts or resumes in a directory. A wake checks that a worker
+    # whose item is checked out separately has not changed them.
+    workspace_files: ClassVar[tuple[str, ...]] = ()
 
     # ----- configuration ----------------------------------------------------
 
