@@ -6,7 +6,7 @@ Order, once per tick:
 2. apply recorded control requests
 3. run the watchdog
 4. subscribe each worker to the pull request of its branch, once one exists
-5. poll the event sources and route their events: inboxes, then start rules
+5. poll the event sources and route their events: inboxes, closes, then start rules
 6. diff session states against the ledger and notify on change
 7. deliver: wake each idle worker once for the events in its inbox
 8. sync the tracker labels
@@ -90,6 +90,15 @@ FOLLOWS_PULL_REQUEST_PREFIX = "follows-pr:"
 # What wakes a worker on the pull request of its own branch. Not `pr_closed`: the pull
 # request is not the worker's primary item, so its close does not end the worker.
 PULL_REQUEST_KINDS = (roles_mod.COMMENT, "review", "ci_status")
+
+# A role with `checkout = "item"` gets its item's head from its setup step. The commit the
+# worktree was on after that step is kept under this prefix and the worker id, so that
+# garbage collection does not count the item's own commits as unpushed work.
+CHECKOUT_HEAD_PREFIX = "checkout-head:"
+
+# A start event for a repository that no `[[repository]]` names is ignored. It is reported
+# once per source and repository; this prefix marks the ones reported.
+UNCONFIGURED_PREFIX = "unconfigured:"
 
 # The notification detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
@@ -945,7 +954,11 @@ class Runner:
         worktree = worker.worktree_path
         if not worktree.exists():
             return None
-        unpushed = self.git.unpushed_commits(worktree)
+        # A worker given a pull request to review sits on its head commit, which no
+        # remote-tracking ref may contain: a fork's commits, or a squash-merged branch
+        # that a fetch pruned. Those commits are not the session's work.
+        given = self.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}")
+        unpushed = self.git.unpushed_commits(worktree, not_in=(given,) if given else ())
         if unpushed < 0:
             return "its worktree could not be inspected"
         if unpushed > 0:
@@ -1101,6 +1114,7 @@ class Runner:
             start=lambda event: self._start_from_event(
                 event, report, crash_after_step=crash_after_step
             ),
+            close=lambda event: self._close_from_event(event, report),
         )
         # The tracker starts are kept for the tracker step, so they are not counted here.
         later = sum(TrackerSource.produced(event) for event in self.ledger.pending_start_events())
@@ -1182,6 +1196,7 @@ class Runner:
                 return self.config.source_by_name(event.source) is not None
             found = source.repository_for(event.item, self.config.repositories)
             if found is None:
+                self._note_unconfigured(event, report)
                 return False
             repository, context = found, self.context(found)
         if not context.usable:
@@ -1222,6 +1237,11 @@ class Runner:
                     deferred = True
                     continue
             elif router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
+                if router_mod.deliver_to_holders(self.ledger, role.name, event):
+                    report.routed.append(
+                        f"{role.name}/{sanitize.scrub_identifier(item)}: {rule.on} goes to "
+                        f"the worker that has it"
+                    )
                 continue
             if not sanitize.is_safe_identifier(item):
                 report.warnings.append(
@@ -1258,6 +1278,83 @@ class Runner:
             except ChargehandError as exc:
                 report.errors.append(f"{item}: {exc}")
         return deferred
+
+    def _note_unconfigured(self, event: Event, report: TickReport) -> None:
+        """Report a start event for a repository that no `[[repository]]` names, once.
+
+        Only when a role would start on the event's kind: a mention on some other
+        repository is not news.
+        """
+        hint = sanitize.one_line(event.item.hint or "", limit=100).lower()
+        if not hint or not self._some_role_starts_on(event):
+            return
+        key = f"{UNCONFIGURED_PREFIX}{event.source}:{hint}"
+        if self.ledger.get_state(key):
+            return
+        self.ledger.set_state(key, str(int(time.time())))
+        message = (
+            f"source {event.source}: ignored a start event for {hint}, which no [[repository]] "
+            f"names; reported once per repository"
+        )
+        log.warning("%s", message)
+        report.warnings.append(message)
+
+    def _some_role_starts_on(self, event: Event) -> bool:
+        for repository in self.config.repositories:
+            context = self.context(repository)
+            if context.repo_config is None:
+                continue
+            for role_name in repository.roles:
+                try:
+                    role = context.role(role_name)
+                except ConfigError:
+                    continue
+                if any(
+                    router_mod.kind_matches((rule.on,), event.kind, event.source)
+                    for rule in role.start
+                ):
+                    return True
+        return False
+
+    def _close_from_event(self, event: Event, report: TickReport) -> int:
+        """End each worker whose primary item *event* closes, by its start rule's ``close_on``.
+
+        The session is stopped first and the worker becomes done; garbage collection then
+        removes the session and the worktree, never over unpushed commits. A worker that
+        is working is left to finish its turn: once it is idle, the tick finds its item
+        closed and ends it the same way.
+        """
+        closed = 0
+        for subscription, worker in self.ledger.live_subscriptions(event.source, event.item.key):
+            if not subscription.is_primary:
+                continue
+            rule = self._start_rule_of(worker)
+            if rule is None or not router_mod.kind_matches(rule.close_on, event.kind, event.source):
+                continue
+            if worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING):
+                report.skipped.append(
+                    f"{worker.handle}: its item closed while it works; it ends after the turn"
+                )
+                continue
+            if not self._stop_session(worker):
+                report.warnings.append(f"{worker.item}: item closed but its session would not stop")
+                continue
+            updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
+            self._sync_labels(updated, self.context_for_worker(updated), report)
+            report.transitions.append(f"{worker.item}: item closed -> done")
+            closed += 1
+        return closed
+
+    def _start_rule_of(self, worker: Worker) -> StartRule | None:
+        """The start rule that created *worker*, as its role file says now; None when unknown."""
+        context = self.context_for_worker(worker)
+        if context is None or not context.usable or not worker.start_rule:
+            return None
+        try:
+            role = context.role(worker.role)
+        except ConfigError:
+            return None
+        return next((rule for rule in role.start if rule.name == worker.start_rule), None)
 
     # ----- 6. state diff and notification -----------------------------------
 
@@ -1428,6 +1525,7 @@ class Runner:
 
     def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
         """Wake each idle worker once, for every event waiting in its inbox."""
+        idle_before = {w.id for w in self.ledger.workers_in_state([ledger_mod.IDLE])}
         result = delivery_mod.Delivery(
             self.ledger,
             max_concurrent=self.config.max_concurrent,
@@ -1446,6 +1544,9 @@ class Runner:
             # The tick log prints transitions, so a wake shows there too.
             report.transitions.append(f"{worker.item or worker.handle}: wake -> {worker.state}")
             log.info("woke %s in session %s", worker.handle, worker.session_id)
+        for worker in self.ledger.workers_in_state([ledger_mod.QUEUED]):
+            if worker.id in idle_before:
+                report.transitions.append(f"{worker.item or worker.handle}: wake held -> queued")
         for worker, detail in result.faults:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.item or worker.handle, "wake-fault", worker.url,
@@ -1544,6 +1645,7 @@ class Runner:
             start=lambda event: self._start_from_event(
                 event, report, crash_after_step=crash_after_step
             ),
+            close=lambda event: self._close_from_event(event, report),
         )
         polled = self._poll_trackers(report)
         router.retry_pending_starts()
@@ -1746,7 +1848,8 @@ class Runner:
             worker = self.ledger.update(worker, step=2)
             self._check_crash(2, crash_after_step)
 
-        # Step 3: the repository's own setup script, then the role's.
+        # Step 3: the repository's own setup script, then the role's. A role that reviews
+        # an item, `checkout = "item"`, checks out the item's head in its own step.
         if worker.step < 3:
             for template, where in (
                 (repo_config.setup, f"{repo_config.source or 'repo config'}.setup"),
@@ -1758,6 +1861,10 @@ class Runner:
                     return self._fail_worker(
                         worker, context, failure, report, notify_detail="setup script failed"
                     )
+            if role.checkout == "item":
+                head = self.git.head_commit(worker.worktree_path)
+                if head is not None:
+                    self.ledger.set_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}", head)
             worker = self.ledger.update(worker, step=3)
             self._check_crash(3, crash_after_step)
 
@@ -1966,6 +2073,17 @@ class Runner:
                 report.warnings.append(f"{worker.item}: collected, but {KEPT_BRANCH}")
             self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
             report.collected.append(worker.item)
+        self._forget_checkout_heads()
+
+    def _forget_checkout_heads(self) -> None:
+        """Drop the checkout head of each worker whose worktree is gone, by any path."""
+        for key in self.ledger.all_state():
+            if not key.startswith(CHECKOUT_HEAD_PREFIX):
+                continue
+            worker_id = key.removeprefix(CHECKOUT_HEAD_PREFIX)
+            worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            if worker is None or worker.gc_done:
+                self.ledger.delete_state(key)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:
         """A closed issue ends its worker, even one that is idle or parked as blocked.

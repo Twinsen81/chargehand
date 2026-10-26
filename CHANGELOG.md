@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
+  pr-reviewer`: a review request starts a reviewer on the pull request head, a reply
+  wakes it, its own marked comments do not, and a second review request wakes it again.
+  A start rule's `close_on` event on a worker's primary item ends the worker, and a start
+  event for a repository that is not configured is reported once. `tick` prints wakes and
+  held wakes, and `status` shows how to attach to idle and queued workers.
 - Delivery. Once per tick, each idle worker with events in its inbox gets one wake that
   lists the events' pointers and continues the same session, admitted against
   `max_concurrent`, the role's `max_wakes_per_day` and the usage reserve. The events are

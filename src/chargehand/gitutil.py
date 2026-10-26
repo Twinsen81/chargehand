@@ -125,14 +125,26 @@ class Git:
         result = self.run(["status", "--porcelain"], cwd=worktree, check=False)
         return result.returncode == 0 and bool(result.stdout.strip())
 
-    def unpushed_commits(self, worktree: Path) -> int:
-        """Commits on HEAD that no remote-tracking ref contains.
+    def head_commit(self, worktree: Path) -> str | None:
+        """The full id of the commit HEAD names in *worktree*, or None."""
+        result = self.run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                          cwd=worktree, check=False)
+        commit = result.stdout.strip()
+        return commit if result.returncode == 0 and is_commit_id(commit) else None
+
+    def unpushed_commits(self, worktree: Path, *, not_in: Sequence[str] = ()) -> int:
+        """Commits on HEAD that no remote-tracking ref contains, nor any of *not_in*.
 
         Used as the refusal condition for `discard`: removing a worktree that still
-        holds unpushed work destroys it silently.
+        holds unpushed work destroys it silently. *not_in* names commits that are known
+        not to be the session's work, such as a pull request head it was given to review.
         """
+        excluded = [commit for commit in not_in if is_commit_id(commit)]
+        if len(excluded) != len(not_in):
+            return -1
         result = self.run(
-            ["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=worktree, check=False
+            ["rev-list", "--count", "HEAD", "--not", "--remotes", *excluded],
+            cwd=worktree, check=False,
         )
         if result.returncode != 0:
             # An unreadable worktree is treated as holding work, never as safe to drop.
@@ -200,3 +212,8 @@ def remote_of(base: str, default: str = "origin") -> str:
         if candidate and not candidate.startswith("."):
             return candidate
     return default
+
+
+def is_commit_id(value: str) -> bool:
+    """A full SHA-1 or SHA-256 commit id, so that it reaches argv as a commit and nothing else."""
+    return len(value) in (40, 64) and all(c in "0123456789abcdef" for c in value)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -311,6 +312,39 @@ def issue_edit(state: dict, args: list[str]) -> int:
     return 0
 
 
+def pr_checkout(state: dict, args: list[str]) -> int:
+    """`gh pr checkout <url|number> --detach`, in the current directory.
+
+    The head is fetched from the pull request's `checkout_from` (a path that stands in
+    for a fork) or from origin, by its branch, and checked out detached. A pull request
+    with no branch leaves HEAD where it is, detached.
+    """
+    if "--detach" not in args:
+        return fail("the fake gh checks pull requests out with --detach only")
+    target = next((arg for arg in args[2:] if not arg.startswith("-")), "")
+    pull = next(
+        (
+            pull for pull in state.get("pulls", {}).values()
+            if target in (pull.get("html_url"), str(pull.get("number")))
+        ),
+        None,
+    )
+    if pull is None:
+        return fail(f"no pull requests found for {target}")
+    branch = (pull.get("head") or {}).get("ref")
+    commands = [["git", "checkout", "--detach"]]
+    if branch:
+        commands = [
+            ["git", "fetch", pull.get("checkout_from") or "origin", f"refs/heads/{branch}"],
+            ["git", "checkout", "--detach", "FETCH_HEAD"],
+        ]
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return fail(result.stderr.strip() or "git failed")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     state = load()
     state.setdefault("calls", []).append(argv)
@@ -324,6 +358,8 @@ def main(argv: list[str]) -> int:
         code = issue_edit(state, argv)
         save(state)
         return code
+    if argv[:2] == ["pr", "checkout"]:
+        return pr_checkout(state, argv)
     return fail(f"unknown command {' '.join(argv[:2])}")
 
 

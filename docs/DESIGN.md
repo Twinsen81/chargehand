@@ -155,12 +155,20 @@ The router runs once per tick after the polls, in this order:
    in turn.
 2. Delivery: one inbox row per matching live subscriber. The inbox is unique per worker and
    event, so routing an event twice adds nothing.
-3. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
-   finds a live worker that has the item (`role`: of its own role, `any`: of any role) does
-   nothing, so a second review request wakes the reviewer that has the pull request and
-   starts no other. Otherwise it launches a worker under the same caps as the queue, with a
-   primary subscription carrying the rule's `subscribe` kinds. A start that the caps, a pause
-   or a previous worktree hold back is kept and offered to the rules again on the next tick.
+3. Close: an event that a worker's start rule names in `close_on`, on the worker's primary
+   item, ends that worker. The session is stopped first, then the worker is `done`, and
+   garbage collection removes the session and the worktree, never over unpushed commits.
+   A worker that is working finishes its turn first; the tick then finds its item closed.
+   On an item the worker only follows, the same event is an ordinary delivery.
+4. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
+   finds a live worker that has the item (`role`: of its own role, `any`: of any role)
+   starts none, and the event goes to the inbox of the rule's own workers on the item, so a
+   second review request wakes the reviewer that has the pull request. Otherwise it
+   launches a worker under the same caps as the queue, with a primary subscription carrying
+   the rule's `subscribe` kinds. A start that the caps, a pause or a previous worktree hold
+   back is kept and offered to the rules again on the next tick. A start event for a
+   repository that no `[[repository]]` names is ignored, and reported once per source and
+   repository when a role would start on its kind.
 
 The `github` source works through the `gh` CLI, so chargehand handles no token, and it is
 the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
@@ -188,8 +196,8 @@ The source's cursor is saved after its events are routed, so a source that fails
 error in the report and its events arrive on a later tick. The queue label starts its
 workers through the same router, as a `labeled` event from the repository's tracker; a
 `labeled` event from a `[[source]]` starts nothing. The implementer role starts on it,
-subscribes to `comment` and declares `close_on = ["done"]`; no code acts on `close_on`
-yet, and a worker ends when the tick finds its issue closed, as before. A `[[source]]` may
+subscribes to `comment` and declares `close_on = ["done"]`; a worker whose issue closes
+without that event still ends when the tick finds the issue closed, as before. A `[[source]]` may
 share its name with a tracker type, such as a `github` source next to a GitHub Issues
 queue: they share subscriptions, so a comment that the source reports reaches the worker,
 the tracker leaves the followed items to that source, and the tracker's dedupe ids carry
@@ -288,6 +296,20 @@ A start rule creates a worker on its own. A start event arrives again on every p
 ledger allows at most one live worker per role and item among the workers that start rules
 created, enforced by the database. The ledger already records each worker's origin, so a
 later way to create workers by hand is not held to that limit.
+
+chargehand ships two starter roles, which `chargehand init --role <name>` writes into a
+repository. `implementer` takes issues from the queue. `pr-reviewer` starts on
+`github.review_requested`, follows `comment`, `review` and `ci_status` on its pull request
+and ends on `pr_closed`; it comes with a Claude Code agent file,
+`.claude/agents/pr-reviewer.md`. With `checkout = "item"` the worktree is created from
+`base` and the role's `setup` step, `gh pr checkout {item_url} --detach`, checks out the
+pull request head. The commit that step leaves the worktree on is recorded, so garbage
+collection does not count the pull request's own commits as unpushed work, also when they
+come from a fork or a fetch pruned their branch.
+
+Workers post as you. Both starter roles tell the worker to end every comment it posts with
+the authorship marker, so its own comments wake no worker; a comment without the marker
+wakes the worker once, and the role's daily wake cap stops a loop.
 
 ### Runtimes
 
