@@ -401,18 +401,27 @@ def watchers() -> tuple[str, ...]:
 
 
 @pytest.fixture
-def wired(tmp_path, repo, claude_state, board, fake_board, watchers):
+def with_mark() -> bool:
+    """Whether the source's configuration has a mark command."""
+    return True
+
+
+@pytest.fixture
+def wired(tmp_path, repo, claude_state, board, fake_board, watchers, with_mark):
     for name in watchers:
         target = repo / ".chargehand" / "roles" / f"{name}.toml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(WATCHER)
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
+    options = fake_options(fake_board)
+    if not with_mark:
+        del options["mark"]
     config = make_config(
         repo,
         worktree_root,
         roles=("implementer", *watchers),
-        sources=(SourceConfig(name="cmd", type="command", options=fake_options(fake_board)),),
+        sources=(SourceConfig(name="cmd", type="command", options=options),),
     )
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
@@ -500,6 +509,31 @@ def test_the_worker_a_command_source_started_marks_its_item(wired, fake_board):
     assert mark_calls(fake_board) == [
         ["mark", "DEMO-1", "running"], ["mark", "DEMO-1", "blocked"], ["mark", "DEMO-1", "done"],
     ]
+
+
+@pytest.mark.parametrize("with_mark", [False])
+def test_without_a_mark_command_the_tick_marks_nothing(wired, fake_board):
+    fake_board.add("DEMO-1")
+    labels = fake_board.labels_of("DEMO-1")
+
+    report = wired.tick()
+
+    assert report.errors == []
+    watcher = wired.worker("DEMO-1", "watcher")
+    assert watcher.state == ledger_mod.RUNNING
+    assert watcher.owns_label == ledger_mod.LABEL_NONE
+
+    wired.claude_state.set_session_state("DEMO-1", "done", status="idle")
+    wired.next_tick()
+    assert wired.worker("DEMO-1", "watcher").state == ledger_mod.IDLE
+    fake_board.close("DEMO-1")
+    report = wired.next_tick()
+
+    assert report.errors == []
+    assert wired.ledger.get(watcher.id).state == ledger_mod.DONE
+    assert wired.ledger.get(watcher.id).label_state is None
+    assert mark_calls(fake_board) == []
+    assert fake_board.labels_of("DEMO-1") == labels
 
 
 @pytest.mark.parametrize(

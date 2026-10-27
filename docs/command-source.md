@@ -118,7 +118,10 @@ the first worker shows its state there, so two workers never write the item's st
 turn. The tick records this when it creates the worker.
 
 When: as the worker's state changes, the tick calls `mark` with `running` while it works,
-`blocked` while it waits for events or for you, and `done` when it ends. A write that
+`blocked` while it waits for events or for you, and `done` once it has finished its item:
+the item closed, or the worker reported its work complete. A worker that fails, is
+cancelled or is stopped leaves the item at `blocked`, so that the item shows that someone
+must look at it; `done` is never written for it. A write that
 exits 0 is recorded, and the same status is not written again. A write that exits 3 or
 fails is one error in the tick's report, and the tick calls `mark` again with the same
 status on the next tick, so the command must accept a status that is already set. Without a
