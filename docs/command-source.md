@@ -112,9 +112,17 @@ happened:
 
 Verify the write in the command, by reading the item again, before you exit 0.
 
-The tick changes labels only for a worker that a repository's queue label started. A
-`[[source]]` starts its workers by start rules, so today chargehand does not call the
-`mark` command of a command source; the contract is fixed now so that a later version can.
+Which worker calls it: the worker that a start rule started on one of this source's events,
+with the item of that event as its own. When several roles start on the same item, only
+the first worker shows its state there, so two workers never write the item's status in
+turn. The tick records this when it creates the worker.
+
+When: as the worker's state changes, the tick calls `mark` with `running` while it works,
+`blocked` while it waits for events or for you, and `done` when it ends. A write that
+exits 0 is recorded, and the same status is not written again. A write that exits 3 or
+fails is one error in the tick's report, and the tick calls `mark` again with the same
+status on the next tick, so the command must accept a status that is already set. Without a
+`mark` command, the tick calls nothing.
 
 ## item_open
 

@@ -48,6 +48,10 @@ class TrackerSource(Source):
     def whoami(self) -> str:
         return self.tracker.whoami()
 
+    @property
+    def marks_items(self) -> bool:
+        return True
+
     def poll(
         self, cursor: str | None, items: Sequence[WorkItem]
     ) -> tuple[list[Event], str | None]:

@@ -42,11 +42,12 @@ launchd timer ──► chargehand tick
    4. follow the pull request of each worker's pushed branch
    5. poll the event sources, route: inboxes, then start rules
    6. diff session states, notify on change      ◄── claude agents --json --all
-   7. deliver: one wake per idle worker with events (stop, then claude --resume)
-   8. sync the tracker labels
-   9. poll each repository's tracker as a source: the queue label is a start rule
+   7. poll each repository's tracker as a source, route: inboxes and closes
+   8. deliver: one wake per idle worker with events (stop, then claude --resume)
+   9. sync the tracker labels and the status of source items
+  10. admit the tracker's starts: the queue label is a start rule
       (repositories, roles' start rules, ledger, capacity)
-  10. collect garbage
+  11. collect garbage
    launch: ledger → label → worktree → setup → claude --bg "<prompt>"
         │
         ▼
@@ -114,15 +115,18 @@ queued issue, and the issues that live workers follow give `comment` and `done` 
 `labeled` event is news again once the issue changed, so a re-armed issue starts a new
 worker. Every poll lists the whole queue, as admission always did: a queue start that the
 router gave up after a week comes back from the next listing. The cursor is kept per
-repository. The tracker step polls every tracker after the state diff, then tries the
-waiting queue starts, then the new ones, so a slot that a finished worker frees is used in
-the same tick; each waiting start is tried once per tick. A paused repository is not
-polled. A queue start waits while a live worker holds the issue or while a role file does
+repository. Every tracker is polled after the state diff and before delivery, and its
+events go through the router's filters, inboxes and closes there, so a comment on a
+worker's issue wakes the worker in the same tick. The tracker's starts wait for the
+admission step after delivery, which offers them to the start rules oldest first: a slot
+that a finished worker frees is used in the same tick, and a waiting worker gets a slot
+before the queue starts a new one. Each waiting start is tried once per tick. A paused
+repository is not polled. A queue start waits while a live worker holds the issue or while a role file does
 not load, and is dropped once the issue has left the queue.
 
 | Adapter | Notes |
 |---|---|
-| `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. The poll lists the queue in one paged query, and reads the followed issues and their comments since each issue's previous poll in one more query, with a five-minute overlap that the router's dedupe absorbs; the comments are read page by page, whatever their order, and an issue with more than twenty pages left is read from the same point again. A comment body is read only for the authorship marker. |
+| `linear` | GraphQL with an API key. Supports a workflow-state filter. Labels are changed with single-label add/remove mutations so concurrent label edits are not clobbered. Issue URLs are shortened to their identifier form, because Linear's own URLs end in a slug built from the title. The poll lists the queue in one paged query, and reads the followed issues and their comments since each issue's previous poll in one more query, with a five-minute overlap that the router's dedupe absorbs; the comments are read page by page, whatever their order, and an issue with more than twenty pages left goes on from the last page read on the next poll, then is read again from when its pages started. A comment body is read only for the authorship marker. |
 | `github` | Through the `gh` CLI, so there is no token handling. No workflow states: the trigger is label + assignee + open. `tracker = { type = "github", repo = "owner/repo" }`; labels change with `gh issue edit` and are verified by a re-read. |
 
 Any other system is connected as a `command` source, not as a tracker adapter (see "Event
@@ -188,7 +192,10 @@ review comments, the reviews, the issue comments, and the commit statuses and ch
 the head commit, which gives `comment`, `review`, `ci_status` and `pr_closed`; a followed
 item gets only review requests from the notifications, so nothing arrives twice. An item
 that `gh` cannot read is logged and read again from the same point on the next poll; it
-does not hold back the other items. A review counts as marked when its body or one of its
+does not hold back the other items. The same holds for a notification thread whose pull
+request cannot be read: the other threads arrive, and the list keeps its old
+`Last-Modified`, so the next poll asks for the same window again. A review request on a
+repository that no `[[repository]]` names is not checked with a call of its own. A review counts as marked when its body or one of its
 inline comments carries the authorship marker. Dedupe ids are GitHub's object ids. An item is `owner/repo#number`; its key is `owner_repo_number` in
 lower case, or a shortened form with a digest when a name does not fit a path or a branch
 name, and a name that GitHub itself would refuse is skipped. A start event belongs to the
@@ -199,15 +206,16 @@ The `command` source connects any other system without a plugin framework: charg
 a configured executable that reads the cursor on stdin, and the refs of the followed items
 in `CHARGEHAND_REFS`, and prints one JSON object per event and a last line with the new
 cursor. Optional commands answer `item_open` and `mark` (exit 3 means the write may or may
-not have landed); the tick changes labels only for workers that a repository's queue label
-started, so it does not call a source's `mark` yet. The commands run as subprocesses with a
+not have landed). The commands run as subprocesses with a
 timeout and without a shell, each output line is checked against a closed event shape, and a
 line that does not fit is logged and skipped. A start event belongs to one of the
 repositories listed in the source's `repositories`. The contract is a public surface and is
 documented in [command-source.md](command-source.md).
 
 The source's cursor is saved after its events are routed, so a source that fails is one
-error in the report and its events arrive on a later tick. The queue label starts its
+error in the report and its events arrive on a later tick. An expected failure, such as an
+outage, a timeout or a command that exits non-zero, is that one line on every tick it
+lasts, without a traceback; only an unexpected exception also logs its traceback. The queue label starts its
 workers through the same router, as a `labeled` event from the repository's tracker; a
 `labeled` event from a `[[source]]` starts nothing. The implementer role starts on it,
 subscribes to `comment` and declares `close_on = ["done"]`; a worker whose issue closes
@@ -216,8 +224,13 @@ share its name with a tracker type, such as a `github` source next to a GitHub I
 queue: they share subscriptions, so a comment that the source reports reaches the worker,
 the tracker leaves the followed items to that source, and the tracker's dedupe ids carry
 their own prefix. Only a worker the queue label started changes the label;
-every other worker on the issue only reads it. The ledger records this when the worker is
-created, so an edit of a role file cannot move the label to another worker. A worker started
+every other worker on the issue only reads it. In the same way, of the workers that a
+`[[source]]` with a `mark` command started on one item, only the first one shows its state
+there: the tick calls that source's `mark` with `running`, `blocked` or `done` as the
+worker's state changes, records the status once the command confirms it, and calls it
+again on the next tick after a failed or ambiguous write. The ledger records which worker
+does this when the worker is created, so an edit of a role file cannot move the label to
+another worker. A worker started
 by another event ends when its source reports its primary item closed. A start URL from a
 source reaches the prompt only when it is a plain http(s) URL, and a start that waits longer
 than a week is given up with a warning.

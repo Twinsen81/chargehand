@@ -79,6 +79,25 @@ class Source(abc.ABC):
     def __init__(self, name: str, options: Mapping[str, object]) -> None:
         self.name = name
         self.options = dict(options)
+        # The configured repositories, once the tick has given them; None while unknown.
+        self.configured_repositories: tuple[Repository, ...] | None = None
+
+    def use_repositories(self, repositories: Sequence[Repository]) -> None:
+        """Tell the source which repositories are configured, once it is built.
+
+        A source may then skip a call for an item that no repository would start a worker
+        on. Without it, the source treats every repository as configured.
+        """
+        self.configured_repositories = tuple(repositories)
+
+    @property
+    def marks_items(self) -> bool:
+        """Whether :meth:`mark` shows a worker's state on the item.
+
+        The tick gives a worker that this source's start rule started the job of marking
+        its item only when this is true, so a source without labels costs no call.
+        """
+        return False
 
     @abc.abstractmethod
     def whoami(self) -> str:

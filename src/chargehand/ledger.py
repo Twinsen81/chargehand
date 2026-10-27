@@ -76,6 +76,15 @@ ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
 
+# What a worker's `owns_label` says it shows its state on. One worker per item does it,
+# so two workers cannot write the same label in turn. QUEUE: the queue label of its
+# repository's tracker, for a worker the queue label started. SOURCE: its primary item
+# on the `[[source]]` whose start rule started it, through that source's `mark`.
+LABEL_NONE = 0
+LABEL_QUEUE = 1
+LABEL_SOURCE = 2
+LABEL_OWNERS = (LABEL_NONE, LABEL_QUEUE, LABEL_SOURCE)
+
 _WORKER_COLUMNS = (
     "id",
     "role",
@@ -149,8 +158,9 @@ CREATE TABLE IF NOT EXISTS workers (
     created_at       REAL    NOT NULL,
     updated_at       REAL    NOT NULL,
     finished_at      REAL,
-    -- Whether this worker drives the tracker's queue label: set when the queue label
-    -- started it. Every worker before version 3 was started that way.
+    -- What this worker shows its state on, one of LABEL_OWNERS: 0 nothing, 1 the
+    -- tracker's queue label (the queue label started it; every worker before version 3
+    -- was started that way), 2 its primary item on the [[source]] that started it.
     owns_label       INTEGER NOT NULL DEFAULT 1
 );
 
@@ -509,12 +519,14 @@ class Ledger:
         origin: str = ORIGIN_SOURCE,
         start_rule: str | None = None,
         runtime: str = "claude",
-        owns_label: bool = True,
+        owns_label: int = LABEL_QUEUE,
         now: float | None = None,
     ) -> Worker:
         """Step 0 of the launch sequence: the row exists before any side effect."""
         if origin not in ORIGINS:
             raise ValueError(f"unknown worker origin {origin!r}")
+        if int(owns_label) not in LABEL_OWNERS:
+            raise ValueError(f"unknown label owner {owns_label!r}")
         stamp = time.time() if now is None else now
         cursor = self._conn.execute(
             """
@@ -524,7 +536,7 @@ class Ledger:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
             """,
             (role, origin, start_rule, runtime, item, item_id, url, repository, str(repo),
-             str(worktree), branch, LAUNCHING, stamp, stamp, 1 if owns_label else 0),
+             str(worktree), branch, LAUNCHING, stamp, stamp, int(owns_label)),
         )
         worker = self.get(int(cursor.lastrowid))
         assert worker is not None
@@ -552,8 +564,8 @@ class Ledger:
     def latest_label_owner(self, item: str) -> Worker | None:
         """The newest worker on *item* that drives the queue label."""
         row = self._conn.execute(
-            "SELECT * FROM workers WHERE item = ? AND owns_label = 1 ORDER BY id DESC LIMIT 1",
-            (item,),
+            "SELECT * FROM workers WHERE item = ? AND owns_label = ? ORDER BY id DESC LIMIT 1",
+            (item, LABEL_QUEUE),
         ).fetchone()
         return _row_to_worker(row) if row else None
 

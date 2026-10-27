@@ -395,16 +395,23 @@ def test_the_fake_tracker_contract_marks_and_answers_item_open(fake_board):
 
 
 @pytest.fixture
-def wired(tmp_path, repo, claude_state, board, fake_board):
-    target = repo / ".chargehand" / "roles" / "watcher.toml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(WATCHER)
+def watchers() -> tuple[str, ...]:
+    """The roles that start on the source's events, in the repository's order."""
+    return ("watcher",)
+
+
+@pytest.fixture
+def wired(tmp_path, repo, claude_state, board, fake_board, watchers):
+    for name in watchers:
+        target = repo / ".chargehand" / "roles" / f"{name}.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(WATCHER)
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
     config = make_config(
         repo,
         worktree_root,
-        roles=("implementer", "watcher"),
+        roles=("implementer", *watchers),
         sources=(SourceConfig(name="cmd", type="command", options=fake_options(fake_board)),),
     )
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
@@ -462,3 +469,116 @@ def test_a_garbage_line_does_not_stop_the_tick(wired, fake_board, caplog):
     assert report.errors == []
     assert wired.worker("DEMO-1", "watcher") is not None
     assert any("skipped output line 1" in r.getMessage() for r in caplog.records)
+
+
+def mark_calls(fake_board: CommandBoard) -> list[list[str]]:
+    return [call for call in fake_board.calls if call[0] == "mark"]
+
+
+def test_the_worker_a_command_source_started_marks_its_item(wired, fake_board):
+    fake_board.add("DEMO-1")
+
+    report = wired.tick()
+
+    assert report.errors == []
+    watcher = wired.worker("DEMO-1", "watcher")
+    assert watcher.owns_label == ledger_mod.LABEL_SOURCE
+    assert watcher.label_state == "running"
+    assert fake_board.labels_of("DEMO-1") == ["chargehand-running"]
+
+    # The turn ends: the worker waits for events, and its item shows it as blocked.
+    wired.claude_state.set_session_state("DEMO-1", "done", status="idle")
+    wired.next_tick()
+    assert wired.worker("DEMO-1", "watcher").state == ledger_mod.IDLE
+    assert fake_board.labels_of("DEMO-1") == ["chargehand-blocked"]
+
+    fake_board.close("DEMO-1")
+    wired.next_tick()
+
+    assert wired.worker("DEMO-1", "watcher").state == ledger_mod.DONE
+    assert fake_board.labels_of("DEMO-1") == []
+    assert mark_calls(fake_board) == [
+        ["mark", "DEMO-1", "running"], ["mark", "DEMO-1", "blocked"], ["mark", "DEMO-1", "done"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure, error",
+    [
+        ("ambiguous", "DEMO-1: source cmd: mark DEMO-1 running may or may not have landed"),
+        ("failure", "DEMO-1: source cmd: mark exited 1: fake: the write failed"),
+    ],
+)
+def test_a_mark_that_did_not_land_for_sure_is_tried_again_on_the_next_tick(
+    wired, fake_board, failure, error
+):
+    fake_board.add("DEMO-1")
+    # The tick syncs the item after the state diff and again in its label step.
+    fake_board.update(fail_next_mark=[failure, failure])
+
+    report = wired.tick()
+
+    assert any(e.startswith(error) for e in report.errors), report.errors
+    assert wired.worker("DEMO-1", "watcher").label_state is None
+
+    report = wired.next_tick()
+
+    assert report.errors == []
+    assert wired.worker("DEMO-1", "watcher").label_state == "running"
+    assert mark_calls(fake_board) == [["mark", "DEMO-1", "running"]] * 3
+
+
+@pytest.mark.parametrize("watchers", [("watcher", "helper")])
+def test_only_the_first_worker_on_an_item_marks_it(wired, fake_board):
+    fake_board.add("DEMO-1")
+
+    report = wired.tick()
+
+    assert report.errors == []
+    watcher, helper = wired.worker("DEMO-1", "watcher"), wired.worker("DEMO-1", "helper")
+    assert watcher.state == helper.state == ledger_mod.RUNNING
+    assert (watcher.owns_label, helper.owns_label) == (
+        ledger_mod.LABEL_SOURCE, ledger_mod.LABEL_NONE,
+    )
+    assert mark_calls(fake_board) == [["mark", "DEMO-1", "running"]]
+
+
+def test_retry_does_not_queue_a_command_source_item_again(wired, fake_board):
+    fake_board.add("DEMO-1")
+    wired.tick()
+    wired.ledger.record_request("cancel", "DEMO-1", role="watcher")
+    wired.next_tick()
+    wired.ledger.record_request("retry", "DEMO-1", role="watcher", force=True)
+
+    report = wired.next_tick()
+
+    (outcome,) = [r for r in report.requests if r.startswith("retry")]
+    assert "the next start event for the item starts a new worker" in outcome
+    assert "queued" not in [call[2] for call in mark_calls(fake_board)]
+
+
+def test_a_failing_poll_is_one_line_per_tick_without_a_traceback(
+    tmp_path, repo, claude_state, board, caplog
+):
+    poll = script(tmp_path, "cat >/dev/null\necho 'upstream is down' >&2\nexit 2\n")
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+    config = make_config(
+        repo, worktree_root,
+        sources=(SourceConfig(name="demo", type="command", options={"poll": str(poll)}),),
+    )
+    ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
+    notifier = Notifier(config.notify)
+    runner = Runner(config, ledger, git=Git(), notifier=notifier)
+    harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
+
+    with caplog.at_level(logging.DEBUG, logger="chargehand"):
+        reports = [harness.next_tick(), harness.next_tick()]
+
+    expected = "source demo: poll exited 2: upstream is down"
+    assert [report.errors for report in reports] == [[expected], [expected]]
+    records = [r for r in caplog.records if "upstream is down" in r.getMessage()]
+    assert [r.getMessage() for r in records] == [expected, expected]
+    # The tick prints the report's error line; this record shows only at debug level.
+    assert all(r.levelno < logging.INFO and r.exc_info is None for r in records)
+    ledger.close()

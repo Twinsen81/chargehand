@@ -700,20 +700,70 @@ def test_a_second_poll_reads_comment_51_and_later(polling, newest_first):
     assert {f"c{n}" for n in range(51, 71)} <= {c.id for c in second.comments}
 
 
-def test_an_issue_with_more_comments_than_one_poll_reads_is_read_from_the_same_point(polling):
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_an_issue_with_more_comments_than_one_poll_reads_goes_on_from_its_last_page(
+    polling, newest_first
+):
     tracker, transport = polling
+    transport.newest_first = newest_first
     cursor = tracker.poll(None, []).cursor
-    transport.followed = [
-        poll_node("ABC-1", updated=NOW, comments=[
-            comment(f"c{n}", created=NOW + n) for n in range(1, 50 * 20 + 2)
-        ]),
-    ]
+    busy = poll_node("ABC-1", updated=NOW, comments=[
+        comment(f"c{n}", created=NOW + n) for n in range(1, 50 * 20 + 31)
+    ])
+    transport.followed = [busy]
     tracker.clock = lambda: NOW + 3000
+
+    first = tracker.poll(cursor, ["id-ABC-1"])
+
+    assert len(first.comments) == 50 * 20
+    state = json.loads(first.cursor)
+    assert state["items"] == {"id-ABC-1": NOW}
+    assert state["pages"]["id-ABC-1"]["after"] == "1000"
+    assert state["pages"]["id-ABC-1"]["started"] == NOW + 3000
+
+    # A comment arrives while the pages are read.
+    busy["comments"]["nodes"].append(comment("late", created=NOW + 3500))
+    transport.calls.clear()
+    tracker.clock = lambda: NOW + 4000
+    second = tracker.poll(first.cursor, ["id-ABC-1"])
+
+    seen = {c.id for c in first.comments} | {c.id for c in second.comments}
+    assert {f"c{n}" for n in range(1, 50 * 20 + 31)} <= seen
+    (going_on,) = [v for name, v in transport.calls if name == "Comments"]
+    assert going_on["after"] == "1000"
+    assert going_on["comments"] == {"createdAt": {"gt": state["pages"]["id-ABC-1"]["gt"]}}
+    # The pages are done: the issue is read again from when they started.
+    state = json.loads(second.cursor)
+    assert state["items"] == {"id-ABC-1": NOW + 3000} and "pages" not in state
+
+    tracker.clock = lambda: NOW + 5000
+    third = tracker.poll(second.cursor, ["id-ABC-1"])
+    assert "late" in seen | {c.id for c in third.comments}
+    assert json.loads(third.cursor)["items"] == {"id-ABC-1": NOW + 5000}
+
+
+def test_a_page_cursor_that_linear_refuses_starts_the_issue_over(polling):
+    tracker, transport = polling
+    cursor = json.dumps({
+        "polled_at": NOW, "items": {"id-ABC-1": NOW},
+        "pages": {"id-ABC-1": {"after": "stale", "gt": iso(NOW - 300), "started": NOW}},
+    })
+    transport.followed = [poll_node("ABC-1", updated=NOW, comments=[comment("c1", created=NOW + 1)])]
+    answer = transport.__call__
+
+    def refusing(query, variables=None):
+        if (variables or {}).get("after") == "stale":
+            raise TrackerError("linear: invalid cursor")
+        return answer(query, variables)
+
+    tracker._post = refusing
+    tracker.clock = lambda: NOW + 600
 
     result = tracker.poll(cursor, ["id-ABC-1"])
 
-    assert len(result.comments) == 50 * 20
-    assert json.loads(result.cursor)["items"] == {"id-ABC-1": NOW}
+    # The issue is read from its own time again, from its first page.
+    assert [c.id for c in result.comments] == ["c1"]
+    assert "pages" not in json.loads(result.cursor)
 
 
 def test_the_linear_tracker_as_a_source_gives_labeled_comment_and_done_events(polling):

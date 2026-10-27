@@ -151,7 +151,10 @@ def poll(board: CommandBoard, cursor: str) -> list[str]:
 def mark(board: CommandBoard, key: str, status: str) -> int:
     state = board.read()
     state["calls"].append(["mark", key, status])
+    # One outcome for the next call, or a list of outcomes for the next calls in turn.
     failure, state["fail_next_mark"] = state["fail_next_mark"], None
+    if isinstance(failure, list):
+        failure, state["fail_next_mark"] = (failure[0] if failure else None), (failure[1:] or None)
     if failure == "failure":
         board.write(state)
         print("fake: the write failed", file=sys.stderr)

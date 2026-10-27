@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import time
 from pathlib import Path
 
@@ -381,9 +382,23 @@ def test_a_failing_source_is_one_error_and_the_tick_goes_on(routed):
 
     report = routed.tick()
 
-    assert report.errors == ["source fake: fake: 503"]
+    # The source's own name at the start of its error is not repeated.
+    assert report.errors == ["source fake: 503"]
     assert report.launched == ["ABC-1"]
     assert routed.ledger.get_cursor("fake") is None
+
+
+def test_an_unexpected_source_failure_keeps_its_traceback(routed, caplog, monkeypatch):
+    def broken(self, cursor, items):
+        raise RuntimeError("unforeseen")
+
+    monkeypatch.setattr(FakeSource, "poll", broken)
+    with caplog.at_level(logging.WARNING, logger="chargehand"):
+        report = routed.tick()
+
+    assert report.errors == ["source fake: unforeseen"]
+    (record,) = [r for r in caplog.records if r.name == "chargehand.tick"]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
 
 
 def test_an_unknown_source_type_is_one_error(tmp_path, repo, claude_state, board):
