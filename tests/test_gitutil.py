@@ -75,3 +75,43 @@ def test_a_directory_that_became_a_symlink_is_seen_by_its_target(worktree, tmp_p
 def test_the_record_is_none_outside_a_repository_and_empty_without_pathspecs(worktree, tmp_path):
     assert Git().workspace_manifest(tmp_path, PATHSPECS) is None
     assert Git().workspace_manifest(worktree, ()) == {}
+
+
+def test_a_configured_fsmonitor_program_does_not_run(tmp_path):
+    """core.fsmonitor names a program git runs on status/ls-files; the -c override wins."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git("init", "--initial-branch=main", cwd=repo)
+    (repo / "file.txt").write_text("x\n")
+    run_git("add", "-A", cwd=repo)
+    run_git("commit", "-m", "init", cwd=repo)
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    hook.chmod(0o755)
+    run_git("config", "core.fsmonitor", str(hook), cwd=repo)
+
+    # Every read the wake check makes goes through Git, so none may run the program.
+    assert Git().workspace_manifest(repo, (":(glob)**/*.txt",)) is not None
+    assert Git().is_dirty(repo) is False
+    assert Git().unpushed_commits(repo) >= 0
+    assert not marker.exists()
+
+
+def test_a_configured_hook_does_not_run_for_a_git_call(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git("init", "--initial-branch=main", cwd=repo)
+    marker = tmp_path / "hook-ran"
+    hooks = repo / "hooks"
+    hooks.mkdir()
+    (hooks / "post-commit").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    (hooks / "post-commit").chmod(0o755)
+    run_git("config", "core.hooksPath", str(hooks), cwd=repo)
+    (repo / "file.txt").write_text("x\n")
+
+    git = Git()
+    git.run(["add", "-A"], cwd=repo)
+    git.run(["commit", "-m", "init"], cwd=repo)
+
+    assert not marker.exists()

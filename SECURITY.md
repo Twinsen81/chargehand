@@ -84,10 +84,12 @@ public location.
   or an absolute `PATH` entry, never from the head: a relative program that is in neither
   checkout is refused. Before a wake, the base checkout is left out as well, because the
   session has worked in it since the launch and a program there may be the session's.
-  Git hooks are turned off for the whole step (`core.hooksPath` is set to `/dev/null`
-  through git's environment configuration), because a repository with a relative
-  `core.hooksPath`, as husky sets it, would otherwise run the hooks that the head commits
-  when `gh pr checkout` checks it out. A wake whose step fails waits.
+  Git runs with hooks and the fsmonitor turned off for the whole step (`core.hooksPath`
+  and `core.fsmonitor` through git's environment configuration), and so does every git
+  call chargehand itself makes (`-c` on the command line): a repository with a relative
+  `core.hooksPath`, as husky sets it, or a `core.fsmonitor` set to a program, would
+  otherwise run that program when git checks the head out or reads the worktree. A wake
+  whose step fails waits.
 - **A changed workspace is not resumed.** Before each wake, and before `continue`, of such
   a worker, chargehand checks that its working directory is still on the worker's own
   branch and that the files Claude Code loads from it (`.claude/` and `CLAUDE.md` and
@@ -96,10 +98,15 @@ public location.
   symlink by its target path and, for a file, that file's content, and the `.claude` entry
   itself counts, so that a symlink in its place is seen. Otherwise a wake stops the idle
   session instead of resuming it, pauses the worker with its events kept and sends
-  `wake-fault` to the hook, and `continue` is refused. An operator who has looked at the
-  worktree accepts it with `chargehand continue <item> --force`, which records the files
-  as they are now; a worktree that left its branch, or whose item checkout is gone, is not
-  accepted.
+  `wake-fault` to the hook, and `continue` is refused. It also refuses the item checkout
+  itself when it is no longer a plain directory that git lists, from the main checkout, as
+  a detached worktree at its own path: a symlink or a redirected `.git` there would aim
+  the setup step, or a git read, at a directory the session chose. The check runs again
+  after the refresh step, so a step that moved the head into the session's own worktree
+  shows as a worktree off its branch before the resume. An operator who has looked at the
+  worktree accepts a file change with `chargehand continue <item> --force`, which records
+  the files as they are now; a worktree that left its branch, or whose item checkout is
+  gone or redirected, is not accepted, and `chargehand discard` removes the worker.
 
   What this does not cover: the session itself. During a turn it can run any command the
   classifier or a prompt lets through, including git commands in the head checkout,
@@ -108,7 +115,12 @@ public location.
   is loaded by every session on the machine and is not checked. The shipped agent file tells
   the reviewer to treat the head as data, never to run it, never to check anything out,
   and its allow rules leave out `gh api`, `gh pr checkout`, merge, close and approve.
-  Those are guardrails, not a boundary. Git filters that the operator configured, such as
+  Those are guardrails, not a boundary. A session that gains approval to write outside
+  its own working directory is out of scope: one that can write the item checkout, the
+  main checkout or `~/.claude` can already alter the operator's shell profile or a
+  LaunchAgent, so the checks above defend against a change the session made inside its
+  own worktree and against an accident, not against a session that already holds that
+  power. Git filters that the operator configured, such as
   Git LFS, still run on the files the head selects through `.gitattributes`, and a
   session that the operator resumes by hand, outside chargehand, is not checked.
 - **A wake carries pointers only.** The message that wakes a worker is a fixed line that

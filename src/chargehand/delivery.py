@@ -175,20 +175,7 @@ class Delivery:
             result.held.append(f"{worker.handle}: {reason}")
             return
 
-        fault = self._guard(worker)
-        if fault is not None:
-            # A resume would load what the worktree now holds. The idle session is
-            # stopped, which loads nothing, so that the state diff leaves the worker
-            # paused, with its events, until the operator has looked.
-            try:
-                self._runtime(worker.runtime).stop(worker.session_id)
-            except (AgentRuntimeError, ConfigError):
-                pass
-            paused = self.ledger.update(
-                worker, state=ledger_mod.PAUSED, last_error=f"wake refused: {fault}"[:500]
-            )
-            result.faults.append((paused, fault))
-            result.errors.append(f"{worker.handle}: wake refused: {fault}")
+        if self._refuse_faulted(worker, result):
             return
 
         problem = self._prepare(worker)
@@ -196,6 +183,12 @@ class Delivery:
             if worker.state != ledger_mod.QUEUED:
                 self.ledger.update(worker, state=ledger_mod.QUEUED)
             result.held.append(f"{worker.handle}: wake held, {problem}")
+            return
+
+        # Again after the refresh: it runs the role's setup step, so a checkout it
+        # redirected into the session's own worktree shows here as a worktree off its
+        # branch, before the resume.
+        if self._refuse_faulted(worker, result):
             return
 
         try:
@@ -253,6 +246,27 @@ class Delivery:
                 last_error=None,
             )
         result.woken.append(worker)
+
+    def _refuse_faulted(self, worker: Worker, result: DeliveryResult) -> bool:
+        """Pause *worker* when the guard refuses its worktree; True when it did.
+
+        A resume would load what the worktree now holds. The idle session is stopped,
+        which loads nothing, so that the state diff leaves the worker paused, with its
+        events, until the operator has looked.
+        """
+        fault = self._guard(worker)
+        if fault is None:
+            return False
+        try:
+            self._runtime(worker.runtime).stop(worker.session_id)
+        except (AgentRuntimeError, ConfigError):
+            pass
+        paused = self.ledger.update(
+            worker, state=ledger_mod.PAUSED, last_error=f"wake refused: {fault}"[:500]
+        )
+        result.faults.append((paused, fault))
+        result.errors.append(f"{worker.handle}: wake refused: {fault}")
+        return True
 
     def _refusal(self, worker: Worker, result: DeliveryResult) -> str | None:
         """Why admission holds this wake back now, or None when it may go."""

@@ -67,10 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pull request head from a separate checkout, `{item_checkout}`, so the author's Claude
   Code settings and hooks are never loaded. Its setup runs with git hooks turned off and
   never takes a program from the head, and runs again before each wake so the checkout
-  follows the head, then without taking a program from the session's worktree either. A
-  wake refuses a reviewer whose item checkout is gone, whose worktree left its branch or
-  whose Claude Code files changed since the setup step; `chargehand continue --force`
-  accepts the files after a look. A reply wakes it, its own marked comments do not, and a second
+  follows the head, then without taking a program from the session's worktree either.
+  Every git call runs with hooks and the fsmonitor off, so no repository config runs a
+  program. A wake refuses a reviewer whose item checkout is gone, a symlink or a redirected
+  worktree, whose worktree left its branch, or whose Claude Code files changed since the
+  setup step, and checks again after the refresh; `chargehand continue --force` accepts a
+  file change after a look. A reply wakes it, its own marked comments do not, and a second
   review request wakes it again.
   A start rule's `close_on` event on a worker's primary item ends the worker, and a start
   event for a repository that is not configured is reported once. `tick` prints wakes and

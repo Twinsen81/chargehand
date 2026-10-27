@@ -16,6 +16,13 @@ from pathlib import Path
 
 from chargehand.errors import GitError
 
+# Overrides passed to every git call, so that no repository-controlled config runs a
+# program: `core.hooksPath` names hook scripts, `core.fsmonitor` a program git runs on
+# `status`, `ls-files` and `diff`. chargehand's git calls are all plumbing and need
+# neither, and a worktree, or a `.git` file, the session can write must not run code
+# through them. A command-line `-c` wins over any config the repository holds.
+HARDEN = ("core.hooksPath=/dev/null", "core.fsmonitor=false")
+
 
 @dataclass(frozen=True)
 class GitResult:
@@ -38,6 +45,8 @@ class Git:
         timeout: float | None = None,
     ) -> GitResult:
         argv = [self.binary]
+        for override in HARDEN:
+            argv += ["-c", override]
         if cwd is not None:
             argv += ["-C", str(cwd)]
         argv += list(args)

@@ -206,16 +206,24 @@ def trusted_program(name: str, roots: Sequence[Path]) -> str | None:
     return shutil.which(name, path=search)
 
 
-def without_git_hooks(environ: Mapping[str, str]) -> dict[str, str]:
-    """*environ* with git's hooks turned off, through git's own environment configuration."""
+def hardened_git_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """*environ* with git's hooks and fsmonitor turned off, through git's config env.
+
+    For a subprocess that itself runs git, such as `gh pr checkout`, where a command-line
+    `-c` cannot reach. A relative `core.hooksPath`, or a `core.fsmonitor` set to a
+    program, would otherwise run code a checkout the session can write controls. Added on
+    top of any `GIT_CONFIG_*` already in the environment.
+    """
     env = dict(environ)
     try:
         index = max(int(env.get("GIT_CONFIG_COUNT") or 0), 0)
     except ValueError:
         index = 0
-    env[f"GIT_CONFIG_KEY_{index}"] = "core.hooksPath"
-    env[f"GIT_CONFIG_VALUE_{index}"] = os.devnull
-    env["GIT_CONFIG_COUNT"] = str(index + 1)
+    for key, value in (("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+        index += 1
+    env["GIT_CONFIG_COUNT"] = str(index)
     return env
 
 
@@ -941,21 +949,7 @@ class Runner:
             return False, f"{worker.item} is {worker.state}, not paused or blocked"
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
-            if check.acceptable:
-                hint = (
-                    f"Check the worktree, then `chargehand continue {worker.item} --force` "
-                    f"to accept the files or `chargehand discard {worker.item} --yes`."
-                )
-            else:
-                hint = "Check the worktree and put it right, then continue, or discard the worker."
-            message = f"{worker.item}: {check.fault}. {hint}"
-            # The paths are the session's choice, so they are cleaned like any agent text,
-            # and they take only the room the hint leaves.
-            room = REQUEST_MESSAGE_LIMIT - len(message) - len(" ()")
-            if check.changed and room >= 20:
-                changed = sanitize.one_line(", ".join(check.changed[:3]), limit=room)
-                message = f"{worker.item}: {check.fault} ({changed}). {hint}"
-            return False, message
+            return False, self._refusal_message(worker, check)
         result = self.runtime(worker.runtime).respawn(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         if result.returncode != 0:
@@ -975,6 +969,32 @@ class Runner:
         )
         self._sync_labels(worker, context, report)
         return True, "session respawned"
+
+    def _refusal_message(self, worker: Worker, check: WorkspaceCheck) -> str:
+        """The `continue` refusal, within what the CLI prints, keeping the remedy whole.
+
+        An acceptable fault points at `--force`; any other at `discard`, the only remedy
+        for a worktree off its branch or an item checkout that is gone. The changed
+        paths, which the session chose, are cleaned and take only the room that is left.
+        """
+        if check.acceptable:
+            hint = (
+                f"Check the worktree, then `chargehand continue {worker.item} --force` "
+                f"to accept the files, or `chargehand discard {worker.item} --yes`."
+            )
+        else:
+            hint = (
+                f"Check the worktree, then `chargehand discard {worker.item} --yes`; the "
+                f"next review request starts a fresh worker."
+            )
+        prefix, tail = f"{worker.item}: ", f". {hint}"
+        budget = REQUEST_MESSAGE_LIMIT - len(prefix) - len(tail)
+        detail = check.fault
+        room = budget - len(detail) - len(" ()")
+        if check.changed and room >= 20:
+            detail = f"{detail} ({sanitize.one_line(', '.join(check.changed[:3]), limit=room)})"
+        detail = sanitize.one_line(detail, limit=max(budget, 1))
+        return sanitize.one_line(f"{prefix}{detail}{tail}", limit=REQUEST_MESSAGE_LIMIT)
 
     def _do_retry(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
@@ -1684,10 +1704,9 @@ class Runner:
         """
         if not self._has_item_checkout(worker):
             return WorkspaceCheck()
-        if not item_checkout_path(worker).exists():
-            # The records say there was one. A session that removed it must not turn the
-            # check off by doing so.
-            return WorkspaceCheck("its item checkout is gone")
+        checkout_fault = self._item_checkout_fault(worker)
+        if checkout_fault is not None:
+            return WorkspaceCheck(checkout_fault)
         try:
             branch = self.git.worktree_branch(worker.repo_path, worker.worktree_path)
         except GitError:
@@ -1728,6 +1747,35 @@ class Runner:
             self.ledger.get_state(f"{prefix}{worker.id}") is not None
             for prefix in WORKER_STATE_PREFIXES
         )
+
+    def _item_checkout_fault(self, worker: Worker) -> str | None:
+        """Why the worker's item checkout must not be read or written again, or None.
+
+        A session that replaced the checkout with a symlink, or pointed its `.git` file
+        elsewhere, would otherwise redirect the setup step the refresh runs, or the git
+        calls that read it, into a directory of its choosing. So the path must be a plain
+        directory that git lists, from the main checkout, as a detached worktree at that
+        same path.
+        """
+        checkout = item_checkout_path(worker)
+        if checkout.is_symlink():
+            return "its item checkout was replaced with a symlink"
+        if not checkout.exists():
+            # The records say there was one. A session that removed it must not turn the
+            # check off by doing so.
+            return "its item checkout is gone"
+        try:
+            worktrees = self.git.list_worktrees(worker.repo_path)
+        except GitError:
+            return "its item checkout could not be inspected"
+        entry = worktrees.get(str(checkout)) or worktrees.get(str(checkout.resolve()))
+        if entry is None:
+            return "its item checkout is not a registered worktree"
+        if entry.get("branch"):
+            # A detached worktree has no branch. One with a branch is the session's own
+            # worktree, reached because the checkout path led there.
+            return "its item checkout is not where it was"
+        return None
 
     def _record_workspace_files(self, worker: Worker) -> str | None:
         """Record the agent's files in the worktree as they are now; the reason when that fails."""
@@ -2145,7 +2193,7 @@ class Runner:
             named = ", ".join(name for _, name in roots)
             return f"setup program {argv[0]!r} is not in {named}, or an absolute PATH entry"
         argv[0] = program
-        env = None if cwd is None else without_git_hooks(os.environ)
+        env = None if cwd is None else hardened_git_env(os.environ)
         try:
             result = subprocess.run(
                 argv,

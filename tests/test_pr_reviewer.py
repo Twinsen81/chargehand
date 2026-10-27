@@ -536,15 +536,16 @@ def test_a_trusted_relative_program_comes_from_the_worktree(tmp_path):
     )
 
 
-def test_git_hooks_are_turned_off_on_top_of_existing_environment_configuration():
-    from chargehand.tick import without_git_hooks
+def test_git_hooks_and_fsmonitor_are_turned_off_on_top_of_existing_configuration():
+    from chargehand.tick import hardened_git_env
 
-    env = without_git_hooks({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "a.b",
-                             "GIT_CONFIG_VALUE_0": "c"})
+    env = hardened_git_env({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "a.b",
+                            "GIT_CONFIG_VALUE_0": "c"})
 
     assert env["GIT_CONFIG_KEY_0"] == "a.b"
     assert (env["GIT_CONFIG_KEY_1"], env["GIT_CONFIG_VALUE_1"]) == ("core.hooksPath", os.devnull)
-    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert (env["GIT_CONFIG_KEY_2"], env["GIT_CONFIG_VALUE_2"]) == ("core.fsmonitor", "false")
+    assert env["GIT_CONFIG_COUNT"] == "3"
 
 
 def head_in_the_working_directory(worktree: Path, fork: Path) -> None:
@@ -801,6 +802,62 @@ def test_a_setup_program_only_in_the_worktree_holds_the_wake(reviewing, gh, tmp_
     )
 
 
+def test_a_reviewer_whose_item_checkout_became_a_symlink_is_not_woken(reviewing, gh, tmp_path):
+    """A symlink from the item checkout to the session worktree would aim the refresh there."""
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    checkout = item_checkout_path(reviewer)
+    go_idle(reviewing)
+    shutil.rmtree(checkout)
+    checkout.symlink_to(Path(reviewer.worktree))
+    comment(gh, 84, "alice", "look")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    assert "resumes" not in reviewing.claude_state.read()
+    paused = reviewing.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED
+    assert paused.last_error == "wake refused: its item checkout was replaced with a symlink"
+    assert (PR_KEY, "wake-fault") in reviewing.notifications()
+    # The session's worktree never had the head checked into it.
+    on_branch = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=Path(reviewer.worktree)).strip()
+    assert on_branch == reviewer.branch
+
+    reviewing.ledger.record_request("continue", PR_KEY, force=True)
+    report = reviewing.next_tick()
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert "replaced with a symlink" in outcome and "--force" not in outcome
+
+
+def test_a_refresh_that_poisons_the_session_worktree_faults_the_wake(
+    reviewing, gh, tmp_path, monkeypatch
+):
+    """The guard runs again after the refresh: a refresh that moved the worktree is caught."""
+    import chargehand.tick as tick_mod
+
+    fork, head = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+
+    def poison(self, worker):
+        # Stand in for a refresh that ran in the session worktree and detached its HEAD.
+        run_git("checkout", "--detach", "HEAD", cwd=Path(worker.worktree))
+        return None
+
+    monkeypatch.setattr(tick_mod.Runner, "_refresh_item_checkout", poison)
+    comment(gh, 85, "alice", "look")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    assert "resumes" not in reviewing.claude_state.read()
+    paused = reviewing.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED
+    assert paused.last_error == "wake refused: its worktree is no longer on its own branch"
+    assert (PR_KEY, "wake-fault") in reviewing.notifications()
+
+
 def test_a_reviewer_whose_item_checkout_is_gone_is_not_woken(reviewing, gh, tmp_path):
     fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
     reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
@@ -821,7 +878,7 @@ def test_a_reviewer_whose_item_checkout_is_gone_is_not_woken(reviewing, gh, tmp_
 
     (outcome,) = [line for line in report.requests if line.startswith("continue")]
     assert "refused" in outcome and "item checkout is gone" in outcome
-    assert "--force" not in outcome
+    assert "--force" not in outcome and f"discard {PR_KEY} --yes" in outcome
     # The remedy works, and a later worker for the item gets a fresh checkout.
     reviewing.ledger.record_request("discard", PR_KEY, force=True)
     report = reviewing.next_tick()
