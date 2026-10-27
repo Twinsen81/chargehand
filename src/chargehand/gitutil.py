@@ -221,7 +221,10 @@ class Git:
         if str(worktree) in existing or (
             worktree.exists() and str(worktree.resolve()) in existing
         ):
-            return
+            if worktree.exists():
+                return
+            # Git still lists a checkout whose directory is gone; forget it, then create it.
+            self.run(["worktree", "prune"], cwd=repo)
         if worktree.exists() and any(worktree.iterdir()):
             raise GitError(f"{worktree} already exists and is not empty, but git does not know it")
         worktree.parent.mkdir(parents=True, exist_ok=True)

@@ -116,6 +116,10 @@ UNCONFIGURED_PREFIX = "unconfigured:"
 # The notification detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
 
+# How much of a control request's outcome the CLI prints. An outcome that must carry a
+# hint keeps within it.
+REQUEST_MESSAGE_LIMIT = 300
+
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
 PENDING_NOTIFICATION_PREFIX = "notify-pending:"
@@ -937,20 +941,21 @@ class Runner:
             return False, f"{worker.item} is {worker.state}, not paused or blocked"
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
-            # The paths are the session's choice, so they are cleaned like any agent text.
-            # The whole answer must fit the 300 characters the CLI prints.
-            changed = sanitize.one_line(", ".join(check.changed[:3]), limit=80)
             if check.acceptable:
                 hint = (
-                    f"Check the worktree; `chargehand continue {worker.item} --force` accepts "
-                    f"them, `chargehand discard {worker.item} --yes` removes the worker."
+                    f"Check the worktree, then `chargehand continue {worker.item} --force` "
+                    f"to accept the files or `chargehand discard {worker.item} --yes`."
                 )
             else:
                 hint = "Check the worktree and put it right, then continue, or discard the worker."
-            return False, (
-                f"{worker.item}: {check.fault}{f' ({changed})' if changed else ''}, so a "
-                f"respawn would load them. {hint}"
-            )
+            message = f"{worker.item}: {check.fault}. {hint}"
+            # The paths are the session's choice, so they are cleaned like any agent text,
+            # and they take only the room the hint leaves.
+            room = REQUEST_MESSAGE_LIMIT - len(message) - len(" ()")
+            if check.changed and room >= 20:
+                changed = sanitize.one_line(", ".join(check.changed[:3]), limit=room)
+                message = f"{worker.item}: {check.fault} ({changed}). {hint}"
+            return False, message
         result = self.runtime(worker.runtime).respawn(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         if result.returncode != 0:
@@ -1677,8 +1682,12 @@ class Runner:
         is resumed. With *accept_files*, the files as they are now become the record, for
         an operator who has looked at them; the branch is checked either way.
         """
-        if not item_checkout_path(worker).exists():
+        if not self._has_item_checkout(worker):
             return WorkspaceCheck()
+        if not item_checkout_path(worker).exists():
+            # The records say there was one. A session that removed it must not turn the
+            # check off by doing so.
+            return WorkspaceCheck("its item checkout is gone")
         try:
             branch = self.git.worktree_branch(worker.repo_path, worker.worktree_path)
         except GitError:
@@ -1713,6 +1722,13 @@ class Runner:
             )
         return WorkspaceCheck()
 
+    def _has_item_checkout(self, worker: Worker) -> bool:
+        """Whether *worker* has, or had, an item checkout: the directory or a record of it."""
+        return item_checkout_path(worker).exists() or any(
+            self.ledger.get_state(f"{prefix}{worker.id}") is not None
+            for prefix in WORKER_STATE_PREFIXES
+        )
+
     def _record_workspace_files(self, worker: Worker) -> str | None:
         """Record the agent's files in the worktree as they are now; the reason when that fails."""
         try:
@@ -1746,9 +1762,11 @@ class Runner:
             return "its role does not load"
         if role.checkout != roles_mod.CHECKOUT_ITEM or not role.setup:
             return None
+        # The worktree has been the session's working directory since the launch, so a
+        # program there is not the operator's any more.
         failure = self._run_script(
             role.setup, worker, context.repo_config.setup_timeout_secs,
-            f"{role.source or 'role ' + role.name}.setup", cwd=checkout,
+            f"{role.source or 'role ' + role.name}.setup", cwd=checkout, trust_worktree=False,
         )
         if failure is not None:
             detail = sanitize.one_line(f"item checkout not refreshed: {failure}", limit=400)
@@ -2104,24 +2122,28 @@ class Runner:
 
     def _run_script(
         self, template: str | None, worker: Worker, timeout_secs: float, where: str,
-        *, cwd: Path | None = None,
+        *, cwd: Path | None = None, trust_worktree: bool = True,
     ) -> str | None:
         """Run a setup command in the worktree, or in *cwd*, an item checkout.
 
         The program is found in the worktree, the main checkout or the absolute entries
         of PATH, never relative to *cwd*: an item checkout holds the item author's files.
-        A command in an item checkout runs with git hooks turned off, because a
-        repository's relative `core.hooksPath` would name the author's hooks there.
+        Without *trust_worktree* the worktree is left out too: once a session has worked
+        in it, a program there may be the session's. A command in an item checkout runs
+        with git hooks turned off, because a repository's relative `core.hooksPath` would
+        name the author's hooks there.
         """
         if not template:
             return None
         argv = config_mod.render_argv(template, self._template_values(worker), where=where)
-        program = trusted_program(argv[0], (worker.worktree_path, worker.repo_path))
+        roots = (
+            *(((worker.worktree_path, "the worktree"),) if trust_worktree else ()),
+            (worker.repo_path, "the main checkout"),
+        )
+        program = trusted_program(argv[0], [path for path, _ in roots])
         if program is None:
-            return (
-                f"setup program {argv[0]!r} is not in the worktree, the main checkout, or an "
-                f"absolute PATH entry"
-            )
+            named = ", ".join(name for _, name in roots)
+            return f"setup program {argv[0]!r} is not in {named}, or an absolute PATH entry"
         argv[0] = program
         env = None if cwd is None else without_git_hooks(os.environ)
         try:

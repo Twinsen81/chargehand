@@ -325,23 +325,24 @@ request head is its author's content, and Claude Code loads settings, hooks and
 instructions from a session's working directory (see SECURITY.md). The head goes into a
 second, detached worktree, `<worktree_root>/.items/<role>/<item>`, where the role's
 `setup` step runs, with git hooks turned off and its program taken from the base checkout,
-the main checkout or an absolute `PATH` entry; for the reviewer that is
-`gh pr checkout {item_url} --detach`. The step runs again before each wake, so the
-checkout follows the item's head; a wake whose step fails waits like one a cap holds. The
-prompt names the checkout as `{item_checkout}`, and the session may read it without a
-prompt. After the setup step, the tick records the files its runtime loads from a working
-directory (for Claude Code: `.claude/`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`;
-tracked, untracked and ignored, symlinks by their target). Before each wake and each
-`continue`, it checks that the session's worktree is still on its branch and that those
-files are as recorded; otherwise the worker is paused with a `wake-fault`, and
-`continue --force` records the files as they are, for an operator who has looked at them.
-The launch checks that the role's agent file is in the worktree or the user's files,
-because an agent file that is only in the main checkout is not there. The commit the
-setup step leaves the item checkout on is recorded, so garbage collection does not count
-the pull request's own commits as unpushed work, also when they come from a fork or a
-fetch pruned their branch; a newer head that a later `gh pr checkout` fetched counts as
-the pull request's too. Garbage collection removes both checkouts, and either one with
-commits of the session's own keeps both.
+the main checkout or an absolute `PATH` entry; for the reviewer that is `gh pr checkout
+{item_url} --detach`. The step runs again before each wake, so the checkout follows the
+item's head, and then its program comes from the main checkout or `PATH` only, because the
+session has worked in the base checkout since; a wake whose step fails waits like one a
+cap holds. The prompt names the checkout as `{item_checkout}`, and the session may read it
+without a prompt. After the setup step, the tick records the files its runtime loads from
+a working directory (for Claude Code: `.claude/`, `.mcp.json`, `CLAUDE.md`,
+`CLAUDE.local.md`; tracked, untracked and ignored, symlinks by their target). Before each
+wake and each `continue`, it checks that the item checkout is still there, that the
+session's worktree is still on its branch and that those files are as recorded; otherwise
+the worker is paused with a `wake-fault`, and `continue --force` records the files as they
+are, for an operator who has looked at them. The launch checks that the role's agent file
+is in the worktree or the user's files, because an agent file that is only in the main
+checkout is not there. The commit the setup step leaves the item checkout on is recorded,
+so garbage collection does not count the pull request's own commits as unpushed work, also
+when they come from a fork or a fetch pruned their branch; a newer head that a later `gh
+pr checkout` fetched counts as the pull request's too. Garbage collection removes both
+checkouts, and either one with commits of the session's own keeps both.
 
 Workers post as you. Both starter roles tell the worker in the prompt to end every comment
 it posts with the authorship marker, so its own comments wake no worker; a comment without

@@ -28,7 +28,7 @@ from chargehand.errors import ChargehandError, ConfigError, TickBusy
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
-from chargehand.tick import Runner, tick_lock
+from chargehand.tick import REQUEST_MESSAGE_LIMIT, Runner, tick_lock
 from chargehand.trackers import Status
 
 DESCRIPTION = (
@@ -520,7 +520,7 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
     if applied is None or applied["applied_at"] is None:
         _print(f"recorded: {_described(kind, target)} — the next tick will apply it")
         return EXIT_OK
-    message = sanitize.one_line(applied["message"] or "", limit=300)
+    message = sanitize.one_line(applied["message"] or "", limit=REQUEST_MESSAGE_LIMIT)
     if applied["ok"]:
         _print(f"{_described(kind, target)}: {message}")
         return EXIT_OK

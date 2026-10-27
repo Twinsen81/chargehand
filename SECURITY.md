@@ -82,10 +82,12 @@ public location.
   head checkout, at the launch and again before each wake, so that the checkout follows
   the pull request head. Its program is taken from the base checkout, the main checkout
   or an absolute `PATH` entry, never from the head: a relative program that is in neither
-  checkout is refused. Git hooks are turned off for the whole step (`core.hooksPath` is
-  set to `/dev/null` through git's environment configuration), because a repository with
-  a relative `core.hooksPath`, as husky sets it, would otherwise run the hooks that the
-  head commits when `gh pr checkout` checks it out. A wake whose step fails waits.
+  checkout is refused. Before a wake, the base checkout is left out as well, because the
+  session has worked in it since the launch and a program there may be the session's.
+  Git hooks are turned off for the whole step (`core.hooksPath` is set to `/dev/null`
+  through git's environment configuration), because a repository with a relative
+  `core.hooksPath`, as husky sets it, would otherwise run the hooks that the head commits
+  when `gh pr checkout` checks it out. A wake whose step fails waits.
 - **A changed workspace is not resumed.** Before each wake, and before `continue`, of such
   a worker, chargehand checks that its working directory is still on the worker's own
   branch and that the files Claude Code loads from it (`.claude/` and `CLAUDE.md` and
@@ -96,7 +98,8 @@ public location.
   session instead of resuming it, pauses the worker with its events kept and sends
   `wake-fault` to the hook, and `continue` is refused. An operator who has looked at the
   worktree accepts it with `chargehand continue <item> --force`, which records the files
-  as they are now; a worktree that left its branch is not accepted.
+  as they are now; a worktree that left its branch, or whose item checkout is gone, is not
+  accepted.
 
   What this does not cover: the session itself. During a turn it can run any command the
   classifier or a prompt lets through, including git commands in the head checkout,

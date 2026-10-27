@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import time
 import tomllib
@@ -590,7 +591,7 @@ def test_a_reviewer_whose_working_directory_took_the_heads_files_is_not_woken(
     reviewing.ledger.record_request("continue", PR_KEY)
     report = reviewing.next_tick()
     (outcome,) = [line for line in report.requests if line.startswith("continue")]
-    assert "refused" in outcome and "respawn would load" in outcome
+    assert "refused" in outcome and "Check the worktree" in outcome
     # Files the operator has looked at can be accepted; a worktree off its branch cannot.
     assert ("--force" in outcome) == (change is not head_in_the_working_directory)
     assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PAUSED
@@ -746,6 +747,113 @@ def test_a_wake_waits_while_the_item_checkout_cannot_be_refreshed(reviewing, gh,
 
     assert report.woken == [HANDLE]
     assert reviewing.ledger.get(reviewer.id).state == ledger_mod.RUNNING
+
+
+def test_a_program_the_session_wrote_in_its_worktree_does_not_run_at_a_wake(
+    reviewing, gh, tmp_path
+):
+    """At the launch the worktree is a fresh checkout of base; at a wake it is the session's."""
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+    marker = tmp_path / "planted-ran"
+    planted = Path(reviewer.worktree) / "gh"
+    planted.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    planted.chmod(0o755)
+    comment(gh, 78, "alice", "a reply")
+
+    report = reviewing.next_tick()
+
+    assert not marker.exists()
+    # The gh on PATH refreshed the checkout instead, and the wake went through.
+    assert report.woken == [HANDLE]
+    assert gh.calls.count(["pr", "checkout", PR_URL, "--detach"]) == 2
+
+
+def test_a_setup_program_only_in_the_worktree_holds_the_wake(reviewing, gh, tmp_path):
+    role_file = reviewing.repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    role_file.write_text(role_file.read_text().replace(
+        'setup = "gh pr checkout {item_url} --detach"', 'setup = "tools/prepare.sh"'
+    ))
+    # Committed to base, so the launch finds it in the worktree; the main checkout is on
+    # an older commit and does not have it.
+    tools = reviewing.repo / "tools"
+    tools.mkdir()
+    (tools / "prepare.sh").write_text("#!/bin/sh\nexit 0\n")
+    (tools / "prepare.sh").chmod(0o755)
+    run_git("add", "tools", cwd=reviewing.repo)
+    run_git("commit", "-m", "a setup program", cwd=reviewing.repo)
+    run_git("push", "origin", "main", cwd=reviewing.repo)
+    run_git("reset", "-q", "--hard", "HEAD~1", cwd=reviewing.repo)
+    reviewer = start_reviewer(reviewing, gh)
+    assert (Path(reviewer.worktree) / "tools" / "prepare.sh").exists()
+    go_idle(reviewing)
+    comment(gh, 80, "alice", "a reply")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    assert f"{HANDLE}: wake held, its item checkout could not be refreshed" in report.skipped
+    queued = reviewing.ledger.get(reviewer.id)
+    assert queued.state == ledger_mod.QUEUED
+    assert "'tools/prepare.sh' is not in the main checkout, or an absolute PATH entry" in (
+        queued.last_error
+    )
+
+
+def test_a_reviewer_whose_item_checkout_is_gone_is_not_woken(reviewing, gh, tmp_path):
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+    shutil.rmtree(item_checkout_path(reviewer))
+    comment(gh, 79, "alice", "a reply")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    paused = reviewing.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED
+    assert paused.last_error == "wake refused: its item checkout is gone"
+    assert (PR_KEY, "wake-fault") in reviewing.notifications()
+
+    reviewing.ledger.record_request("continue", PR_KEY, force=True)
+    report = reviewing.next_tick()
+
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert "refused" in outcome and "item checkout is gone" in outcome
+    assert "--force" not in outcome
+    # The remedy works, and a later worker for the item gets a fresh checkout.
+    reviewing.ledger.record_request("discard", PR_KEY, force=True)
+    report = reviewing.next_tick()
+    (outcome,) = [line for line in report.requests if line.startswith("discard")]
+    assert ": ok" in outcome, outcome
+    gh.notify("review_requested", PR, thread="2", updated_at="2026-10-26T11:00:00Z",
+              last_modified="Mon, 26 Oct 2026 11:00:00 GMT")
+    ask_notifications_again(reviewing)
+    report = reviewing.next_tick()
+    assert report.errors == [] and report.launched == [PR_KEY]
+    assert item_checkout_path(reviewing.worker(PR_KEY, "pr-reviewer")).exists()
+
+
+def test_the_continue_refusal_fits_what_the_cli_prints(reviewing, gh, tmp_path):
+    from chargehand.tick import REQUEST_MESSAGE_LIMIT
+
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+    agents = Path(reviewer.worktree) / ".claude" / "agents"
+    for index in range(6):
+        (agents / f"an-agent-file-with-a-rather-long-name-{index}.md").write_text("x\n")
+    comment(gh, 82, "alice", "a reply")
+    reviewing.next_tick()
+    request_id = reviewing.ledger.record_request("continue", PR_KEY)
+
+    reviewing.next_tick()
+
+    message = reviewing.ledger.get_request(request_id)["message"]
+    assert len(message) <= REQUEST_MESSAGE_LIMIT
+    assert message.endswith(f"`chargehand discard {PR_KEY} --yes`.")
+    assert "an-agent-file-with-a-rather-long-name-0.md (new)" in message
 
 
 def test_a_reviewer_whose_other_files_changed_is_woken(reviewing, gh, tmp_path):
