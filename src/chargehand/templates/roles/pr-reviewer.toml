@@ -33,8 +33,9 @@ allow = [
 # The session works in a fresh checkout of `base`, which is yours. The pull request head
 # is the author's content: Claude Code would load its settings, hooks, MCP servers and
 # CLAUDE.md from a working directory, so the head goes into a separate checkout that the
-# session only reads, {item_checkout}. This setup step runs there, without a shell, and
-# checks the head out detached, so git does not refuse a branch that is checked out in
+# session only reads, {item_checkout}. This setup step runs there, without a shell, at
+# the launch and again before each wake, so the checkout follows the pull request head.
+# It checks the head out detached, so git does not refuse a branch that is checked out in
 # another worktree.
 checkout = "item"
 setup = "gh pr checkout {item_url} --detach"

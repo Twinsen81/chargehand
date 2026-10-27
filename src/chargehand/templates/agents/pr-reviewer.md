@@ -21,7 +21,8 @@ that checks the pull request out.
 
 When you are woken with a list of links, each link is a new comment, review or CI
 result on the pull request. Read each one yourself with `gh api` or `gh pr view`, and
-answer the threads that need an answer. New commits show in `gh pr diff`.
+answer the threads that need an answer. New commits show in `gh pr diff`, and the head
+checkout is brought up to date before you are woken.
 
 End every comment, review and reply you post with this line, exactly as written:
 

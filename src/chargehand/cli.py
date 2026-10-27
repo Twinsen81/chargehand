@@ -549,7 +549,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_continue(args: argparse.Namespace) -> int:
-    return _request(args, "continue", args.item, **_role_args(args))
+    return _request(args, "continue", args.item, force=args.force, **_role_args(args))
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
@@ -750,11 +750,18 @@ def build_parser() -> argparse.ArgumentParser:
     for name, handler, help_text in (
         ("cancel", cmd_cancel, "stop the session and mark the item blocked; keep the worktree"),
         ("stop", cmd_stop, "pause one worker"),
-        ("continue", cmd_continue, "respawn a stopped or blocked worker"),
     ):
         sub = add(name, handler, help_text)
         add_item(sub)
         _add_request_flags(sub)
+
+    continue_cmd = add("continue", cmd_continue, "respawn a stopped or blocked worker")
+    add_item(continue_cmd)
+    continue_cmd.add_argument(
+        "--force", action="store_true",
+        help="accept the agent's files in the worktree as they are now, after you checked them",
+    )
+    _add_request_flags(continue_cmd)
 
     retry = add("retry", cmd_retry, "start a new worker for a failed or cancelled one")
     add_item(retry)

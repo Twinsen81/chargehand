@@ -66,9 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
   pull request head from a separate checkout, `{item_checkout}`, so the author's Claude
   Code settings and hooks are never loaded. Its setup runs with git hooks turned off and
-  never takes a program from the head, and a wake refuses a reviewer whose worktree left
-  its branch or whose Claude Code files changed. A reply wakes it, its own marked comments
-  do not, and a second review request wakes it again.
+  never takes a program from the head, and runs again before each wake so the checkout
+  follows the head. A wake refuses a reviewer whose worktree left its branch or whose
+  Claude Code files changed since the setup step; `chargehand continue --force` accepts
+  them after a look. A reply wakes it, its own marked comments do not, and a second
+  review request wakes it again.
   A start rule's `close_on` event on a worker's primary item ends the worker, and a start
   event for a repository that is not configured is reported once. `tick` prints wakes and
   held wakes, and `status` shows how to attach to idle and queued workers.

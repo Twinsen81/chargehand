@@ -611,8 +611,10 @@ class ClaudeRuntime(Runtime):
     )
     role_keys = ("agent", "permission_mode", "allow")
     # Project settings, hooks, agents, skills and commands; MCP servers; instructions,
-    # which Claude Code also reads from subdirectories.
+    # which Claude Code also reads from subdirectories. The `.claude` entry itself is
+    # named too: a symlink there is a file, and it would hand the directory to its target.
     workspace_files = (
+        ":(glob)**/.claude",
         ":(glob)**/.claude/**",
         ".mcp.json",
         ":(glob)**/CLAUDE.md",

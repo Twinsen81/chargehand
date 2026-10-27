@@ -589,8 +589,163 @@ def test_a_reviewer_whose_working_directory_took_the_heads_files_is_not_woken(
     assert inbox_rows(reviewing) == [(reviewer.id, "comment", "issue_comment:71")]
     reviewing.ledger.record_request("continue", PR_KEY)
     report = reviewing.next_tick()
-    assert any("refused" in line and "respawn would load" in line for line in report.requests)
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert "refused" in outcome and "respawn would load" in outcome
+    # Files the operator has looked at can be accepted; a worktree off its branch cannot.
+    assert ("--force" in outcome) == (change is not head_in_the_working_directory)
     assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PAUSED
+
+
+def test_a_claude_directory_that_became_a_symlink_to_the_head_is_not_woken(
+    reviewing, gh, tmp_path
+):
+    """With no agent files on the base branch, the symlink itself is the only trace."""
+    agent = reviewing.repo / ".claude" / "agents" / "pr-reviewer.md"
+    user_agents = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "agents"
+    user_agents.mkdir(parents=True)
+    (user_agents / "pr-reviewer.md").write_text(agent.read_text())
+    run_git("rm", "-rq", ".claude", cwd=reviewing.repo)
+    run_git("commit", "-m", "the agent file is in the user's files", cwd=reviewing.repo)
+    run_git("push", "origin", "main", cwd=reviewing.repo)
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    worktree = Path(reviewer.worktree)
+    assert not (worktree / ".claude").exists()
+    go_idle(reviewing)
+    (worktree / ".claude").symlink_to(item_checkout_path(reviewer) / ".claude")
+    comment(gh, 73, "alice", "look again")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PAUSED
+    assert (PR_KEY, "wake-fault") in reviewing.notifications()
+
+
+def test_a_setup_that_writes_local_agent_files_does_not_fault_the_wake(reviewing, gh, tmp_path):
+    """A repository's setup may write Claude Code's local settings or instructions."""
+    script = reviewing.repo / "setup.sh"
+    script.write_text(
+        '#!/bin/sh\nmkdir -p "$1/.claude"\necho "{}" > "$1/.claude/settings.local.json"\n'
+        'echo "local notes" > "$1/CLAUDE.local.md"\n'
+    )
+    script.chmod(0o755)
+    config = reviewing.repo / ".chargehand.toml"
+    config.write_text('setup = "setup.sh {worktree}"\n' + config.read_text())
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    worktree = Path(reviewer.worktree)
+    assert (worktree / ".claude" / "settings.local.json").exists()
+    assert (worktree / "CLAUDE.local.md").exists()
+    go_idle(reviewing)
+    comment(gh, 81, "alice", "a reply")
+
+    report = reviewing.next_tick()
+
+    assert report.errors == [] and report.woken == [HANDLE]
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.RUNNING
+
+    reviewing.ledger.record_request("stop", PR_KEY)
+    reviewing.next_tick()
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PAUSED
+    reviewing.ledger.record_request("continue", PR_KEY)
+    report = reviewing.next_tick()
+
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert ": ok" in outcome and "refused" not in outcome, outcome
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.RUNNING
+
+
+def test_continue_force_accepts_the_agents_files_as_they_are(reviewing, gh, tmp_path):
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+    untracked_settings(Path(reviewer.worktree), fork)
+    comment(gh, 74, "alice", "a question")
+    reviewing.next_tick()
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PAUSED
+
+    reviewing.ledger.record_request("continue", PR_KEY)
+    report = reviewing.next_tick()
+
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert "refused" in outcome and ".claude/settings.json (new)" in outcome, outcome
+    assert f"chargehand continue {PR_KEY} --force" in outcome
+
+    reviewing.ledger.record_request("continue", PR_KEY, force=True)
+    report = reviewing.next_tick()
+
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert ": ok" in outcome and "refused" not in outcome, outcome
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.RUNNING
+    # The events it kept wake the session when its turn ends, in the accepted worktree.
+    reviewing.claude_state.set_session_state(PR_KEY, "done")
+    report = reviewing.next_tick()
+    assert report.woken == [HANDLE]
+    (resume,) = reviewing.claude_state.read()["resumes"]
+    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}#issuecomment-74"]
+
+
+def test_continue_force_does_not_accept_a_worktree_off_its_branch(reviewing, gh, tmp_path):
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+    head_in_the_working_directory(Path(reviewer.worktree), fork)
+    comment(gh, 75, "alice", "a question")
+    reviewing.next_tick()
+
+    reviewing.ledger.record_request("continue", PR_KEY, force=True)
+    report = reviewing.next_tick()
+
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert "refused" in outcome and "no longer on its own branch" in outcome, outcome
+    assert "--force" not in outcome
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PAUSED
+    assert "resumes" not in reviewing.claude_state.read()
+
+
+def test_a_wake_brings_the_item_checkout_to_the_newest_head(reviewing, gh, tmp_path):
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    checkout = item_checkout_path(reviewer)
+    go_idle(reviewing)
+    newer = fork_commit(fork, "second.txt")
+    comment(gh, 76, "alice", "see the new commit")
+
+    report = reviewing.next_tick()
+
+    assert report.errors == [] and report.woken == [HANDLE]
+    assert run_git("rev-parse", "HEAD", cwd=checkout).strip() == newer
+    assert gh.calls.count(["pr", "checkout", PR_URL, "--detach"]) == 2
+    assert reviewing.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{reviewer.id}") == newer
+    # The session's own worktree did not move.
+    worktree = Path(reviewer.worktree)
+    assert reviewing.runner.git.worktree_branch(reviewing.repo, worktree) == reviewer.branch
+    assert not (worktree / "second.txt").exists()
+
+
+def test_a_wake_waits_while_the_item_checkout_cannot_be_refreshed(reviewing, gh, tmp_path):
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    go_idle(reviewing)
+    gh.update(lambda data: data["pulls"][PR].update(checkout_from=str(tmp_path / "gone")))
+    comment(gh, 77, "alice", "and now?")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == [] and "resumes" not in reviewing.claude_state.read()
+    assert f"{HANDLE}: wake held, its item checkout could not be refreshed" in report.skipped
+    assert f"{PR_KEY}: wake held -> queued" in report.transitions
+    queued = reviewing.ledger.get(reviewer.id)
+    assert queued.state == ledger_mod.QUEUED
+    assert queued.last_error.startswith("item checkout not refreshed: ")
+    assert inbox_rows(reviewing) == [(reviewer.id, "comment", "issue_comment:77")]
+
+    gh.update(lambda data: data["pulls"][PR].update(checkout_from=str(fork)))
+    report = reviewing.next_tick()
+
+    assert report.woken == [HANDLE]
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.RUNNING
 
 
 def test_a_reviewer_whose_other_files_changed_is_woken(reviewing, gh, tmp_path):

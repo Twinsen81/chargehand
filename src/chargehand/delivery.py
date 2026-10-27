@@ -8,8 +8,11 @@ events in its inbox goes through these steps:
    the worker fetches what a pointer names itself.
 2. Admit. The global cap on working turns, the role's daily wake cap and the usage
    reserve. A worker that is not admitted becomes ``queued`` and keeps its events.
-3. Wake, through the worker's runtime, so that the same session continues.
-4. Record. One ledger transaction marks the events delivered and records the wake on the
+3. Check and prepare, through the caller: a worker whose worktree must not host its
+   session again is paused with a fault, and one whose item checkout cannot be brought
+   up to date waits like one a cap holds.
+4. Wake, through the worker's runtime, so that the same session continues.
+5. Record. One ledger transaction marks the events delivered and records the wake on the
    worker and in the sessions table. It comes after the wake: a crash between the two
    leaves the events in the inbox, and a later tick wakes the worker with them again.
    A second wake costs one turn and is otherwise harmless, because the message carries
@@ -123,6 +126,7 @@ class Delivery:
         crash_after_wake: bool = False,
         clock: Callable[[], float] = time.time,
         guard: Callable[[Worker], str | None] = lambda worker: None,
+        prepare: Callable[[Worker], str | None] = lambda worker: None,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -135,6 +139,9 @@ class Delivery:
         # Why a worker's session must not be resumed where it is, or None. The text is
         # the caller's own, so it may reach a notification.
         self._guard = guard
+        # Brings what the worker reads up to date before the wake; why the wake must
+        # wait, or None.
+        self._prepare = prepare
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
@@ -182,6 +189,13 @@ class Delivery:
             )
             result.faults.append((paused, fault))
             result.errors.append(f"{worker.handle}: wake refused: {fault}")
+            return
+
+        problem = self._prepare(worker)
+        if problem is not None:
+            if worker.state != ledger_mod.QUEUED:
+                self.ledger.update(worker, state=ledger_mod.QUEUED)
+            result.held.append(f"{worker.handle}: wake held, {problem}")
             return
 
         try:

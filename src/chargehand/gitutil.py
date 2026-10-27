@@ -6,7 +6,9 @@ idempotent so a resumed launch can simply run them again.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import stat
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -45,6 +47,8 @@ class Git:
                 argv,
                 capture_output=True,
                 text=True,
+                # A file name git prints need not decode as text; it must not end the tick.
+                errors="replace",
                 timeout=timeout or self.timeout_secs,
                 check=False,
                 env=env,
@@ -186,25 +190,30 @@ class Git:
             args += ["-b", branch, str(worktree), base]
         self.run(args, cwd=repo, timeout=600)
 
-    def paths_changed(self, worktree: Path, since: str, pathspecs: Sequence[str]) -> bool:
-        """Whether *pathspecs* differ from commit *since*, committed or not.
+    def workspace_manifest(
+        self, worktree: Path, pathspecs: Sequence[str]
+    ) -> dict[str, str] | None:
+        """What *pathspecs* name in *worktree*, each with a digest of its content.
 
-        Untracked and ignored files count, because an agent reads a file whatever git
-        thinks of it. An answer git cannot give counts as changed.
+        Tracked, untracked and ignored files all count, because an agent reads a file
+        whatever git thinks of it. A symlink counts by its target path and, when that is
+        a file, by the file's content; a tracked file that is gone counts as missing.
+        None when the worktree cannot be listed or read.
         """
         if not pathspecs:
-            return False
-        if not is_commit_id(since):
-            return True
-        diff = self.run(["diff", "--quiet", since, "HEAD", "--", *pathspecs],
-                        cwd=worktree, check=False)
-        if diff.returncode != 0:
-            return True
-        status = self.run(
-            ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", *pathspecs],
-            cwd=worktree, check=False,
+            return {}
+        listing = self.run(
+            ["ls-files", "-z", "--cached", "--others", "--", *pathspecs], cwd=worktree, check=False
         )
-        return status.returncode != 0 or bool(status.stdout.strip())
+        if listing.returncode != 0:
+            return None
+        manifest: dict[str, str] = {}
+        try:
+            for name in sorted(set(listing.stdout.split("\0")) - {""}):
+                manifest[name] = _entry_digest(worktree / name)
+        except OSError:
+            return None
+        return manifest
 
     def add_detached_worktree(self, repo: Path, worktree: Path, base: str) -> None:
         """Create a worktree with a detached HEAD at *base*, or accept an existing one."""
@@ -249,3 +258,28 @@ def remote_of(base: str, default: str = "origin") -> str:
 def is_commit_id(value: str) -> bool:
     """A full SHA-1 or SHA-256 commit id, so that it reaches argv as a commit and nothing else."""
     return len(value) in (40, 64) and all(c in "0123456789abcdef" for c in value)
+
+
+def _entry_digest(path: Path) -> str:
+    """The kind of *path* and a digest of what it holds; a path that is gone is ``missing``."""
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    if stat.S_ISLNK(status.st_mode):
+        target = os.readlink(path)
+        digest = "link:" + hashlib.sha256(target.encode("utf-8", "surrogateescape")).hexdigest()
+        # A link to a file is read as that file, so its content is part of the record.
+        if path.is_file():
+            digest += ":" + _file_digest(path)
+        return digest
+    if stat.S_ISREG(status.st_mode):
+        return "file:" + _file_digest(path)
+    if stat.S_ISDIR(status.st_mode):
+        return "directory"
+    return "other"
+
+
+def _file_digest(path: Path) -> str:
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()

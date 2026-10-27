@@ -79,24 +79,30 @@ public location.
   launch prompt names. The session gets a read permission for it and nothing else: it is
   not passed as an added directory, because Claude Code loads skills from one.
 - **The setup step does not run the head's code.** The role's setup command runs in the
-  head checkout. Its program is taken from the base checkout, the main checkout or an
-  absolute `PATH` entry, never from the head: a relative program that is in neither
+  head checkout, at the launch and again before each wake, so that the checkout follows
+  the pull request head. Its program is taken from the base checkout, the main checkout
+  or an absolute `PATH` entry, never from the head: a relative program that is in neither
   checkout is refused. Git hooks are turned off for the whole step (`core.hooksPath` is
   set to `/dev/null` through git's environment configuration), because a repository with
   a relative `core.hooksPath`, as husky sets it, would otherwise run the hooks that the
-  head commits when `gh pr checkout` checks it out.
+  head commits when `gh pr checkout` checks it out. A wake whose step fails waits.
 - **A changed workspace is not resumed.** Before each wake, and before `continue`, of such
   a worker, chargehand checks that its working directory is still on the worker's own
   branch and that the files Claude Code loads from it (`.claude/` and `CLAUDE.md` and
-  `CLAUDE.local.md` at any depth, `.mcp.json`) match the commit it started on, including
-  untracked and ignored files. Otherwise a wake stops the idle session instead of
-  resuming it, pauses the worker with its events kept and sends `wake-fault` to the hook,
-  and `continue` is refused.
+  `CLAUDE.local.md` at any depth, `.mcp.json`) are as they were when the session started,
+  after the setup step. Tracked, untracked and ignored files count by their content, a
+  symlink by its target path and, for a file, that file's content, and the `.claude` entry
+  itself counts, so that a symlink in its place is seen. Otherwise a wake stops the idle
+  session instead of resuming it, pauses the worker with its events kept and sends
+  `wake-fault` to the hook, and `continue` is refused. An operator who has looked at the
+  worktree accepts it with `chargehand continue <item> --force`, which records the files
+  as they are now; a worktree that left its branch is not accepted.
 
   What this does not cover: the session itself. During a turn it can run any command the
   classifier or a prompt lets through, including git commands in the head checkout,
   which then run the head's hooks under a relative `core.hooksPath`, and a file it copies
-  into its working directory can be read in that same turn. The shipped agent file tells
+  into its working directory can be read in that same turn; one it copies into `~/.claude`
+  is loaded by every session on the machine and is not checked. The shipped agent file tells
   the reviewer to treat the head as data, never to run it, never to check anything out,
   and its allow rules leave out `gh api`, `gh pr checkout`, merge, close and approve.
   Those are guardrails, not a boundary. Git filters that the operator configured, such as

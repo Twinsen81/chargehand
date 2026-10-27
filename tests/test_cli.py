@@ -143,6 +143,15 @@ def test_the_tick_prints_a_held_wake_and_the_move_to_queued(capsys, config_file,
     assert re.search(f"^{STAMP}transition: ABC-1: wake held -> queued$", out, re.M), out
 
 
+def test_continue_force_is_recorded_as_such(config_file, harness):
+    assert run(["continue", "ABC-1", "--force", "--no-wait"], config_file) == EXIT_OK
+
+    (request,) = harness.ledger.pending_requests()
+    assert (request["kind"], request["target"], request["args"]) == (
+        "continue", "ABC-1", {"force": True},
+    )
+
+
 def test_logs_strip_terminal_control_sequences(capsys, config_file, harness):
     harness.board.add("ABC-1")
     run(["tick"], config_file)
