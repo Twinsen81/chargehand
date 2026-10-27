@@ -108,6 +108,9 @@ def test_a_configured_hook_does_not_run_for_a_git_call(tmp_path):
     (hooks / "post-commit").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
     (hooks / "post-commit").chmod(0o755)
     run_git("config", "core.hooksPath", str(hooks), cwd=repo)
+    # A commit needs an identity; the runner has none set globally, so set it in the repo.
+    run_git("config", "user.email", "t@example.invalid", cwd=repo)
+    run_git("config", "user.name", "t", cwd=repo)
     (repo / "file.txt").write_text("x\n")
 
     git = Git()
