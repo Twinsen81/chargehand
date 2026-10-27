@@ -32,8 +32,10 @@ PERMISSION_MODES = ("auto", "manual", "acceptEdits", "dontAsk", "plan", "bypassP
 # itself. Adding a text variable here would undo the main prompt-injection defense.
 #
 # {issue} and {url} are the names from before work items existed; they render the same
-# values as {item} and {item_url} and stay accepted.
-TEMPLATE_VARS = ("item", "item_url", "worktree", "branch", "repo", "issue", "url")
+# values as {item} and {item_url} and stay accepted. {item_checkout} is the separate
+# checkout of the item's head for a role with `checkout = "item"`, and the worktree itself
+# for any other role.
+TEMPLATE_VARS = ("item", "item_url", "item_checkout", "worktree", "branch", "repo", "issue", "url")
 
 DEFAULT_LABELS = {
     "queued": "chargehand",

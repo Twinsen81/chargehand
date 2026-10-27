@@ -158,12 +158,20 @@ The router runs once per tick after the polls, in this order:
    in turn.
 2. Delivery: one inbox row per matching live subscriber. The inbox is unique per worker and
    event, so routing an event twice adds nothing.
-3. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
-   finds a live worker that has the item (`role`: of its own role, `any`: of any role) does
-   nothing, so a second review request wakes the reviewer that has the pull request and
-   starts no other. Otherwise it launches a worker under the same caps as the queue, with a
-   primary subscription carrying the rule's `subscribe` kinds. A start that the caps, a pause
-   or a previous worktree hold back is kept and offered to the rules again on the next tick.
+3. Close: an event that a worker's start rule names in `close_on`, on the worker's primary
+   item, ends that worker. The session is stopped first, then the worker is `done`, and
+   garbage collection removes the session and the worktree, never over unpushed commits.
+   A worker that is working finishes its turn first; the tick then finds its item closed.
+   On an item the worker only follows, the same event is an ordinary delivery.
+4. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
+   finds a live worker that has the item (`role`: of its own role, `any`: of any role)
+   starts none, and the event goes to the inbox of the rule's own workers on the item, so a
+   second review request wakes the reviewer that has the pull request. Otherwise it
+   launches a worker under the same caps as the queue, with a primary subscription carrying
+   the rule's `subscribe` kinds. A start that the caps, a pause or a previous worktree hold
+   back is kept and offered to the rules again on the next tick. A start event for a
+   repository that no `[[repository]]` names is ignored, and reported once per source and
+   repository when a role would start on its kind.
 
 The `github` source works through the `gh` CLI, so chargehand handles no token, and it is
 the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
@@ -202,8 +210,8 @@ The source's cursor is saved after its events are routed, so a source that fails
 error in the report and its events arrive on a later tick. The queue label starts its
 workers through the same router, as a `labeled` event from the repository's tracker; a
 `labeled` event from a `[[source]]` starts nothing. The implementer role starts on it,
-subscribes to `comment` and declares `close_on = ["done"]`; no code acts on `close_on`
-yet, and a worker ends when the tick finds its issue closed, as before. A `[[source]]` may
+subscribes to `comment` and declares `close_on = ["done"]`; a worker whose issue closes
+without that event still ends when the tick finds the issue closed, as before. A `[[source]]` may
 share its name with a tracker type, such as a `github` source next to a GitHub Issues
 queue: they share subscriptions, so a comment that the source reports reaches the worker,
 the tracker leaves the followed items to that source, and the tracker's dedupe ids carry
@@ -284,8 +292,10 @@ A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` 
 `status_file`, and has no role file, gets an `implementer` role built from them, so a
 configuration from before roles keeps working.
 
-Template variables are `{item}`, `{item_url}`, `{worktree}`, `{branch}`, and `{repo}`;
-`{issue}` and `{url}` are the older names for the first two. There is deliberately no
+Template variables are `{item}`, `{item_url}`, `{item_checkout}`, `{worktree}`, `{branch}`,
+and `{repo}`; `{issue}` and `{url}` are the older names for the first two. `{item_checkout}`
+is the separate checkout of the item's head for a role with `checkout = "item"`, and the
+worktree for any other role. There is deliberately no
 `{title}` or `{body}`: the prompt is a trusted user message, so issue text must reach the
 agent as a tool result it fetches itself, never inlined. A configured template that names any
 other variable is a configuration error, not a literal.
@@ -302,6 +312,48 @@ A start rule creates a worker on its own. A start event arrives again on every p
 ledger allows at most one live worker per role and item among the workers that start rules
 created, enforced by the database. The ledger already records each worker's origin, so a
 later way to create workers by hand is not held to that limit.
+
+chargehand ships two starter roles, which `chargehand init --role <name>` writes into a
+repository. `implementer` takes issues from the queue. `pr-reviewer` starts on
+`github.review_requested`, follows `comment`, `review` and `ci_status` on its pull request
+and ends on `pr_closed`; it comes with a Claude Code agent file,
+`.claude/agents/pr-reviewer.md`, which must be on the base branch or in `~/.claude/agents`,
+because the session starts in a checkout of `base`.
+
+With `checkout = "item"` the session's worktree is still a checkout of `base`: the pull
+request head is its author's content, and Claude Code loads settings, hooks and
+instructions from a session's working directory (see SECURITY.md). The head goes into a
+second, detached worktree, `<worktree_root>/.items/<role>/<item>`, where the role's
+`setup` step runs, with git hooks turned off and its program taken from the base checkout,
+the main checkout or an absolute `PATH` entry; for the reviewer that is `gh pr checkout
+{item_url} --detach`. The step runs again before each wake, so the checkout follows the
+item's head, and then its program comes from the main checkout or `PATH` only, because the
+session has worked in the base checkout since; a wake whose step fails waits like one a
+cap holds. Every git call chargehand makes, and the setup subprocess, run with
+`core.hooksPath` and `core.fsmonitor` off, so no repository config runs a program. The
+prompt names the checkout as `{item_checkout}`, and the session may read it without a
+prompt. After the setup step, the tick records the files its runtime loads from a working
+directory (for Claude Code: `.claude/`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`;
+tracked, untracked and ignored, symlinks by their target). Before each wake and each
+`continue`, it checks that the item checkout is still a detached worktree that git lists
+at its own path, that neither checkout's `.git` was replaced with a symlink or redirected
+to a git directory the session wrote (the `.git` file is read as data, compared with the
+record the main checkout keeps), that the session's worktree is still on its branch and
+that those files are as recorded, and it checks again after the refresh step so a step
+aimed at the session's own worktree shows as a worktree off its branch; otherwise the
+worker is paused with a `wake-fault`, and `continue --force` records the files as they
+are, for an operator who has looked at them, while a worktree off its branch or a gone or
+redirected item checkout is not accepted. The launch checks that the role's agent file is
+in the worktree or the user's files, because an agent file that is only in the main
+checkout is not there. The commit the setup step leaves the item checkout on is recorded,
+so garbage collection does not count the pull request's own commits as unpushed work, also
+when they come from a fork or a fetch pruned their branch; a newer head that a later `gh
+pr checkout` fetched counts as the pull request's too. Garbage collection removes both
+checkouts, and either one with commits of the session's own keeps both.
+
+Workers post as you. Both starter roles tell the worker in the prompt to end every comment
+it posts with the authorship marker, so its own comments wake no worker; a comment without
+the marker wakes the worker once, and the role's daily wake cap stops a loop.
 
 ### Runtimes
 

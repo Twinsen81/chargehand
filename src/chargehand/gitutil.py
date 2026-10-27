@@ -6,13 +6,22 @@ idempotent so a resumed launch can simply run them again.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import stat
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from chargehand.errors import GitError
+
+# Overrides passed to every git call, so that no repository-controlled config runs a
+# program: `core.hooksPath` names hook scripts, `core.fsmonitor` a program git runs on
+# `status`, `ls-files` and `diff`. chargehand's git calls are all plumbing and need
+# neither, and a worktree, or a `.git` file, the session can write must not run code
+# through them. A command-line `-c` wins over any config the repository holds.
+HARDEN = ("core.hooksPath=/dev/null", "core.fsmonitor=false")
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,8 @@ class Git:
         timeout: float | None = None,
     ) -> GitResult:
         argv = [self.binary]
+        for override in HARDEN:
+            argv += ["-c", override]
         if cwd is not None:
             argv += ["-C", str(cwd)]
         argv += list(args)
@@ -45,6 +56,8 @@ class Git:
                 argv,
                 capture_output=True,
                 text=True,
+                # A file name git prints need not decode as text; it must not end the tick.
+                errors="replace",
                 timeout=timeout or self.timeout_secs,
                 check=False,
                 env=env,
@@ -125,14 +138,26 @@ class Git:
         result = self.run(["status", "--porcelain"], cwd=worktree, check=False)
         return result.returncode == 0 and bool(result.stdout.strip())
 
-    def unpushed_commits(self, worktree: Path) -> int:
-        """Commits on HEAD that no remote-tracking ref contains.
+    def head_commit(self, worktree: Path, ref: str = "HEAD") -> str | None:
+        """The full id of the commit *ref* (``HEAD``, ``FETCH_HEAD``) names in *worktree*, or None."""
+        result = self.run(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                          cwd=worktree, check=False)
+        commit = result.stdout.strip()
+        return commit if result.returncode == 0 and is_commit_id(commit) else None
+
+    def unpushed_commits(self, worktree: Path, *, not_in: Sequence[str] = ()) -> int:
+        """Commits on HEAD that no remote-tracking ref contains, nor any of *not_in*.
 
         Used as the refusal condition for `discard`: removing a worktree that still
-        holds unpushed work destroys it silently.
+        holds unpushed work destroys it silently. *not_in* names commits that are known
+        not to be the session's work, such as a pull request head it was given to review.
         """
+        excluded = [commit for commit in not_in if is_commit_id(commit)]
+        if len(excluded) != len(not_in):
+            return -1
         result = self.run(
-            ["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=worktree, check=False
+            ["rev-list", "--count", "HEAD", "--not", "--remotes", *excluded],
+            cwd=worktree, check=False,
         )
         if result.returncode != 0:
             # An unreadable worktree is treated as holding work, never as safe to drop.
@@ -174,6 +199,107 @@ class Git:
             args += ["-b", branch, str(worktree), base]
         self.run(args, cwd=repo, timeout=600)
 
+    def workspace_manifest(
+        self, worktree: Path, pathspecs: Sequence[str]
+    ) -> dict[str, str] | None:
+        """What *pathspecs* name in *worktree*, each with a digest of its content.
+
+        Tracked, untracked and ignored files all count, because an agent reads a file
+        whatever git thinks of it. A symlink counts by its target path and, when that is
+        a file, by the file's content; a tracked file that is gone counts as missing.
+        None when the worktree cannot be listed or read.
+        """
+        if not pathspecs:
+            return {}
+        listing = self.run(
+            ["ls-files", "-z", "--cached", "--others", "--", *pathspecs], cwd=worktree, check=False
+        )
+        if listing.returncode != 0:
+            return None
+        manifest: dict[str, str] = {}
+        try:
+            for name in sorted(set(listing.stdout.split("\0")) - {""}):
+                manifest[name] = _entry_digest(worktree / name)
+        except OSError:
+            return None
+        return manifest
+
+    def recorded_admin_dir(self, repo: Path, worktree: Path) -> Path | None:
+        """The git directory the main checkout records for *worktree*, from its own files.
+
+        Reads ``<common>/worktrees/*/gitdir``, which live in the main checkout and the
+        session cannot write, and returns the admin directory of the one that names
+        *worktree*. Independent of the worktree's own ``.git``, so a redirected link does
+        not change the answer. None when *worktree* is not a registered linked worktree.
+        """
+        try:
+            common = self.run(["rev-parse", "--git-common-dir"], cwd=repo).stdout.strip()
+        except GitError:
+            return None
+        if not common:
+            return None
+        common_dir = Path(common)
+        if not common_dir.is_absolute():
+            common_dir = repo / common_dir
+        base = common_dir / "worktrees"
+        try:
+            want = worktree.resolve()
+            if not base.is_dir():
+                return None
+            for entry in sorted(base.iterdir()):
+                try:
+                    pointed = Path((entry / "gitdir").read_text(encoding="utf-8").strip())
+                except (OSError, ValueError):
+                    continue
+                if pointed.parent.resolve() == want:
+                    return entry.resolve()
+        except OSError:
+            return None
+        return None
+
+    def linked_gitdir(self, worktree: Path) -> Path | None:
+        """The directory *worktree*'s ``.git`` file points to, read as data, resolved.
+
+        The ``.git`` file is read, never followed by running git, so a redirected or
+        tampered link is seen rather than acted on. None when ``.git`` is a directory, a
+        symlink, missing, unreadable, or not a ``gitdir:`` pointer.
+        """
+        link = worktree / ".git"
+        try:
+            if link.is_symlink() or not link.is_file():
+                return None
+            text = link.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        prefix = "gitdir:"
+        if not text.startswith(prefix):
+            return None
+        target = text[len(prefix):].strip()
+        if not target:
+            return None
+        path = Path(target)
+        if not path.is_absolute():
+            path = worktree / path
+        try:
+            return path.resolve()
+        except OSError:
+            return None
+
+    def add_detached_worktree(self, repo: Path, worktree: Path, base: str) -> None:
+        """Create a worktree with a detached HEAD at *base*, or accept an existing one."""
+        existing = self.list_worktrees(repo)
+        if str(worktree) in existing or (
+            worktree.exists() and str(worktree.resolve()) in existing
+        ):
+            if worktree.exists():
+                return
+            # Git still lists a checkout whose directory is gone; forget it, then create it.
+            self.run(["worktree", "prune"], cwd=repo)
+        if worktree.exists() and any(worktree.iterdir()):
+            raise GitError(f"{worktree} already exists and is not empty, but git does not know it")
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        self.run(["worktree", "add", "--detach", str(worktree), base], cwd=repo, timeout=600)
+
     def remove_worktree(self, repo: Path, worktree: Path, *, force: bool = False) -> None:
         args = ["worktree", "remove"]
         if force:
@@ -200,3 +326,33 @@ def remote_of(base: str, default: str = "origin") -> str:
         if candidate and not candidate.startswith("."):
             return candidate
     return default
+
+
+def is_commit_id(value: str) -> bool:
+    """A full SHA-1 or SHA-256 commit id, so that it reaches argv as a commit and nothing else."""
+    return len(value) in (40, 64) and all(c in "0123456789abcdef" for c in value)
+
+
+def _entry_digest(path: Path) -> str:
+    """The kind of *path* and a digest of what it holds; a path that is gone is ``missing``."""
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    if stat.S_ISLNK(status.st_mode):
+        target = os.readlink(path)
+        digest = "link:" + hashlib.sha256(target.encode("utf-8", "surrogateescape")).hexdigest()
+        # A link to a file is read as that file, so its content is part of the record.
+        if path.is_file():
+            digest += ":" + _file_digest(path)
+        return digest
+    if stat.S_ISREG(status.st_mode):
+        return "file:" + _file_digest(path)
+    if stat.S_ISDIR(status.st_mode):
+        return "directory"
+    return "other"
+
+
+def _file_digest(path: Path) -> str:
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()

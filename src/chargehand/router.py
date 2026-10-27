@@ -9,10 +9,14 @@ Once per tick, after the polls, every event goes through the same steps in this 
    other in turn.
 2. Delivery. One inbox row for every live worker with a subscription to the item that
    names the event's kind.
-3. Start. The start rules of the enabled roles, checked here in code and never by a
-   model. A rule whose ``unless_subscribed`` check finds a suitable worker does nothing,
-   so a second review request wakes the reviewer that has the pull request rather than
-   starting another one.
+3. Close. A worker whose primary item the event closes, by its start rule's
+   ``close_on``, ends. On an item the worker only follows, the same event is an ordinary
+   delivery.
+4. Start. The start rules of the enabled roles, checked here in code and never by a
+   model. A rule whose ``unless_subscribed`` check finds a suitable worker starts none,
+   and the event goes to the inbox of the rule's own workers on the item, so a second
+   review request wakes the reviewer that has the pull request rather than starting
+   another one.
 
 A start is not a delivery: no worker exists yet to receive the event. When the launch
 caps defer a start, the event is kept as a pending start and offered to the start
@@ -32,6 +36,9 @@ from chargehand.sources.base import Event, WorkItem
 # Called with an event that passed the filters; returns True when a start rule wanted a
 # worker for it and the launch had to wait.
 Starter = Callable[[Event], bool]
+# Called with an event that passed the filters; ends the workers whose primary item it
+# closes and returns how many ended.
+Closer = Callable[[Event], int]
 
 
 def kind_matches(kinds: Iterable[str], kind: str, source: str) -> bool:
@@ -53,24 +60,46 @@ def suitable_worker_exists(ledger: Ledger, rule: StartRule, role: str, item: Wor
     return ledger.live_worker_for(item.key, None if any_role else role) is not None
 
 
+def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> int:
+    """Put a start event into the inbox of the live workers of *role* that have its item.
+
+    A start event that finds its worker is news for that worker, whether or not its
+    subscription names the kind: a second review request asks the reviewer to look again.
+    The inbox is unique per worker and event, so a subscriber that already got it gets
+    no second row.
+    """
+    holders = {
+        worker.id
+        for _, worker in ledger.live_subscriptions(event.item.source, event.item.key)
+        if worker.role == role
+    }
+    own = ledger.live_worker_for(event.item.key, role)
+    if own is not None:
+        holders.add(own.id)
+    return sum(int(ledger.enqueue(worker_id, event)) for worker_id in sorted(holders))
+
+
 @dataclass
 class RouteResult:
     duplicates: int = 0
     own: int = 0
     delivered: int = 0
     deferred: int = 0
+    closed: int = 0
 
     def merge(self, other: "RouteResult") -> None:
         self.duplicates += other.duplicates
         self.own += other.own
         self.delivered += other.delivered
         self.deferred += other.deferred
+        self.closed += other.closed
 
 
 class Router:
-    def __init__(self, ledger: Ledger, *, start: Starter) -> None:
+    def __init__(self, ledger: Ledger, *, start: Starter, close: Closer | None = None) -> None:
         self.ledger = ledger
         self._start = start
+        self._close = close
 
     def route(self, events: Iterable[Event], *, signed_in: str) -> RouteResult:
         """Filter, deliver and start, for the events of one source's poll.
@@ -87,6 +116,8 @@ class Router:
                 result.own += 1
                 continue
             result.delivered += self.deliver(event)
+            if self._close is not None:
+                result.closed += self._close(event)
             deferred = self._start(event)
             self.ledger.record_event(event, start_pending=deferred)
             result.deferred += int(deferred)
@@ -110,4 +141,12 @@ class Router:
         return result
 
 
-__all__ = ["RouteResult", "Router", "Starter", "kind_matches", "suitable_worker_exists"]
+__all__ = [
+    "Closer",
+    "RouteResult",
+    "Router",
+    "Starter",
+    "deliver_to_holders",
+    "kind_matches",
+    "suitable_worker_exists",
+]

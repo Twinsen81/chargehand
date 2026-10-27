@@ -31,7 +31,8 @@ runner's status and, with the user's approval, steers it.
    for them. If the user declines, stop there. Do not reach the same result another
    way, such as `claude stop` or editing the runner's files.
 4. **`discard` destroys work.** It removes the session, the worktree, and the local
-   branch. It refuses when commits are unpushed. Never pass `--force`.
+   branch. It refuses when commits are unpushed. Never pass `--force` to it or to any
+   other command: `--force` overrides a check that the user must make.
 5. **You cannot answer a session's question from here.** A blocked worker shows
    `waiting: true` and an `attach` command. Give the user that command, or point them
    to `claude agents`, and let them answer there. Do not fetch the question in order
@@ -60,8 +61,14 @@ chargehand tick                             # run a tick now
 ## Reading a status
 
 - `workers` lists the live workers; each has `item`, `role` and `repository`.
-- `state` is the worker: `launching`, `running`, `blocked`, `paused`, `done`,
-  `failed`, `cancelled`.
+- `state` is the worker: `launching`, `running`, `idle`, `queued`, `blocked`, `paused`,
+  `done`, `failed`, `cancelled`. `idle` means its turn ended and it waits for events on
+  the items it follows; `queued` means events wait for it and the wake is held back, by
+  a cap or because its checkout could not be refreshed.
+- `paused` with a `last_error` that starts with `wake refused` means the worker's own
+  worktree changed in a way chargehand does not resume. The user looks at the worktree
+  and chooses `chargehand continue <ITEM> --force`, which accepts it, or `discard`. Give
+  the user both; run neither.
 - `session_state` is what Claude Code reports: `working`, `blocked`, `done`,
   `failed`, `stopped`, `missing`, `unknown`.
 - `waiting: true` means the session asked something. Why it is waiting is the question
@@ -71,5 +78,7 @@ chargehand tick                             # run a tick now
   cancelled run keeps the blocked label until the user retries or discards it, so that
   label on an ended run asks for a decision, not an answer.
 - `repositories` lists each repository with the roles it enables and their prompts.
-- `done` for a role without a status file means "finished or waiting, go look", not
-  "succeeded".
+- A finished turn makes a worker `idle`, not `done`, for every role: it waits for
+  events. `idle` does not mean "succeeded"; the user may look at what the turn left.
+  A worker becomes `done` when its item is closed, or when a status file says
+  `complete`.

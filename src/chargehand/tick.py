@@ -6,7 +6,7 @@ Order, once per tick:
 2. apply recorded control requests
 3. run the watchdog
 4. subscribe each worker to the pull request of its branch, once one exists
-5. poll the event sources and route their events: inboxes, then start rules
+5. poll the event sources and route their events: inboxes, closes, then start rules
 6. diff session states against the ledger and notify on change
 7. deliver: wake each idle worker once for the events in its inbox
 8. sync the tracker labels
@@ -91,8 +91,34 @@ FOLLOWS_PULL_REQUEST_PREFIX = "follows-pr:"
 # request is not the worker's primary item, so its close does not end the worker.
 PULL_REQUEST_KINDS = (roles_mod.COMMENT, "review", "ci_status")
 
+# A role with `checkout = "item"` gets a second, detached checkout of its item's head, made
+# by its setup step, at <worktree_root>/<ITEM_CHECKOUTS>/<role>/<item>. The session never
+# runs there: the head is the item author's content, and Claude Code would load its
+# settings, hooks and instructions from a working directory it trusts. A role name starts
+# with a letter or digit, so this directory never holds a worker's worktree.
+ITEM_CHECKOUTS = ".items"
+# The commit the item checkout was on after the setup step is kept under this prefix and
+# the worker id, so that garbage collection does not count the item's own commits as
+# unpushed work.
+CHECKOUT_HEAD_PREFIX = "checkout-head:"
+# The files the runtime loads from the session's own worktree, as the setup step left
+# them, for the same workers: a JSON object of path to content digest. A wake checks that
+# the worktree is still on the worker's branch and that these files are as recorded, so a
+# session that moved the item's head, or its settings or instructions, into its own
+# working directory is not resumed there. `continue --force` records them again.
+WORKSPACE_FILES_PREFIX = "workspace-files:"
+WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_FILES_PREFIX)
+
+# A start event for a repository that no `[[repository]]` names is ignored. It is reported
+# once per source and repository; this prefix marks the ones reported.
+UNCONFIGURED_PREFIX = "unconfigured:"
+
 # The notification detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
+
+# How much of a control request's outcome the CLI prints. An outcome that must carry a
+# hint keeps within it.
+REQUEST_MESSAGE_LIMIT = 300
 
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
@@ -119,6 +145,86 @@ _STATUS_FOR_STATE = {
     ledger_mod.CANCELLED: Status.BLOCKED,
     ledger_mod.DONE: Status.DONE,
 }
+
+
+def item_checkout_path(worker: Worker) -> Path:
+    """Where a `checkout = "item"` role keeps its item's head, next to the worktree root."""
+    worktree = worker.worktree_path
+    return worktree.parent.parent / ITEM_CHECKOUTS / worktree.parent.name / worktree.name
+
+
+@dataclass(frozen=True)
+class WorkspaceCheck:
+    """Whether a worker's own worktree may host its session again.
+
+    *fault* is chargehand's own text and may reach a notification. *changed* names the
+    recorded files that differ, for the operator; *acceptable* says whether recording the
+    files as they are now, with `continue --force`, would clear the fault.
+    """
+
+    fault: str | None = None
+    changed: tuple[str, ...] = ()
+    acceptable: bool = False
+
+
+def changed_entries(recorded: Mapping[str, str], current: Mapping[str, str]) -> list[str]:
+    """The paths whose record differs from *current*, each with what happened to it."""
+    changes = []
+    for name in sorted(set(recorded) | set(current)):
+        before, now = recorded.get(name), current.get(name)
+        if before == now:
+            continue
+        if before is None:
+            what = "new"
+        elif now is None or now == "missing":
+            what = "gone"
+        else:
+            what = "changed"
+        changes.append(f"{name} ({what})")
+    return changes
+
+
+def trusted_program(name: str, roots: Sequence[Path]) -> str | None:
+    """The program a setup command names, found where the operator's files are; None if not.
+
+    A relative name is looked up under *roots* first. A bare name is then looked up in the
+    absolute entries of PATH only; a relative name with a directory part is not looked up
+    further, because the process would resolve it against its working directory.
+    """
+    program = Path(name)
+    if program.is_absolute():
+        return name
+    for root in roots:
+        candidate = root / program
+        if candidate.exists():
+            return str(candidate)
+    if "/" in name or name in (".", ".."):
+        return None
+    search = os.pathsep.join(
+        entry for entry in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry)
+    )
+    return shutil.which(name, path=search)
+
+
+def hardened_git_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """*environ* with git's hooks and fsmonitor turned off, through git's config env.
+
+    For a subprocess that itself runs git, such as `gh pr checkout`, where a command-line
+    `-c` cannot reach. A relative `core.hooksPath`, or a `core.fsmonitor` set to a
+    program, would otherwise run code a checkout the session can write controls. Added on
+    top of any `GIT_CONFIG_*` already in the environment.
+    """
+    env = dict(environ)
+    try:
+        index = max(int(env.get("GIT_CONFIG_COUNT") or 0), 0)
+    except ValueError:
+        index = 0
+    for key, value in (("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+        index += 1
+    env["GIT_CONFIG_COUNT"] = str(index)
+    return env
 
 
 @contextmanager
@@ -778,7 +884,7 @@ class Runner:
         if kind == "stop":
             return self._do_stop(worker, context, report)
         if kind == "continue":
-            return self._do_continue(worker, context, report)
+            return self._do_continue(worker, context, bool(args.get("force")), report)
         if kind == "retry":
             return self._do_retry(worker, context, bool(args.get("force")), report)
         if kind == "discard":
@@ -834,12 +940,16 @@ class Runner:
         return True, "session stopped; `chargehand continue` respawns it"
 
     def _do_continue(
-        self, worker: Worker, context: RepositoryContext | None, report: TickReport
+        self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
     ) -> tuple[bool, str]:
+        """Respawn the session. *force* accepts the agent's files in the worktree as they are."""
         if not worker.session_id:
             return False, f"{worker.item} has no session to respawn"
         if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED):
             return False, f"{worker.item} is {worker.state}, not paused or blocked"
+        check = self._workspace_check(worker, accept_files=force)
+        if check.fault is not None:
+            return False, self._refusal_message(worker, check)
         result = self.runtime(worker.runtime).respawn(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         if result.returncode != 0:
@@ -859,6 +969,32 @@ class Runner:
         )
         self._sync_labels(worker, context, report)
         return True, "session respawned"
+
+    def _refusal_message(self, worker: Worker, check: WorkspaceCheck) -> str:
+        """The `continue` refusal, within what the CLI prints, keeping the remedy whole.
+
+        An acceptable fault points at `--force`; any other at `discard`, the only remedy
+        for a worktree off its branch or an item checkout that is gone. The changed
+        paths, which the session chose, are cleaned and take only the room that is left.
+        """
+        if check.acceptable:
+            hint = (
+                f"Check the worktree, then `chargehand continue {worker.item} --force` "
+                f"to accept the files, or `chargehand discard {worker.item} --yes`."
+            )
+        else:
+            hint = (
+                f"Check the worktree, then `chargehand discard {worker.item} --yes`; the "
+                f"next review request starts a fresh worker."
+            )
+        prefix, tail = f"{worker.item}: ", f". {hint}"
+        budget = REQUEST_MESSAGE_LIMIT - len(prefix) - len(tail)
+        detail = check.fault
+        room = budget - len(detail) - len(" ()")
+        if check.changed and room >= 20:
+            detail = f"{detail} ({sanitize.one_line(', '.join(check.changed[:3]), limit=room)})"
+        detail = sanitize.one_line(detail, limit=max(budget, 1))
+        return sanitize.one_line(f"{prefix}{detail}{tail}", limit=REQUEST_MESSAGE_LIMIT)
 
     def _do_retry(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
@@ -942,16 +1078,30 @@ class Runner:
         return True, f"session removed, worktree and branch deleted{kept}"
 
     def _worktree_holds_work(self, worker: Worker) -> str | None:
-        worktree = worker.worktree_path
-        if not worktree.exists():
+        found = self._checkout_holds_work(worker.worktree_path, (), "its worktree")
+        checkout = item_checkout_path(worker)
+        if found is None and checkout.exists():
+            # The item's checkout sits on its head commit, which no remote-tracking ref
+            # may contain: a fork's commits, or a squash-merged branch that a fetch pruned.
+            # Those commits are not the session's work, and neither is a newer head that
+            # `gh pr checkout` fetched again.
+            given = self.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}")
+            fetched = self.git.head_commit(checkout, "FETCH_HEAD")
+            found = self._checkout_holds_work(
+                checkout, tuple(c for c in (given, fetched) if c), "its item checkout"
+            )
+        return found
+
+    def _checkout_holds_work(self, path: Path, not_in: tuple[str, ...], name: str) -> str | None:
+        if not path.exists():
             return None
-        unpushed = self.git.unpushed_commits(worktree)
+        unpushed = self.git.unpushed_commits(path, not_in=not_in)
         if unpushed < 0:
-            return "its worktree could not be inspected"
+            return f"{name} could not be inspected"
         if unpushed > 0:
-            return f"its worktree holds {unpushed} unpushed commit(s)"
-        if self.git.is_dirty(worktree):
-            return "its worktree has uncommitted changes"
+            return f"{name} holds {unpushed} unpushed commit(s)"
+        if self.git.is_dirty(path):
+            return f"{name} has uncommitted changes"
         return None
 
     def _remove_worktree(self, worker: Worker, *, force: bool) -> bool:
@@ -965,6 +1115,9 @@ class Runner:
         """
         repo = worker.repo_path
         current = None
+        checkout = item_checkout_path(worker)
+        if checkout.exists():
+            self.git.remove_worktree(repo, checkout, force=force)
         if worker.worktree_path.exists():
             current = self.git.worktree_branch(repo, worker.worktree_path)
             self.git.remove_worktree(repo, worker.worktree_path, force=force)
@@ -1101,6 +1254,7 @@ class Runner:
             start=lambda event: self._start_from_event(
                 event, report, crash_after_step=crash_after_step
             ),
+            close=lambda event: self._close_from_event(event, report),
         )
         # The tracker starts are kept for the tracker step, so they are not counted here.
         later = sum(TrackerSource.produced(event) for event in self.ledger.pending_start_events())
@@ -1142,7 +1296,7 @@ class Runner:
                 report.routed.append(
                     f"{config.name}: {len(own)} event(s), {result.duplicates} seen before, "
                     f"{result.own} by chargehand, {result.delivered} inbox row(s), "
-                    f"{result.deferred} start(s) deferred"
+                    f"{result.closed} worker(s) closed, {result.deferred} start(s) deferred"
                 )
         _, given_up = self.ledger.prune_events()
         if given_up:
@@ -1182,6 +1336,7 @@ class Runner:
                 return self.config.source_by_name(event.source) is not None
             found = source.repository_for(event.item, self.config.repositories)
             if found is None:
+                self._note_unconfigured(event, report)
                 return False
             repository, context = found, self.context(found)
         if not context.usable:
@@ -1222,6 +1377,11 @@ class Runner:
                     deferred = True
                     continue
             elif router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
+                if router_mod.deliver_to_holders(self.ledger, role.name, event):
+                    report.routed.append(
+                        f"{role.name}/{sanitize.scrub_identifier(item)}: {rule.on} goes to "
+                        f"the worker that has it"
+                    )
                 continue
             if not sanitize.is_safe_identifier(item):
                 report.warnings.append(
@@ -1258,6 +1418,83 @@ class Runner:
             except ChargehandError as exc:
                 report.errors.append(f"{item}: {exc}")
         return deferred
+
+    def _note_unconfigured(self, event: Event, report: TickReport) -> None:
+        """Report a start event for a repository that no `[[repository]]` names, once.
+
+        Only when a role would start on the event's kind: a mention on some other
+        repository is not news.
+        """
+        hint = sanitize.one_line(event.item.hint or "", limit=100).lower()
+        if not hint or not self._some_role_starts_on(event):
+            return
+        key = f"{UNCONFIGURED_PREFIX}{event.source}:{hint}"
+        if self.ledger.get_state(key):
+            return
+        self.ledger.set_state(key, str(int(time.time())))
+        message = (
+            f"source {event.source}: ignored a start event for {hint}, which no [[repository]] "
+            f"names; reported once per repository"
+        )
+        log.warning("%s", message)
+        report.warnings.append(message)
+
+    def _some_role_starts_on(self, event: Event) -> bool:
+        for repository in self.config.repositories:
+            context = self.context(repository)
+            if context.repo_config is None:
+                continue
+            for role_name in repository.roles:
+                try:
+                    role = context.role(role_name)
+                except ConfigError:
+                    continue
+                if any(
+                    router_mod.kind_matches((rule.on,), event.kind, event.source)
+                    for rule in role.start
+                ):
+                    return True
+        return False
+
+    def _close_from_event(self, event: Event, report: TickReport) -> int:
+        """End each worker whose primary item *event* closes, by its start rule's ``close_on``.
+
+        The session is stopped first and the worker becomes done; garbage collection then
+        removes the session and the worktree, never over unpushed commits. A worker that
+        is working is left to finish its turn: once it is idle, the tick finds its item
+        closed and ends it the same way.
+        """
+        closed = 0
+        for subscription, worker in self.ledger.live_subscriptions(event.source, event.item.key):
+            if not subscription.is_primary:
+                continue
+            rule = self._start_rule_of(worker)
+            if rule is None or not router_mod.kind_matches(rule.close_on, event.kind, event.source):
+                continue
+            if worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING):
+                report.skipped.append(
+                    f"{worker.handle}: its item closed while it works; it ends after the turn"
+                )
+                continue
+            if not self._stop_session(worker):
+                report.warnings.append(f"{worker.item}: item closed but its session would not stop")
+                continue
+            updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
+            self._sync_labels(updated, self.context_for_worker(updated), report)
+            report.transitions.append(f"{worker.item}: item closed -> done")
+            closed += 1
+        return closed
+
+    def _start_rule_of(self, worker: Worker) -> StartRule | None:
+        """The start rule that created *worker*, as its role file says now; None when unknown."""
+        context = self.context_for_worker(worker)
+        if context is None or not context.usable or not worker.start_rule:
+            return None
+        try:
+            role = context.role(worker.role)
+        except ConfigError:
+            return None
+        return next((rule for rule in role.start if rule.name == worker.start_rule), None)
 
     # ----- 6. state diff and notification -----------------------------------
 
@@ -1428,6 +1665,7 @@ class Runner:
 
     def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
         """Wake each idle worker once, for every event waiting in its inbox."""
+        idle_before = {w.id for w in self.ledger.workers_in_state([ledger_mod.IDLE])}
         result = delivery_mod.Delivery(
             self.ledger,
             max_concurrent=self.config.max_concurrent,
@@ -1435,6 +1673,8 @@ class Runner:
             policy=self._policy_of,
             usage=self._usage,
             crash_after_wake=crash_after_wake,
+            guard=lambda worker: self._workspace_check(worker).fault,
+            prepare=self._refresh_item_checkout,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -1446,10 +1686,164 @@ class Runner:
             # The tick log prints transitions, so a wake shows there too.
             report.transitions.append(f"{worker.item or worker.handle}: wake -> {worker.state}")
             log.info("woke %s in session %s", worker.handle, worker.session_id)
+        for worker in self.ledger.workers_in_state([ledger_mod.QUEUED]):
+            if worker.id in idle_before:
+                report.transitions.append(f"{worker.item or worker.handle}: wake held -> queued")
         for worker, detail in result.faults:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.item or worker.handle, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+
+    def _workspace_check(self, worker: Worker, *, accept_files: bool = False) -> WorkspaceCheck:
+        """Whether the session of a worker with an item checkout may start again where it is.
+
+        A session that checked the item's head out in its own worktree, or copied the
+        head's settings or instructions there, would have them loaded, trusted, when it
+        is resumed. With *accept_files*, the files as they are now become the record, for
+        an operator who has looked at them; the branch is checked either way.
+        """
+        if not self._has_item_checkout(worker):
+            return WorkspaceCheck()
+        checkout_fault = self._item_checkout_fault(worker)
+        if checkout_fault is not None:
+            return WorkspaceCheck(checkout_fault)
+        try:
+            branch = self.git.worktree_branch(worker.repo_path, worker.worktree_path)
+        except GitError:
+            branch = None
+        if branch != worker.branch:
+            return WorkspaceCheck("its worktree is no longer on its own branch")
+        link_fault = self._gitlink_fault(worker.repo_path, worker.worktree_path, "its worktree")
+        if link_fault is not None:
+            return WorkspaceCheck(link_fault)
+        if accept_files:
+            return WorkspaceCheck(self._record_workspace_files(worker))
+        recorded = self.ledger.get_state(f"{WORKSPACE_FILES_PREFIX}{worker.id}")
+        try:
+            record = json.loads(recorded) if recorded is not None else None
+        except ValueError:
+            record = None
+        if not isinstance(record, dict):
+            return WorkspaceCheck(
+                "the agent's files in its worktree are not recorded", acceptable=True
+            )
+        try:
+            pathspecs = self.runtime(worker.runtime).workspace_files
+        except ConfigError:
+            return WorkspaceCheck("its runtime is unknown")
+        current = self.git.workspace_manifest(worker.worktree_path, pathspecs)
+        if current is None:
+            return WorkspaceCheck("its worktree could not be inspected")
+        changed = changed_entries(record, current)
+        if changed:
+            log.warning("%s: the agent's files in its worktree changed: %s", worker.handle,
+                        sanitize.one_line(", ".join(changed), limit=500))
+            return WorkspaceCheck(
+                "the agent's settings or instructions in its worktree changed",
+                tuple(changed), acceptable=True,
+            )
+        return WorkspaceCheck()
+
+    def _has_item_checkout(self, worker: Worker) -> bool:
+        """Whether *worker* has, or had, an item checkout: the directory or a record of it."""
+        return item_checkout_path(worker).exists() or any(
+            self.ledger.get_state(f"{prefix}{worker.id}") is not None
+            for prefix in WORKER_STATE_PREFIXES
+        )
+
+    def _item_checkout_fault(self, worker: Worker) -> str | None:
+        """Why the worker's item checkout must not be read or written again, or None.
+
+        A session that replaced the checkout with a symlink, or pointed its `.git` file
+        elsewhere, would otherwise redirect the setup step the refresh runs, or the git
+        calls that read it, into a directory of its choosing. So the path must be a plain
+        directory that git lists, from the main checkout, as a detached worktree at that
+        same path.
+        """
+        checkout = item_checkout_path(worker)
+        if checkout.is_symlink():
+            return "its item checkout was replaced with a symlink"
+        if not checkout.exists():
+            # The records say there was one. A session that removed it must not turn the
+            # check off by doing so.
+            return "its item checkout is gone"
+        try:
+            worktrees = self.git.list_worktrees(worker.repo_path)
+        except GitError:
+            return "its item checkout could not be inspected"
+        entry = worktrees.get(str(checkout)) or worktrees.get(str(checkout.resolve()))
+        if entry is None:
+            return "its item checkout is not a registered worktree"
+        if entry.get("branch"):
+            # A detached worktree has no branch. One with a branch is the session's own
+            # worktree, reached because the checkout path led there.
+            return "its item checkout is not where it was"
+        return self._gitlink_fault(worker.repo_path, checkout, "its item checkout")
+
+    def _gitlink_fault(self, repo: Path, worktree: Path, name: str) -> str | None:
+        """Why *worktree*'s ``.git`` must not be trusted, or None.
+
+        A linked worktree's ``.git`` is a file that points to the admin directory the main
+        checkout holds for it. A session that rewrites it to a directory of its own aims
+        every later git read, and the refresh's `gh pr checkout`, at config it controls.
+        So the link must still point to the admin directory the main checkout records,
+        which the main checkout keeps out of the session's reach.
+        """
+        admin = self.git.recorded_admin_dir(repo, worktree)
+        if admin is None:
+            return f"{name} is not a registered worktree"
+        if self.git.linked_gitdir(worktree) != admin:
+            return f"{name} no longer points at its own git directory"
+        return None
+
+    def _record_workspace_files(self, worker: Worker) -> str | None:
+        """Record the agent's files in the worktree as they are now; the reason when that fails."""
+        try:
+            pathspecs = self.runtime(worker.runtime).workspace_files
+        except ConfigError:
+            return "its runtime is unknown"
+        manifest = self.git.workspace_manifest(worker.worktree_path, pathspecs)
+        if manifest is None:
+            return "its worktree could not be inspected"
+        self.ledger.set_state(
+            f"{WORKSPACE_FILES_PREFIX}{worker.id}", json.dumps(manifest, sort_keys=True)
+        )
+        return None
+
+    def _refresh_item_checkout(self, worker: Worker) -> str | None:
+        """Run the role's setup step again in the item checkout, so it follows the item's head.
+
+        Before a wake only: the setup is what fetched the head at the launch, and a wake
+        is when the session reads it again. Returns why the wake must wait, or None. The
+        command's output may quote the item, so it stays in the ledger and the log.
+        """
+        checkout = item_checkout_path(worker)
+        if not checkout.exists():
+            return None
+        context = self.context_for_worker(worker)
+        if context is None or not context.usable or context.repo_config is None:
+            return f"repository '{worker.repository}' is unavailable"
+        try:
+            role = context.role(worker.role)
+        except ConfigError:
+            return "its role does not load"
+        if role.checkout != roles_mod.CHECKOUT_ITEM or not role.setup:
+            return None
+        # The worktree has been the session's working directory since the launch, so a
+        # program there is not the operator's any more.
+        failure = self._run_script(
+            role.setup, worker, context.repo_config.setup_timeout_secs,
+            f"{role.source or 'role ' + role.name}.setup", cwd=checkout, trust_worktree=False,
+        )
+        if failure is not None:
+            detail = sanitize.one_line(f"item checkout not refreshed: {failure}", limit=400)
+            self.ledger.update(worker, last_error=detail)
+            log.warning("%s: %s", worker.handle, detail)
+            return "its item checkout could not be refreshed"
+        head = self.git.head_commit(checkout)
+        if head is not None:
+            self.ledger.set_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}", head)
+        return None
 
     def _policy_of(self, worker: Worker) -> roles_mod.Policy:
         context = self.context_for_worker(worker)
@@ -1544,6 +1938,7 @@ class Runner:
             start=lambda event: self._start_from_event(
                 event, report, crash_after_step=crash_after_step
             ),
+            close=lambda event: self._close_from_event(event, report),
         )
         polled = self._poll_trackers(report)
         router.retry_pending_starts()
@@ -1558,10 +1953,10 @@ class Runner:
                 continue
             result = router.route(events, signed_in=signed_in)
             self.ledger.set_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}", cursor)
-            if result.delivered or result.own:
+            if result.delivered or result.own or result.closed:
                 report.routed.append(
                     f"{repository.name}: {len(events)} tracker event(s), {result.own} by "
-                    f"chargehand, {result.delivered} inbox row(s)"
+                    f"chargehand, {result.delivered} inbox row(s), {result.closed} worker(s) closed"
                 )
 
     def _poll_trackers(
@@ -1737,26 +2132,50 @@ class Runner:
             worker = self.ledger.update(worker, step=1, label_state=Status.RUNNING.value)
             self._check_crash(1, crash_after_step)
 
-        # Step 2: fetch, then create the worktree on a placeholder branch.
+        # Step 2: fetch, then create the worktree on a placeholder branch. A role that
+        # reviews its item gets a second, detached worktree for the item's head.
         if worker.step < 2:
             self.git.fetch(context.repository.path, gitutil.remote_of(repo_config.base))
             self.git.add_worktree(
                 context.repository.path, worker.worktree_path, worker.branch, repo_config.base
             )
+            if role.checkout == roles_mod.CHECKOUT_ITEM:
+                self.git.add_detached_worktree(
+                    context.repository.path, item_checkout_path(worker), repo_config.base
+                )
             worker = self.ledger.update(worker, step=2)
             self._check_crash(2, crash_after_step)
 
-        # Step 3: the repository's own setup script, then the role's.
+        # Step 3: the repository's own setup script, then the role's. A role that reviews
+        # its item runs its setup in the item checkout, which the setup moves to the
+        # item's head.
         if worker.step < 3:
-            for template, where in (
-                (repo_config.setup, f"{repo_config.source or 'repo config'}.setup"),
-                (role.setup, f"{role.source or 'role ' + role.name}.setup"),
+            item_checkout = role.checkout == roles_mod.CHECKOUT_ITEM
+            for template, where, cwd in (
+                (repo_config.setup, f"{repo_config.source or 'repo config'}.setup", None),
+                (role.setup, f"{role.source or 'role ' + role.name}.setup",
+                 item_checkout_path(worker) if item_checkout else None),
             ):
-                failure = self._run_script(template, worker, repo_config.setup_timeout_secs, where)
+                failure = self._run_script(
+                    template, worker, repo_config.setup_timeout_secs, where, cwd=cwd
+                )
                 if failure is not None:
                     # `failure` can quote the script's stderr, so it stays local.
                     return self._fail_worker(
                         worker, context, failure, report, notify_detail="setup script failed"
+                    )
+            if item_checkout:
+                head = self.git.head_commit(item_checkout_path(worker))
+                if head is not None:
+                    self.ledger.set_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}", head)
+                # Recorded after the setup scripts: what a repository's own setup writes,
+                # such as local settings, is not a change the wake check should see.
+                problem = self._record_workspace_files(worker)
+                if problem is not None:
+                    return self._fail_worker(
+                        worker, context,
+                        f"the agent's files in the worktree could not be recorded: {problem}",
+                        report, notify_detail="the worktree could not be inspected",
                     )
             worker = self.ledger.update(worker, step=3)
             self._check_crash(3, crash_after_step)
@@ -1769,24 +2188,36 @@ class Runner:
         return worker
 
     def _run_script(
-        self, template: str | None, worker: Worker, timeout_secs: float, where: str
+        self, template: str | None, worker: Worker, timeout_secs: float, where: str,
+        *, cwd: Path | None = None, trust_worktree: bool = True,
     ) -> str | None:
+        """Run a setup command in the worktree, or in *cwd*, an item checkout.
+
+        The program is found in the worktree, the main checkout or the absolute entries
+        of PATH, never relative to *cwd*: an item checkout holds the item author's files.
+        Without *trust_worktree* the worktree is left out too: once a session has worked
+        in it, a program there may be the session's. A command in an item checkout runs
+        with git hooks turned off, because a repository's relative `core.hooksPath` would
+        name the author's hooks there.
+        """
         if not template:
             return None
         argv = config_mod.render_argv(template, self._template_values(worker), where=where)
-        program = Path(argv[0])
-        if not program.is_absolute():
-            # The worktree is a full checkout, so its own copy of the script is the one
-            # the run should use; the main checkout is only a fallback.
-            for root in (worker.worktree_path, worker.repo_path):
-                candidate = root / program
-                if candidate.exists():
-                    argv[0] = str(candidate)
-                    break
+        roots = (
+            *(((worker.worktree_path, "the worktree"),) if trust_worktree else ()),
+            (worker.repo_path, "the main checkout"),
+        )
+        program = trusted_program(argv[0], [path for path, _ in roots])
+        if program is None:
+            named = ", ".join(name for _, name in roots)
+            return f"setup program {argv[0]!r} is not in {named}, or an absolute PATH entry"
+        argv[0] = program
+        env = None if cwd is None else hardened_git_env(os.environ)
         try:
             result = subprocess.run(
                 argv,
-                cwd=str(worker.worktree_path),
+                cwd=str(cwd or worker.worktree_path),
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=timeout_secs,
@@ -1820,6 +2251,19 @@ class Runner:
         self.sessions(worker.runtime, refresh=True)
         existing = self._find_worker_session(worker, exclude=owned_elsewhere)
         if existing is None:
+            # Loading the role checked the main checkout, which may hold files that are
+            # not committed. The session starts in the worktree, a checkout of `base`, so
+            # what it needs, such as an agent file, must be there or in the user's files.
+            try:
+                runtime.check_role(role, worker.worktree_path)
+            except ConfigError as exc:
+                return self._fail_worker(
+                    worker, context,
+                    f"the session starts in a checkout of the base branch, so a file it "
+                    f"needs must be committed there: {exc}",
+                    report,
+                    notify_detail="the role's files are not in the worktree",
+                )
             prompt = config_mod.render(
                 role.prompt,
                 self._template_values(worker),
@@ -1833,6 +2277,10 @@ class Runner:
                     options=role.options,
                     model=role.model,
                     effort=role.effort,
+                    read_paths=(
+                        (item_checkout_path(worker),)
+                        if role.checkout == roles_mod.CHECKOUT_ITEM else ()
+                    ),
                 ),
                 warn=report.warnings.append,
             )
@@ -1895,9 +2343,11 @@ class Runner:
         return f"{prefix}{role}/{item}"
 
     def _template_values(self, worker: Worker) -> dict[str, str]:
+        checkout = item_checkout_path(worker)
         values = {
             "item": worker.item,
             "item_url": worker.url or "",
+            "item_checkout": str(checkout if checkout.exists() else worker.worktree_path),
             "worktree": str(worker.worktree_path),
             "branch": worker.branch,
             "repo": str(worker.repo_path),
@@ -1966,6 +2416,18 @@ class Runner:
                 report.warnings.append(f"{worker.item}: collected, but {KEPT_BRANCH}")
             self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
             report.collected.append(worker.item)
+        self._forget_checkout_heads()
+
+    def _forget_checkout_heads(self) -> None:
+        """Drop the records of each worker whose worktree is gone, by any path."""
+        for key in self.ledger.all_state():
+            prefix = next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            if prefix is None:
+                continue
+            worker_id = key.removeprefix(prefix)
+            worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            if worker is None or worker.gc_done:
+                self.ledger.delete_state(key)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:
         """A closed issue ends its worker, even one that is idle or parked as blocked.

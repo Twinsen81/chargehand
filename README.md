@@ -63,6 +63,7 @@ export PATH="$HOME/.venvs/chargehand/bin:$PATH"
 
 chargehand init --machine            # ~/.config/chargehand/config.toml and notify.sh
 chargehand init --repo ~/code/my-app # .chargehand.toml and .chargehand/roles/implementer.toml
+chargehand init --repo ~/code/my-app --role pr-reviewer  # a reviewer role and its agent file
 chargehand doctor                    # check this machine
 chargehand tick                      # one pass, in the foreground
 chargehand status                    # what is running

@@ -8,8 +8,11 @@ events in its inbox goes through these steps:
    the worker fetches what a pointer names itself.
 2. Admit. The global cap on working turns, the role's daily wake cap and the usage
    reserve. A worker that is not admitted becomes ``queued`` and keeps its events.
-3. Wake, through the worker's runtime, so that the same session continues.
-4. Record. One ledger transaction marks the events delivered and records the wake on the
+3. Check and prepare, through the caller: a worker whose worktree must not host its
+   session again is paused with a fault, and one whose item checkout cannot be brought
+   up to date waits like one a cap holds.
+4. Wake, through the worker's runtime, so that the same session continues.
+5. Record. One ledger transaction marks the events delivered and records the wake on the
    worker and in the sessions table. It comes after the wake: a crash between the two
    leaves the events in the inbox, and a later tick wakes the worker with them again.
    A second wake costs one turn and is otherwise harmless, because the message carries
@@ -122,6 +125,8 @@ class Delivery:
         reserve_percent: float = DEFAULT_WAKE_RESERVE_PERCENT,
         crash_after_wake: bool = False,
         clock: Callable[[], float] = time.time,
+        guard: Callable[[Worker], str | None] = lambda worker: None,
+        prepare: Callable[[Worker], str | None] = lambda worker: None,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -131,6 +136,12 @@ class Delivery:
         self.reserve_percent = reserve_percent
         self.crash_after_wake = crash_after_wake
         self._clock = clock
+        # Why a worker's session must not be resumed where it is, or None. The text is
+        # the caller's own, so it may reach a notification.
+        self._guard = guard
+        # Brings what the worker reads up to date before the wake; why the wake must
+        # wait, or None.
+        self._prepare = prepare
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
@@ -162,6 +173,22 @@ class Delivery:
             if worker.state != ledger_mod.QUEUED:
                 self.ledger.update(worker, state=ledger_mod.QUEUED)
             result.held.append(f"{worker.handle}: {reason}")
+            return
+
+        if self._refuse_faulted(worker, result):
+            return
+
+        problem = self._prepare(worker)
+        if problem is not None:
+            if worker.state != ledger_mod.QUEUED:
+                self.ledger.update(worker, state=ledger_mod.QUEUED)
+            result.held.append(f"{worker.handle}: wake held, {problem}")
+            return
+
+        # Again after the refresh: it runs the role's setup step, so a checkout it
+        # redirected into the session's own worktree shows here as a worktree off its
+        # branch, before the resume.
+        if self._refuse_faulted(worker, result):
             return
 
         try:
@@ -219,6 +246,27 @@ class Delivery:
                 last_error=None,
             )
         result.woken.append(worker)
+
+    def _refuse_faulted(self, worker: Worker, result: DeliveryResult) -> bool:
+        """Pause *worker* when the guard refuses its worktree; True when it did.
+
+        A resume would load what the worktree now holds. The idle session is stopped,
+        which loads nothing, so that the state diff leaves the worker paused, with its
+        events, until the operator has looked.
+        """
+        fault = self._guard(worker)
+        if fault is None:
+            return False
+        try:
+            self._runtime(worker.runtime).stop(worker.session_id)
+        except (AgentRuntimeError, ConfigError):
+            pass
+        paused = self.ledger.update(
+            worker, state=ledger_mod.PAUSED, last_error=f"wake refused: {fault}"[:500]
+        )
+        result.faults.append((paused, fault))
+        result.errors.append(f"{worker.handle}: wake refused: {fault}")
+        return True
 
     def _refusal(self, worker: Worker, result: DeliveryResult) -> str | None:
         """Why admission holds this wake back now, or None when it may go."""

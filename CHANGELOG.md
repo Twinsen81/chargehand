@@ -62,6 +62,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
+  pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
+  pull request head from a separate checkout, `{item_checkout}`, so the author's Claude
+  Code settings and hooks are never loaded. Its setup runs with git hooks turned off and
+  never takes a program from the head, and runs again before each wake so the checkout
+  follows the head, then without taking a program from the session's worktree either.
+  Every git call runs with hooks and the fsmonitor off, so no repository config runs a
+  program, and the guard refuses a worktree whose `.git` was redirected to a git directory
+  the session wrote, read as data rather than followed. A wake refuses a reviewer whose item
+  checkout is gone, a symlink or a redirected worktree, whose worktree left its branch, or
+  whose Claude Code files changed since the setup step, and checks again after the refresh;
+  `chargehand continue --force` accepts a file change after a look. A reply wakes it, its own marked comments do not, and a second
+  review request wakes it again.
+  A start rule's `close_on` event on a worker's primary item ends the worker, and a start
+  event for a repository that is not configured is reported once. `tick` prints wakes and
+  held wakes, and `status` shows how to attach to idle and queued workers.
 - A `command` event source for any system without a built-in source: a configured
   executable reads the cursor on stdin and prints events as JSON lines, with optional
   `mark` and `item_open` commands. The contract is documented in `docs/command-source.md`.
@@ -168,6 +184,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A worker woken by a resume no longer stays `running` after its turn. Claude Code 2.1.311
+  lists a resumed background session as `working` with `status: idle` once the resumed
+  turn has ended, so the adapter reads that pair as done.
 - A launch that Claude Code refuses as an untrusted workspace writes the worktree's trust
   entry again and retries at once, up to three times in the same launch step. A Claude
   Code process that is already running can write `~/.claude.json` back without the entry

@@ -122,7 +122,12 @@ class HealthCheck:
 
 @dataclass(frozen=True)
 class LaunchSpec:
-    """One new session. *options* are the role's runtime-owned keys, already checked."""
+    """One new session. *options* are the role's runtime-owned keys, already checked.
+
+    *read_paths* are directories outside the worktree that the session must be able to
+    read without asking, such as the checkout of a pull request it reviews. They are not
+    workspaces: a runtime must not load configuration or instructions from them.
+    """
 
     worktree: Path
     name: str
@@ -130,6 +135,7 @@ class LaunchSpec:
     options: Mapping[str, Any] = field(default_factory=dict)
     model: str | None = None
     effort: str | None = None
+    read_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +170,10 @@ class Runtime(ABC):
     # The role-file keys this runtime owns. Any other key that is not a common one is
     # an error in a role on this runtime.
     role_keys: ClassVar[tuple[str, ...]] = ()
+    # The files, as git pathspecs, that this runtime loads configuration or instructions
+    # from when a session starts or resumes in a directory. A wake checks that a worker
+    # whose item is checked out separately has not changed them.
+    workspace_files: ClassVar[tuple[str, ...]] = ()
 
     # ----- configuration ----------------------------------------------------
 

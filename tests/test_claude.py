@@ -257,6 +257,14 @@ ASKED_A_QUESTION = {
     "name": "CHPROBE-4", "pid": 55993, "sessionId": "50fe0d86-0acf-401e-ab70-970ebe687349",
     "startedAt": 1790074156873, "state": "blocked", "status": "idle",
 }
+# Recorded live from Claude Code 2.1.311, six minutes after a turn that a
+# `--resume --bg` wake started had ended: `state` never left `working`.
+RESUMED_TURN_ENDED = {
+    "pid": 52227, "id": "4a4a227e", "kind": "background", "startedAt": 1793092895050,
+    "sessionId": "4a4a227e-1732-46ef-b775-0faeb5f4ec61", "name": "pr-reviewer/octo_app_1",
+    "status": "idle", "state": "working",
+    "cwd": "/private/tmp/chargehand-pr21-probe/worktrees/pr-reviewer/octo_app_1",
+}
 
 
 def test_a_session_waiting_on_a_permission_prompt_reads_blocked():
@@ -286,6 +294,12 @@ def test_state_wins_over_status_because_they_disagree():
     assert parse_sessions(json.dumps([ASKED_A_QUESTION]))[0].state == "blocked"
 
 
+def test_a_resumed_session_whose_turn_ended_reads_done():
+    """`state` stays `working` after a resume; `status: idle` is what knows the turn ended."""
+    assert parse_sessions(json.dumps([RESUMED_TURN_ENDED]))[0].state == "done"
+    assert parse_sessions(json.dumps([RUNNING]))[0].state == "working"
+
+
 def test_the_short_id_is_preferred_over_the_session_uuid():
     """`stop`, `rm`, `logs` and `attach` all take the short id that --bg prints."""
     session = parse_sessions(json.dumps([RUNNING]))[0]
@@ -294,13 +308,15 @@ def test_the_short_id_is_preferred_over_the_session_uuid():
     assert session.uuid == "1ae10693-8bbb-4e5a-92a5-072b5df5ce96"
 
 
-@pytest.mark.parametrize("node", [RUNNING, FINISHED, PERMISSION_PROMPT, ASKED_A_QUESTION])
+@pytest.mark.parametrize(
+    "node", [RUNNING, FINISHED, PERMISSION_PROMPT, ASKED_A_QUESTION, RESUMED_TURN_ENDED]
+)
 def test_every_observed_shape_parses_into_a_known_state(node):
     session = parse_sessions(json.dumps([node]))[0]
 
     assert session.state in ("working", "done", "blocked")
     assert session.kind == "background"
-    assert 1790073000 < session.started_at < 1790075000
+    assert session.started_at == node["startedAt"] / 1000
 
 
 # ----- workspace trust ------------------------------------------------------

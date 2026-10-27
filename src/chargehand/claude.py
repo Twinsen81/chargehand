@@ -180,13 +180,19 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
     if identifier is None and uuid is None:
         return None
     raw_state = str(_first(node, _STATE_KEYS) or "")
+    state = _STATE_ALIASES.get(raw_state.strip().lower().replace(" ", "_"), UNKNOWN)
+    # Observed in Claude Code 2.1.311: after `--resume --bg`, `state` stays `working` once
+    # the resumed turn has ended, while `status` drops to `idle`. A turn that runs lists
+    # `status: busy`, so `idle` next to `working` is a turn that ended.
+    if state == WORKING and str(node.get("status") or "").strip().lower() == "idle":
+        state = DONE
     waiting = _first(node, _WAITING_KEYS)
     return Session(
         id=str(identifier if identifier is not None else uuid),
         uuid=str(uuid) if uuid is not None else None,
         name=(lambda v: str(v) if v is not None else None)(_first(node, _NAME_KEYS)),
         cwd=(lambda v: str(v) if v is not None else None)(_first(node, _CWD_KEYS)),
-        state=_STATE_ALIASES.get(raw_state.strip().lower().replace(" ", "_"), UNKNOWN),
+        state=state,
         raw_state=raw_state,
         waiting_for=str(waiting) if waiting is not None else None,
         started_at=_parse_time(_first(node, _STARTED_KEYS)),
@@ -576,14 +582,22 @@ def agent_file_candidates(repo: Path, name: str) -> list[Path]:
     return [repo / ".claude" / "agents" / f"{name}.md", user_claude_dir() / "agents" / f"{name}.md"]
 
 
-def launch_settings(options: Mapping[str, Any], deny_rules: Sequence[str]) -> dict[str, object] | None:
-    """The per-launch settings payload: the machine's deny rules and the role's allow rules."""
+def launch_settings(
+    options: Mapping[str, Any], deny_rules: Sequence[str], read_paths: Sequence[Path] = ()
+) -> dict[str, object] | None:
+    """The per-launch settings payload: the machine's deny rules and the role's allow rules.
+
+    Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
+    not passed as `--add-dir`: Claude Code loads skills from an added directory, and these
+    paths hold content the operator did not write.
+    """
     permissions: dict[str, list[str]] = {}
     if deny_rules:
         permissions["deny"] = list(deny_rules)
-    allow = options.get("allow") or ()
+    # `//` starts an absolute path in a Claude Code permission rule.
+    allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
     if allow:
-        permissions["allow"] = list(allow)
+        permissions["allow"] = allow
     return {"permissions": permissions} if permissions else None
 
 
@@ -602,6 +616,16 @@ class ClaudeRuntime(Runtime):
         external_supervisor=True,
     )
     role_keys = ("agent", "permission_mode", "allow")
+    # Project settings, hooks, agents, skills and commands; MCP servers; instructions,
+    # which Claude Code also reads from subdirectories. The `.claude` entry itself is
+    # named too: a symlink there is a file, and it would hand the directory to its target.
+    workspace_files = (
+        ":(glob)**/.claude",
+        ":(glob)**/.claude/**",
+        ".mcp.json",
+        ":(glob)**/CLAUDE.md",
+        ":(glob)**/CLAUDE.local.md",
+    )
 
     def __init__(
         self,
@@ -713,7 +737,7 @@ class ClaudeRuntime(Runtime):
                     agent=spec.options.get("agent") or None,
                     model=spec.model,
                     effort=spec.effort,
-                    settings=launch_settings(spec.options, self.deny_rules),
+                    settings=launch_settings(spec.options, self.deny_rules, spec.read_paths),
                 )
             except WorkspaceNotTrusted as exc:
                 if not trusted:

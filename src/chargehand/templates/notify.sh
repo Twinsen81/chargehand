@@ -6,7 +6,8 @@
 #   CHARGEHAND_ITEM    the work item (an issue identifier)
 #   CHARGEHAND_ROLE    the worker's role
 #   CHARGEHAND_ISSUE   the same as CHARGEHAND_ITEM, kept for older hooks
-#   CHARGEHAND_STATE   blocked | done | failed | cancelled | long-running | watchdog-stopped | ...
+#   CHARGEHAND_STATE   idle | blocked | done | failed | cancelled | long-running |
+#                      watchdog-stopped | wake-fault | ...
 #   CHARGEHAND_URL     the issue URL, when the tracker provides one
 #   CHARGEHAND_REPOSITORY  the repository name (CHARGEHAND_ROUTE carries the same)
 #   CHARGEHAND_DETAIL  a short chargehand-generated reason

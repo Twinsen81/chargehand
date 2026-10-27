@@ -20,11 +20,16 @@
 
 # The first turn: a slash command, a skill, or a plain instruction.
 #
-# Available variables: {item} {item_url} {worktree} {branch} {repo}
+# Available variables: {item} {item_url} {item_checkout} {worktree} {branch} {repo}
 #
 # There is deliberately no {title} and no {body}. The prompt is a trusted user
 # message, so issue text has to reach the agent as a tool result it fetches itself.
-prompt = "{item}"
+#
+# Workers post as you, and a comment on the issue or on the worker's pull request wakes
+# it. chargehand drops your comments that end with its authorship marker,
+# <!-- chargehand -->, so the worker must add it to every comment it posts, or its own
+# comments wake it. Keep that instruction here or in the agent file.
+prompt = "Work on {item}. End every comment you post on the issue or on its pull request with <!-- chargehand -->"
 
 # auto (default) runs behind Claude Code's safety classifier and falls back to a
 # permission prompt, which chargehand surfaces as "blocked". bypassPermissions is a

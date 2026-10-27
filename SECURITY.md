@@ -30,7 +30,8 @@ public location.
 - The operator: the person who installs chargehand, owns the machine, and owns the tracker
   credentials it uses.
 - The repository's own configuration and instructions (its chargehand config, its agent
-  instruction files, its permission rules).
+  instruction files, its permission rules), as the base branch the operator configured
+  holds them.
 
 ### What is not trusted
 
@@ -38,6 +39,12 @@ public location.
   an issue. They are attacker-controlled input to an agent.
 - **Agent output.** Logs and messages produced by a session can echo anything the session
   read.
+- **The head of a pull request under review.** Its author controls every file in it,
+  including `.claude/settings.json` (hooks and permission rules), `.mcp.json`, `CLAUDE.md`
+  and `.claude/agents/`. A review request needs no triage rights: a code-owners rule can
+  ask the operator to review a pull request from any fork. Claude Code loads those files
+  from the working directory of a session it trusts, and a hook runs as the operator's
+  user before the model reads anything.
 - **Event fields.** An event's actor and pointer come from the source. An event has no
   body: a source reads a comment only to find the authorship marker, and the text does
   not leave the source. The marker filter is a convenience against workers waking each
@@ -63,6 +70,62 @@ public location.
   a notification. Claude Code's auto-mode
   classifier trusts user messages and does not see tool results, so this keeps
   attacker-controlled text on the untrusted side of that boundary.
+- **A pull request head is never a session's workspace.** A role with `checkout = "item"`,
+  such as the shipped `pr-reviewer`, starts its session in a fresh checkout of the base
+  branch, the only directory chargehand marks as a trusted workspace. Its agent file must
+  be committed there or be in `~/.claude/agents`; the launch checks that checkout, not
+  the main one. The pull request head goes into a second, detached checkout outside that
+  directory, under `<worktree_root>/.items/`, which the role's setup step fills and the
+  launch prompt names. The session gets a read permission for it and nothing else: it is
+  not passed as an added directory, because Claude Code loads skills from one.
+- **The setup step does not run the head's code.** The role's setup command runs in the
+  head checkout, at the launch and again before each wake, so that the checkout follows
+  the pull request head. Its program is taken from the base checkout, the main checkout
+  or an absolute `PATH` entry, never from the head: a relative program that is in neither
+  checkout is refused. Before a wake, the base checkout is left out as well, because the
+  session has worked in it since the launch and a program there may be the session's.
+  Git runs with hooks and the fsmonitor turned off for the whole step (`core.hooksPath`
+  and `core.fsmonitor` through git's environment configuration), and so does every git
+  call chargehand itself makes (`-c` on the command line): a repository with a relative
+  `core.hooksPath`, as husky sets it, or a `core.fsmonitor` set to a program, would
+  otherwise run that program when git checks the head out or reads the worktree. A wake
+  whose step fails waits.
+- **A changed workspace is not resumed.** Before each wake, and before `continue`, of such
+  a worker, chargehand checks that its working directory is still on the worker's own
+  branch and that the files Claude Code loads from it (`.claude/` and `CLAUDE.md` and
+  `CLAUDE.local.md` at any depth, `.mcp.json`) are as they were when the session started,
+  after the setup step. Tracked, untracked and ignored files count by their content, a
+  symlink by its target path and, for a file, that file's content, and the `.claude` entry
+  itself counts, so that a symlink in its place is seen. Otherwise a wake stops the idle
+  session instead of resuming it, pauses the worker with its events kept and sends
+  `wake-fault` to the hook, and `continue` is refused. It also refuses either checkout
+  when it is no longer a plain directory that git lists, from the main checkout, as the
+  worktree it was: a symlink, a `.git` that points somewhere other than the git directory
+  the main checkout recorded for it, or an item checkout that is not detached at its own
+  path. The main checkout holds those records out of the session's reach, and the `.git`
+  file is read as data, never followed by running git, so a redirected link is seen
+  rather than acted on. The check runs again after the refresh step, so a step that moved
+  the head into the session's own worktree shows as a worktree off its branch before the
+  resume. An operator who has looked at the
+  worktree accepts a file change with `chargehand continue <item> --force`, which records
+  the files as they are now; a worktree that left its branch, or whose item checkout is
+  gone or redirected, is not accepted, and `chargehand discard` removes the worker.
+
+  What this does not cover: the session itself. During a turn it can run any command the
+  classifier or a prompt lets through, including git commands in the head checkout,
+  which then run the head's hooks under a relative `core.hooksPath`, and a file it copies
+  into its working directory can be read in that same turn; one it copies into `~/.claude`
+  is loaded by every session on the machine and is not checked. The shipped agent file tells
+  the reviewer to treat the head as data, never to run it, never to check anything out,
+  and its allow rules leave out `gh api`, `gh pr checkout`, merge, close and approve.
+  Those are guardrails, not a boundary. A session that gains approval to write outside
+  its own working directory is out of scope: one that can write the item checkout, the
+  main checkout or `~/.claude` can already alter the operator's shell profile or a
+  LaunchAgent, so the checks above defend against a change the session made inside its
+  own worktree and against an accident, not against a session that already holds that
+  power. Git filters that the operator configured, such as
+  Git LFS, still run on the files the head selects through `.gitattributes`, and a
+  session that the operator resumes by hand, outside chargehand, is not checked.
 - **A wake carries pointers only.** The message that wakes a worker is a fixed line that
   chargehand writes, followed by the events' pointers. A pointer that is not a plain
   http(s) URL or a plain identifier is left out, and no actor name, title or body is

@@ -88,6 +88,70 @@ def test_a_blocked_run_shows_how_to_attach(capsys, config_file, harness):
     assert "claude attach" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("state", [ledger_mod.IDLE, ledger_mod.QUEUED])
+def test_an_idle_or_queued_worker_shows_how_to_attach(capsys, config_file, harness, state):
+    """Its turn ended; what the turn left is in the session."""
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    run(["tick"], config_file)
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    harness.ledger.update(harness.worker("ABC-1"), state=state)
+    capsys.readouterr()
+
+    run(["status", "--json", "--no-queue"], config_file)
+
+    (worker,) = json.loads(capsys.readouterr().out)["workers"]
+    assert "claude attach" in worker["attach"]
+
+
+def idle_with_a_reply(harness, config_file) -> None:
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    run(["tick"], config_file)
+    harness.board.comment("ABC-1")
+    # The tracker is polled after delivery, so the reply waits one tick in the inbox.
+    run(["tick"], config_file)
+
+
+def test_the_tick_prints_a_wake(capsys, config_file, harness):
+    idle_with_a_reply(harness, config_file)
+    capsys.readouterr()
+
+    run(["tick"], config_file)
+
+    assert re.search(f"^{STAMP}woken: implementer/ABC-1$", capsys.readouterr().out, re.M)
+
+
+def test_the_tick_prints_a_held_wake_and_the_move_to_queued(capsys, config_file, harness):
+    role = harness.repo / ".chargehand" / "roles" / "implementer.toml"
+    role.parent.mkdir(parents=True)
+    role.write_text(
+        'prompt = "{item}"\n\n[[start]]\non = "labeled"\nsubscribe = ["comment"]\n\n'
+        "[policy]\nmax_wakes_per_day = 0\n"
+    )
+    idle_with_a_reply(harness, config_file)
+    capsys.readouterr()
+
+    run(["tick"], config_file)
+
+    out = capsys.readouterr().out
+    assert re.search(
+        f"^{STAMP}skipped: implementer/ABC-1: wake held by the daily cap \\(0/0\\)$", out, re.M
+    ), out
+    assert re.search(f"^{STAMP}transition: ABC-1: wake held -> queued$", out, re.M), out
+
+
+def test_continue_force_is_recorded_as_such(config_file, harness):
+    assert run(["continue", "ABC-1", "--force", "--no-wait"], config_file) == EXIT_OK
+
+    (request,) = harness.ledger.pending_requests()
+    assert (request["kind"], request["target"], request["args"]) == (
+        "continue", "ABC-1", {"force": True},
+    )
+
+
 def test_logs_strip_terminal_control_sequences(capsys, config_file, harness):
     harness.board.add("ABC-1")
     run(["tick"], config_file)
