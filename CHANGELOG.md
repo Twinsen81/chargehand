@@ -180,6 +180,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A worker woken by a resume no longer stays `running` after its turn. Claude Code 2.1.311
+  lists a resumed background session as `working` with `status: idle` once the resumed
+  turn has ended, so the adapter reads that pair as done.
 - A launch that Claude Code refuses as an untrusted workspace writes the worktree's trust
   entry again and retries at once, up to three times in the same launch step. A Claude
   Code process that is already running can write `~/.claude.json` back without the entry

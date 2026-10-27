@@ -180,13 +180,19 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
     if identifier is None and uuid is None:
         return None
     raw_state = str(_first(node, _STATE_KEYS) or "")
+    state = _STATE_ALIASES.get(raw_state.strip().lower().replace(" ", "_"), UNKNOWN)
+    # Observed in Claude Code 2.1.311: after `--resume --bg`, `state` stays `working` once
+    # the resumed turn has ended, while `status` drops to `idle`. A turn that runs lists
+    # `status: busy`, so `idle` next to `working` is a turn that ended.
+    if state == WORKING and str(node.get("status") or "").strip().lower() == "idle":
+        state = DONE
     waiting = _first(node, _WAITING_KEYS)
     return Session(
         id=str(identifier if identifier is not None else uuid),
         uuid=str(uuid) if uuid is not None else None,
         name=(lambda v: str(v) if v is not None else None)(_first(node, _NAME_KEYS)),
         cwd=(lambda v: str(v) if v is not None else None)(_first(node, _CWD_KEYS)),
-        state=_STATE_ALIASES.get(raw_state.strip().lower().replace(" ", "_"), UNKNOWN),
+        state=state,
         raw_state=raw_state,
         waiting_for=str(waiting) if waiting is not None else None,
         started_at=_parse_time(_first(node, _STARTED_KEYS)),
