@@ -410,6 +410,50 @@ def test_one_unreadable_item_does_not_hold_back_the_others(source, gh, clock):
     assert "issue_comment:62" in {e.dedupe_id for e in events}
 
 
+def test_one_unreadable_notification_thread_does_not_hold_back_the_others(source, gh, clock):
+    _, cursor = source.poll(None, [])
+    before = json.loads(cursor)["last_modified"]
+    gh.add_pull(PR)
+    gh.add_pull("octo/app#8")
+    gh.add("issue_comments", PR, {"id": 61, "user": {"login": "a"}, "created_at": iso(NOW + 10)})
+    gh.set(fail=[{"match": "pulls/8", "stderr": "HTTP 502: Bad Gateway"}])
+    gh.notify("review_requested", PR, thread="1")
+    gh.notify("review_requested", "octo/app#8", thread="2")
+    gh.notify("mention", "octo/app#9", kind="Issue", thread="3")
+    clock.now += 61
+
+    events, cursor = source.poll(cursor, followed())
+
+    assert sorted(e.dedupe_id for e in events) == [
+        "issue_comment:61",
+        "notification:1:2026-10-26T10:00:00Z",
+        "notification:3:2026-10-26T10:00:00Z",
+    ]
+    # The list keeps its old Last-Modified, so the next poll asks for the same window.
+    assert json.loads(cursor)["last_modified"] == before
+    gh.set(fail=[])
+    clock.now += 61
+    events, cursor = source.poll(cursor, followed())
+    assert "notification:2:2026-10-26T10:00:00Z" in {e.dedupe_id for e in events}
+    assert json.loads(cursor)["last_modified"] == gh.read()["last_modified"]
+
+
+def test_a_review_request_on_an_unconfigured_repository_costs_no_call(source, gh):
+    config = MachineConfig.parse(repository_table(github="octo/app"))
+    source.use_repositories(config.repositories)
+    gh.add_pull(PR)
+    gh.add_pull("elsewhere/other#1")
+    gh.notify("review_requested", PR)
+    gh.notify("review_requested", "elsewhere/other#1")
+
+    events, _ = source.poll(None, [])
+
+    # It is passed on unchecked: it starts nothing, and the tick reports it once.
+    assert [e.item.ref for e in events] == [PR, "elsewhere/other#1"]
+    assert "repos/octo/app/pulls/7" in api_paths(gh)
+    assert not any(path.startswith("repos/elsewhere") for path in api_paths(gh))
+
+
 def test_an_auth_failure_on_an_item_still_fails_the_poll(source, gh):
     gh.add_pull(PR)
     gh.set(fail=[{"match": "pulls/7", "exit": 4, "stderr": "gh auth login"}])
@@ -674,8 +718,11 @@ def test_a_review_request_starts_a_reviewer_and_a_comment_reaches_its_inbox(tick
         PR, "https://github.com/octo/app/pull/7", "test",
     )
     assert ticking.claude_state.launches[0]["argv"][-1] == "/review https://github.com/octo/app/pull/7"
-    # A review request on a repository the machine does not know starts nothing.
+    # A review request on a repository the machine does not know starts nothing, costs
+    # no call, and is reported once.
     assert ticking.ledger.live_worker_for("elsewhere_other_1") is None
+    assert not any(path.startswith("repos/elsewhere") for path in api_paths(gh))
+    assert any("elsewhere/other" in warning for warning in report.warnings)
 
     now = time.time()
     gh.add("issue_comments", PR, {"id": 41, "user": {"login": "alice"}, "body": "why?",

@@ -105,8 +105,8 @@ query Comments($id: String!, $comments: CommentFilter, $after: String) {
 # Pages of the queue read in one poll. Far more than one account has queued at once.
 _MAX_QUEUE_PAGES = 10
 _FOLLOWED_CHUNK = 50
-# Pages of one issue's comments read in one poll. An issue with more left is read from
-# the same point again on the next poll.
+# Pages of one issue's comments read in one poll. An issue with more left goes on from
+# the last page on the next poll.
 _MAX_COMMENT_PAGES = 20
 
 # A comment can become readable a moment after a later one was already read, so every
@@ -170,9 +170,9 @@ def _author(user: object) -> str:
 
 def _marked(body: object) -> bool:
     # Imported here: the sources package imports the trackers package.
-    from chargehand.sources.base import AUTHORSHIP_MARKER
+    from chargehand.sources.base import is_marked
 
-    return isinstance(body, str) and AUTHORSHIP_MARKER in body
+    return is_marked(body)
 
 
 def _number(raw: object) -> float | None:
@@ -180,13 +180,40 @@ def _number(raw: object) -> float | None:
 
 
 @dataclass
+class _Pages:
+    """Where an issue's comments go on when one poll could not read them all.
+
+    *after* is the end cursor of the last page read, *gt* the comment filter it belongs
+    to, and *started* when the first of those pages was read.
+    """
+
+    after: str
+    gt: str
+    started: float
+
+    @classmethod
+    def load(cls, value: object) -> "_Pages | None":
+        if not isinstance(value, dict):
+            return None
+        after, gt, started = value.get("after"), value.get("gt"), _number(value.get("started"))
+        if not isinstance(after, str) or not isinstance(gt, str) or started is None:
+            return None
+        return cls(after, gt, started)
+
+    def dump(self) -> dict[str, object]:
+        return {"after": self.after, "gt": self.gt, "started": self.started}
+
+
+@dataclass
 class _Cursor:
     """When each followed issue was last read for comments. A followed issue seen for the
     first time is read from the previous poll on: its worker started after that poll and
-    reads the issue itself."""
+    reads the issue itself. An issue with more comments than one poll reads also keeps
+    where its pages go on."""
 
     polled_at: float | None = None
     items: dict[str, float] = field(default_factory=dict)
+    pages: dict[str, _Pages] = field(default_factory=dict)
 
     @classmethod
     def load(cls, value: str | None) -> "_Cursor":
@@ -197,6 +224,11 @@ class _Cursor:
         if not isinstance(data, dict):
             return cls()
         items = data.get("items")
+        pages = data.get("pages")
+        loaded = {
+            str(key): _Pages.load(value)
+            for key, value in (pages.items() if isinstance(pages, dict) else ())
+        }
         return cls(
             polled_at=_number(data.get("polled_at")),
             items={
@@ -204,13 +236,14 @@ class _Cursor:
                 for key, since in (items.items() if isinstance(items, dict) else ())
                 if _number(since) is not None
             },
+            pages={key: value for key, value in loaded.items() if value is not None},
         )
 
     def dump(self) -> str:
-        return json.dumps(
-            {"polled_at": self.polled_at, "items": self.items},
-            sort_keys=True,
-        )
+        data: dict[str, object] = {"polled_at": self.polled_at, "items": self.items}
+        if self.pages:
+            data["pages"] = {key: pages.dump() for key, pages in self.pages.items()}
+        return json.dumps(data, sort_keys=True)
 
 
 class LinearTracker(Tracker):
@@ -368,16 +401,24 @@ class LinearTracker(Tracker):
         queued = self._queue()
         issues: list[Issue] = []
         comments: list[Comment] = []
-        unfinished: set[str] = set()
+        unfinished: dict[str, _Pages] = {}
         start = state.polled_at if state.polled_at is not None else now
         since = {issue_id: state.items.get(issue_id, start) for issue_id in followed}
+        going_on = {key: pages for key, pages in state.pages.items() if key in since}
         if followed:
-            issues, comments, unfinished = self._read_followed(since)
-        # An issue with comments left after the pages read here is read from the same
-        # point again.
-        state.items = {
-            issue_id: since[issue_id] if issue_id in unfinished else now for issue_id in followed
-        }
+            issues, comments, unfinished = self._read_followed(since, going_on, now)
+        # An issue with comments left keeps its time and goes on from its last page. Once
+        # its pages are all read, it is read again from when they started, so a comment
+        # added while they were read is not lost, whatever the order of the pages.
+        state.items = {}
+        for issue_id in followed:
+            if issue_id in unfinished:
+                state.items[issue_id] = since[issue_id]
+            elif issue_id in going_on:
+                state.items[issue_id] = going_on[issue_id].started
+            else:
+                state.items[issue_id] = now
+        state.pages = unfinished
         state.polled_at = now
         return TrackerPoll(queued=queued, followed=issues, comments=comments, cursor=state.dump())
 
@@ -401,19 +442,22 @@ class LinearTracker(Tracker):
         return issues
 
     def _read_followed(
-        self, since: Mapping[str, float]
-    ) -> tuple[list[Issue], list[Comment], set[str]]:
-        """The followed issues, their comments since each one's time, and the issues whose
-        comments did not fit in the pages one poll reads.
+        self, since: Mapping[str, float], going_on: Mapping[str, _Pages], now: float
+    ) -> tuple[list[Issue], list[Comment], dict[str, _Pages]]:
+        """The followed issues, their comments since each one's time, and where the
+        comments go on for each issue whose comments did not fit in the pages one poll
+        reads.
 
         Every page of comments is read through ``pageInfo``, so nothing depends on the
-        order in which Linear returns them.
+        order in which Linear returns them. An issue in *going_on* goes on from its last
+        page, with the filter that page was read with, instead of from its first page.
         """
         ids = sorted(since)
-        comment_filter = {"createdAt": {"gt": _iso(min(since.values()) - OVERLAP_SECS)}}
+        gt = _iso(min(since.values()) - OVERLAP_SECS)
+        comment_filter = {"createdAt": {"gt": gt}}
         issues: list[Issue] = []
         comments: list[Comment] = []
-        unfinished: set[str] = set()
+        unfinished: dict[str, _Pages] = {}
         for offset in range(0, len(ids), _FOLLOWED_CHUNK):
             variables = {
                 "filter": {"id": {"in": ids[offset : offset + _FOLLOWED_CHUNK]}},
@@ -426,11 +470,18 @@ class LinearTracker(Tracker):
                     continue
                 issues.append(issue)
                 after = since[issue.id] - OVERLAP_SECS
-                entries, complete = self._all_comments(
-                    issue.id, node.get("comments") or {}, comment_filter
-                )
-                if not complete:
-                    unfinished.add(issue.id)
+                pages = going_on.get(issue.id)
+                found = self._comments_after(issue.id, pages) if pages is not None else None
+                if pages is not None and found is not None:
+                    entries, end = found
+                    if end is not None:
+                        unfinished[issue.id] = _Pages(end, pages.gt, pages.started)
+                else:
+                    entries, end = self._all_comments(
+                        issue.id, node.get("comments") or {}, comment_filter
+                    )
+                    if end is not None:
+                        unfinished[issue.id] = _Pages(end, gt, now)
                 for entry in entries:
                     created = _timestamp(entry.get("createdAt"))
                     if not entry.get("id") or created is None or created <= after:
@@ -447,22 +498,47 @@ class LinearTracker(Tracker):
         return issues, comments, unfinished
 
     def _all_comments(
-        self, issue_id: str, first: Mapping[str, Any], comment_filter: Mapping[str, Any]
-    ) -> tuple[list[Mapping[str, Any]], bool]:
-        """The comment entries of *first* and of the pages after it; False when more are
-        left after the last page this poll reads."""
+        self,
+        issue_id: str,
+        first: Mapping[str, Any],
+        comment_filter: Mapping[str, Any],
+        *,
+        pages: int = _MAX_COMMENT_PAGES - 1,
+    ) -> tuple[list[Mapping[str, Any]], str | None]:
+        """The comment entries of *first* and of up to *pages* pages after it, and the end
+        cursor of the last page when more are left after it."""
         entries = list(first.get("nodes") or [])
         info = first.get("pageInfo") or {}
-        for _ in range(_MAX_COMMENT_PAGES - 1):
+        for _ in range(pages):
             if not info.get("hasNextPage") or not info.get("endCursor"):
-                return entries, True
+                return entries, None
             variables = {"id": issue_id, "comments": comment_filter, "after": info["endCursor"]}
             connection = (
                 (self._post(_COMMENTS_QUERY, variables).get("issue") or {}).get("comments") or {}
             )
             entries += connection.get("nodes") or []
             info = connection.get("pageInfo") or {}
-        return entries, not (info.get("hasNextPage") and info.get("endCursor"))
+        if info.get("hasNextPage") and info.get("endCursor"):
+            return entries, str(info["endCursor"])
+        return entries, None
+
+    def _comments_after(
+        self, issue_id: str, pages: _Pages
+    ) -> tuple[list[Mapping[str, Any]], str | None] | None:
+        """Go on from where an earlier poll stopped reading the issue's comments.
+
+        None when Linear no longer takes the cursor: the issue is then read from its own
+        time again, from its first page, as before the pages started.
+        """
+        first = {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": pages.after}}
+        try:
+            return self._all_comments(
+                issue_id, first, {"createdAt": {"gt": pages.gt}}, pages=_MAX_COMMENT_PAGES
+            )
+        except TrackerAuthError:
+            raise
+        except TrackerError:
+            return None
 
     def get(self, issue_id: str) -> Issue | None:
         node = self._post(_ISSUE_QUERY, {"id": issue_id}).get("issue")

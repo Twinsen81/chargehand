@@ -285,6 +285,10 @@ class CommandSource(Source):
     def whoami(self) -> str:
         return self.account
 
+    @property
+    def marks_items(self) -> bool:
+        return self.mark_command is not None
+
     # ----- the three commands ---------------------------------------------------
 
     def poll(

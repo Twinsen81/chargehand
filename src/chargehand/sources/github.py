@@ -34,7 +34,7 @@ from urllib.parse import quote
 from chargehand import sanitize
 from chargehand.config import Repository
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
-from chargehand.sources.base import AUTHORSHIP_MARKER, Event, Source, WorkItem
+from chargehand.sources.base import Event, Source, WorkItem, is_marked
 from chargehand.trackers.base import Issue, Status, Tracker
 
 log = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ def _login(user: object) -> str:
 
 
 def _marked(body: object) -> bool:
-    return isinstance(body, str) and AUTHORSHIP_MARKER in body
+    return is_marked(body)
 
 
 # ----- the gh command line -----------------------------------------------------
@@ -498,16 +498,32 @@ class GithubSource(Source):
         state.next_poll_at = now + state.poll_interval
         if response.status == 304:
             return []
-        if response.headers.get("last-modified"):
-            state.last_modified = response.headers["last-modified"]
         values = _json_values(response.body)
         if len(values) != 1 or not isinstance(values[0], list):
             raise TrackerError("github: notifications: expected a list")
         events = []
+        failed = False
         for entry in values[0]:
-            event = self._notification_event(entry, followed) if isinstance(entry, Mapping) else None
+            if not isinstance(entry, Mapping):
+                continue
+            try:
+                event = self._notification_event(entry, followed)
+            except TrackerAuthError:
+                raise
+            except TrackerError as exc:
+                # One thread whose pull request cannot be read now (a server error, a
+                # timeout) must not hold back the other threads and the followed items.
+                thread = sanitize.one_line(str(entry.get("id")), limit=40)
+                log.warning("github: could not check notification thread %s: %s", thread, exc)
+                failed = True
+                continue
             if event is not None:
                 events.append(event)
+        # After a failed thread the list keeps its old Last-Modified, so the next poll asks
+        # for the same window again and checks that thread once more; the router drops the
+        # threads it has already seen.
+        if not failed and response.headers.get("last-modified"):
+            state.last_modified = response.headers["last-modified"]
         return events
 
     def _notification_event(self, entry: Mapping[str, Any], followed: set[str]) -> Event | None:
@@ -529,7 +545,11 @@ class GithubSource(Source):
         # request is the one thing only the notification says.
         if item.key in followed and kind != "review_requested":
             return None
-        if kind == "review_requested" and not self._review_requested_now(ref):
+        if (
+            kind == "review_requested"
+            and (item.key in followed or self._configured(item))
+            and not self._review_requested_now(ref)
+        ):
             return None
         updated = str(entry.get("updated_at") or "")
         return Event(
@@ -541,6 +561,16 @@ class GithubSource(Source):
             dedupe_id=f"notification:{entry.get('id')}:{updated}",
             pointer=item.url or "",
         )
+
+    def _configured(self, item: WorkItem) -> bool:
+        """Whether a configured repository would start a worker on *item*.
+
+        A review request on any other repository starts nothing, so it is passed on
+        without the call that checks it; the tick reports it once.
+        """
+        if self.configured_repositories is None:
+            return True
+        return self.repository_for(item, self.configured_repositories) is not None
 
     def _review_requested_now(self, ref: Ref) -> bool:
         """Is a review of the open pull request *ref* still asked of this account?

@@ -8,16 +8,18 @@ Order, once per tick:
 4. subscribe each worker to the pull request of its branch, once one exists
 5. poll the event sources and route their events: inboxes, closes, then start rules
 6. diff session states against the ledger and notify on change
-7. deliver: wake each idle worker once for the events in its inbox
-8. sync the tracker labels
-9. poll each repository's tracker and route its events the same way: the queue label is
-   a start rule, launched within the caps, ledger row first
-10. collect garbage
+7. poll each repository's tracker and route its events the same way, up to the starts
+8. deliver: wake each idle worker once for the events in its inbox
+9. sync the tracker labels and the status of source items
+10. admit the tracker's starts: the queue label is a start rule, launched within the
+    caps, ledger row first
+11. collect garbage
 
-The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 9 comes after
-the state diff so that a slot freed by a finished worker is used in the same tick.
-Delivery comes before it, so a waiting worker gets a free slot before the queue starts a
-new one; a start from a ``[[source]]`` launches earlier, in step 5.
+The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 7 comes before
+delivery, so a comment on a worker's issue wakes it in the same tick. Step 10 comes after
+the state diff so that a slot freed by a finished worker is used in the same tick, and
+after delivery, so a waiting worker gets a free slot before the queue starts a new one; a
+start from a ``[[source]]`` launches earlier, in step 5.
 
 A control command never calls a runtime, git, or a tracker itself; it records a
 request and the tick applies it. Together with the tick lock that gives one writer of
@@ -132,7 +134,8 @@ KEPT_BRANCH = (
     "`git branch` in the repository lists it"
 )
 
-# The queue status each worker state should be reflected by on the tracker.
+# The queue status each worker state should be reflected by on the tracker, or on the
+# item of a `[[source]]` that marks items.
 _STATUS_FOR_STATE = {
     ledger_mod.LAUNCHING: Status.RUNNING,
     ledger_mod.RUNNING: Status.RUNNING,
@@ -145,6 +148,20 @@ _STATUS_FOR_STATE = {
     ledger_mod.CANCELLED: Status.BLOCKED,
     ledger_mod.DONE: Status.DONE,
 }
+
+
+def source_failure(name: str, exc: object) -> str:
+    """*exc* as one line that names the source *name* once.
+
+    A source's own error text often starts with its name already, and the tick adds the
+    name in front of every source error.
+    """
+    text = sanitize.one_line(str(exc), limit=300)
+    for prefix in (f"source {name}: ", f"{name}: "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return f"source {name}: {text}"
 
 
 def item_checkout_path(worker: Worker) -> Path:
@@ -412,7 +429,7 @@ class Runner:
         self._sources: dict[str, Source | Exception | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
         # Which starts this step tries: a `[[source]]`'s in the route step, a tracker's in
-        # the tracker step. Each waiting start is tried once per tick.
+        # the admission step. Each waiting start is tried once per tick.
         self._trackers_turn = False
         # The repositories whose tracker this tick polled. A queue start of any other
         # waits, with no tracker call: its poll failed and was reported once.
@@ -481,13 +498,36 @@ class Runner:
         if name not in self._sources:
             config = self.config.source_by_name(name)
             try:
-                self._sources[name] = self._source_factory(config) if config else None
-            except Exception as exc:
+                built = self._source_factory(config) if config else None
+                if built is not None:
+                    built.use_repositories(self.config.repositories)
+                self._sources[name] = built
+            except ChargehandError as exc:
                 # One source that cannot be built must not keep the others from polling.
+                # The route step reports it; that error line is its record.
+                log.debug("source %s could not be built: %s", name, exc)
+                self._sources[name] = exc
+            except Exception as exc:
                 log.exception("source %s could not be built", name)
                 self._sources[name] = exc
         found = self._sources[name]
         return found if isinstance(found, Source) else None
+
+    def _source_failed(
+        self, report: TickReport, name: str, exc: Exception, doing: str = "poll"
+    ) -> None:
+        """Report a source's failure as one error line, with a traceback only when unexpected.
+
+        An expected failure, such as an outage, a timeout or a command that exits
+        non-zero, comes back on every tick while it lasts. The report's error line, which
+        the tick prints, is its one record; a traceback would add nothing to it.
+        """
+        message = source_failure(name, exc)
+        if isinstance(exc, ChargehandError):
+            log.debug("%s", message)
+        else:
+            log.exception("source %s: %s failed", name, doing)
+        report.errors.append(message)
 
     def tracker_context(self, event: Event) -> RepositoryContext | None:
         """The repository whose tracker produced *event*; None for a ``[[source]]`` event.
@@ -531,9 +571,10 @@ class Runner:
             ("follow", lambda: self._follow_pull_requests(report)),
             ("route", lambda: self._route_events(report, crash_after_step=crash_after_step)),
             ("supervise", lambda: self._diff_and_notify(report)),
+            ("trackers", lambda: self._route_trackers(report)),
             ("deliver", lambda: self._deliver(report, crash_after_wake=crash_after_wake)),
             ("labels", lambda: self._sync_all_labels(report)),
-            ("admit", lambda: self._route_trackers(report, crash_after_step=crash_after_step)),
+            ("admit", lambda: self._admit(report, crash_after_step=crash_after_step)),
             ("collect", lambda: self._collect_garbage(report)),
         )
         for name, phase in phases:
@@ -773,13 +814,16 @@ class Runner:
         if repository is None or role_name not in repository.roles:
             return None
         context = self.context(repository)
-        owns_label = (
-            bool(previous.owns_label) if previous else self._queue_starts(context, role_name)
-        )
+        if previous is not None:
+            owns_label = previous.owns_label
+        elif self._queue_starts(context, role_name):
+            owns_label = ledger_mod.LABEL_QUEUE
+        else:
+            owns_label = ledger_mod.LABEL_NONE
         item_id, url = item, None
         if previous is not None:
             item_id, url = previous.item_id or item, previous.url
-        elif owns_label and context.source is not None:
+        elif owns_label == ledger_mod.LABEL_QUEUE and context.source is not None:
             try:
                 found = context.source.find(item)
             except TRACKER_FAILURES:
@@ -959,10 +1003,14 @@ class Runner:
             (s for s in self.sessions(worker.runtime, refresh=True) if s.id == worker.session_id),
             None,
         )
-        if session is None or self.runtime(worker.runtime).is_stopped(session):
+        if session is None:
+            return False, f"{worker.item}: respawn reported success but the session is gone"
+        if self.runtime(worker.runtime).is_stopped(session):
+            # A stopped session keeps the state of its last turn, often `done`, which says
+            # nothing about why the respawn did not take.
             return False, (
-                f"{worker.item}: respawn reported success but the session is "
-                f"{session.state if session else 'gone'}"
+                f"{worker.item}: respawn reported success but no process is running "
+                f"(the session lists as {session.state})"
             )
         worker = self.ledger.update(
             worker, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0
@@ -1199,9 +1247,8 @@ class Runner:
                 try:
                     item = source.pull_request_for(repository, branch)
                 except Exception as exc:
-                    log.exception("source %s: pull_request_for failed for %s", name, worker.handle)
-                    report.errors.append(
-                        f"source {name}: {sanitize.one_line(str(exc), limit=300)}"
+                    self._source_failed(
+                        report, name, exc, f"pull_request_for of {worker.handle}"
                     )
                     continue
                 if item is None:
@@ -1246,7 +1293,7 @@ class Runner:
 
         A source that fails is one error in the report and keeps its cursor, so its
         events arrive on the next tick; the other sources are routed as usual. The starts
-        of a repository's tracker wait for the tracker step.
+        of a repository's tracker wait for the admission step.
         """
         self._trackers_turn = False
         router = router_mod.Router(
@@ -1256,7 +1303,7 @@ class Runner:
             ),
             close=lambda event: self._close_from_event(event, report),
         )
-        # The tracker starts are kept for the tracker step, so they are not counted here.
+        # The tracker starts are kept for the admission step, so they are not counted here.
         later = sum(TrackerSource.produced(event) for event in self.ledger.pending_start_events())
         retried = router.retry_pending_starts()
         if retried.deferred > later:
@@ -1265,9 +1312,10 @@ class Runner:
             source = self.source(config.name)
             if source is None:
                 problem = self._sources.get(config.name)
-                message = sanitize.one_line(str(problem), limit=300)
                 report.errors.append(
-                    message if isinstance(problem, ConfigError) else f"source {config.name}: {message}"
+                    sanitize.one_line(str(problem), limit=300)
+                    if isinstance(problem, ConfigError)
+                    else source_failure(config.name, problem)
                 )
                 continue
             try:
@@ -1279,10 +1327,7 @@ class Runner:
             except LaunchAborted:
                 raise
             except Exception as exc:
-                log.exception("source %s failed", config.name)
-                report.errors.append(
-                    f"source {config.name}: {sanitize.one_line(str(exc), limit=300)}"
-                )
+                self._source_failed(report, config.name, exc)
                 continue
             own = [event for event in events if event.source == config.name]
             if len(own) != len(events):
@@ -1323,6 +1368,7 @@ class Runner:
             # Not this step's start: it is tried in the other one, once per tick.
             return True
         context = self.tracker_context(event)
+        from_tracker = context is not None
         if context is not None:
             repository = context.repository
         elif event.kind == roles_mod.LABELED:
@@ -1351,8 +1397,8 @@ class Runner:
             if repository.name not in self._polled_trackers:
                 # This tick's poll failed and is reported; the queue cannot be checked.
                 return True
-            # A start that waited may have left the queue since. The tracker step polls
-            # before it retries, so this reads the listing of this tick's poll.
+            # A start that waited may have left the queue since. The trackers are polled
+            # before the admission step, so this reads the listing of this tick's poll.
             try:
                 if not context.source.still_queued(event.item):  # type: ignore[union-attr]
                     return False
@@ -1365,7 +1411,7 @@ class Runner:
             try:
                 role = context.role(role_name)
             except ConfigError:
-                # Reported by the tracker step, once per tick. The role might start on this
+                # Reported by the tracker poll, once per tick. The role might start on this
                 # event, so the start waits until the role file loads again.
                 deferred = True
                 continue
@@ -1410,14 +1456,34 @@ class Runner:
                 report.skipped.append(refusal)
                 deferred = True
                 continue
+            if queue:
+                owner = ledger_mod.LABEL_QUEUE
+            elif from_tracker:
+                owner = ledger_mod.LABEL_NONE
+            else:
+                owner = self._source_status_owner(event)
             try:
-                self._launch(context, role, rule, event.item, report, owns_label=queue,
+                self._launch(context, role, rule, event.item, report, owns_label=owner,
                              crash_after_step=crash_after_step)
             except LaunchAborted:
                 raise
             except ChargehandError as exc:
                 report.errors.append(f"{item}: {exc}")
         return deferred
+
+    def _source_status_owner(self, event: Event) -> int:
+        """Whether a worker that *event* starts marks its item on the event's source.
+
+        Only when the source marks items, and only the first live worker on the item does
+        it: the first role listed in the repository takes it, as with the queue label.
+        """
+        source = self.source(event.source)
+        if source is None or not source.marks_items:
+            return ledger_mod.LABEL_NONE
+        for subscription, worker in self.ledger.live_subscriptions(event.source, event.item.key):
+            if subscription.is_primary and worker.owns_label == ledger_mod.LABEL_SOURCE:
+                return ledger_mod.LABEL_NONE
+        return ledger_mod.LABEL_SOURCE
 
     def _note_unconfigured(self, event: Event, report: TickReport) -> None:
         """Report a start event for a repository that no `[[repository]]` names, once.
@@ -1872,18 +1938,41 @@ class Runner:
 
     @staticmethod
     def _drives_label(worker: Worker) -> bool:
-        """Only a worker that the queue label started changes the label.
+        """Only a worker that the queue label started changes the queue label.
 
         The label is one per issue and several workers may follow the issue, so a worker
         that another event started only reads it. Recorded when the worker is created,
         so a later edit of the role file cannot hand the label to another worker.
         """
-        return bool(worker.owns_label)
+        return worker.owns_label == ledger_mod.LABEL_QUEUE
+
+    def _status_target(
+        self, worker: Worker, context: RepositoryContext | None
+    ) -> tuple[Source, WorkItem] | None:
+        """The source that shows *worker*'s state, and the item there; None for no call now.
+
+        A queue worker marks its issue on the repository's tracker. A worker that a
+        `[[source]]` that marks items started marks its primary item on that source, which
+        needs no usable repository. A source that cannot be built this tick is tried again
+        on the next one.
+        """
+        if self._drives_label(worker):
+            if context is None or not context.usable:
+                return None
+            assert context.source is not None
+            return context.source, context.item_of(worker)
+        if worker.owns_label != ledger_mod.LABEL_SOURCE:
+            return None
+        primary = self.ledger.primary_subscription(worker)
+        source = self.source(primary.source) if primary is not None else None
+        if primary is None or source is None:
+            return None
+        return source, primary.work_item
 
     def _sync_labels(
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> Worker:
-        """Drive the tracker towards the label the worker state implies.
+        """Drive the tracker, or the source item the worker marks, towards the worker state.
 
         `label_state` records what was last *verified*, so a write that could not be
         confirmed is simply retried on the next tick rather than assumed to have landed.
@@ -1891,12 +1980,12 @@ class Runner:
         desired = _STATUS_FOR_STATE.get(worker.state)
         if desired is None or worker.label_state == desired.value:
             return worker
-        if context is None or not context.usable:
+        target = self._status_target(worker, context)
+        if target is None:
             return worker
-        if not self._drives_label(worker):
-            return worker
+        source, item = target
         try:
-            context.source.mark(context.item_of(worker), desired)  # type: ignore[union-attr]
+            source.mark(item, desired)
         except ItemGone:
             report.warnings.append(f"{worker.item} no longer exists on the tracker")
             return self.ledger.update(worker, label_state=desired.value)
@@ -1925,23 +2014,22 @@ class Runner:
                 per_route[worker.repository] = per_route.get(worker.repository, 0) + 1
         return working, open_workers, per_route
 
-    def _route_trackers(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
-        """Poll each repository's tracker as a source, and route its events.
+    def _route_trackers(self, report: TickReport) -> None:
+        """Poll each repository's tracker as a source, and route its events before delivery.
 
-        Every tracker is polled first, so a start that waited checks the queue against
-        this poll's listing. Then the waiting starts go, before the new ones and after
-        the state diff, which may have freed a slot. A paused repository is not polled.
+        The filters, the inboxes and the closes run here, so a comment on a worker's issue
+        wakes it in this tick's delivery, as an event from a ``[[source]]`` does. The
+        tracker's starts are not this step's turn: the router keeps them as waiting
+        starts, and the admission step offers them to the start rules. A paused
+        repository is not polled.
         """
-        self._trackers_turn = True
+        self._trackers_turn = False
         router = router_mod.Router(
             self.ledger,
-            start=lambda event: self._start_from_event(
-                event, report, crash_after_step=crash_after_step
-            ),
+            start=lambda event: self._start_from_event(event, report),
             close=lambda event: self._close_from_event(event, report),
         )
         polled = self._poll_trackers(report)
-        router.retry_pending_starts()
         for repository, events, cursor in polled:
             source = self.context(repository).source
             assert source is not None
@@ -1958,6 +2046,22 @@ class Runner:
                     f"{repository.name}: {len(events)} tracker event(s), {result.own} by "
                     f"chargehand, {result.delivered} inbox row(s), {result.closed} worker(s) closed"
                 )
+
+    def _admit(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
+        """Offer the tracker's waiting starts to the start rules, oldest first, under the caps.
+
+        After the state diff, which may have freed a slot, and after delivery, so a
+        waiting worker gets a free slot before the queue starts a new one. Each tracker
+        was polled earlier in the tick, so a queue start checks the queue against this
+        tick's listing.
+        """
+        self._trackers_turn = True
+        router_mod.Router(
+            self.ledger,
+            start=lambda event: self._start_from_event(
+                event, report, crash_after_step=crash_after_step
+            ),
+        ).retry_pending_starts()
 
     def _poll_trackers(
         self, report: TickReport
@@ -1984,7 +2088,9 @@ class Runner:
                     self.ledger.get_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}"),
                     self._followed_items(context),
                 )
-            except TRACKER_FAILURES as exc:
+            except ChargehandError as exc:
+                # Expected, and back on every tick while it lasts: the report's error
+                # line is its one record.
                 report.errors.append(f"repository {repository.name}: {exc}")
                 continue
             except Exception as exc:
@@ -2057,10 +2163,10 @@ class Runner:
         item: WorkItem,
         report: TickReport,
         *,
-        owns_label: bool = False,
+        owns_label: int = ledger_mod.LABEL_NONE,
         crash_after_step: int | None = None,
     ) -> None:
-        """Start a worker of *role* on *item*; *owns_label* for a start by the queue label."""
+        """Start a worker of *role* on *item*; *owns_label* says what it marks its state on."""
         repository = context.repository
         repo_config = context.repo_config
         assert repo_config is not None
@@ -2070,7 +2176,7 @@ class Runner:
         # Step 0: the row, and the subscription to its own item, exist before any
         # external side effect. The url reaches the prompt as {item_url} and comes from the
         # source, so only a plain URL is kept. Only a worker the queue label starts drives
-        # the label.
+        # the label; a worker that marks its item on a `[[source]]` does it after the launch.
         with self.ledger.transaction():
             worker = self.ledger.create_worker(
                 role=role.name,
@@ -2477,7 +2583,9 @@ class Runner:
             return False
         try:
             return not source.item_open(item)
-        except TRACKER_FAILURES:
+        except ChargehandError as exc:
+            # An outage: the item counts as open until a later tick can ask again.
+            log.debug("%s", source_failure(source.name, exc))
             return False
         except Exception:
             # One source failure must not end the phase for every other worker.

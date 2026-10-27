@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 import pytest
@@ -110,9 +111,8 @@ def idle_with_a_reply(harness, config_file) -> None:
     run(["tick"], config_file)
     harness.claude_state.set_session_state("ABC-1", "done")
     run(["tick"], config_file)
+    # The tracker is polled before delivery, so the next tick delivers the reply.
     harness.board.comment("ABC-1")
-    # The tracker is polled after delivery, so the reply waits one tick in the inbox.
-    run(["tick"], config_file)
 
 
 def test_the_tick_prints_a_wake(capsys, config_file, harness):
@@ -141,6 +141,25 @@ def test_the_tick_prints_a_held_wake_and_the_move_to_queued(capsys, config_file,
         f"^{STAMP}skipped: implementer/ABC-1: wake held by the daily cap \\(0/0\\)$", out, re.M
     ), out
     assert re.search(f"^{STAMP}transition: ABC-1: wake held -> queued$", out, re.M), out
+
+
+def test_a_failing_source_is_one_line_per_tick(capsys, caplog, config_file, harness, tmp_path):
+    poll = tmp_path / "poll.sh"
+    poll.write_text("#!/bin/sh\ncat >/dev/null\necho 'upstream is down' >&2\nexit 2\n")
+    poll.chmod(0o755)
+    with config_file.open("a") as config:
+        config.write(f'\n[[source]]\nname = "demo"\ntype = "command"\npoll = "{poll}"\n')
+
+    run(["tick"], config_file)
+
+    out = capsys.readouterr()
+    lines = [line for line in (out.out + out.err).splitlines() if "upstream is down" in line]
+    assert len(lines) == 1, lines
+    assert re.fullmatch(f"{STAMP}error: source demo: poll exited 2: upstream is down", lines[0])
+    # Nothing at the level the tick logs by default.
+    assert not [
+        r for r in caplog.records if r.levelno >= logging.WARNING and r.name.startswith("chargehand")
+    ]
 
 
 def test_continue_force_is_recorded_as_such(config_file, harness):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import time
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from chargehand.ledger import Ledger
 from chargehand.notify import Notifier
 from chargehand.roles import StartRule
 from chargehand.router import Router, kind_matches, suitable_worker_exists
-from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem
+from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
 from chargehand.tick import Runner
 from support import fake_source
 from support.fake_source import FakeSource
@@ -61,6 +62,19 @@ def test_an_event_has_no_body():
 
     assert fields == {"source", "kind", "item", "actor", "occurred_at", "dedupe_id", "pointer", "marked"}
     assert AUTHORSHIP_MARKER
+
+
+@pytest.mark.parametrize(
+    "body,marked",
+    (
+        (f"Fixed.\n\n{AUTHORSHIP_MARKER}", True),
+        ("Fixed.\n\n<!-- chargehand -->", True),
+        ("chargehand fixed it", False),
+        (None, False),
+    ),
+)
+def test_both_marker_spellings_are_read_as_marked(body, marked):
+    assert is_marked(body) is marked
 
 
 # ----- the router against a ledger ----------------------------------------------
@@ -381,9 +395,23 @@ def test_a_failing_source_is_one_error_and_the_tick_goes_on(routed):
 
     report = routed.tick()
 
-    assert report.errors == ["source fake: fake: 503"]
+    # The source's own name at the start of its error is not repeated.
+    assert report.errors == ["source fake: 503"]
     assert report.launched == ["ABC-1"]
     assert routed.ledger.get_cursor("fake") is None
+
+
+def test_an_unexpected_source_failure_keeps_its_traceback(routed, caplog, monkeypatch):
+    def broken(self, cursor, items):
+        raise RuntimeError("unforeseen")
+
+    monkeypatch.setattr(FakeSource, "poll", broken)
+    with caplog.at_level(logging.WARNING, logger="chargehand"):
+        report = routed.tick()
+
+    assert report.errors == ["source fake: unforeseen"]
+    (record,) = [r for r in caplog.records if r.name == "chargehand.tick"]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
 
 
 def test_an_unknown_source_type_is_one_error(tmp_path, repo, claude_state, board):

@@ -19,7 +19,19 @@ from chargehand.trackers.base import Status
 # so the actor alone cannot tell a worker's comment from the operator's own; the marker
 # can. The router drops a marked comment by the signed-in account for every worker, so
 # two workers on one pull request do not wake each other in turn.
-AUTHORSHIP_MARKER = "<!-- chargehand -->"
+#
+# No space follows the name: a worker usually posts with the body on the command line,
+# and the launch deny rule `Bash(*chargehand *)` refuses any command that holds the name
+# and a space. The first spelling had that space, so it is still read as marked.
+AUTHORSHIP_MARKER = "<!-- chargehand-worker -->"
+LEGACY_AUTHORSHIP_MARKERS = ("<!-- chargehand -->",)
+
+
+def is_marked(body: object) -> bool:
+    """Whether a comment body carries the authorship marker, in any spelling it had."""
+    return isinstance(body, str) and any(
+        marker in body for marker in (AUTHORSHIP_MARKER, *LEGACY_AUTHORSHIP_MARKERS)
+    )
 
 
 @dataclass(frozen=True)
@@ -79,6 +91,25 @@ class Source(abc.ABC):
     def __init__(self, name: str, options: Mapping[str, object]) -> None:
         self.name = name
         self.options = dict(options)
+        # The configured repositories, once the tick has given them; None while unknown.
+        self.configured_repositories: tuple[Repository, ...] | None = None
+
+    def use_repositories(self, repositories: Sequence[Repository]) -> None:
+        """Tell the source which repositories are configured, once it is built.
+
+        A source may then skip a call for an item that no repository would start a worker
+        on. Without it, the source treats every repository as configured.
+        """
+        self.configured_repositories = tuple(repositories)
+
+    @property
+    def marks_items(self) -> bool:
+        """Whether :meth:`mark` shows a worker's state on the item.
+
+        The tick gives a worker that this source's start rule started the job of marking
+        its item only when this is true, so a source without labels costs no call.
+        """
+        return False
 
     @abc.abstractmethod
     def whoami(self) -> str:

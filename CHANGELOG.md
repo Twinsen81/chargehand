@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The authorship marker that workers add to their comments is now
+  `<!-- chargehand-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
+  the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that
+  carried it on its command line, and a worker could not post a review or a comment at all.
+  The shipped role and agent templates use the new spelling; the sources still read the old
+  one as marked, and a `command` source may report either.
 - The runner's unit of work is now a *worker*: one member of a *role*, usually bound to
   one work *item*. A role may have any number of workers. The ledger's `attempts` table
   becomes `workers`, with `role`, `origin`, `start_rule`, `runtime`, `item`, `item_id`
@@ -184,6 +190,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- One notification thread whose pull request `gh` cannot read (a server error, a timeout)
+  no longer fails the whole `github` source on every tick. The thread is logged and
+  skipped, the other threads and the followed pull requests arrive, and the list keeps its
+  old `Last-Modified`, so the next poll checks that thread again. A review request on a
+  repository that no `[[repository]]` names costs no extra call.
+- The tick now calls the `mark` command of a `command` source. The first worker that the
+  source's start rules start on an item shows its state there, `running`, `blocked` or
+  `done`; a write that exits 3 or fails is written again on the next tick.
+- A comment on a tracker issue wakes its worker in the same tick, as an event from a
+  `[[source]]` does. The trackers are polled and routed before delivery; their queue
+  starts still come after delivery, so a waiting worker gets a free slot first.
+- An expected source failure, such as an outage, a timeout or a command that exits
+  non-zero, is one error line per tick, without a traceback and without the source's name
+  twice. An unexpected exception still logs its traceback.
+- A refused `continue` says that no process is running when the respawn started none,
+  instead of quoting the state of the session's last turn.
+- A Linear issue with more than twenty pages of new comments goes on from the last page
+  read on the next poll, instead of reading the same pages again on every poll.
 - A worker woken by a resume no longer stays `running` after its turn. Claude Code 2.1.311
   lists a resumed background session as `working` with `status: idle` once the resumed
   turn has ended, so the adapter reads that pair as done.

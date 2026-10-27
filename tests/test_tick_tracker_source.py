@@ -32,6 +32,22 @@ def test_a_comment_on_an_issue_with_a_live_implementer_lands_in_its_inbox(harnes
     assert [row["kind"] for row in rows] == ["comment"]
 
 
+def test_a_comment_on_an_idle_workers_issue_wakes_it_in_the_same_tick(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    harness.claude_state.set_session_state("ABC-1", "done", status="idle")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+
+    harness.board.comment("ABC-1", author="reviewer@example.invalid")
+    report = harness.next_tick()
+
+    # The tracker is polled before delivery, as a `[[source]]` is.
+    assert report.woken == ["implementer/ABC-1"]
+    (entry,) = harness.ledger.inbox(harness.worker("ABC-1"), pending_only=False)
+    assert entry.delivered_at is not None
+
+
 def test_a_comment_a_worker_posted_wakes_nobody(harness):
     harness.board.add("ABC-1")
     harness.tick()

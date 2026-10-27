@@ -476,6 +476,10 @@ def test_continue_refuses_a_respawn_that_started_no_process(harness):
 
     assert result["ok"] == 0
     assert harness.worker("ABC-1").state == ledger_mod.PAUSED
+    # The listing still says `done`, the state of the last turn; the reason is the process.
+    assert result["message"] == (
+        "ABC-1: respawn reported success but no process is running (the session lists as done)"
+    )
 
 
 def test_a_stopped_idle_session_keeps_its_worker_paused(harness):
