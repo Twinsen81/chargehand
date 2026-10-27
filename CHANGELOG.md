@@ -69,10 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never takes a program from the head, and runs again before each wake so the checkout
   follows the head, then without taking a program from the session's worktree either.
   Every git call runs with hooks and the fsmonitor off, so no repository config runs a
-  program. A wake refuses a reviewer whose item checkout is gone, a symlink or a redirected
-  worktree, whose worktree left its branch, or whose Claude Code files changed since the
-  setup step, and checks again after the refresh; `chargehand continue --force` accepts a
-  file change after a look. A reply wakes it, its own marked comments do not, and a second
+  program, and the guard refuses a worktree whose `.git` was redirected to a git directory
+  the session wrote, read as data rather than followed. A wake refuses a reviewer whose item
+  checkout is gone, a symlink or a redirected worktree, whose worktree left its branch, or
+  whose Claude Code files changed since the setup step, and checks again after the refresh;
+  `chargehand continue --force` accepts a file change after a look. A reply wakes it, its own marked comments do not, and a second
   review request wakes it again.
   A start rule's `close_on` event on a worker's primary item ends the worker, and a start
   event for a repository that is not configured is reported once. `tick` prints wakes and

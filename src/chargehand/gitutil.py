@@ -224,6 +224,67 @@ class Git:
             return None
         return manifest
 
+    def recorded_admin_dir(self, repo: Path, worktree: Path) -> Path | None:
+        """The git directory the main checkout records for *worktree*, from its own files.
+
+        Reads ``<common>/worktrees/*/gitdir``, which live in the main checkout and the
+        session cannot write, and returns the admin directory of the one that names
+        *worktree*. Independent of the worktree's own ``.git``, so a redirected link does
+        not change the answer. None when *worktree* is not a registered linked worktree.
+        """
+        try:
+            common = self.run(["rev-parse", "--git-common-dir"], cwd=repo).stdout.strip()
+        except GitError:
+            return None
+        if not common:
+            return None
+        common_dir = Path(common)
+        if not common_dir.is_absolute():
+            common_dir = repo / common_dir
+        base = common_dir / "worktrees"
+        try:
+            want = worktree.resolve()
+            if not base.is_dir():
+                return None
+            for entry in sorted(base.iterdir()):
+                try:
+                    pointed = Path((entry / "gitdir").read_text(encoding="utf-8").strip())
+                except (OSError, ValueError):
+                    continue
+                if pointed.parent.resolve() == want:
+                    return entry.resolve()
+        except OSError:
+            return None
+        return None
+
+    def linked_gitdir(self, worktree: Path) -> Path | None:
+        """The directory *worktree*'s ``.git`` file points to, read as data, resolved.
+
+        The ``.git`` file is read, never followed by running git, so a redirected or
+        tampered link is seen rather than acted on. None when ``.git`` is a directory, a
+        symlink, missing, unreadable, or not a ``gitdir:`` pointer.
+        """
+        link = worktree / ".git"
+        try:
+            if link.is_symlink() or not link.is_file():
+                return None
+            text = link.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        prefix = "gitdir:"
+        if not text.startswith(prefix):
+            return None
+        target = text[len(prefix):].strip()
+        if not target:
+            return None
+        path = Path(target)
+        if not path.is_absolute():
+            path = worktree / path
+        try:
+            return path.resolve()
+        except OSError:
+            return None
+
     def add_detached_worktree(self, repo: Path, worktree: Path, base: str) -> None:
         """Create a worktree with a detached HEAD at *base*, or accept an existing one."""
         existing = self.list_worktrees(repo)

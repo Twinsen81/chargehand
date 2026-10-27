@@ -336,19 +336,20 @@ prompt. After the setup step, the tick records the files its runtime loads from 
 directory (for Claude Code: `.claude/`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`;
 tracked, untracked and ignored, symlinks by their target). Before each wake and each
 `continue`, it checks that the item checkout is still a detached worktree that git lists
-at its own path (not a symlink or a redirected `.git`), that the session's worktree is
-still on its branch and that those files are as recorded, and it checks again after the
-refresh step so a step aimed at the session's own worktree shows as a worktree off its
-branch; otherwise the worker is paused with a `wake-fault`, and `continue --force` records
-the files as they are, for an operator who has looked at them, while a worktree off its
-branch or a gone or redirected item checkout is not accepted. The launch checks that the
-role's agent file is in the worktree or the user's files, because an agent file that is
-only in the main checkout is not there. The commit the setup step leaves the item checkout
-on is recorded, so garbage collection does not count the pull request's own commits as
-unpushed work, also when they come from a fork or a fetch pruned their branch; a newer
-head that a later `gh pr checkout` fetched counts as the pull request's too. Garbage
-collection removes both checkouts, and either one with commits of the session's own keeps
-both.
+at its own path, that neither checkout's `.git` was replaced with a symlink or redirected
+to a git directory the session wrote (the `.git` file is read as data, compared with the
+record the main checkout keeps), that the session's worktree is still on its branch and
+that those files are as recorded, and it checks again after the refresh step so a step
+aimed at the session's own worktree shows as a worktree off its branch; otherwise the
+worker is paused with a `wake-fault`, and `continue --force` records the files as they
+are, for an operator who has looked at them, while a worktree off its branch or a gone or
+redirected item checkout is not accepted. The launch checks that the role's agent file is
+in the worktree or the user's files, because an agent file that is only in the main
+checkout is not there. The commit the setup step leaves the item checkout on is recorded,
+so garbage collection does not count the pull request's own commits as unpushed work, also
+when they come from a fork or a fetch pruned their branch; a newer head that a later `gh
+pr checkout` fetched counts as the pull request's too. Garbage collection removes both
+checkouts, and either one with commits of the session's own keeps both.
 
 Workers post as you. Both starter roles tell the worker in the prompt to end every comment
 it posts with the authorship marker, so its own comments wake no worker; a comment without

@@ -1713,6 +1713,9 @@ class Runner:
             branch = None
         if branch != worker.branch:
             return WorkspaceCheck("its worktree is no longer on its own branch")
+        link_fault = self._gitlink_fault(worker.repo_path, worker.worktree_path, "its worktree")
+        if link_fault is not None:
+            return WorkspaceCheck(link_fault)
         if accept_files:
             return WorkspaceCheck(self._record_workspace_files(worker))
         recorded = self.ledger.get_state(f"{WORKSPACE_FILES_PREFIX}{worker.id}")
@@ -1775,6 +1778,22 @@ class Runner:
             # A detached worktree has no branch. One with a branch is the session's own
             # worktree, reached because the checkout path led there.
             return "its item checkout is not where it was"
+        return self._gitlink_fault(worker.repo_path, checkout, "its item checkout")
+
+    def _gitlink_fault(self, repo: Path, worktree: Path, name: str) -> str | None:
+        """Why *worktree*'s ``.git`` must not be trusted, or None.
+
+        A linked worktree's ``.git`` is a file that points to the admin directory the main
+        checkout holds for it. A session that rewrites it to a directory of its own aims
+        every later git read, and the refresh's `gh pr checkout`, at config it controls.
+        So the link must still point to the admin directory the main checkout records,
+        which the main checkout keeps out of the session's reach.
+        """
+        admin = self.git.recorded_admin_dir(repo, worktree)
+        if admin is None:
+            return f"{name} is not a registered worktree"
+        if self.git.linked_gitdir(worktree) != admin:
+            return f"{name} no longer points at its own git directory"
         return None
 
     def _record_workspace_files(self, worker: Worker) -> str | None:

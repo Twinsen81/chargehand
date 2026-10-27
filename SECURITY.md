@@ -98,12 +98,15 @@ public location.
   symlink by its target path and, for a file, that file's content, and the `.claude` entry
   itself counts, so that a symlink in its place is seen. Otherwise a wake stops the idle
   session instead of resuming it, pauses the worker with its events kept and sends
-  `wake-fault` to the hook, and `continue` is refused. It also refuses the item checkout
-  itself when it is no longer a plain directory that git lists, from the main checkout, as
-  a detached worktree at its own path: a symlink or a redirected `.git` there would aim
-  the setup step, or a git read, at a directory the session chose. The check runs again
-  after the refresh step, so a step that moved the head into the session's own worktree
-  shows as a worktree off its branch before the resume. An operator who has looked at the
+  `wake-fault` to the hook, and `continue` is refused. It also refuses either checkout
+  when it is no longer a plain directory that git lists, from the main checkout, as the
+  worktree it was: a symlink, a `.git` that points somewhere other than the git directory
+  the main checkout recorded for it, or an item checkout that is not detached at its own
+  path. The main checkout holds those records out of the session's reach, and the `.git`
+  file is read as data, never followed by running git, so a redirected link is seen
+  rather than acted on. The check runs again after the refresh step, so a step that moved
+  the head into the session's own worktree shows as a worktree off its branch before the
+  resume. An operator who has looked at the
   worktree accepts a file change with `chargehand continue <item> --force`, which records
   the files as they are now; a worktree that left its branch, or whose item checkout is
   gone or redirected, is not accepted, and `chargehand discard` removes the worker.

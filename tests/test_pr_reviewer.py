@@ -830,6 +830,54 @@ def test_a_reviewer_whose_item_checkout_became_a_symlink_is_not_woken(reviewing,
     assert "replaced with a symlink" in outcome and "--force" not in outcome
 
 
+def test_a_redirected_git_link_in_the_item_checkout_is_not_woken(reviewing, gh, tmp_path):
+    """A .git that points at a git directory the session wrote would run its config."""
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    checkout = item_checkout_path(reviewer)
+    go_idle(reviewing)
+    (checkout / ".git").write_text(f"gitdir: {tmp_path / 'evil-gitdir'}\n")
+    comment(gh, 86, "alice", "look")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    assert "resumes" not in reviewing.claude_state.read()
+    paused = reviewing.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED
+    assert paused.last_error == (
+        "wake refused: its item checkout no longer points at its own git directory"
+    )
+    assert (PR_KEY, "wake-fault") in reviewing.notifications()
+    # The setup step never ran, so the item checkout was not fetched a second time.
+    assert gh.calls.count(["pr", "checkout", PR_URL, "--detach"]) == 1
+
+    reviewing.ledger.record_request("continue", PR_KEY, force=True)
+    report = reviewing.next_tick()
+    (outcome,) = [line for line in report.requests if line.startswith("continue")]
+    assert "points at its own git directory" in outcome and "--force" not in outcome
+
+
+def test_a_redirected_git_link_in_the_session_worktree_is_not_woken(reviewing, gh, tmp_path):
+    """The same tamper on the session's own worktree would run its config at the wake read."""
+    fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
+    reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
+    worktree = Path(reviewer.worktree)
+    go_idle(reviewing)
+    (worktree / ".git").write_text(f"gitdir: {tmp_path / 'evil-gitdir'}\n")
+    comment(gh, 87, "alice", "look")
+
+    report = reviewing.next_tick()
+
+    assert report.woken == []
+    paused = reviewing.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED
+    assert paused.last_error == (
+        "wake refused: its worktree no longer points at its own git directory"
+    )
+    assert (PR_KEY, "wake-fault") in reviewing.notifications()
+
+
 def test_a_refresh_that_poisons_the_session_worktree_faults_the_wake(
     reviewing, gh, tmp_path, monkeypatch
 ):

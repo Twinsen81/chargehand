@@ -118,3 +118,50 @@ def test_a_configured_hook_does_not_run_for_a_git_call(tmp_path):
     git.run(["commit", "-m", "init"], cwd=repo)
 
     assert not marker.exists()
+
+
+def test_the_recorded_admin_dir_matches_a_real_linked_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git("init", "--initial-branch=main", cwd=repo)
+    run_git("config", "user.email", "t@example.invalid", cwd=repo)
+    run_git("config", "user.name", "t", cwd=repo)
+    (repo / "f").write_text("x\n")
+    run_git("add", "-A", cwd=repo)
+    run_git("commit", "-m", "init", cwd=repo)
+    wt = tmp_path / "wt"
+    run_git("worktree", "add", "--detach", str(wt), "HEAD", cwd=repo)
+
+    git = Git()
+    admin = git.recorded_admin_dir(repo, wt)
+    assert admin is not None and admin.name == "wt"
+    # The worktree's own .git file points at exactly that admin directory.
+    assert git.linked_gitdir(wt) == admin
+
+
+def test_a_redirected_or_replaced_git_link_is_seen(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git("init", "--initial-branch=main", cwd=repo)
+    run_git("config", "user.email", "t@example.invalid", cwd=repo)
+    run_git("config", "user.name", "t", cwd=repo)
+    (repo / "f").write_text("x\n")
+    run_git("add", "-A", cwd=repo)
+    run_git("commit", "-m", "init", cwd=repo)
+    wt = tmp_path / "wt"
+    run_git("worktree", "add", "--detach", str(wt), "HEAD", cwd=repo)
+    git = Git()
+    admin = git.recorded_admin_dir(repo, wt)
+
+    # A .git file redirected elsewhere no longer matches the recorded admin directory.
+    (wt / ".git").write_text(f"gitdir: {tmp_path / 'evil'}\n")
+    assert git.linked_gitdir(wt) != admin
+    # A .git that is a directory, or a symlink, is not a plain link at all.
+    (wt / ".git").unlink()
+    (wt / ".git").mkdir()
+    assert git.linked_gitdir(wt) is None
+    (wt / ".git").rmdir()
+    (wt / ".git").symlink_to(admin)
+    assert git.linked_gitdir(wt) is None
+    # The recorded admin directory is unchanged by any of this.
+    assert git.recorded_admin_dir(repo, wt) == admin
