@@ -30,7 +30,19 @@ class AmbiguousWrite(TrackerError):
     """
 
 
-class ClaudeError(ChargehandError):
+class ItemGone(ChargehandError):
+    """The work item no longer exists on its source.
+
+    Not a TrackerError: the tick treats those as a passing outage and tries again, and an
+    item that is gone does not come back.
+    """
+
+
+class AgentRuntimeError(ChargehandError):
+    """A runtime's agent is missing, failed, or returned output its adapter cannot use."""
+
+
+class ClaudeError(AgentRuntimeError):
     """The Claude Code CLI is missing, failed, or returned unparseable output."""
 
 
@@ -56,3 +68,7 @@ class LaunchAborted(ChargehandError):
     def __init__(self, step: int) -> None:
         super().__init__(f"launch aborted after step {step}")
         self.step = step
+
+
+class DeliveryAborted(ChargehandError):
+    """Fault injection stopped a delivery after the wake and before its ledger write."""

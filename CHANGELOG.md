@@ -54,9 +54,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Claude Code adapter passes `--agent`, `--model`, `--effort` and `--plugin-dir` at
   launch, and can wake a stopped background session with a new prompt by its full
   session id, recognising when Claude Code started a copy instead.
+- Claude Code is now the `claude` runtime behind a runtime interface (launch, wake, stop,
+  session states, attach command, fork) with declared capabilities. The tick, the control
+  commands and reconciliation reach it only through that interface, and a role's runtime
+  checks its own role-file keys. `status --json` reports each worker's and session's
+  `runtime`.
 
 ### Added
 
+- A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
+  pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
+  pull request head from a separate checkout, `{item_checkout}`, so the author's Claude
+  Code settings and hooks are never loaded. Its setup runs with git hooks turned off and
+  never takes a program from the head, and runs again before each wake so the checkout
+  follows the head, then without taking a program from the session's worktree either.
+  Every git call runs with hooks and the fsmonitor off, so no repository config runs a
+  program, and the guard refuses a worktree whose `.git` was redirected to a git directory
+  the session wrote, read as data rather than followed. A wake refuses a reviewer whose item
+  checkout is gone, a symlink or a redirected worktree, whose worktree left its branch, or
+  whose Claude Code files changed since the setup step, and checks again after the refresh;
+  `chargehand continue --force` accepts a file change after a look. A reply wakes it, its own marked comments do not, and a second
+  review request wakes it again.
+  A start rule's `close_on` event on a worker's primary item ends the worker, and a start
+  event for a repository that is not configured is reported once. `tick` prints wakes and
+  held wakes, and `status` shows how to attach to idle and queued workers.
+- A `command` event source for any system without a built-in source: a configured
+  executable reads the cursor on stdin and prints events as JSON lines, with optional
+  `mark` and `item_open` commands. The contract is documented in `docs/command-source.md`.
+- Delivery. Once per tick, each idle worker with events in its inbox gets one wake that
+  lists the events' pointers and continues the same session, admitted against
+  `max_concurrent`, the role's `max_wakes_per_day` and the usage reserve. The events are
+  marked delivered only after the wake, so a crash in between delivers them again. Workers
+  gain the live states `idle` (a turn ended without a question, which was "go look"
+  before) and `queued` (a wake was held back), and a worker follows the pull request of
+  its own pushed branch for comments, reviews and CI results. A resume that starts a copy
+  pauses the worker and notifies.
+- A repository's tracker is now an event source, and the tick reaches it only that way.
+  The queue becomes `labeled` events through the router, and the issues that live workers
+  follow give `comment` and `done` events, so a comment on an issue lands in the inbox of
+  every worker that follows it; a comment a worker posted with the authorship marker does
+  not. The `linear` adapter still lists the whole queue on each poll, and reads the
+  followed issues and their comments since each one's previous poll in one more query.
+  The implementer role, from a pre-roles `.chargehand.toml` or from the starter role file,
+  subscribes to `comment` and declares `close_on = ["done"]`. A queue start waits in the
+  router while the caps, a pause, a live worker on the issue or a broken role file hold it
+  back, is tried after the state diff so the tick that frees a slot uses it, and is
+  dropped once its issue has left the queue.
+- A `github` event source and a `github` tracker, both through the `gh` CLI. The source
+  polls the account's notifications with `If-Modified-Since` at the pace that GitHub's
+  `X-Poll-Interval` asks for, and the pull requests that workers follow for comments,
+  reviews, commit statuses, check runs and the close; a `[[repository]]` maps its events by
+  `github = "owner/repo"`. The tracker lets GitHub Issues be a repository's queue.
+- Event sources and a publish-and-subscribe router. A `[[source]]` table in the machine
+  configuration names a poller (`name`, `type`, and the type's own options); each tick
+  polls every source after the watchdog, drops events seen before and comments that a
+  chargehand worker posted as the signed-in account (by an authorship marker), puts one
+  inbox row per matching live subscriber, and then runs the enabled roles' start rules,
+  which start a worker subscribed to its item unless a suitable worker already has it. A
+  start that the caps defer is kept for up to a week and tried again. Only a worker the
+  queue label started changes the label, recorded as `owns_label` when it is created. The
+  ledger moves to version 3 with `subscriptions`, `inbox`, `events` and `cursors` tables
+  and the `owns_label` column; a version 2 ledger gains them in place.
 - Runner: a `tick` that reconciles interrupted launches, applies recorded control
   requests, runs the watchdog, diffs session states against the ledger, admits queued
   issues within the launch throttle, launches them ledger-row-first, and collects
@@ -126,6 +184,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A worker woken by a resume no longer stays `running` after its turn. Claude Code 2.1.311
+  lists a resumed background session as `working` with `status: idle` once the resumed
+  turn has ended, so the adapter reads that pair as done.
 - A launch that Claude Code refuses as an untrusted workspace writes the worktree's trust
   entry again and retries at once, up to three times in the same launch step. A Claude
   Code process that is already running can write `~/.claude.json` back without the entry

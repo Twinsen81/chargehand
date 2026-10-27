@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Mapping
 
 from chargehand.config import Repository
@@ -10,6 +11,17 @@ from chargehand.trackers.base import Issue, Status, Tracker
 from chargehand.trackers.linear import LinearTracker
 
 _BUILTIN: dict[str, type[Tracker]] = {LinearTracker.type: LinearTracker}
+
+# Adapters that live in a source module, imported when first asked for: the sources
+# package imports this one, so importing them here would be circular.
+_DEFERRED = {"github": ("chargehand.sources.github", "GithubTracker")}
+
+
+def _adapter(tracker_type: str) -> type[Tracker]:
+    if tracker_type not in _BUILTIN and tracker_type in _DEFERRED:
+        module, name = _DEFERRED[tracker_type]
+        _BUILTIN[tracker_type] = getattr(importlib.import_module(module), name)
+    return _BUILTIN[tracker_type]
 
 
 def register(adapter: type[Tracker]) -> None:
@@ -20,12 +32,12 @@ def register(adapter: type[Tracker]) -> None:
 
 
 def available() -> tuple[str, ...]:
-    return tuple(sorted(_BUILTIN))
+    return tuple(sorted(set(_BUILTIN) | set(_DEFERRED)))
 
 
 def build(repository: Repository) -> Tracker:
     try:
-        adapter = _BUILTIN[repository.tracker.type]
+        adapter = _adapter(repository.tracker.type)
     except KeyError as exc:
         raise ConfigError(
             f"repository '{repository.name}': unknown tracker type '{repository.tracker.type}'; "
@@ -36,7 +48,7 @@ def build(repository: Repository) -> Tracker:
 
 def build_from(tracker_type: str, options: Mapping[str, object], labels: Mapping[str, str]) -> Tracker:
     try:
-        adapter = _BUILTIN[tracker_type]
+        adapter = _adapter(tracker_type)
     except KeyError as exc:
         raise ConfigError(f"unknown tracker type '{tracker_type}'") from exc
     return adapter(options, labels)  # type: ignore[call-arg]

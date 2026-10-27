@@ -118,16 +118,17 @@ def test_answering_a_blocked_session_flips_the_label_back(harness):
     assert harness.labels("ABC-1") == ("chargehand-running",)
 
 
-def test_done_without_a_status_file_means_go_look(harness):
+def test_done_without_a_status_file_means_idle(harness):
+    """Every role waits for events when a turn ends without a question; the label still asks for a look."""
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "done")
 
     harness.next_tick()
 
-    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
-    detail = harness.notifier.sent[-1].detail
-    assert "go look" in detail
+    sent = harness.notifier.sent[-1]
+    assert (sent.state, sent.detail) == ("idle", "turn ended; waits for events")
 
 
 def _with_status_file(harness, repo, tmp_path):
@@ -362,11 +363,11 @@ def test_the_setup_script_from_the_worktrees_own_checkout_is_used(harness, repo)
     assert (harness.worktree("ABC-1") / "which").read_text().strip() == "main-checkout"
 
 
-def test_a_blocked_run_is_closed_out_when_its_issue_closes(harness):
+def test_an_idle_run_is_closed_out_when_its_issue_closes(harness):
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
-    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
 
     harness.board.close("ABC-1")
     report = harness.next_tick()
@@ -535,8 +536,8 @@ def test_a_status_file_from_an_earlier_attempt_is_ignored(harness, repo, tmp_pat
     harness.next_tick()
 
     after = harness.worker("ABC-1")
-    assert after.state == ledger_mod.BLOCKED
-    assert "predates this worker" in harness.notifier.sent[-1].detail
+    assert after.state == ledger_mod.IDLE
+    assert harness.notifier.sent[-1].state == "idle"
 
 
 def test_a_status_file_written_by_this_attempt_is_still_honoured(harness, repo, tmp_path):

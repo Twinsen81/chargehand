@@ -32,8 +32,10 @@ PERMISSION_MODES = ("auto", "manual", "acceptEdits", "dontAsk", "plan", "bypassP
 # itself. Adding a text variable here would undo the main prompt-injection defense.
 #
 # {issue} and {url} are the names from before work items existed; they render the same
-# values as {item} and {item_url} and stay accepted.
-TEMPLATE_VARS = ("item", "item_url", "worktree", "branch", "repo", "issue", "url")
+# values as {item} and {item_url} and stay accepted. {item_checkout} is the separate
+# checkout of the item's head for a role with `checkout = "item"`, and the worktree itself
+# for any other role.
+TEMPLATE_VARS = ("item", "item_url", "item_checkout", "worktree", "branch", "repo", "issue", "url")
 
 DEFAULT_LABELS = {
     "queued": "chargehand",
@@ -220,6 +222,35 @@ class TrackerConfig:
 
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_GITHUB_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}/[A-Za-z0-9._-]{1,100}")
+
+
+@dataclass(frozen=True)
+class SourceConfig:
+    """One ``[[source]]`` table: a poller that produces events.
+
+    Keys other than ``name`` and ``type`` belong to the source type and are passed to it
+    unchanged; the source checks them itself. ``name`` defaults to the type, and event
+    kinds are qualified by it, as in ``github.review_requested``.
+    """
+
+    name: str
+    type: str
+    options: Mapping[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def parse(cls, table: object, where: str) -> "SourceConfig":
+        if not isinstance(table, Mapping):
+            raise ConfigError(f"{where}: expected a table, e.g. {{ name = \"github\", type = \"github\" }}")
+        kind = _as_str(_require(table, "type", where), f"{where}.type")
+        name = _as_str(table.get("name", kind), f"{where}.name")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ConfigError(
+                f"{where}.name: use lower-case letters, digits and underscore, starting with a "
+                f"letter, because event kinds are qualified by it"
+            )
+        options = {k: v for k, v in table.items() if k not in ("name", "type")}
+        return cls(name=name, type=kind, options=options)
 
 DEFAULT_ROLES = ("implementer",)
 
@@ -242,11 +273,15 @@ class Repository:
     labels: Labels
     max_concurrent: int | None = None
     roles: tuple[str, ...] = DEFAULT_ROLES
+    # The repository on GitHub, as owner/repo: what github source events are mapped by.
+    github: str | None = None
 
     @classmethod
     def parse(cls, table: Mapping[str, object], where: str, defaults: Labels) -> "Repository":
         _unknown_keys(
-            table, ("name", "path", "repo", "tracker", "labels", "max_concurrent", "roles"), where
+            table,
+            ("name", "path", "repo", "tracker", "labels", "max_concurrent", "roles", "github"),
+            where,
         )
         if "path" in table and "repo" in table:
             raise ConfigError(f"{where}: give either path or repo, not both")
@@ -270,6 +305,11 @@ class Repository:
             if role in roles:
                 raise ConfigError(f"{where}.roles: '{role}' is listed twice")
             roles.append(role)
+        github = None
+        if "github" in table:
+            github = _as_str(table["github"], f"{where}.github")
+            if not _GITHUB_REPO.fullmatch(github) or github.split("/")[1] in (".", ".."):
+                raise ConfigError(f"{where}.github: expected the repository as owner/repo")
         return cls(
             name=name,
             path=path,
@@ -277,6 +317,7 @@ class Repository:
             labels=Labels.parse(table.get("labels"), f"{where}.labels", defaults),
             max_concurrent=max_concurrent,
             roles=tuple(roles),
+            github=github,
         )
 
 
@@ -319,6 +360,7 @@ class MachineConfig:
     # Keys that are accepted for one release and have no effect, for `doctor` to name.
     ignored_keys: tuple[str, ...] = ()
     source: Path | None = None
+    sources: tuple[SourceConfig, ...] = ()
 
     _TOP_LEVEL = (
         "poll_interval_secs",
@@ -340,6 +382,7 @@ class MachineConfig:
         "labels",
         "repository",
         "route",
+        "source",
     )
 
     def repository_by_name(self, name: str) -> Repository | None:
@@ -373,6 +416,19 @@ class MachineConfig:
         duplicate = next((n for n in names if names.count(n) > 1), None)
         if duplicate:
             raise ConfigError(f"config: duplicate repository name '{duplicate}'")
+
+        raw_sources = data.get("source", [])
+        if not isinstance(raw_sources, list):
+            raise ConfigError("config: [[source]] entries must be tables")
+        sources = tuple(
+            SourceConfig.parse(entry, f"source[{index}]") for index, entry in enumerate(raw_sources)
+        )
+        source_names = [s.name for s in sources]
+        duplicate = next((n for n in source_names if source_names.count(n) > 1), None)
+        if duplicate:
+            raise ConfigError(
+                f"config: duplicate source name '{duplicate}'; give each [[source]] its own `name`"
+            )
 
         worktree_root = _expand(
             _as_str(data.get("worktree_root", "~/chargehand-worktrees"), "config.worktree_root")
@@ -424,7 +480,11 @@ class MachineConfig:
             git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
             ignored_keys=tuple(key for key in _IGNORED_KEYS if key in data),
             source=source,
+            sources=sources,
         )
+
+    def source_by_name(self, name: str) -> SourceConfig | None:
+        return next((s for s in self.sources if s.name == name), None)
 
 
 @dataclass(frozen=True)

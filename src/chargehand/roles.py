@@ -7,8 +7,9 @@ launch. Everything else about the role lives in a small TOML file: the runtime, 
 first prompt, the permission mode, the model and effort, the allow rules, the start
 rules that create a worker on their own, and the policy caps.
 
-``agent``, ``permission_mode`` and ``allow`` belong to the ``claude`` runtime, the
-only one so far. Another runtime brings its own keys and checks them itself.
+Role files are flat: the common keys sit next to the keys of the role's runtime, and
+the runtime checks its own keys (see :mod:`chargehand.runtime`). ``agent``,
+``permission_mode`` and ``allow`` belong to the ``claude`` runtime, the default.
 
 Lookup order for a role named ``pr-reviewer``:
 
@@ -28,26 +29,31 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chargehand import claude as claude_mod
 from chargehand import paths
+from chargehand import runtime as runtime_mod
 from chargehand.config import (
-    PERMISSION_MODES,
     TEMPLATE_VARS,
     RepoConfig,
     render_argv,
-    validate_permission_rule,
     validate_template,
 )
 from chargehand.errors import ConfigError
 
 DEFAULT_ROLE = "implementer"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-CHECKOUTS = ("base", "item")
-RUNTIMES = ("claude",)
+CHECKOUT_BASE = "base"
+# The session works in a checkout of `base`; the item's head is checked out separately,
+# by the role's setup step, and the prompt names it as {item_checkout}.
+CHECKOUT_ITEM = "item"
+CHECKOUTS = (CHECKOUT_BASE, CHECKOUT_ITEM)
+DEFAULT_RUNTIME = runtime_mod.DEFAULT_RUNTIME
 
 # The event kind every tracker adapter produces for "an issue got the queue label".
 # A role starts on it as `labeled`, which means any tracker, or as `<tracker>.labeled`.
 LABELED = "labeled"
+# The kinds a tracker produces for the issues that live workers follow.
+COMMENT = "comment"
+DONE = "done"
 
 # The start rule a pre-roles `.chargehand.toml` describes, and the rule recorded on
 # workers migrated from a version 1 ledger.
@@ -205,27 +211,23 @@ class Policy:
 class Role:
     name: str
     prompt: str
-    runtime: str = "claude"
-    permission_mode: str = "auto"
-    agent: str | None = None
+    runtime: str = DEFAULT_RUNTIME
     model: str | None = None
     effort: str | None = None
-    allow: tuple[str, ...] = ()
     checkout: str = "base"
     status_file: str | None = None
     setup: str | None = None
     start: tuple[StartRule, ...] = ()
     policy: Policy = field(default_factory=Policy)
     source: Path | None = None
+    # The keys the runtime owns, as its parse_role_options returned them.
+    options: Mapping[str, object] = field(default_factory=dict)
 
     _KEYS = (
         "runtime",
-        "agent",
         "model",
         "effort",
         "prompt",
-        "permission_mode",
-        "allow",
         "checkout",
         "status_file",
         "setup",
@@ -236,20 +238,19 @@ class Role:
     @classmethod
     def parse(cls, name: str, data: Mapping[str, object], source: Path | None = None) -> "Role":
         where = str(source) if source else f"role {name}"
-        _unknown_keys(data, cls._KEYS, where)
-        runtime = _as_str(data.get("runtime", "claude"), f"{where}.runtime")
-        if runtime not in RUNTIMES:
-            raise ConfigError(
-                f"{where}.runtime: unknown runtime '{runtime}'; expected one of {', '.join(RUNTIMES)}"
-            )
+        runtime = _as_str(data.get("runtime", DEFAULT_RUNTIME), f"{where}.runtime")
+        try:
+            runtime_type = runtime_mod.get(runtime)
+        except ConfigError as exc:
+            raise ConfigError(f"{where}.runtime: {exc}") from None
+        _unknown_keys(
+            data, cls._KEYS + runtime_type.role_keys, f"{where} (runtime '{runtime}')"
+        )
+        options = runtime_type.parse_role_options(
+            {key: data[key] for key in runtime_type.role_keys if key in data}, where
+        )
         prompt = _as_str(data.get("prompt") if "prompt" in data else None, f"{where}.prompt")
         _check_prompt(prompt, where)
-        mode = _as_str(data.get("permission_mode", "auto"), f"{where}.permission_mode")
-        if mode not in PERMISSION_MODES:
-            raise ConfigError(
-                f"{where}.permission_mode: unknown mode '{mode}'; "
-                f"expected one of {', '.join(PERMISSION_MODES)}"
-            )
         effort = data.get("effort")
         if effort is not None:
             effort = _as_str(effort, f"{where}.effort")
@@ -261,9 +262,6 @@ class Role:
         checkout = _as_str(data.get("checkout", "base"), f"{where}.checkout")
         if checkout not in CHECKOUTS:
             raise ConfigError(f"{where}.checkout: expected one of {', '.join(CHECKOUTS)}")
-        allow = _as_strings(data.get("allow", []), f"{where}.allow")
-        for rule in allow:
-            validate_permission_rule(rule, where=f"{where}.allow")
         setup = data.get("setup")
         if setup is not None:
             render_argv(
@@ -278,33 +276,38 @@ class Role:
             name=name,
             prompt=prompt,
             runtime=runtime,
-            permission_mode=mode,
-            agent=_as_str(data["agent"], f"{where}.agent") if data.get("agent") is not None else None,
             model=_as_str(data["model"], f"{where}.model") if data.get("model") is not None else None,
             effort=effort,
-            allow=allow,
             checkout=checkout,
             status_file=status_file,
             setup=setup,
             start=_parse_start_rules(data.get("start", []), f"{where}.start"),
             policy=Policy.parse(data.get("policy", {}), f"{where}.policy"),
             source=source,
+            options=options,
         )
+
+    # Read by the callers that describe a role. A runtime without these keys gives the
+    # empty value.
+    @property
+    def agent(self) -> str | None:
+        value = self.options.get("agent")
+        return value if isinstance(value, str) else None
+
+    @property
+    def permission_mode(self) -> str:
+        value = self.options.get("permission_mode")
+        return value if isinstance(value, str) else ""
+
+    @property
+    def allow(self) -> tuple[str, ...]:
+        return tuple(self.options.get("allow") or ())  # type: ignore[arg-type]
 
     def start_rule_for(
         self, kind: str, source: str | None = None, repository: str | None = None
     ) -> StartRule | None:
         """The first start rule that creates a worker for this event, or None."""
         return next((rule for rule in self.start if rule.matches(kind, source, repository)), None)
-
-    def launch_settings(self, deny_rules: tuple[str, ...]) -> dict[str, object] | None:
-        """The per-launch settings payload: the machine's deny rules and this role's allow rules."""
-        permissions: dict[str, list[str]] = {}
-        if deny_rules:
-            permissions["deny"] = list(deny_rules)
-        if self.allow:
-            permissions["allow"] = list(self.allow)
-        return {"permissions": permissions} if permissions else None
 
 
 def _check_prompt(prompt: str, where: str) -> None:
@@ -348,9 +351,11 @@ def legacy_role(repo_config: RepoConfig, *, tracker_type: str | None = None) -> 
     return Role(
         name=DEFAULT_ROLE,
         prompt=repo_config.prompt,
-        permission_mode=repo_config.permission_mode,
+        options={"permission_mode": repo_config.permission_mode},
         status_file=repo_config.status_file,
-        start=(StartRule(on=on, name=QUEUE_RULE),),
+        start=(
+            StartRule(on=on, name=QUEUE_RULE, subscribe=(COMMENT,), close_on=(DONE,)),
+        ),
         source=repo_config.source,
     )
 
@@ -363,7 +368,7 @@ def load_role(
     tracker_type: str | None = None,
     check_agent: bool = True,
 ) -> Role:
-    """Find and parse a role, checking that the agent file it names exists."""
+    """Find and parse a role, and let its runtime check what the role needs, such as an agent file."""
     validate_role_name(name)
     candidates = role_file_candidates(repo, name)
     for candidate in candidates:
@@ -378,22 +383,21 @@ def load_role(
                 f"{repo}: no role named '{name}'; looked for {looked}. "
                 f"Run `chargehand init` in the repository to write a starter role."
             )
-    if check_agent and role.agent and not any(
-        path.is_file() for path in claude_mod.agent_file_candidates(repo, role.agent)
-    ):
-        looked = ", ".join(str(c) for c in claude_mod.agent_file_candidates(repo, role.agent))
-        raise ConfigError(f"{role.source or name}: agent '{role.agent}' not found; looked for {looked}")
+    if check_agent:
+        runtime_mod.get(role.runtime).check_role(role, repo)
     return role
 
 
 __all__ = [
+    "COMMENT",
     "DEFAULT_ROLE",
+    "DONE",
+    "DEFAULT_RUNTIME",
     "EFFORT_LEVELS",
     "LABELED",
     "Policy",
     "QUEUE_RULE",
     "Role",
-    "RUNTIMES",
     "StartRule",
     "UNLESS_ANY",
     "UNLESS_ROLE",

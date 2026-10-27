@@ -6,9 +6,8 @@ import dataclasses
 import json
 import stat
 
-from conftest import FAKE_CLAUDE, Harness, make_config
+from conftest import FAKE_CLAUDE, Harness, make_config, run_git
 from chargehand import ledger as ledger_mod
-from chargehand.claude import ClaudeCLI
 from chargehand.config import DEFAULT_DENY_RULES
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger
@@ -23,9 +22,13 @@ def write_role(repo, name, text):
 
 
 def write_agent(repo, name):
+    """Commit and push the agent file: the session starts in a checkout of the base branch."""
     target = repo / ".claude" / "agents" / f"{name}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"---\nname: {name}\n---\nBe the {name}.\n")
+    run_git("add", str(target), cwd=repo)
+    run_git("commit", "-m", f"agent {name}", cwd=repo)
+    run_git("push", "origin", "main", cwd=repo)
 
 
 def harness_with(tmp_path, repo, claude_state, board, **overrides) -> Harness:
@@ -34,7 +37,7 @@ def harness_with(tmp_path, repo, claude_state, board, **overrides) -> Harness:
     config = make_config(repo, worktree_root, **overrides)
     ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
     notifier = Notifier(config.notify)
-    runner = Runner(config, ledger, claude=ClaudeCLI(config.claude_bin), git=Git(),
+    runner = Runner(config, ledger, git=Git(),
                     notifier=notifier)
     return Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
 

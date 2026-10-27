@@ -1,6 +1,6 @@
 """The control surface: a CLI, reached over SSH. There is no server.
 
-Two rules shape this module. A mutating command never calls Claude Code, git, or a
+Two rules shape this module. A mutating command never calls a runtime, git, or a
 tracker itself — it records a request and lets a tick apply it, so a cancel cannot
 race a launch in progress. And nothing that originated outside chargehand is printed
 without going through :mod:`chargehand.sanitize`; issue titles and agent output are
@@ -22,13 +22,13 @@ from pathlib import Path
 
 from chargehand import __version__, install, paths, sanitize, trackers
 from chargehand import roles as roles_mod
-from chargehand.claude import ClaudeCLI
+from chargehand import runtime as runtime_mod
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError, TickBusy
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
-from chargehand.tick import Runner, tick_lock
+from chargehand.tick import REQUEST_MESSAGE_LIMIT, Runner, tick_lock
 from chargehand.trackers import Status
 
 DESCRIPTION = (
@@ -44,6 +44,16 @@ EXIT_REFUSED = 3
 # often it kick-starts the job meanwhile.
 SCHEDULED_JOB_WAIT_SECS = 30.0
 KICKSTART_RETRY_SECS = 2.0
+
+# The worker states whose session `status` offers to attach to.
+ATTACH_STATES = ("blocked", "idle", "queued")
+
+# The parts of a tick report that `tick` prints, in this order. `skipped` holds the
+# launches and wakes that a cap or a pause held back.
+TICK_FIELDS = (
+    "launched", "adopted", "resumed", "woken", "failed", "transitions", "requests",
+    "collected", "skipped", "warnings", "errors",
+)
 
 log = logging.getLogger("chargehand")
 
@@ -66,7 +76,6 @@ def _runner(config: MachineConfig, ledger: Ledger) -> Runner:
     return Runner(
         config,
         ledger,
-        claude=ClaudeCLI(config.claude_bin),
         git=Git(config.git_bin),
         notifier=Notifier(config.notify),
     )
@@ -115,10 +124,13 @@ def _branch_is_ours(worker: Worker) -> bool:
     return worker.branch.endswith(worker.item)
 
 
-def _worker_dict(worker: Worker, *, verbose: bool) -> dict[str, object]:
+def _worker_dict(
+    worker: Worker, *, verbose: bool, runner: Runner | None = None
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "item": worker.item,
         "role": worker.role,
+        "runtime": worker.runtime,
         "repository": worker.repository,
         "state": worker.state,
         "session_state": worker.session_state,
@@ -138,8 +150,12 @@ def _worker_dict(worker: Worker, *, verbose: bool) -> dict[str, object]:
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
     }
-    if worker.state == "blocked" and worker.session_id:
-        payload["attach"] = f"claude attach {worker.session_id}"
+    # An idle or queued worker ended a turn whose result the operator may want to read.
+    if worker.state in ATTACH_STATES and worker.session_id and runner is not None:
+        try:
+            payload["attach"] = runner.runtime(worker.runtime).attach_command(worker.session_id)
+        except ConfigError:
+            pass
     if verbose:
         if worker.waiting_for:
             payload["waiting_for"] = sanitize.one_line(worker.waiting_for)
@@ -160,10 +176,16 @@ def build_status(
     runner = _runner(config, ledger)
 
     sessions_payload: list[dict[str, object]] = []
-    session_error: str | None = None
-    try:
-        for session in runner.claude.list_sessions():
+    session_errors: list[str] = []
+    for runtime_name in runner.runtime_names():
+        try:
+            sessions = runner.runtime(runtime_name).list_sessions()
+        except ChargehandError as exc:
+            session_errors.append(f"{runtime_name}: {exc}")
+            continue
+        for session in sessions:
             entry: dict[str, object] = {
+                "runtime": runtime_name,
                 "id": session.id,
                 "state": session.state,
                 "raw_state": sanitize.one_line(session.raw_state, limit=40),
@@ -174,8 +196,7 @@ def build_status(
                 entry["name"] = sanitize.one_line(session.name or "", limit=64)
                 entry["waiting_for"] = sanitize.one_line(session.waiting_for or "", limit=120)
             sessions_payload.append(entry)
-    except ChargehandError as exc:
-        session_error = str(exc)
+    session_error = "; ".join(session_errors) or None
 
     repositories_payload = []
     for repository in config.repositories:
@@ -212,6 +233,7 @@ def build_status(
                 roles_payload[name] = {"error": str(exc)}
                 continue
             roles_payload[name] = {
+                "runtime": role.runtime,
                 "prompt": role.prompt,
                 "permission_mode": role.permission_mode,
                 "agent": role.agent,
@@ -253,9 +275,9 @@ def build_status(
             ],
         },
         "repositories": repositories_payload,
-        "workers": [_worker_dict(w, verbose=verbose) for w in workers],
+        "workers": [_worker_dict(w, verbose=verbose, runner=runner) for w in workers],
         "recent": [
-            _worker_dict(w, verbose=verbose)
+            _worker_dict(w, verbose=verbose, runner=runner)
             for w in ledger.recent_workers(10)
             if w.is_terminal
         ],
@@ -278,7 +300,7 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
     if runner["paused_repositories"]:
         lines.append(f"  paused repositories: {', '.join(runner['paused_repositories'])}")
     if status.get("session_error"):
-        lines.append(f"  ! claude: {sanitize.one_line(str(status['session_error']), limit=160)}")
+        lines.append(f"  ! {sanitize.one_line(str(status['session_error']), limit=160)}")
 
     lines.append("")
     lines.append("repositories")
@@ -351,14 +373,11 @@ def cmd_tick(args: argparse.Namespace) -> int:
         _emit_json(report.as_dict())
     else:
         stamp = _stamp()
-        for field in ("launched", "adopted", "resumed", "failed", "transitions", "requests",
-                      "collected", "warnings", "errors"):
+        for field in TICK_FIELDS:
             for entry in getattr(report, field):
                 _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
                        f"{sanitize.one_line(str(entry), limit=200)}")
-        if not any(getattr(report, f) for f in ("launched", "adopted", "resumed", "failed",
-                                                "transitions", "requests", "collected",
-                                                "warnings", "errors")):
+        if not any(getattr(report, f) for f in TICK_FIELDS):
             _print(f"{stamp} nothing to do")
     return EXIT_ERROR if report.errors else EXIT_OK
 
@@ -420,7 +439,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
         print(f"{worker.handle} has no session", file=sys.stderr)
         return EXIT_ERROR
     try:
-        output = ClaudeCLI(config.claude_bin).logs(worker.session_id, lines=args.lines)
+        output = runtime_mod.create(worker.runtime, config).logs(worker.session_id, lines=args.lines)
     except ChargehandError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_ERROR
@@ -501,7 +520,7 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
     if applied is None or applied["applied_at"] is None:
         _print(f"recorded: {_described(kind, target)} — the next tick will apply it")
         return EXIT_OK
-    message = sanitize.one_line(applied["message"] or "", limit=300)
+    message = sanitize.one_line(applied["message"] or "", limit=REQUEST_MESSAGE_LIMIT)
     if applied["ok"]:
         _print(f"{_described(kind, target)}: {message}")
         return EXIT_OK
@@ -530,7 +549,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_continue(args: argparse.Namespace) -> int:
-    return _request(args, "continue", args.item, **_role_args(args))
+    return _request(args, "continue", args.item, force=args.force, **_role_args(args))
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
@@ -640,14 +659,20 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     repo = Path(args.repo or ".").expanduser().resolve()
     try:
-        written = install.init_repo(repo, force=args.force)
+        written = install.init_repo(repo, force=args.force, roles=args.role)
     except ChargehandError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_REFUSED
     for target in written:
         _print(f"wrote {target}")
-    _print("Edit `base` in the repository configuration and `prompt` in the role, then add "
-           "the repository to your machine configuration.")
+    if args.role:
+        _print(f"Add {', '.join(args.role)} to the repository's `roles` in your machine "
+               "configuration. Commit an agent file to the base branch, or copy it to "
+               "~/.claude/agents: sessions start in a checkout of the base branch. The "
+               "comments at the top of each role file say what else it needs.")
+    else:
+        _print("Edit `base` in the repository configuration and `prompt` in the role, then add "
+               "the repository to your machine configuration.")
     return EXIT_OK
 
 
@@ -725,11 +750,18 @@ def build_parser() -> argparse.ArgumentParser:
     for name, handler, help_text in (
         ("cancel", cmd_cancel, "stop the session and mark the item blocked; keep the worktree"),
         ("stop", cmd_stop, "pause one worker"),
-        ("continue", cmd_continue, "respawn a stopped or blocked worker"),
     ):
         sub = add(name, handler, help_text)
         add_item(sub)
         _add_request_flags(sub)
+
+    continue_cmd = add("continue", cmd_continue, "respawn a stopped or blocked worker")
+    add_item(continue_cmd)
+    continue_cmd.add_argument(
+        "--force", action="store_true",
+        help="accept the agent's files in the worktree as they are now, after you checked them",
+    )
+    _add_request_flags(continue_cmd)
 
     retry = add("retry", cmd_retry, "start a new worker for a failed or cancelled one")
     add_item(retry)
@@ -758,6 +790,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--repo", help="repository root (default: the current directory)")
     init.add_argument("--output", help="where to write the machine config")
     init.add_argument("--force", action="store_true")
+    init.add_argument(
+        "--role", action="append", default=[], metavar="NAME",
+        help="write this starter role and its agent file instead of the implementer; "
+             "repeatable (e.g. pr-reviewer)",
+    )
 
     templates = add("templates", cmd_templates, "print a bundled template")
     templates.add_argument("name", nargs="?", help="e.g. skill/SKILL.md, roles/implementer.toml")

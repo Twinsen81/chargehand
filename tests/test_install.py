@@ -62,9 +62,11 @@ def test_init_writes_a_repo_config_that_parses(tmp_path, capsys):
     assert config.base
     assert config.prompt is None
     from chargehand.roles import load_role
+    from chargehand.sources import AUTHORSHIP_MARKER
 
     role = load_role(tmp_path, "implementer", repo_config=config, tracker_type="linear")
-    assert role.prompt == "{item}"
+    # The worker posts as the operator, so it must mark its comments or they wake it.
+    assert "{item}" in role.prompt and AUTHORSHIP_MARKER in role.prompt
     assert role.permission_mode == "auto"
     assert role.start_rule_for("labeled", "linear") is not None
 
@@ -76,6 +78,52 @@ def test_init_refuses_to_overwrite_without_force(tmp_path):
         install.init_repo(tmp_path)
 
     assert install.init_repo(tmp_path, force=True)
+
+
+def test_init_writes_a_starter_role_and_its_agent_file_on_request(tmp_path, capsys):
+    from chargehand.config import load_repo_config
+    from chargehand.roles import load_role
+
+    config = tmp_path / ".chargehand.toml"
+    config.write_text('base = "origin/main"\n')
+
+    assert main(["init", "--repo", str(tmp_path), "--role", "pr-reviewer"]) == EXIT_OK
+
+    # The repository configuration that exists is left alone.
+    assert config.read_text() == 'base = "origin/main"\n'
+    assert not (tmp_path / ".chargehand" / "roles" / "implementer.toml").exists()
+    agent = tmp_path / ".claude" / "agents" / "pr-reviewer.md"
+    assert agent.read_text() == (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text()
+    # The role finds its agent file.
+    role = load_role(tmp_path, "pr-reviewer", repo_config=load_repo_config(tmp_path))
+    assert role.agent == "pr-reviewer"
+    assert role.start_rule_for("review_requested", "github") is not None
+
+    with pytest.raises(ChargehandError, match="--force"):
+        install.init_repo(tmp_path, roles=["pr-reviewer"])
+    assert install.init_repo(tmp_path, roles=["pr-reviewer"], force=True) == [
+        tmp_path / ".chargehand" / "roles" / "pr-reviewer.toml", agent,
+    ]
+
+
+def test_init_writes_the_repository_configuration_with_a_role_when_it_is_missing(tmp_path):
+    written = install.init_repo(tmp_path, roles=["pr-reviewer", "implementer"])
+
+    assert written == [
+        tmp_path / ".chargehand.toml",
+        tmp_path / ".chargehand" / "roles" / "pr-reviewer.toml",
+        tmp_path / ".claude" / "agents" / "pr-reviewer.md",
+        tmp_path / ".chargehand" / "roles" / "implementer.toml",
+    ]
+
+
+def test_init_refuses_a_role_it_has_no_template_for(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert main(["init", "--repo", str(repo), "--role", "../x"]) == EXIT_REFUSED
+    assert "available: implementer, pr-reviewer" in capsys.readouterr().err
+    assert list(repo.iterdir()) == []
 
 
 def test_init_machine_writes_a_config_and_a_notify_script(tmp_path, capsys):
@@ -136,6 +184,19 @@ def test_doctor_flags_a_bypass_permissions_route(capsys, config_file, harness, r
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
     assert checks["repository test role implementer"]["status"] == install.WARN
     assert "dedicated machine" in checks["repository test role implementer"]["detail"]
+
+
+def test_doctor_checks_every_runtime_a_role_uses(capsys, config_file, harness, repo):
+    role = repo / ".chargehand" / "roles" / "implementer.toml"
+    role.parent.mkdir(parents=True)
+    role.write_text('runtime = "fake"\nprompt = "{item}"\n\n[[start]]\non = "labeled"\n')
+
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
+    assert checks["claude"]["status"] == install.OK
+    assert checks["fake sessions"]["status"] == install.OK
+    assert checks["repository test role implementer"]["detail"] == "runtime fake"
 
 
 def test_doctor_warns_when_the_launch_deny_rules_cannot_be_passed(capsys, config_file, harness):

@@ -1,6 +1,12 @@
 """Linear adapter: GraphQL over an API key.
 
-Two things drive the shape of this module. Label writes are single-label add/remove
+The poll reads the whole queue, one paged query as the queue listing always was, so a
+start that waited is never lost and an empty queue costs one small query. The issues
+that live workers follow are read in one more query, with their comments since each
+issue's previous poll; that is what the cursor keeps. A comment body is read only to
+find the authorship marker; it does not leave this module.
+
+Two things drive the shape of the label writes. Label writes are single-label add/remove
 mutations rather than a whole-list update, so a concurrent label edit by a human is
 not clobbered. And every write is followed by a re-read, because the two mutations
 run serially rather than atomically and a reported failure may still have landed.
@@ -11,14 +17,17 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit, urlunsplit
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
-from chargehand.trackers.base import Issue, Status, Tracker
+from chargehand.trackers.base import Comment, Issue, Status, Tracker, TrackerPoll
 
 DEFAULT_ENDPOINT = "https://api.linear.app/graphql"
 DEFAULT_KEY_ENV = "CHARGEHAND_LINEAR_API_KEY"
@@ -32,6 +41,7 @@ _ISSUE_FIELDS = """
   branchName
   labels { nodes { id name } }
   state { name type }
+  updatedAt
 """
 
 _QUEUE_QUERY = """
@@ -53,6 +63,57 @@ query Issue($id: String!) {
 """ % _ISSUE_FIELDS
 
 _VIEWER_QUERY = "query { viewer { id name email } }"
+
+_POLL_QUERY = """
+query Poll($filter: IssueFilter!, $after: String) {
+  issues(first: 50, after: $after, filter: $filter) {
+    nodes {
+      %s
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+""" % _ISSUE_FIELDS
+
+# The body is asked for only to find the authorship marker.
+_FOLLOWED_QUERY = """
+query Followed($filter: IssueFilter!, $comments: CommentFilter) {
+  issues(first: 50, filter: $filter) {
+    nodes {
+      %s
+      comments(first: 50, filter: $comments) {
+        nodes { id createdAt body user { id name email } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""" % _ISSUE_FIELDS
+
+# The next pages of one issue's comments, with the same filter as the first page.
+_COMMENTS_QUERY = """
+query Comments($id: String!, $comments: CommentFilter, $after: String) {
+  issue(id: $id) {
+    comments(first: 50, after: $after, filter: $comments) {
+      nodes { id createdAt body user { id name email } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+# Pages of the queue read in one poll. Far more than one account has queued at once.
+_MAX_QUEUE_PAGES = 10
+_FOLLOWED_CHUNK = 50
+# Pages of one issue's comments read in one poll. An issue with more left is read from
+# the same point again on the next poll.
+_MAX_COMMENT_PAGES = 20
+
+# A comment can become readable a moment after a later one was already read, so every
+# poll reads this far back again. The overlap costs nothing: the router drops what it has
+# seen before. Comment times come from Linear's clock and are compared with this
+# machine's, which the overlap also covers.
+OVERLAP_SECS = 300
 
 # `first` is a ceiling, not an expectation: with a team filter the answer is one label,
 # and without one a workspace can hold a great many with the same name. A full page is
@@ -84,6 +145,74 @@ def _lookup_keychain(service: str, account: str | None) -> str | None:
     return result.stdout.strip() or None
 
 
+def _timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _author(user: object) -> str:
+    """The comment's author, named the way :meth:`LinearTracker.whoami` names the viewer."""
+    if not isinstance(user, Mapping):
+        return ""
+    return str(user.get("email") or user.get("name") or user.get("id") or "")
+
+
+def _marked(body: object) -> bool:
+    # Imported here: the sources package imports the trackers package.
+    from chargehand.sources.base import AUTHORSHIP_MARKER
+
+    return isinstance(body, str) and AUTHORSHIP_MARKER in body
+
+
+def _number(raw: object) -> float | None:
+    return float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+
+
+@dataclass
+class _Cursor:
+    """When each followed issue was last read for comments. A followed issue seen for the
+    first time is read from the previous poll on: its worker started after that poll and
+    reads the issue itself."""
+
+    polled_at: float | None = None
+    items: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, value: str | None) -> "_Cursor":
+        try:
+            data = json.loads(value) if value else {}
+        except ValueError:
+            return cls()
+        if not isinstance(data, dict):
+            return cls()
+        items = data.get("items")
+        return cls(
+            polled_at=_number(data.get("polled_at")),
+            items={
+                str(key): float(since)
+                for key, since in (items.items() if isinstance(items, dict) else ())
+                if _number(since) is not None
+            },
+        )
+
+    def dump(self) -> str:
+        return json.dumps(
+            {"polled_at": self.polled_at, "items": self.items},
+            sort_keys=True,
+        )
+
+
 class LinearTracker(Tracker):
     type = "linear"
 
@@ -113,6 +242,7 @@ class LinearTracker(Tracker):
         self._api_key: str | None = None
         self._label_ids: dict[str, str] = {}
         self._viewer: str | None = None
+        self.clock: Callable[[], float] = time.time
 
     def describe(self) -> str:
         bits = [self.type]
@@ -207,6 +337,12 @@ class LinearTracker(Tracker):
         return self._viewer
 
     def list(self, status: Status) -> list[Issue]:
+        nodes = (
+            self._post(_QUEUE_QUERY, {"filter": self._filter_for(status)}).get("issues") or {}
+        ).get("nodes", [])
+        return [self._to_issue(node) for node in nodes]
+
+    def _filter_for(self, status: Status) -> dict[str, Any]:
         label = self._label_for(status)
         if label is None:
             raise TrackerError("linear: cannot list issues by the 'done' status")
@@ -222,10 +358,111 @@ class LinearTracker(Tracker):
         # running has been moved on by whatever the prompt runs, and must still be found.
         if self._state and status is Status.QUEUED:
             issue_filter["state"] = {"name": {"eq": self._state}}
-        nodes = (self._post(_QUEUE_QUERY, {"filter": issue_filter}).get("issues") or {}).get(
-            "nodes", []
-        )
-        return [self._to_issue(node) for node in nodes]
+        return issue_filter
+
+    # ----- the poll -----------------------------------------------------------
+
+    def poll(self, cursor: str | None, followed: Sequence[str]) -> TrackerPoll:
+        state = _Cursor.load(cursor)
+        now = self.clock()
+        queued = self._queue()
+        issues: list[Issue] = []
+        comments: list[Comment] = []
+        unfinished: set[str] = set()
+        start = state.polled_at if state.polled_at is not None else now
+        since = {issue_id: state.items.get(issue_id, start) for issue_id in followed}
+        if followed:
+            issues, comments, unfinished = self._read_followed(since)
+        # An issue with comments left after the pages read here is read from the same
+        # point again.
+        state.items = {
+            issue_id: since[issue_id] if issue_id in unfinished else now for issue_id in followed
+        }
+        state.polled_at = now
+        return TrackerPoll(queued=queued, followed=issues, comments=comments, cursor=state.dump())
+
+    def _queue(self) -> list[Issue]:
+        """The whole queue, on every poll: a start that waited longer than the router keeps
+        it is offered again, and the listing tells a waiting start whether its issue is
+        still queued."""
+        issue_filter = self._filter_for(Status.QUEUED)
+        issues: list[Issue] = []
+        after: str | None = None
+        for _ in range(_MAX_QUEUE_PAGES):
+            page = (
+                self._post(_POLL_QUERY, {"filter": issue_filter, "after": after}).get("issues")
+                or {}
+            )
+            issues += [self._to_issue(node) for node in page.get("nodes") or []]
+            info = page.get("pageInfo") or {}
+            after = info.get("endCursor")
+            if not info.get("hasNextPage") or not after:
+                break
+        return issues
+
+    def _read_followed(
+        self, since: Mapping[str, float]
+    ) -> tuple[list[Issue], list[Comment], set[str]]:
+        """The followed issues, their comments since each one's time, and the issues whose
+        comments did not fit in the pages one poll reads.
+
+        Every page of comments is read through ``pageInfo``, so nothing depends on the
+        order in which Linear returns them.
+        """
+        ids = sorted(since)
+        comment_filter = {"createdAt": {"gt": _iso(min(since.values()) - OVERLAP_SECS)}}
+        issues: list[Issue] = []
+        comments: list[Comment] = []
+        unfinished: set[str] = set()
+        for offset in range(0, len(ids), _FOLLOWED_CHUNK):
+            variables = {
+                "filter": {"id": {"in": ids[offset : offset + _FOLLOWED_CHUNK]}},
+                "comments": comment_filter,
+            }
+            page = self._post(_FOLLOWED_QUERY, variables).get("issues") or {}
+            for node in page.get("nodes") or []:
+                issue = self._to_issue(node)
+                if issue.id not in since:
+                    continue
+                issues.append(issue)
+                after = since[issue.id] - OVERLAP_SECS
+                entries, complete = self._all_comments(
+                    issue.id, node.get("comments") or {}, comment_filter
+                )
+                if not complete:
+                    unfinished.add(issue.id)
+                for entry in entries:
+                    created = _timestamp(entry.get("createdAt"))
+                    if not entry.get("id") or created is None or created <= after:
+                        continue
+                    comments.append(
+                        Comment(
+                            id=str(entry["id"]),
+                            issue=issue,
+                            author=_author(entry.get("user")),
+                            created_at=created,
+                            marked=_marked(entry.get("body")),
+                        )
+                    )
+        return issues, comments, unfinished
+
+    def _all_comments(
+        self, issue_id: str, first: Mapping[str, Any], comment_filter: Mapping[str, Any]
+    ) -> tuple[list[Mapping[str, Any]], bool]:
+        """The comment entries of *first* and of the pages after it; False when more are
+        left after the last page this poll reads."""
+        entries = list(first.get("nodes") or [])
+        info = first.get("pageInfo") or {}
+        for _ in range(_MAX_COMMENT_PAGES - 1):
+            if not info.get("hasNextPage") or not info.get("endCursor"):
+                return entries, True
+            variables = {"id": issue_id, "comments": comment_filter, "after": info["endCursor"]}
+            connection = (
+                (self._post(_COMMENTS_QUERY, variables).get("issue") or {}).get("comments") or {}
+            )
+            entries += connection.get("nodes") or []
+            info = connection.get("pageInfo") or {}
+        return entries, not (info.get("hasNextPage") and info.get("endCursor"))
 
     def get(self, issue_id: str) -> Issue | None:
         node = self._post(_ISSUE_QUERY, {"id": issue_id}).get("issue")
@@ -401,4 +638,5 @@ class LinearTracker(Tracker):
             labels=labels,
             state=state.get("name"),
             closed=state_type in ("completed", "canceled"),
+            updated_at=_timestamp(node.get("updatedAt")),
         )
