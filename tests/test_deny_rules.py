@@ -253,3 +253,22 @@ def test_the_template_ships_the_same_rules_the_runner_passes():
     shipped = json.loads((paths.templates_dir() / "launch-deny-rules.json").read_text())
     assert shipped["permissions"]["deny"] == list(DEFAULT_DENY_RULES)
 
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'gh pr comment 1 --body "Fixed.\n\n<!-- chargehand-worker -->"',
+        "gh pr review https://github.com/o/r/pull/1 --comment --body 'Looks fine. <!-- chargehand-worker -->'",
+        'gh pr create --base main --title "Note" --body "Test.\n\n<!-- chargehand-worker -->"',
+    ),
+)
+def test_a_worker_may_post_a_comment_that_carries_the_marker(command):
+    # Workers post with the body on the command line; a marker that the rules refuse
+    # would leave every worker unable to post at all.
+    assert first_matching_rule(DEFAULT_DENY_RULES, command) is None
+
+
+def test_the_first_marker_spelling_is_refused_on_a_command_line():
+    # Why the marker changed: the name followed by a space is what the rules refuse.
+    assert first_matching_rule(DEFAULT_DENY_RULES, 'gh pr comment 1 --body "ok <!-- chargehand -->"')

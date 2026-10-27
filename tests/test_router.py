@@ -20,7 +20,7 @@ from chargehand.ledger import Ledger
 from chargehand.notify import Notifier
 from chargehand.roles import StartRule
 from chargehand.router import Router, kind_matches, suitable_worker_exists
-from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem
+from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
 from chargehand.tick import Runner
 from support import fake_source
 from support.fake_source import FakeSource
@@ -62,6 +62,19 @@ def test_an_event_has_no_body():
 
     assert fields == {"source", "kind", "item", "actor", "occurred_at", "dedupe_id", "pointer", "marked"}
     assert AUTHORSHIP_MARKER
+
+
+@pytest.mark.parametrize(
+    "body,marked",
+    (
+        (f"Fixed.\n\n{AUTHORSHIP_MARKER}", True),
+        ("Fixed.\n\n<!-- chargehand -->", True),
+        ("chargehand fixed it", False),
+        (None, False),
+    ),
+)
+def test_both_marker_spellings_are_read_as_marked(body, marked):
+    assert is_marked(body) is marked
 
 
 # ----- the router against a ledger ----------------------------------------------

@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from chargehand.errors import AmbiguousWrite, TrackerError
-from chargehand.sources import AUTHORSHIP_MARKER
+from chargehand.sources import is_marked
 from chargehand.trackers import register
 from chargehand.trackers.base import Comment, Issue, Status, Tracker, TrackerPoll
 
@@ -84,7 +84,7 @@ class Board:
             issue=issue,
             author=author,
             created_at=self.next_time(),
-            marked=AUTHORSHIP_MARKER in body,
+            marked=is_marked(body),
         )
         self.comments.append(comment)
         return comment

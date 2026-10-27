@@ -27,7 +27,7 @@ checkout is brought up to date before you are woken.
 
 End every comment, review and reply you post with this line, exactly as written:
 
-<!-- chargehand -->
+<!-- chargehand-worker -->
 
 You post as the owner of this machine, and chargehand wakes you for new comments on the
 pull request. The line above is how it knows that a comment is yours, so a comment

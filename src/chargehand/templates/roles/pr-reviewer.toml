@@ -16,7 +16,7 @@ agent = "pr-reviewer"
 # Workers post as you. The marker at the end tells chargehand that a comment is the
 # worker's own, so it does not wake the worker. It is in the prompt as well as in the
 # agent file, so a missing agent file does not let the reviewer wake itself.
-prompt = "Review the pull request {item_url}. Its head is checked out at {item_checkout}; read the code there. End every comment, review and reply you post with <!-- chargehand -->"
+prompt = "Review the pull request {item_url}. Its head is checked out at {item_checkout}; read the code there. End every comment, review and reply you post with <!-- chargehand-worker -->"
 permission_mode = "auto"
 # Read the pull request and comment on it without a prompt. Everything else, `gh api`
 # included, goes to the auto-mode classifier or a permission prompt: `gh api` can approve

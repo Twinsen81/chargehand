@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from chargehand.config import SourceConfig
 from chargehand.errors import ConfigError
-from chargehand.sources.base import AUTHORSHIP_MARKER, Event, Source, WorkItem
+from chargehand.sources.base import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
 from chargehand.sources.command import CommandSource
 from chargehand.sources.github import GithubSource
 
@@ -43,5 +43,6 @@ __all__ = [
     "WorkItem",
     "available",
     "build",
+    "is_marked",
     "register",
 ]

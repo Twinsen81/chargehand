@@ -19,7 +19,19 @@ from chargehand.trackers.base import Status
 # so the actor alone cannot tell a worker's comment from the operator's own; the marker
 # can. The router drops a marked comment by the signed-in account for every worker, so
 # two workers on one pull request do not wake each other in turn.
-AUTHORSHIP_MARKER = "<!-- chargehand -->"
+#
+# No space follows the name: a worker usually posts with the body on the command line,
+# and the launch deny rule `Bash(*chargehand *)` refuses any command that holds the name
+# and a space. The first spelling had that space, so it is still read as marked.
+AUTHORSHIP_MARKER = "<!-- chargehand-worker -->"
+LEGACY_AUTHORSHIP_MARKERS = ("<!-- chargehand -->",)
+
+
+def is_marked(body: object) -> bool:
+    """Whether a comment body carries the authorship marker, in any spelling it had."""
+    return isinstance(body, str) and any(
+        marker in body for marker in (AUTHORSHIP_MARKER, *LEGACY_AUTHORSHIP_MARKERS)
+    )
 
 
 @dataclass(frozen=True)

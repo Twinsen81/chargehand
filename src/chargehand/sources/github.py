@@ -34,7 +34,7 @@ from urllib.parse import quote
 from chargehand import sanitize
 from chargehand.config import Repository
 from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
-from chargehand.sources.base import AUTHORSHIP_MARKER, Event, Source, WorkItem
+from chargehand.sources.base import Event, Source, WorkItem, is_marked
 from chargehand.trackers.base import Issue, Status, Tracker
 
 log = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ def _login(user: object) -> str:
 
 
 def _marked(body: object) -> bool:
-    return isinstance(body, str) and AUTHORSHIP_MARKER in body
+    return is_marked(body)
 
 
 # ----- the gh command line -----------------------------------------------------

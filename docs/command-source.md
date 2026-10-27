@@ -85,7 +85,7 @@ skipped:
 | `ref` | no | The item in the system's own terms, given to `mark` and `item_open` as `{ref}`. Defaults to `item`. |
 | `url` | no | The item's web page, given to the launch prompt as `{item_url}`. Must be a plain http(s) URL. |
 | `repository` | no | Which of the source's `repositories` a start event belongs to. Without it, a source with exactly one repository uses that one, and a source with several starts nothing on the event. |
-| `marked` | no | `true` when the event is a comment that carries chargehand's authorship marker, `<!-- chargehand -->`. Default `false`. |
+| `marked` | no | `true` when the event is a comment that carries chargehand's authorship marker, `<!-- chargehand-worker -->`, or its older spelling `<!-- chargehand -->`. Default `false`. |
 
 An event never has a body. Read a comment's text in your command at most to find the
 marker, and do not print it.

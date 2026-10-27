@@ -170,9 +170,9 @@ def _author(user: object) -> str:
 
 def _marked(body: object) -> bool:
     # Imported here: the sources package imports the trackers package.
-    from chargehand.sources.base import AUTHORSHIP_MARKER
+    from chargehand.sources.base import is_marked
 
-    return isinstance(body, str) and AUTHORSHIP_MARKER in body
+    return is_marked(body)
 
 
 def _number(raw: object) -> float | None:

@@ -143,8 +143,11 @@ events and the next cursor, an optional `mark` for label writes, and `item_open`
 collection. It is configured as a `[[source]]` table with a `name`, a `type`, and the type's
 own options. An event names its source, kind, work item, actor, time, a dedupe id and a
 pointer (a URL or identifier the worker fetches itself). It never carries a body: a source
-reads a comment only to find chargehand's authorship marker, and the text stays in the
-source. Kinds are bare (`comment`, any source) or qualified by the source name
+reads a comment only to find chargehand's authorship marker, `<!-- chargehand-worker -->`,
+and the text stays in the source. No space follows the name, because a worker posts with
+the body on its command line and the launch deny rule `Bash(*chargehand *)` refuses the
+name followed by a space; the first spelling, `<!-- chargehand -->`, is still read as
+marked. Kinds are bare (`comment`, any source) or qualified by the source name
 (`github.comment`).
 
 Delivery is publish and subscribe. A worker subscribes to work items, each with a set of

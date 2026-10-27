@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The authorship marker that workers add to their comments is now
+  `<!-- chargehand-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
+  the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that
+  carried it on its command line, and a worker could not post a review or a comment at all.
+  The shipped role and agent templates use the new spelling; the sources still read the old
+  one as marked, and a `command` source may report either.
 - The runner's unit of work is now a *worker*: one member of a *role*, usually bound to
   one work *item*. A role may have any number of workers. The ledger's `attempts` table
   becomes `workers`, with `role`, `origin`, `start_rule`, `runtime`, `item`, `item_id`
