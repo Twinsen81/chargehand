@@ -343,6 +343,22 @@ def test_a_review_request_without_a_thread_warns_once_a_day(source, gh, clock):
     assert len(warnings) == 1
 
 
+def test_the_printed_warning_keeps_the_hint_with_long_keys(source, gh, capsys):
+    from chargehand import cli
+    from chargehand.tick import TickReport
+
+    for number in (101, 102, 103):
+        gh.add_pull(f"octo/{'long-repository-name-' * 4}{number}#{number}", updated_at=OLD_REQUEST)
+    warnings, _ = review_warnings(source, gh)
+    assert len(warnings) == 1 and len(warnings[0]) > 200
+
+    cli._print_report(TickReport(warnings=warnings))
+
+    line = capsys.readouterr().out.strip()
+    assert line.endswith("…")
+    assert 'check that GitHub\'s "On GitHub" setting for participating notifications is on' in line
+
+
 def test_a_review_request_with_a_thread_does_not_warn(source, gh):
     gh.add_pull(PR, updated_at=OLD_REQUEST)
     gh.notify("review_requested", PR, updated_at=OLD_REQUEST, unread=False)

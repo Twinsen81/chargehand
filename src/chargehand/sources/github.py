@@ -601,11 +601,12 @@ class GithubSource(Source):
         return threads, False
 
     def _review_thread_warning(self, keys: Sequence[str]) -> str:
+        # The hint comes before the keys: `tick` cuts a printed line at 200 characters.
         shown = ", ".join(keys[:10]) + (f" and {len(keys) - 10} more" if len(keys) > 10 else "")
         return (
-            f"source {self.name}: {len(keys)} open review request(s) have no notification "
-            f"thread, so they start nothing: {shown}. GitHub adds the thread only while the "
-            f'"On GitHub" setting for participating notifications is on'
+            f'source {self.name}: check that GitHub\'s "On GitHub" setting for participating '
+            f"notifications is on; {len(keys)} open review request(s) have no notification "
+            f"thread and start nothing: {shown}"
         )
 
     def _check_review_threads(self) -> None:
