@@ -179,6 +179,45 @@ def test_the_shipped_agent_file_tells_the_worker_to_mark_its_comments():
     assert AUTHORSHIP_MARKER in text
 
 
+def test_the_shipped_reviewer_posts_every_body_from_a_file():
+    """A body on the command line that names a denied word is refused; a file is not read
+    by the rules."""
+    agent = (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text(encoding="utf-8")
+    role_file = paths.templates_dir() / "roles" / "pr-reviewer.toml"
+    role = Role.parse("pr-reviewer", tomllib.loads(role_file.read_text("utf-8")))
+
+    for text in (agent, role.prompt):
+        assert "mkdir -p -m 700 ~/.cache/gh-body" in text
+        assert "--body-file" in text and "-F body=@<file>" in text
+        assert "Write tool" in text
+    assert "gh pr comment <url> --body-file <file>" in agent
+    assert "gh pr review <url> --comment --body-file <file>" in agent
+    # Only the body-file forms post without the classifier, and the body directory is
+    # writable without a prompt.
+    assert "Bash(gh pr comment *--body-file *)" in role.allow
+    assert "Bash(gh pr review * --comment --body-file *)" in role.allow
+    assert "Bash(gh pr comment *)" not in role.allow
+    assert "Bash(mkdir -p -m 700 ~/.cache/gh-body)" in role.allow
+    assert "Edit(~/.cache/gh-body/**)" in role.allow
+    assert "delete the file" in role.prompt and "Delete the file" in agent
+    # The agent file names the session's tools, so the Write tool must be one of them.
+    frontmatter = agent.split("---\n")[1]
+    (tools,) = [line for line in frontmatter.splitlines() if line.startswith("tools:")]
+    assert "Write" in [t.strip() for t in tools.removeprefix("tools:").split(",")]
+
+
+def test_the_shipped_reviewer_says_what_each_event_kind_in_a_wake_asks_for():
+    agent = (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text(encoding="utf-8")
+    role_file = paths.templates_dir() / "roles" / "pr-reviewer.toml"
+    prompt = Role.parse("pr-reviewer", tomllib.loads(role_file.read_text("utf-8"))).prompt
+
+    assert "`review_requested`: you were asked again to review the pull request" in agent
+    assert "review_requested asks you to review the pull request again" in prompt
+    for kind in ("review_requested", "comment", "review", "mention", "ci_status", "pr_closed"):
+        assert f"`{kind}`:" in agent, kind
+        assert kind in prompt, kind
+
+
 # ----- start, wake, filter --------------------------------------------------------------
 
 
@@ -235,7 +274,7 @@ def test_a_reply_wakes_the_reviewer_once_and_its_own_comments_do_not(reviewing, 
     # The marked comment of the signed-in account reached no inbox.
     assert inbox_rows(reviewing) == [(reviewer.id, "comment", "issue_comment:41")]
     (resume,) = reviewing.claude_state.read()["resumes"]
-    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}#issuecomment-41"]
+    assert resume["prompt"].splitlines()[1:] == [f"comment: {PR_URL}#issuecomment-41"]
 
     go_idle(reviewing)
     comment(gh, 43, "operator", f"and another {AUTHORSHIP_MARKER}")
@@ -270,7 +309,7 @@ def test_an_unmarked_comment_of_the_account_wakes_once_and_the_daily_cap_stops_a
 def test_a_second_review_request_wakes_the_reviewer_and_starts_none(reviewing, gh):
     reviewer = start_reviewer(reviewing, gh)
     go_idle(reviewing)
-    gh.notify("review_requested", PR, thread="1", updated_at="2026-10-26T11:00:00Z",
+    gh.notify("review_requested", PR, thread="1", updated_at=iso(time.time() + 1),
               last_modified="Mon, 26 Oct 2026 11:00:00 GMT")
     ask_notifications_again(reviewing)
 
@@ -280,7 +319,24 @@ def test_a_second_review_request_wakes_the_reviewer_and_starts_none(reviewing, g
     assert [w.id for w in reviewing.ledger.live_workers()] == [reviewer.id]
     assert report.woken == [HANDLE]
     (resume,) = reviewing.claude_state.read()["resumes"]
-    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}"]
+    assert resume["prompt"].splitlines()[1:] == [f"review_requested: {PR_URL}"]
+
+
+def test_a_review_request_from_before_the_reviewer_started_does_not_wake_it(reviewing, gh):
+    reviewer = start_reviewer(reviewing, gh)
+    go_idle(reviewing)
+    gh.notify("review_requested", PR, thread="1", updated_at=iso(reviewer.created_at - 240),
+              last_modified="Mon, 26 Oct 2026 11:00:00 GMT")
+    ask_notifications_again(reviewing)
+
+    report = reviewing.next_tick()
+
+    assert report.errors == [] and report.launched == [] and report.woken == []
+    assert inbox_rows(reviewing) == []
+    assert (
+        f"{HANDLE}: github.review_requested is from before the start of the worker that has "
+        f"it, not delivered"
+    ) in report.routed, report.routed
 
 
 def test_a_second_subscriber_of_the_pull_request_gets_the_same_events(reviewing, gh):
@@ -685,7 +741,7 @@ def test_continue_force_accepts_the_agents_files_as_they_are(reviewing, gh, tmp_
     report = reviewing.next_tick()
     assert report.woken == [HANDLE]
     (resume,) = reviewing.claude_state.read()["resumes"]
-    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}#issuecomment-74"]
+    assert resume["prompt"].splitlines()[1:] == [f"comment: {PR_URL}#issuecomment-74"]
 
 
 def test_continue_force_does_not_accept_a_worktree_off_its_branch(reviewing, gh, tmp_path):

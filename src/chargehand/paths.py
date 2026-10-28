@@ -60,6 +60,15 @@ def log_file() -> Path:
     return state_dir() / "chargehand.log"
 
 
+def usage_file() -> Path:
+    """The usage windows of the provider account.
+
+    It is not in the state directory: every instance on the machine uses the same
+    account, so a second instance reads the same file.
+    """
+    return _home() / ".cache" / "chargehand" / "usage.json"
+
+
 def is_default_instance() -> bool:
     """Whether this process is the instance the scheduled job would run.
 

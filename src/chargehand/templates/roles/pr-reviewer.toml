@@ -5,6 +5,10 @@
 # machine configuration needs a `[[source]]` of type "github", and the repository needs
 # its `github = "owner/repo"` key. `chargehand init --role pr-reviewer` writes this file
 # and the agent file it names, .claude/agents/pr-reviewer.md.
+# The source reads review requests from your GitHub notifications, so turn on the "On
+# GitHub" setting for participating notifications in GitHub's notification settings.
+# While it is off, GitHub sends review requests by email only and no reviewer starts;
+# `chargehand doctor` warns about a review request that has no notification.
 
 # The agent file holds the reviewer's instructions. Claude Code looks for it in the
 # session's working directory, a fresh checkout of `base`, and then in ~/.claude/agents.
@@ -16,18 +20,32 @@ agent = "pr-reviewer"
 # Workers post as you. The marker at the end tells chargehand that a comment is the
 # worker's own, so it does not wake the worker. It is in the prompt as well as in the
 # agent file, so a missing agent file does not let the reviewer wake itself.
-prompt = "Review the pull request {item_url}. Its head is checked out at {item_checkout}; read the code there. End every comment, review and reply you post with <!-- chargehand-worker -->"
+# When chargehand wakes the worker, each line of its message is an event kind, a colon
+# and a link; the prompt says what each kind asks for, for the same reason.
+# The worker posts each body from a file, because a launch deny rule matches the whole
+# command text: a review of a change that names a denied word would be refused on the
+# command line. The file's content never reaches the rules. This is in both files too.
+prompt = "Review the pull request {item_url}. Its head is checked out at {item_checkout}; read the code there. When you are woken later, each line names an event kind and a link: review_requested asks you to review the pull request again; comment, review and mention are new comments or replies to answer when they need it; ci_status is a CI result to check; pr_closed means the pull request is closed or merged, so post nothing more. Never put a body on a command line. Run mkdir -p -m 700 ~/.cache/gh-body before the first Write. Write each body with the Write tool, not a shell command, to a new file in that directory, by its absolute path $HOME/.cache/gh-body/<name>, and end it with the marker named next. Post the file with --body-file (gh pr comment, gh pr review --comment) or -F body=@<file> (gh api), then delete the file. End every comment, review and reply you post with <!-- chargehand-worker -->"
 permission_mode = "auto"
-# Read the pull request and comment on it without a prompt. Everything else, `gh api`
-# included, goes to the auto-mode classifier or a permission prompt: `gh api` can approve
-# or merge as easily as it can read. A pattern matches the command text, so this list is
-# a guardrail, not a boundary.
+# Read the pull request, write body files to ~/.cache/gh-body/ and post them as comments
+# without a prompt. Everything else, `gh api` included, goes to the auto-mode classifier
+# or a permission prompt: `gh api` can approve or merge as easily as it can read. A
+# reply in a review thread goes through `gh api` too, and has no rule of its own: a `*`
+# also matches spaces, so a rule for the reply endpoint would also match a call that
+# merges the pull request with that text in an argument. A pattern matches the command
+# text, so this list is a guardrail, not a boundary.
+# The body directory is outside every checkout, so a body file cannot be committed and
+# does not make a checkout dirty, and mode 0700 keeps drafts from other users. An Edit
+# rule covers the Write tool too. Deleting a file has no rule, for the same reason as
+# `gh api`: `rm ~/.cache/gh-body/*` would also match a second path.
 allow = [
   "Bash(gh pr view *)",
   "Bash(gh pr diff *)",
   "Bash(gh pr checks *)",
-  "Bash(gh pr comment *)",
-  "Bash(gh pr review * --comment *)",
+  "Bash(gh pr comment *--body-file *)",
+  "Bash(gh pr review * --comment --body-file *)",
+  "Bash(mkdir -p -m 700 ~/.cache/gh-body)",
+  "Edit(~/.cache/gh-body/**)",
 ]
 
 # The session works in a fresh checkout of `base`, which is yours. The pull request head

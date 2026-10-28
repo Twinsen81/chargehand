@@ -108,7 +108,7 @@ def test_continue_refuses_a_run_that_is_not_paused_or_blocked(harness):
     result = apply_request(harness, "continue", "ABC-1")
 
     assert result["ok"] == 0
-    assert "not paused or blocked" in result["message"]
+    assert "not paused, blocked or parked" in result["message"]
 
 
 def test_retry_starts_a_new_attempt_for_a_failed_run(harness, repo):

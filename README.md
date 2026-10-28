@@ -31,8 +31,9 @@ It runs on your own Mac, the one you already work on, not in a cloud.
    "blocked". You answer in Claude Code's own agent view; the session continues.
 5. When the session finishes, the runner clears the label and later removes the worktree.
 
-You steer it with a CLI — `status`, `watch`, `pause`, `cancel`, `retry` — and there is
-deliberately no server to expose.
+You steer it with a CLI: `status`, `watch`, `pause`, `cancel`, `retry`. A daemon,
+`chargehand serve`, runs the tick and applies what you ask for; it listens on 127.0.0.1
+only and needs a token for anything that changes state.
 
 ## Design principles
 
@@ -42,7 +43,8 @@ deliberately no server to expose.
   never pasted into the launch prompt. Bypassing permissions is an explicit opt-in.
 - **Crash-safe.** Launches are recorded before they have side effects and reconciled on
   every tick, so a crash never strands an issue or leaves a session unsupervised.
-- **Small surface.** Standard-library Python, no runtime dependencies, no listening port.
+- **Small surface.** Standard-library Python, no runtime dependencies, one port on
+  127.0.0.1 and nothing on the network.
 - **Installed, not copied.** A repo contributes small config files, never scripts.
 
 ## Requirements
@@ -69,13 +71,40 @@ chargehand tick                      # one pass, in the foreground
 chargehand status                    # what is running
 ```
 
-`chargehand install` writes the launchd job that runs the tick on a timer; it does not
-load it until you pass `--load`, or run the `launchctl bootstrap` line it prints. The job
-records an absolute path to the interpreter it was installed with, so it works whether or
-not the environment is on your shell's PATH. It also records the PATH of the shell you run
-`install` from, because launchd gives a job only a minimal one; `doctor` checks that
-`claude` and `git` resolve through the job's PATH, not only through yours. Each tick
-appends timestamped lines to `~/Library/Logs/chargehand.log`.
+`chargehand install` writes the launchd job that keeps the daemon, `chargehand serve`,
+running; it does not load it until you pass `--load`, or run the `launchctl bootstrap`
+line it prints. `install --load` also replaces the timer job of an older release, which
+had the same label. The daemon runs a tick every minute (`tick_interval_secs` in
+`[serve]`), and at once when a control command records a request. It serves
+`/api/health` and `/api/state` on `127.0.0.1:7878` (`port` in `[serve]`) and writes its
+token to `~/.config/chargehand/board.token` with mode 0600. The job records an absolute
+path to the interpreter it was installed with, so it works whether or not the environment
+is on your shell's PATH. It also records the PATH of the shell you run `install` from,
+because launchd gives a job only a minimal one; `doctor` checks that `claude` and `git`
+resolve through the job's PATH, not only through yours, that the daemon answers, and that
+the token file has mode 0600. The daemon appends timestamped lines to
+`~/Library/Logs/chargehand.log`. To try the daemon without the job, run `chargehand serve`
+in a terminal; ctrl-c stops it after the tick phase in progress.
+
+Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle and the
+daemon's health in the top bar, and a card per worker in the columns Needs you, Working,
+Queued, Idle and Closed. It refreshes every second and is read-only.
+
+To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
+status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
+the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then
+runs your command with the same input, so your status line does not change. chargehand
+does not edit the settings file for you:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "chargehand statusline -- '~/.claude/statusline.sh'"
+}
+```
+
+`/api/state` then shows each window's percentage and reset time; a reading older than
+30 minutes counts as unknown.
 
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).
@@ -121,7 +150,10 @@ prompt before anything runs.
 
 ## Notifications
 
-The runner calls `~/.config/chargehand/notify.sh` on every state change. As shipped it
+The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or ends:
+blocked, parked, failed, done through the status file, or stopped by the watchdog. A
+turn end that waits for events (`idle`) and a worker that ends because its item closed
+are not notified; `chargehand status` shows them. As shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an
 email, and a push service, and you can enable more than one. The hook receives only the

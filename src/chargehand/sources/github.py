@@ -5,8 +5,11 @@ never handles a token.
 
 The source polls in two parts. The notifications endpoint of the signed-in account
 gives review requests, comments, mentions and CI activity on any repository, and asks
-with ``If-Modified-Since``, so an unchanged list costs nothing against the rate limit;
-it is asked no more often than its ``X-Poll-Interval`` header allows. Then, for each pull
+with ``If-Modified-Since`` and ``If-None-Match``, so an unchanged list costs nothing against
+the rate limit; it is asked no more often than its ``X-Poll-Interval`` header allows. Once a
+day the source compares the open review requests with the notification threads, because
+GitHub adds no thread while the account's "On GitHub" setting for participating
+notifications is off. Then, for each pull
 request a live worker subscribes to, the source reads the review comments, the reviews,
 the issue comments, and the commit statuses and check runs on the head commit, which is
 where external CI systems report.
@@ -47,6 +50,16 @@ DEFAULT_POLL_INTERVAL_SECS = 60
 # costs nothing, because the router drops what it has seen before.
 CLOCK_SKEW_SECS = 300
 PAGE_SIZE = 100
+# How often the source compares the open review requests with the notification threads.
+# The search API allows 30 calls a minute; once a day is enough to notice a setting.
+REVIEW_CHECK_INTERVAL_SECS = 24 * 3600
+# A review request younger than this may not have its notification thread yet.
+REVIEW_THREAD_GRACE_SECS = 10 * 60
+REVIEW_REQUEST_QUERY = "is:pr is:open review-requested:@me"
+# The check reads the notification threads page by page: the endpoint gives at most 50
+# a page, and the check stops after this many pages.
+REVIEW_CHECK_PAGE_SIZE = 50
+REVIEW_CHECK_MAX_PAGES = 10
 
 # A notification's reason, as the event kind it becomes. The other reasons (assign,
 # author, state_change, subscribed, ...) say nothing a worker acts on.
@@ -65,6 +78,7 @@ _REPO = re.compile(r"[A-Za-z0-9._-]{1,100}")
 _REF = re.compile(r"([^/#\s]+)/([^/#\s]+)#([0-9]{1,10})")
 _PLAIN_OWNER = re.compile(r"[a-z0-9-]+")
 _API_PATH = re.compile(r"/repos/([^/]+)/([^/]+)/(pulls|issues)/([0-9]{1,10})$")
+_API_REPO = re.compile(r"/repos/([^/]+)/([^/]+)$")
 # A branch name as it reaches a query string: plain characters only, no leading dash.
 _BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
 
@@ -152,6 +166,19 @@ def _timestamp(value: object) -> float | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _http_date(value: object) -> float | None:
+    """An HTTP date header (Last-Modified, Date) as epoch seconds, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -283,8 +310,10 @@ class Gh:
             raise TrackerError(f"github: {path.split('?')[0]}: expected one object")
         return values[0]
 
-    def conditional(self, path: str, if_modified_since: str | None) -> Response:
-        """A GET that shows the response headers, for ``If-Modified-Since``.
+    def conditional(
+        self, path: str, if_modified_since: str | None, if_none_match: str | None = None
+    ) -> Response:
+        """A GET that shows the response headers, for ``If-Modified-Since`` and ``If-None-Match``.
 
         gh treats every status above 299 as a failure, a 304 too, so the exit code alone
         cannot tell "nothing changed" from an error: the status line decides.
@@ -292,6 +321,8 @@ class Gh:
         args = ["api", "-i", "-X", "GET", path]
         if if_modified_since:
             args += ["-H", f"If-Modified-Since: {if_modified_since}"]
+        if if_none_match:
+            args += ["-H", f"If-None-Match: {if_none_match}"]
         result = self.run(args)
         response = _split_response(result.stdout)
         if response is not None and (response.status == 304 or result.returncode == 0):
@@ -329,13 +360,21 @@ def _check_options(options: Mapping[str, object], allowed: Iterable[str], where:
 class Cursor:
     """What the source remembers between polls, saved as JSON by the router."""
 
-    # The notifications list: the server's Last-Modified, and when it may be asked next.
+    # The notifications list: the server's Last-Modified and ETag, and when it may be
+    # asked next. An empty list has an ETag but no Last-Modified.
     last_modified: str | None = None
+    etag: str | None = None
+    # The server time that the next list read starts from: the list's Last-Modified, or
+    # the Date of a response that had none. None until the first successful read, which
+    # reads the unread threads only.
+    listed_at: float | None = None
     poll_interval: int = DEFAULT_POLL_INTERVAL_SECS
     next_poll_at: float = 0.0
     # When the previous poll ran, and, per followed item, when it was last read.
     polled_at: float | None = None
     items: dict[str, float] = field(default_factory=dict)
+    # When the open review requests were last compared with the notification threads.
+    review_check_at: float = 0.0
 
     @classmethod
     def load(cls, value: str | None) -> "Cursor":
@@ -349,10 +388,15 @@ class Cursor:
         if not isinstance(data, dict):
             return cls()
         items = data.get("items")
+        last_modified = data["last_modified"] if isinstance(data.get("last_modified"), str) else None
+        listed_at = data.get("listed_at")
         try:
             return cls(
-                last_modified=(
-                    data["last_modified"] if isinstance(data.get("last_modified"), str) else None
+                last_modified=last_modified,
+                etag=data["etag"] if isinstance(data.get("etag"), str) else None,
+                # A cursor from before `listed_at` has only Last-Modified.
+                listed_at=(
+                    float(listed_at) if listed_at is not None else _http_date(last_modified)
                 ),
                 poll_interval=int(data.get("poll_interval") or DEFAULT_POLL_INTERVAL_SECS),
                 next_poll_at=float(data.get("next_poll_at") or 0.0),
@@ -362,6 +406,7 @@ class Cursor:
                     for k, v in (items.items() if isinstance(items, dict) else ())
                     if isinstance(v, (int, float))
                 },
+                review_check_at=float(data.get("review_check_at") or 0.0),
             )
         except (TypeError, ValueError):
             log.warning("github: unreadable cursor; starting again")
@@ -371,10 +416,13 @@ class Cursor:
         return json.dumps(
             {
                 "last_modified": self.last_modified,
+                "etag": self.etag,
+                "listed_at": self.listed_at,
                 "poll_interval": self.poll_interval,
                 "next_poll_at": self.next_poll_at,
                 "polled_at": self.polled_at,
                 "items": self.items,
+                "review_check_at": self.review_check_at,
             },
             sort_keys=True,
         )
@@ -413,6 +461,9 @@ class GithubSource(Source):
         events: list[Event] = []
         if now >= state.next_poll_at:
             events += self._poll_notifications(state, followed, now)
+        if now - state.review_check_at >= REVIEW_CHECK_INTERVAL_SECS:
+            state.review_check_at = now
+            self._check_review_threads()
         for item in items:
             ref = parse_ref(item.ref)
             if ref is None:
@@ -475,6 +526,105 @@ class GithubSource(Source):
     def describe(self) -> str:
         return f"{self.name} (github through {self.gh.binary})"
 
+    def setup_warnings(self) -> list[str]:
+        missing = self.unthreaded_review_requests()
+        return [self._review_thread_warning(missing)] if missing else []
+
+    # ----- review requests without a thread -------------------------------------
+
+    def unthreaded_review_requests(self) -> list[str]:
+        """Keys of the open pull requests that ask this account for a review, but have no
+        ``review_requested`` thread in the notifications list, read threads included.
+
+        GitHub adds the thread only while the account's "On GitHub" setting for
+        participating notifications is on; with it off, a review request arrives by email
+        only, and the source never sees it. GitHub has no API for the setting, so this
+        compares the two lists. The search result has no request time, but its
+        ``updated_at`` is not earlier than the request, so a pull request updated within
+        :data:`REVIEW_THREAD_GRACE_SECS` is skipped: its thread may not exist yet. When the
+        thread list is longer than the check reads, a request older than the oldest thread
+        read is not reported.
+        """
+        now = self.clock()
+        query = quote(REVIEW_REQUEST_QUERY, safe="")
+        found = self.gh.api_list(f"search/issues?q={query}&per_page={PAGE_SIZE}", key="items")
+        waiting: dict[str, tuple[Ref, float]] = {}
+        for pull in found:
+            match = _API_REPO.search(str(pull.get("repository_url") or ""))
+            ref = make_ref(match.group(1), match.group(2), pull.get("number")) if match else None
+            updated = _timestamp(pull.get("updated_at"))
+            if ref is None or updated is None or now - updated < REVIEW_THREAD_GRACE_SECS:
+                continue
+            # The thread cannot be older than the pull request.
+            created = min(_timestamp(pull.get("created_at")) or updated, updated)
+            waiting[str(ref).lower()] = (ref, created)
+        if not waiting:
+            return []
+        oldest = min(created for _, created in waiting.values())
+        threads, complete = self._threads_since(oldest - CLOCK_SKEW_SECS)
+        if not complete:
+            # The list comes newest first, so a thread of a request made after the oldest
+            # thread read would be among them. An older request is not known either way.
+            floor = min(
+                (t for t in (_timestamp(e.get("updated_at")) for e in threads) if t is not None),
+                default=None,
+            )
+            waiting = {
+                key: value for key, value in waiting.items()
+                if floor is not None and value[1] >= floor
+            }
+        for thread in threads:
+            subject = thread.get("subject") if isinstance(thread.get("subject"), Mapping) else {}
+            match = _API_PATH.search(str(subject.get("url") or ""))
+            if thread.get("reason") == "review_requested" and match:
+                waiting.pop(f"{match.group(1)}/{match.group(2)}#{match.group(4)}".lower(), None)
+        return sorted(item_key(ref) for ref, _ in waiting.values())
+
+    def _threads_since(self, since: float) -> tuple[list[Mapping[str, Any]], bool]:
+        """The threads updated since *since*, read ones included, newest first, and whether
+        that is all of them.
+
+        At most :data:`REVIEW_CHECK_MAX_PAGES` pages, one gh call each, so that an account
+        with a long history cannot make the check run past the timeout every day.
+        """
+        threads: list[Mapping[str, Any]] = []
+        for page in range(1, REVIEW_CHECK_MAX_PAGES + 1):
+            values = self.gh.api(
+                f"notifications?all=true&per_page={REVIEW_CHECK_PAGE_SIZE}&page={page}"
+                f"&since={_iso(since)}"
+            )
+            if len(values) != 1 or not isinstance(values[0], list):
+                raise TrackerError("github: notifications: expected a list")
+            threads += [entry for entry in values[0] if isinstance(entry, Mapping)]
+            if len(values[0]) < REVIEW_CHECK_PAGE_SIZE:
+                return threads, True
+        return threads, False
+
+    def _review_thread_warning(self, keys: Sequence[str]) -> str:
+        # The hint comes before the keys: `tick` cuts a printed line at 200 characters.
+        shown = ", ".join(keys[:10]) + (f" and {len(keys) - 10} more" if len(keys) > 10 else "")
+        return (
+            f'source {self.name}: check that GitHub\'s "On GitHub" setting for participating '
+            f"notifications is on; {len(keys)} open review request(s) have no notification "
+            f"thread and start nothing: {shown}"
+        )
+
+    def _check_review_threads(self) -> None:
+        """The daily check: one warning for the tick report when a request has no thread.
+
+        Not logged as well: `tick` and `serve` print the report's warnings, so a log line
+        would show the same text twice.
+        """
+        try:
+            missing = self.unthreaded_review_requests()
+        except TrackerAuthError:
+            raise
+        except TrackerError as exc:
+            log.warning("github: could not compare the review requests with the threads: %s", exc)
+            return
+        if missing:
+            self.warn(self._review_thread_warning(missing))
+
     # ----- notifications ------------------------------------------------------
 
     def _poll_notifications(self, state: Cursor, followed: set[str], now: float) -> list[Event]:
@@ -483,15 +633,9 @@ class GithubSource(Source):
         # not replay the account's history. Later polls read the threads that were read
         # too: the operator receives the review requests, and opening one in a browser
         # before the next poll must not hide it. `since` keeps that list short.
-        if state.last_modified:
-            path += "&all=true"
-            try:
-                since = parsedate_to_datetime(state.last_modified).timestamp()
-            except (TypeError, ValueError):
-                since = None
-            if since is not None:
-                path += f"&since={_iso(since - CLOCK_SKEW_SECS)}"
-        response = self.gh.conditional(path, state.last_modified)
+        if state.listed_at is not None:
+            path += f"&all=true&since={_iso(state.listed_at - CLOCK_SKEW_SECS)}"
+        response = self.gh.conditional(path, state.last_modified, state.etag)
         interval = response.headers.get("x-poll-interval", "")
         if interval.isdigit():
             state.poll_interval = max(int(interval), 1)
@@ -519,11 +663,18 @@ class GithubSource(Source):
                 continue
             if event is not None:
                 events.append(event)
-        # After a failed thread the list keeps its old Last-Modified, so the next poll asks
-        # for the same window again and checks that thread once more; the router drops the
-        # threads it has already seen.
-        if not failed and response.headers.get("last-modified"):
-            state.last_modified = response.headers["last-modified"]
+        # After a failed thread the list keeps its old Last-Modified and ETag, so the next
+        # poll asks for the same window again and checks that thread once more; the router
+        # drops the threads it has already seen.
+        if not failed:
+            # An empty list has an ETag but no Last-Modified. The first poll is over all
+            # the same, and the next one reads from the server's Date of this one.
+            last_modified = response.headers.get("last-modified") or None
+            state.last_modified = last_modified
+            state.etag = response.headers.get("etag") or None
+            state.listed_at = (
+                _http_date(last_modified) or _http_date(response.headers.get("date")) or now
+            )
         return events
 
     def _notification_event(self, entry: Mapping[str, Any], followed: set[str]) -> Event | None:

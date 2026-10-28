@@ -32,7 +32,7 @@ def shipped():
 
 
 MUTATING = ("cancel", "stop", "continue", "retry", "discard", "pause", "resume", "tick",
-            "install", "uninstall", "init")
+            "serve", "install", "uninstall", "init")
 
 # The spellings an anchored rule misses. None of them is an evasion: the second is what an
 # assistant produces after running `which chargehand`, and the third is what it produces
@@ -69,7 +69,9 @@ def test_a_mutating_command_is_gated_in_every_spelling(shipped, command, spellin
     assert first_matching_rule(rules, text) is not None, text
 
 
-@pytest.mark.parametrize("command", ("pause", "resume", "tick", "install", "uninstall", "init"))
+@pytest.mark.parametrize(
+    "command", ("pause", "resume", "tick", "serve", "install", "uninstall", "init")
+)
 def test_a_command_with_no_argument_is_gated_too(shipped, command):
     """`chargehand pause` takes no issue, so a rule ending in a space would miss it."""
     rules = tuple(shipped["permissions"]["ask"])

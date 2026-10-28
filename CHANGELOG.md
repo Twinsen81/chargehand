@@ -16,8 +16,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted for one release, and `doctor` says that it is ignored. The deny rule for
   `banksman admin` stays in the launch deny rules.
 
+### Added
+
+- A read-only board at `http://127.0.0.1:<port>/`, served by the daemon: the usage
+  windows, the launch throttle and the daemon's health in a top bar, and a card per
+  worker (role, item, branch, worktree, model and effort, last prompt and last answer,
+  wakes today, estimated tokens, attach command) in the columns Needs you, Working,
+  Queued, Idle and Closed. One static page under a strict content security policy.
+
 ### Changed
 
+- A worker whose turn ends and waits for events (`idle` or `queued`) no longer sends a
+  notification; only blocked, parked, failed, done through the status file and the
+  watchdog states do. The tick's
+  transition lines name the worker's old and new state (the session state only when it
+  explains the change), a closed pull request is reported as "item closed", the warning
+  for a start event of an unconfigured repository is printed once, and `follow:` lines
+  show the pull requests that workers start to follow.
+- The tick runs in a resident daemon, `chargehand serve`, in place of the launchd timer:
+  `install` writes a KeepAlive job that runs it, control commands are applied within a
+  second or two, and a loopback API (`/api/health`, `/api/state`) with a token in a mode
+  0600 file serves the status; `doctor` checks both, and sessions get deny rules for the
+  port.
+- Worker sessions post their start, turn ends, failures, notifications and permission
+  prompts to the daemon through settings hooks, and the daemon updates the ledger at
+  once; the session diff of each tick stays as the fallback. A usage-limit failure makes a
+  worker `parked`, with the reset time when the message gives one, and nothing wakes it
+  until `continue`. The ledger goes to version 4, in place.
+- Workers post every comment, review and pull request body from a file in
+  `~/.cache/gh-body/` (mode 0700) with `--body-file` or `gh api -F body=@<file>`, and
+  delete it after the post, so a body that names a word the launch deny rules refuse no
+  longer stops the worker. The shipped role prompts, the `pr-reviewer` agent file (which
+  gains the Write tool) and the roles' allow rules use the body-file forms, and
+  `probes/deny_rules.py` checks that they pass the rules.
+- Each line of the wake message now names the event's kind before its pointer, for example
+  `review_requested: https://github.com/o/r/pull/1`, so a woken worker knows what each link
+  asks for. The shipped role prompts and the `pr-reviewer` agent file describe the kinds.
 - The authorship marker that workers add to their comments is now
   `<!-- chargehand-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
   the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that
@@ -65,9 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands and reconciliation reach it only through that interface, and a role's runtime
   checks its own role-file keys. `status --json` reports each worker's and session's
   `runtime`.
+- The router no longer wakes a worker for an event that occurred before the worker started
+  (with a one-minute allowance for clock differences). The sources still read a few minutes
+  back from their previous poll, but that overlap no longer reaches a new worker.
 
 ### Added
 
+- `chargehand statusline -- '<command>'`, a status line wrapper that writes the
+  subscription's five-hour and weekly usage windows to `usage_file` in `[serve]` and then
+  runs your own status line command unchanged; `/api/state` and `status --json` show the
+  reading, unknown when it is older than 30 minutes.
 - A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
   pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
   pull request head from a separate checkout, `{item_checkout}`, so the author's Claude
@@ -190,6 +231,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `github` source keeps the notification list's ETag and asks with `If-None-Match`,
+  and an empty list, which has no `Last-Modified`, now ends the first poll too, so later
+  polls read threads you already opened. `doctor`, and the source once a day, warn about a
+  review request that has no notification thread, which usually means GitHub's "On GitHub"
+  setting for participating notifications is off.
 - One notification thread whose pull request `gh` cannot read (a server error, a timeout)
   no longer fails the whole `github` source on every tick. The thread is logged and
   skipped, the other threads and the followed pull requests arrive, and the list keeps its

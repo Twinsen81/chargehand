@@ -136,6 +136,27 @@ def test_the_shipped_implementer_starts_follows_and_closes_like_the_old_config()
     assert template_rule.unless_subscribed == legacy_rule.unless_subscribed
 
 
+def test_the_shipped_implementer_posts_bodies_from_a_file():
+    """A body on the command line that names a denied word is refused; a file is not read
+    by the rules."""
+    import tomllib
+
+    from chargehand import paths
+
+    path = paths.templates_dir() / "roles" / "implementer.toml"
+    shipped = Role.parse("implementer", tomllib.loads(path.read_text(encoding="utf-8")))
+
+    assert "mkdir -p -m 700 ~/.cache/gh-body" in shipped.prompt
+    assert "Write tool" in shipped.prompt and "delete the file" in shipped.prompt
+    assert "--body-file" in shipped.prompt and "-F body=@<file>" in shipped.prompt
+    assert shipped.allow == (
+        "Bash(mkdir -p -m 700 ~/.cache/gh-body)",
+        "Edit(~/.cache/gh-body/**)",
+        "Bash(gh pr create *--body-file *)",
+        "Bash(gh pr comment *--body-file *)",
+    )
+
+
 def test_only_implementer_falls_back_to_the_old_config(tmp_path):
     repo_config = RepoConfig(base="origin/main", prompt="{issue}")
 

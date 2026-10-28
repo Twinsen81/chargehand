@@ -5,8 +5,7 @@ Claude Code and a fake tracker, and the whole sequence has been run against a re
 and real Claude Code on a scratch repository, including a crash after every launch step and a
 reboot that killed a session mid-turn. It has not
 yet been left running unattended for a working day. The unit of work is a *worker* of a
-*role* (section 4); event sources other than the tracker queue, a resident daemon and a
-board are not built yet.
+*role* (section 4); the board on the daemon's loopback API is read-only so far.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -35,7 +34,8 @@ Non-goals:
 Issue: queue label + assigned to me (+ optional state filter)
         │  poll every few minutes
         ▼
-launchd timer ──► chargehand tick
+launchd KeepAlive job ──► chargehand serve: a tick every tick_interval_secs,
+                          and at once when a control request waits
    1. reconcile incomplete launches
    2. apply recorded control requests
    3. watchdog long runs
@@ -57,6 +57,7 @@ Claude Code supervisor (background sessions, one per worker)
 whatever the prompt produces — typically a draft pull request
 
 Operator: chargehand status|watch|cancel…  ·  Claude Code agent view for replies
+          GET 127.0.0.1:7878/api/state, /api/health (the daemon's loopback API)
 ```
 
 Components:
@@ -66,7 +67,8 @@ Components:
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised workers |
 | Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
 | Runtimes | The coding agent behind one interface; `claude` is the only one that ships |
-| Control CLI | See and steer the runner; no server |
+| Daemon (`chargehand serve`) | Runs the tick on a timer and applies control requests; serves a loopback API with a token |
+| Control CLI | See and steer the runner; records requests for the daemon |
 | Tracker adapters | `linear` and `github` |
 | Event sources | `github`, the repository's tracker, and a `command` source for anything else |
 | A lease tool such as banksman (external, optional, never called by chargehand) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
@@ -82,7 +84,7 @@ queue starts drives it, so re-adding the label while a worker runs starts nothin
 - **Per-assignee filtering removes cross-machine races by construction.** Two developers'
   runners never see the same issue. Assigning the issue *is* the routing decision, and the
   pull request's author, its reviewer, and the Claude Code quota all follow the assignee. One
-  person with two machines enables the timer on exactly one.
+  person with two machines runs the daemon on exactly one.
 - **Queue the issue before work starts, not by marking it "in progress".** Whatever the
   prompt runs is free to move the issue forward once it decides the work is feasible; if it
   declines, the issue should not be left looking active.
@@ -144,10 +146,10 @@ collection. It is configured as a `[[source]]` table with a `name`, a `type`, an
 own options. An event names its source, kind, work item, actor, time, a dedupe id and a
 pointer (a URL or identifier the worker fetches itself). It never carries a body: a source
 reads a comment only to find chargehand's authorship marker, `<!-- chargehand-worker -->`,
-and the text stays in the source. No space follows the name, because a worker posts with
-the body on its command line and the launch deny rule `Bash(*chargehand *)` refuses the
-name followed by a space; the first spelling, `<!-- chargehand -->`, is still read as
-marked. Kinds are bare (`comment`, any source) or qualified by the source name
+and the text stays in the source. No space follows the name, because the launch deny rule
+`Bash(*chargehand *)` refuses the name followed by a space in a command, and a body can
+still end up on a command line; the first spelling, `<!-- chargehand -->`, is still read
+as marked. Kinds are bare (`comment`, any source) or qualified by the source name
 (`github.comment`).
 
 Delivery is publish and subscribe. A worker subscribes to work items, each with a set of
@@ -164,7 +166,12 @@ The router runs once per tick after the polls, in this order:
    workers post as you, and two workers on one pull request would otherwise wake each other
    in turn.
 2. Delivery: one inbox row per matching live subscriber. The inbox is unique per worker and
-   event, so routing an event twice adds nothing.
+   event, so routing an event twice adds nothing. A subscriber does not get an event that
+   occurred more than a minute before the worker started: the sources read some minutes
+   back from their previous poll so that a late write is not lost, and on a new worker's
+   first read that overlap would only bring events that the worker reads by itself at its
+   start. The minute allows for the clock difference between a source and this machine.
+   The event is still recorded as seen, and still goes to the start rules.
 3. Close: an event that a worker's start rule names in `close_on`, on the worker's primary
    item, ends that worker. The session is stopped first, then the worker is `done`, and
    garbage collection removes the session and the worktree, never over unpushed commits.
@@ -173,7 +180,8 @@ The router runs once per tick after the polls, in this order:
 4. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
    finds a live worker that has the item (`role`: of its own role, `any`: of any role)
    starts none, and the event goes to the inbox of the rule's own workers on the item, so a
-   second review request wakes the reviewer that has the pull request. Otherwise it
+   second review request wakes the reviewer that has the pull request (not one that started
+   after the request, by the rule in step 2). Otherwise it
    launches a worker under the same caps as the queue, with a primary subscription carrying
    the rule's `subscribe` kinds. A start that the caps, a pause or a previous worktree hold
    back is kept and offered to the rules again on the next tick. A start event for a
@@ -183,11 +191,21 @@ The router runs once per tick after the polls, in this order:
 The `github` source works through the `gh` CLI, so chargehand handles no token, and it is
 the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
 signed-in account gives `review_requested`, `comment`, `mention` and `ci_status` (GitHub's
-`ci_activity`); it is asked with `If-Modified-Since`, so an unchanged list costs nothing
-against the rate limit, and no more often than its `X-Poll-Interval` header allows. The
-first poll reads the unread threads only, so turning the source on does not replay the
-account's history; later polls read the threads you have already read too, so a review
-request opened in a browser before the poll still arrives. A review request counts only
+`ci_activity`); it is asked with `If-Modified-Since` and `If-None-Match`, so an unchanged
+list costs nothing against the rate limit, and no more often than its `X-Poll-Interval`
+header allows. The first poll reads the unread threads only, so turning the source on does
+not replay the account's history; later polls read the threads you have already read too,
+from the list's `Last-Modified` on, or from the `Date` of the previous response when the
+list was empty and had no `Last-Modified`, so a review request opened in a browser before
+the poll still arrives. The source needs the account's "On GitHub" setting for
+participating notifications (in GitHub's notification settings): while it is off, GitHub
+sends review requests and mentions by email only, the list stays empty, and nothing
+starts. GitHub has no API for the setting, so `doctor`, and the source once a day, compare
+the open pull requests that ask the account for a review (`is:pr is:open
+review-requested:@me`) with the `review_requested` threads, read ones included, and warn
+with the item keys of the requests older than ten minutes that have no thread. The check
+reads at most 500 threads, newest first; on a longer list it skips the requests made before
+the oldest thread it read, because their thread may be further down. A review request counts only
 while the pull request is open and still asks the account, or a team it is in, for a review,
 because a notification thread keeps its reason when later activity updates it. When `gh`
 may not list the account's teams, any requested team counts. Then, for each pull request a live worker subscribes to, the source reads the
@@ -272,6 +290,19 @@ type = "github"
 ```
 
 `[[route]]` with `repo` and `max_open_attempts` are the older spellings and stay accepted.
+
+The daemon reads one more table. Every key is optional; these are the defaults:
+
+```toml
+[serve]
+port = 7878                         # on 127.0.0.1; no key binds another address
+token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
+tick_interval_secs = 60             # how often the daemon ticks
+usage_file = "~/.cache/chargehand/usage.json"     # the status line wrapper writes it
+```
+
+`poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
+interval of `watch`, capped at 30 seconds.
 
 Repository layer — `.chargehand.toml`, checked in:
 
@@ -371,6 +402,26 @@ Workers post as you. Both starter roles tell the worker in the prompt to end eve
 it posts with the authorship marker, so its own comments wake no worker; a comment without
 the marker wakes the worker once, and the role's daily wake cap stops a loop.
 
+Workers post every body from a file. A launch deny rule matches the whole command text, so
+a body on the command line that names a denied word is refused: a review of a change to
+the deny rules names them, and the worker would stop with nothing for the operator to
+answer. Both starter roles, and the reviewer's agent file, tell the worker to write each
+body with its file tool, not a shell command, to a new file in `~/.cache/gh-body/`, to
+post it with `--body-file` (`gh pr create`, `gh pr comment`, `gh pr review`) or
+`-F body=@<file>` (`gh api`), and to delete it after the post. The file's content never
+reaches the rules. The directory is outside every checkout, so a body file cannot be
+committed and does not count as untracked work for garbage collection or the wake checks.
+It is per user, and the worker creates it with mode 0700 before its first write, so
+another account on the machine cannot read a draft or replace it before the post; a shared
+directory under `/tmp` would allow both. `mkdir -m` does not change a directory that
+already exists, so a directory created another way keeps its own mode. The roles' allow rules let the worker create the directory and write
+there without a prompt, and name only the `--body-file` forms of the `gh` commands. The
+reviewer's agent file lists the Write tool for this, and says to use it for nothing else.
+Deleting a file has no rule, and `gh api` has none either, not even for the reply
+endpoint: a `*` also matches spaces, so `rm ~/.cache/gh-body/*` would also match a second
+path, and a reply rule would also match a call that merges the pull request with the rest
+of the pattern in its arguments. Those calls go to the auto-mode classifier.
+
 ### Runtimes
 
 A runtime is the coding agent a role's workers run on. Each runtime is one module, and only
@@ -437,8 +488,8 @@ idempotent, and the row's `step` advances after each one.
 
 ### Reconciliation (start of every tick)
 
-launchd runs one tick at a time, so a row still `launching` when a tick starts is an
-interrupted launch, not a concurrent one.
+Ticks never overlap (see the tick lock below), so a row still `launching` when a tick
+starts is an interrupted launch, not a concurrent one.
 
 - **Ledger side:** for a row stuck in `launching`, look for a session whose working
   directory is the row's worktree or whose name is the worker's name (or the issue
@@ -450,7 +501,9 @@ identifier alone, for a session from before roles). Found → adopt it.
   that landed without a row.
 - **Session side:** a background session under the worktree root with no ledger row is
   adopted when the role and the issue can be derived from its name or path, otherwise
-  reported. No
+  reported. An adopted session's primary subscription keeps the time of the row it
+  replaces, so the events since that start still reach it; its new row has the time of the
+  adoption, so a status file from the earlier run stays stale. No
   unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
@@ -463,28 +516,91 @@ The queue status last *verified* on the tracker is stored separately from the wo
 state, so a write that could not be confirmed is retried on the next tick instead of being
 assumed to have landed.
 
-launchd will not run two instances of one job, but `chargehand tick` is also a command, so
-the tick takes an exclusive file lock rather than assuming it is alone. The kernel releases
-that lock when its holder dies, so a killed tick needs no recovery.
+The daemon runs one tick at a time, but `chargehand tick` is also a command, so every tick
+takes an exclusive file lock rather than assuming it is alone. The daemon holds the lock
+only while one of its ticks runs, so a tick by hand waits for it or reports that a tick is
+running. The kernel releases the lock when its holder dies, so a killed tick needs no
+recovery.
 
 ## 6. Supervision, notifications, questions
 
-**Session state** comes from `claude agents --json --all`, diffed against the ledger on every
-tick. A notification hook is not used: the relevant hook types fire only while Claude Code's
-agent view is open in a terminal, which an unattended run cannot guarantee.
+**Session state** comes from two places. Each session is launched with settings hooks that
+post to the daemon: `SessionStart` with its source, `Stop` with the last answer,
+`StopFailure` with the error category, `Notification` with its type, and
+`PermissionRequest` with the tool and its input. These fire in unattended background
+sessions. Four of them are hooks of type `http`. Claude Code does not run an `http` hook on
+`SessionStart`, so that one is a `command` hook: it runs `hook_post.py` from the installed
+package with `python -I`, which imports nothing from the worktree, reads the token from
+`token_file`, posts its stdin to the daemon, prints nothing (the output of a `SessionStart`
+command reaches the model) and exits 0 within a few seconds, also when no daemon answers.
+The settings of a launch with hooks are in a file of mode 0600 under the state directory,
+one per worktree, so the token is never on a command line. The file stays while the
+session exists, because a resume, a respawn and an attach apply the saved `--settings`
+again; it is deleted when the session is removed (`discard`, `retry`, garbage collection).
+In most launches whose stdin is /dev/null or a pipe already at its end, a new session runs
+no `SessionStart` hook; it runs one in every launch whose stdin is a pipe that stays open.
+So a launch gets an empty pipe that chargehand closes when the launcher exits, and does not
+depend on the daemon's own stdin, which is /dev/null under launchd. The daemon applies each
+post to the ledger at once, through the same transition and notification code as the tick.
+`claude agents --json --all`, diffed against the ledger on every tick, stays the fallback
+for anything a hook missed: a session launched before the daemon wrote its token, a post
+while the daemon was down, a process that died.
+
+**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which an http
+hook carries in its `Authorization` header and the `SessionStart` command reads from
+`token_file`; a post without it changes nothing. The runtime reads the payload (`claude`
+reads `session_id`, `cwd`, `transcript_path`, `last_assistant_message`, `error`,
+`notification_type`, `tool_name`, `tool_input` and `source`), and the post maps to the
+live worker with that session id, else to the live worker without a session id yet whose
+worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer is
+`{}`: a `Stop` gets no decision that would keep the turn running, a `SessionStart` gets no
+context for the model, and a `PermissionRequest` gets no decision, so the session keeps its
+own dialog. A hook that times out, or finds no daemon, is an error that Claude Code reports
+and goes past; the session runs on, and the next tick reads its state from the listing.
+`--resume` re-applies the settings of the launch, so a worker launched before the hooks
+existed is followed by the diff alone.
+
+| Post | Effect |
+|---|---|
+| `SessionStart` | the worker is `running` |
+| `Stop` | as a `done` session: the status file, then `idle` (or what the file says) |
+| `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one |
+| `StopFailure`, any other error | the worker is `blocked`, "session failed" |
+| `PermissionRequest` | the worker is `blocked`, and the prompt is recorded with its tool and input |
+| `Notification` `permission_prompt` | the worker is `blocked` |
+| `Notification`, other types | no change |
+
+A hook never moves a `launching` or `paused` worker. The tick and the hooks write the same
+rows from two threads, so the diff's writes and a hook's state write succeed only while
+the row has the state and the last hook they were read with; the loser reads the row
+again. A listing that the tick asked
+for before a hook arrived is older than that hook, and the diff leaves that worker until
+the next tick. The last answer, the tool input and the other payload text are untrusted:
+they are cleaned of control sequences and capped when stored, kept out of notifications,
+and escaped when the page renders them. `/api/state` shows each worker's last hook, its
+last answer, its reset time and its open permission prompts. A prompt is resolved when the
+worker leaves `blocked` by any path, a `stop` or a `cancel` included.
+
+The usage-limit category has not been observed yet (a missing model gives
+`model_not_found`), so it is matched defensively: a category such as `rate_limit` or
+`usage_limit`, or an unnamed one whose message says so. The raw category is kept in
+`last_error`. The reset time is read from an epoch, an ISO 8601 time, or a clock time such
+as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown.
 
 | Session state | Meaning | Action |
 |---|---|---|
 | `working` | A turn is running | — |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
-| `done` | The turn finished | read the status file if configured, then notify; the worker is `idle` |
+| `done` | The turn finished | read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the status file says, which is |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
 A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without a
 question and the worker waits for events), `queued` (events wait in its inbox for a wake
-that admission held back), `blocked` (it needs you) or `paused` (stopped by `stop`). On the
-tracker, `idle` and `queued` keep the blocked label, as a finished turn did before: the
-operator may want to look at what the turn left.
+that admission held back), `blocked` (it needs you), `paused` (stopped by `stop`) or
+`parked` (a usage limit ended its turn; it waits for the reset). On the tracker, `idle`,
+`queued` and `parked` keep the blocked label, as a finished turn did before: the operator
+may want to look at what the turn left. Delivery, the watchdog and the session diff never
+move a `parked` worker; `continue` respawns it.
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -516,8 +632,13 @@ pull-request URL comes from. Without it, or when this worker has not written it 
 it over a question.
 
 **Delivery.** Once per tick, after the state diff, each `idle` or `queued` worker with
-events in its inbox gets one wake. Its events become one message that lists their pointers
-and nothing else; a pointer that is not a plain http(s) URL or identifier is left out. The
+events in its inbox gets one wake. Its events become one message: a header line, then one
+line per event with its kind, a colon and its pointer, for example
+`review_requested: https://github.com/o/r/pull/1`, and nothing else. Two events of one kind
+on one pointer give one line; one pointer with two kinds gives two lines. A pointer that is
+not a plain http(s) URL or identifier is left out, and a kind that is not a plain lower-case
+name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. The role
+prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
 no reserve). A worker that is not admitted becomes `queued` and keeps its events. The
@@ -529,13 +650,15 @@ the events delivered and records the wake on the worker and as a `wake` row in `
 A crash between the two leaves the events in the inbox, and a later tick wakes the worker
 with them again, which costs one turn. A resume that starts a copy is a fault: the worker
 is paused with the reason, keeps its session and its events, and you are notified. A
-`blocked`, `paused` or `launching` worker is not woken; its events wait.
+`blocked`, `paused`, `parked` or `launching` worker is not woken; its events wait.
 
 When a worker's branch is on its remote and has an open pull request, the tick subscribes
 the worker to that pull request for `comment`, `review` and `ci_status`, once, so a review
 comment on an implementer's pull request wakes the implementer. The pull request is not its
 primary item, so its close does not end the worker. The source is asked only about a
-pushed branch.
+pushed branch. The follow is made up to one tick after the push, so a comment can be older
+than the follow; it still reaches the worker, because the router compares an event with the
+start of the worker and not with the time of the subscription.
 
 **Notifications** run a command you configure: a desktop notification, email, a push service,
 anything. The bundled hook has commented examples of the first three. The payload
@@ -545,7 +668,18 @@ setup script, or the tracker goes into it; that stays local and is reached throu
 `status --verbose-titles` and `logs`. Worst-case latency is one poll interval. A session's new
 state counts as notified only when the command succeeds, so a send that failed, for example
 on the first tick after a wake while the network is still down, is tried again on the next
-tick. A finished run's last notification is tried again for up to a day.
+tick. A finished run's last notification is tried again for up to a day. Only a worker that
+needs you or ends is notified: `blocked`, `parked`, `failed`, `done` through the status file,
+and the watchdog states. A worker that ends because its item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not, because a worker that answers
+ten comments ends ten turns; `status` and the board show it. The turn end clears the record
+of the last notified session state, so the next question is notified even when it is the
+same state as the one before.
+
+The tick prints one line per change: a transition names the worker's old and new state, and
+the session state only when the new state alone does not say why (`<item>: running ->
+blocked (session failed)`); `follow:` lines name the pull requests that workers started to
+follow. `serve` prints the changes that a session hook makes in the same lines, and nothing
+for a hook that changes nothing.
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude
@@ -559,14 +693,17 @@ notify after `max_run_hours`, stop the session after `hard_stop_hours`.
 session and its worktree are removed — never when commits are unpushed. Low disk space is
 reported.
 
-## 7. Control: a CLI, no server
+## 7. Control: a CLI and a loopback daemon
 
-The control surface is a CLI, and nothing else. There is no port, no token, and no browser
-to attack. chargehand runs on the machine you work on and is steered from a terminal on it.
+chargehand runs on the machine you work on and is steered from a terminal on it. A
+resident daemon, `chargehand serve`, does the work: it runs the tick every
+`tick_interval_secs`, applies control requests, and serves a small HTTP API on 127.0.0.1.
+The CLI is how you steer it.
 
 It is a plain CLI, so it also works over SSH if you want to reach the machine from
 elsewhere, but nothing depends on that and it is not part of what is tested. Reaching a
-machine remotely is the operating system's job, not this tool's.
+machine remotely is the operating system's job, not this tool's. The daemon's API is
+reachable from the machine itself and from nowhere else.
 
 ```
 chargehand status [--json]          # queue, workers, repositories, sessions — no free text
@@ -579,23 +716,88 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
-chargehand tick                     # run a tick now
+chargehand tick                     # run a tick now, under the tick lock
+chargehand serve                    # the daemon; `install` writes the job that runs it
+chargehand statusline -- '<command>'   # status line wrapper: records the usage windows
 ```
 
 Commands that take an item also take `--role`, which is needed when workers of several
 roles hold the item. `--route` stays accepted for `--repository`.
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
-  tracker. It records the request in the ledger, kick-starts the scheduled tick when that job
-  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome.
-  launchd ignores a kick-start while a tick is running, and that tick can be past the point
-  where it reads requests, so the command repeats the kick-start until a tick applies the
-  request. launchd also starts a job at most once every ten seconds and holds a kick-start
-  back until then, so the second of two quick commands can take that long. The command runs
-  a tick itself only when the job has not applied the request within 30 seconds. A
-  `cancel` therefore cannot race a launch in progress. Reconciliation runs *before* recorded
-  requests, so a cancel issued during a launch acts on a session that is known rather than
-  leaving one that the dying tick had already started running unsupervised.
+  tracker. It records the request in the ledger and waits for the outcome. The daemon is
+  the writer: between ticks it looks for new requests about once a second and runs a tick
+  at once when one waits, so a command usually returns within a second or two, and after
+  the tick in progress when there is one. While the daemon answers on its port the command
+  never runs a tick itself. The daemon reports which ledger it serves, so a second
+  instance (`CHARGEHAND_STATE_DIR`, `--config`) does not wait on another instance's
+  daemon. With no daemon, the command runs a tick itself under the tick lock; a timer job
+  from before the daemon is still kick-started first. A `cancel` therefore cannot race a
+  launch in progress. Reconciliation runs *before* recorded requests, so a cancel issued
+  during a launch acts on a session that is known rather than leaving one that the dying
+  tick had already started running unsupervised.
+- **The daemon's API.** It binds 127.0.0.1 only, on the `[serve]` port; no setting binds
+  another address. `GET /api/health` says that the daemon runs, which ledger it serves and
+  how its ticks went. `GET /api/state` is the `status --json` payload with a `daemon`
+  object added, read from the ledger, with no tracker call; its sessions are the ones the
+  last tick listed, so a request runs no `claude agents`. Reads need no token. Every other
+  method must carry `Authorization: Bearer <token>`, where the token is in the file
+  `token_file`, which the daemon writes with mode 0600 when it is missing and refuses to
+  use when other users can read it. A request whose `Host` header is not
+  `127.0.0.1:<port>` or `localhost:<port>` is refused, so a web page that points its own
+  name at 127.0.0.1 (DNS rebinding) cannot read the API. No response has a CORS header, so
+  a page on another origin cannot read one either. A body is capped at 1 MiB and must come
+  with a `Content-Length`. Each request opens its own ledger connection.
+  `POST /hooks/<event>` receives the posts of the worker sessions (section 6); each
+  worker in `/api/state` also carries its last hook, its last answer, the reset time of a
+  usage limit and its open permission prompts.
+- **The board.** `GET /` is one static page with its script and style sheet
+  (`templates/board/`), under a content security policy that allows only those two files
+  and requests to the daemon itself. The page polls `GET /api/board` about once a second
+  and patches its cards in place, keyed by worker, so a hook shows within a second and
+  the scroll position of each column stays. That answer is built from the ledger, the
+  role files and the usage file only: no tracker call and no session listing per
+  request. The top bar shows the two usage windows with their reset times and levels
+  (grey when unknown), the launch throttle (working against `max_concurrent`, open
+  against `max_open_workers`, pauses) and the daemon's health (last tick, its duration,
+  errors, uptime, version). The columns are Needs you (`blocked`), Working (`launching`,
+  `running`), Queued (`queued`, and `parked` with its reset time), Idle (`idle`,
+  `paused`) and Closed (workers that finished in the last 24 hours). A card shows the
+  role, the item with its link, the branch, the worktree, the model and effort of the
+  role, the last prompt (the role's first prompt before any wake, else the wake message
+  of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open
+  permission prompt, the wakes in the window of the daily wake cap, an approximate token
+  count (the transcript's size over four) and the attach command. The board is
+  read-only: actions on workers are not built yet.
+- **Usage readings.** Claude Code gives a status line command the subscription's
+  `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
+  `resets_at`. It sends them on subscription plans only, and only after the session's first
+  API response. `chargehand statusline -- '<command>'` reads that payload, writes both
+  windows with the time it wrote them to `usage_file` (atomically, mode 0600), and then
+  runs `<command>` through a shell with the same stdin, passing its output and exit code
+  through. A payload without `rate_limits` leaves the file as it is, and a file that cannot
+  be written changes nothing in the status line. chargehand does not edit your settings;
+  you wrap your own command in `~/.claude/settings.json`:
+
+  ```json
+  "statusLine": {
+    "type": "command",
+    "command": "chargehand statusline -- '~/.claude/statusline.sh'"
+  }
+  ```
+
+  Without a status line of your own, leave out `-- '<command>'`; the status line is then
+  empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for each
+  window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
+  `red` from 80 %. A reading older than 30 minutes, a missing or unreadable file, and a
+  window whose reset time has passed are unknown, with the level `grey`. `status --json`
+  carries the same object.
+- **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
+  progress finishes, the rest of that tick is skipped, the server shuts down, and the exit
+  code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL
+  when the daemon has not exited after the job's `ExitTimeOut`, 300 seconds; a phase that
+  runs longer, such as a slow setup script, is then killed and reconciled as an
+  interrupted launch.
 - **Untrusted text.** Issue titles and agent output are attacker-influenced, so `status` and
   `watch` omit free text by default; titles and a session's waiting text need
   `--verbose-titles`, output needs `logs`. That covers what a session can put into fields
@@ -626,13 +828,15 @@ roles hold the item. `--route` stays accepted for `--repository`.
   sessions get deny rules for all three, and one more for the operator commands of the
   lease tool banksman, which all start with `banksman admin` and which banksman asks every
   caller to deny to agents. The rule matches nothing on a machine without banksman, and
-  the other banksman commands stay open, because the repository's scripts use them. A `Bash` rule matches command text rather
+  the other banksman commands stay open, because the repository's scripts use them. They
+  also get deny rules for the daemon's port, written for the port in `[serve]` and added
+  to an operator's own `deny_rules` too: `Bash(*127.0.0.1:<port>*)`,
+  `Bash(*localhost:<port>*)`, and `WebFetch` for both hosts. A `Bash` rule matches command text rather
   than the program behind it, so every pattern leads with a wildcard to cover an absolute
   path and a `sh -c '...'` wrapper alongside the bare name; `probes/deny_rules.py` checks
   each form against a real install. That makes the rules a guardrail against the careless
   path and not a boundary against a deliberate one. Running agents under a separate user
   is the stronger option.
-- **Optional later:** a read-only, loopback-only status page with no mutating endpoints.
 
 ## 8. Sharing devices
 
@@ -671,6 +875,12 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 - A logged-in session is required: Claude Code's credentials and tracker keys live in the
   login keychain, and launchd agents run in that session. A locked screen is fine; a logged
   out one is not.
+- `install` writes a LaunchAgent with `KeepAlive` and `RunAtLoad` that runs
+  `chargehand serve`. launchd starts the daemon when you log in and starts it again when it
+  exits, at most once every ten seconds. The label is still `dev.chargehand.tick`, so
+  `install --load` unloads a timer job from an older release before it loads the new one,
+  and `doctor` warns when the installed job is still that timer. `doctor` also checks that
+  the daemon answers on its port and that the token file has mode 0600.
 - launchd starts jobs with a minimal `PATH`; everything the tick shells out to must be
   reachable through the `PATH` set in the job definition. `install` copies the `PATH` of the
   shell it runs in, and `doctor` resolves `claude` and `git` through the job's `PATH`
@@ -699,7 +909,8 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 | Agent hangs | The watchdog notifies after `max_run_hours` and stops the session after `hard_stop_hours`. |
 | Several blocked runs resumed at once | Sessions wake together; `max_open_workers` bounds how many there can be. |
 | Tracker unavailable | The tick logs and exits; the next one retries. |
-| Control command during a tick | Recorded, then applied by the next, kick-started tick. |
+| Control command during a tick | Recorded, then applied by the daemon's next tick, which starts within about a second of the current one ending. |
+| Daemon killed or crashed | launchd starts it again; the tick lock was released by the kernel, and the first tick reconciles. |
 | Prompt injection through issue text | Mitigated, not eliminated — see `SECURITY.md`. |
 
 ## 11. Roadmap
@@ -708,6 +919,8 @@ Done:
 
 - Runner: configuration, the `linear` adapter, ledger-first launch,
   reconciliation, label lifecycle, state diffing, the control CLI, the launchd job.
+- The resident daemon: the tick on a timer, control requests applied within a second, and
+  a loopback API with a token.
 - Control surface: `watch`, `logs`, request plumbing through the tick, output sanitizing,
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
@@ -726,9 +939,9 @@ Next:
   banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
-- A resident daemon on loopback with a local board, replacing the scheduled job.
+- Actions on the board: new worker, reply, pause, cancel, discard.
 - Packaging, first release.
-- Optional: the read-only status page, agents under a separate user.
+- Optional: agents under a separate user.
 
 Acceptance for the runner runs against a throwaway repository and a cheap prompt, with fault
 injection after every launch step, before any expensive real run. `probes/smoke_route.py`

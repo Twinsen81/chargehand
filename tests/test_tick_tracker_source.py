@@ -48,6 +48,41 @@ def test_a_comment_on_an_idle_workers_issue_wakes_it_in_the_same_tick(harness):
     assert entry.delivered_at is not None
 
 
+def test_a_comment_from_before_the_worker_started_wakes_nobody(harness):
+    """The tracker reads its followed issues some minutes back; the router does not."""
+    harness.board.add("ABC-1")
+    harness.tick()
+    started = harness.worker("ABC-1").created_at
+    harness.board.clock = started - 241
+    before = harness.board.comment("ABC-1", author="reviewer@example.invalid")
+    harness.board.clock = started + 9
+    after = harness.board.comment("ABC-1", author="reviewer@example.invalid")
+    harness.claude_state.set_session_state("ABC-1", "done", status="idle")
+
+    report = harness.next_tick()
+
+    assert (before.created_at, after.created_at) == (started - 240, started + 10)
+    assert report.woken == ["implementer/ABC-1"]
+    entries = harness.ledger.inbox(harness.worker("ABC-1"), pending_only=False)
+    assert [entry.dedupe_id for entry in entries] == [f"tracker:comment:{after.id}"]
+    assert any("1 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
+    assert len(harness.claude_state.read()["resumes"]) == 1
+
+
+def test_a_poll_that_only_skips_old_comments_still_says_so(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    harness.board.clock = harness.worker("ABC-1").created_at - 241
+    harness.board.comment("ABC-1", author="reviewer@example.invalid")
+
+    report = harness.next_tick()
+
+    assert harness.ledger.inbox(harness.worker("ABC-1"), pending_only=False) == []
+    assert any("0 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
+
+
 def test_a_comment_a_worker_posted_wakes_nobody(harness):
     harness.board.add("ABC-1")
     harness.tick()

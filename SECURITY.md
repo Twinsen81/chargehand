@@ -126,10 +126,12 @@ public location.
   power. Git filters that the operator configured, such as
   Git LFS, still run on the files the head selects through `.gitattributes`, and a
   session that the operator resumes by hand, outside chargehand, is not checked.
-- **A wake carries pointers only.** The message that wakes a worker is a fixed line that
-  chargehand writes, followed by the events' pointers. A pointer that is not a plain
-  http(s) URL or a plain identifier is left out, and no actor name, title or body is
-  added, so the wake crosses the same boundary as the launch prompt.
+- **A wake carries kinds and pointers only.** The message that wakes a worker is a fixed
+  line that chargehand writes, followed by one line per event with its kind and its
+  pointer. A pointer that is not a plain http(s) URL or a plain identifier is left out. A
+  kind comes from a source, so it must match `[a-z][a-z0-9_]{0,63}`, or the line names
+  `event` instead. No actor name, title or body is added, so the wake crosses the same
+  boundary as the launch prompt.
 - **Auto permission mode by default.** Sessions run behind Claude Code's safety classifier,
   which is documented as blocking, among others, download-and-execute, data exfiltration,
   force pushes, and destroying files that predate the session, and which falls back to a
@@ -141,8 +143,46 @@ public location.
   is an explicit opt-in intended for a dedicated machine, user account, or VM. Deny rules
   apply in every mode, including `bypassPermissions`, and unlike the classifier they are
   deterministic - but see below for what they are deterministic *about*.
-- **No server.** chargehand opens no port. It is steered by a CLI on the machine it runs on. There
-  is no token to leak and no browser-borne attack surface (CSRF, DNS rebinding, XSS).
+- **A loopback daemon with a token.** The daemon (`chargehand serve`) listens on
+  127.0.0.1 only, on the `[serve]` port, and no setting binds another address. Reads
+  (`GET`) need no token and return what `status --json` returns: identifiers, states,
+  timings and URLs. Every other method needs `Authorization: Bearer <token>`, compared in
+  constant time. The token is in `token_file` (next to `config.toml` by default), which
+  the daemon creates with mode 0600 and refuses to use when it is not a regular file of
+  the operator's with mode 0600; `doctor` checks the same. A request whose `Host` header
+  is not `127.0.0.1:<port>` or `localhost:<port>` is refused, which stops DNS rebinding,
+  and no response carries a CORS header, so a web page on another origin cannot read a
+  response. A cross-origin page can still send a request without reading the answer,
+  which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
+- **Session hooks.** Launched sessions post their start, turn ends, failures,
+  notifications and permission prompts to `POST /hooks/<event>` on that port, with the
+  token in the `Authorization` header; a post without the token changes nothing. The token
+  is never on a command line, where other users of the machine could read it with `ps`:
+  the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
+  0700 under the state directory, and the `SessionStart` command hook names the token
+  file, not the token, and runs its script with `python -I`, so nothing in the worktree
+  is imported. The settings file is deleted when its session is removed. A post moves
+  only the live worker whose session posted it. The daemon answers every post with an
+  empty object, so it never makes a permission decision for a session, never keeps a
+  turn running and never adds text to the model's context. The payload is untrusted: the
+  last answer, the tool input and the other fields are cleaned of terminal control
+  sequences and capped when stored, never reach a notification or a prompt, and
+  `GET /api/state` returns them as JSON data for the page to escape. `status --json`
+  names the last hook event and the reset time, but no payload text.
+- **A read-only board.** `GET /` serves one static page, its script and its style sheet,
+  all from the package; nothing else is served as a file, and the page loads nothing
+  from another origin. They are sent with `Content-Security-Policy: default-src 'none';
+  script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri
+  'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, so no inline script or
+  style runs and no other site can frame the page. The page reads `GET /api/board` and
+  has no action: it sends no request other than that read, and it holds no token. Every
+  text field in that answer is cleaned of control sequences and direction overrides on
+  the server, `<`, `>` and `&` are escaped in its JSON, and the page sets text with
+  `textContent` only, never as markup. A link is made only from a plain http(s) URL, and
+  opens with `rel="noopener noreferrer"`. The board shows session text (the last prompt,
+  the last answer, a permission prompt's tool input) that `status` leaves out, so it is
+  for the operator's own browser on the machine.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
@@ -163,7 +203,8 @@ public location.
 - **Agents are discouraged from steering the runner.** Sessions that chargehand launches
   get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
   other sessions, for the operator commands of the lease tool banksman (`banksman admin`),
-  and for the
+  for the daemon's port (`127.0.0.1:<port>` and `localhost:<port>` in a command, and
+  `WebFetch` to either host), and for the
   flags that would start a fresh session without these rules. Read that as a guardrail
   and not as a boundary. A Claude Code `Bash` rule matches the command text the model
   writes, not the program it ends up running, which its documentation states plainly:
@@ -175,8 +216,8 @@ public location.
   another name, or a script that calls the API directly all still get through, and no
   list of patterns can change that. The boundary is the operating system, not the rule
   list; see the first known limit below.
-- **One writer of side effects.** Mutating commands record a request; only the periodic
-  tick acts on it. Control actions cannot race a launch in progress.
+- **One writer of side effects.** Mutating commands record a request; only the daemon's
+  tick acts on it, under the tick lock. Control actions cannot race a launch in progress.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
   issue URL, and a short reason chargehand itself writes — never question text, agent
   output, issue titles, a status file's `stop_reason`, or a setup script's output —
@@ -199,6 +240,12 @@ public location.
   human review remain the final gate; chargehand never merges.
 - The machine running chargehand holds tracker credentials and an authenticated Claude Code
   install. Treat it as you would a CI worker with write access.
+- A session runs as the operator's user, so it can read the daemon's token file and the
+  ledger. The deny rules for the port are a guardrail against the careless path; a session
+  that reads the token and reaches the port another way can send what the CLI can. The
+  token is also in each session's own hook settings, so a session can read it there too,
+  and post hooks in the name of another worker's session. That can move another worker's
+  state and its label, but it runs no command and answers no prompt.
 - A session can read any credential that the runner or a notification hook reads from the
   login keychain, because it runs as the same user. Give a hook a credential that protects
   nothing else, such as the password of a mailbox that exists only to send alerts.

@@ -1,5 +1,5 @@
 {
-  "//": "Deny rules chargehand passes to every session it launches. A guardrail, not a sandbox: sessions run as the operator's user, and a Bash rule matches command text rather than the program behind it. Each pattern leads with * so an absolute path or `sh -c '...'` is covered as well as the bare name. Running agents under a separate user account is the stronger option.",
+  "//": "Deny rules chargehand passes to every session it launches. A guardrail, not a sandbox: sessions run as the operator's user, and a Bash rule matches command text rather than the program behind it. Each pattern leads with * so an absolute path or `sh -c '...'` is covered as well as the bare name. The last four keep sessions away from the daemon's port, 7878 by default; the runner writes them for the port in [serve]. Running agents under a separate user account is the stronger option.",
   "permissions": {
     "deny": [
       "Bash(*chargehand *)",
@@ -10,7 +10,11 @@
       "Bash(*claude agents*)",
       "Bash(*banksman admin*)",
       "Bash(*dangerously-skip-permissions*)",
-      "Bash(*bypassPermissions*)"
+      "Bash(*bypassPermissions*)",
+      "Bash(*127.0.0.1:7878*)",
+      "Bash(*localhost:7878*)",
+      "WebFetch(domain:127.0.0.1)",
+      "WebFetch(domain:localhost)"
     ]
   }
 }

@@ -6,7 +6,9 @@ import argparse
 import dataclasses
 import json
 import plistlib
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -16,17 +18,25 @@ from chargehand.config import load_machine_config
 from chargehand.errors import ChargehandError
 
 
-def test_the_plist_runs_a_tick_on_a_timer_with_an_explicit_path():
-    data = install.build_plist(interval_secs=300)
+def test_the_plist_keeps_the_daemon_running_with_an_explicit_path(monkeypatch):
+    monkeypatch.setenv("PATH", "/opt/tools/bin:/usr/bin")
+    data = install.build_plist()
 
     assert data["Label"] == paths.LAUNCHD_LABEL
-    assert data["ProgramArguments"][-1] == "tick"
-    assert data["StartInterval"] == 300
+    assert data["ProgramArguments"][-1] == "serve"
+    assert data["KeepAlive"] is True
     assert data["RunAtLoad"] is True
+    # The daemon ticks on its own timer; a StartInterval would start a second process.
+    assert "StartInterval" not in data
+    # The daemon finishes the phase in progress after SIGTERM; launchd must wait for it.
+    assert data["ExitTimeOut"] >= 60
     # Sessions inherit the job's process type; Background would throttle them.
     assert data["ProcessType"] == "Interactive"
-    # launchd starts jobs with a minimal PATH, so the job carries its own.
-    assert "/opt/homebrew/bin" in data["EnvironmentVariables"]["PATH"]
+    # launchd starts jobs with a minimal PATH, so the job carries its own, merged with the
+    # PATH of the shell that ran `install`.
+    job_path = data["EnvironmentVariables"]["PATH"].split(":")
+    assert "/opt/homebrew/bin" in job_path and "/opt/tools/bin" in job_path
+    assert job_path.count("/usr/bin") == 1
 
 
 def test_the_plist_can_always_be_run_by_launchd(monkeypatch):
@@ -34,23 +44,80 @@ def test_the_plist_can_always_be_run_by_launchd(monkeypatch):
 
     The module form is what a virtual environment that was never activated falls back
     to: neither `chargehand` nor its `python` is on PATH there, so naming the program
-    alone would produce `python tick`, which launchd would try to run as a file.
+    alone would produce `python serve`, which launchd would try to run as a file.
     """
     monkeypatch.setattr(install.shutil, "which", lambda name: None)
     argv = install.build_plist()["ProgramArguments"]
-    assert argv == [sys.executable, "-m", "chargehand", "tick"]
+    assert argv == [sys.executable, "-m", "chargehand", "serve"]
 
     monkeypatch.setattr(install.shutil, "which", lambda name: "/opt/bin/chargehand")
-    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/chargehand", "tick"]
+    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/chargehand", "serve"]
 
 
 def test_the_plist_round_trips_through_plistlib(tmp_path):
-    target = install.write_plist(tmp_path / "job.plist", interval_secs=120)
+    target = install.write_plist(tmp_path / "job.plist")
 
     with target.open("rb") as handle:
         data = plistlib.load(handle)
 
-    assert data["StartInterval"] == 120
+    assert data["KeepAlive"] is True
+    assert data["ProgramArguments"][-1] == "serve"
+    assert not install.is_timer_job(data)
+
+
+def test_a_job_from_before_the_daemon_is_a_timer_job():
+    assert install.is_timer_job({"ProgramArguments": ["/bin/chargehand", "tick"], "StartInterval": 180})
+    assert install.is_timer_job({"ProgramArguments": ["/bin/chargehand", "tick"]})
+    assert not install.is_timer_job({"ProgramArguments": ["/bin/chargehand", "serve"]})
+
+
+def test_install_writes_the_daemon_job_and_does_not_load_it(monkeypatch, capsys, config_file, tmp_path):
+    plist = tmp_path / "LaunchAgents" / "job.plist"
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert main(["--config", str(config_file), "install"]) == EXIT_OK
+
+    with plist.open("rb") as handle:
+        data = plistlib.load(handle)
+    assert data["ProgramArguments"][-1] == "serve"
+    assert data["KeepAlive"] is True and data["ProcessType"] == "Interactive"
+    assert "StartInterval" not in data
+    assert "Not loaded" in capsys.readouterr().out
+
+
+def test_install_load_replaces_a_loaded_timer_job(monkeypatch, capsys, config_file, tmp_path):
+    plist = tmp_path / "LaunchAgents" / "job.plist"
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls = []
+    monkeypatch.setattr(install, "is_loaded", lambda: True)
+    monkeypatch.setattr(
+        install, "launchctl",
+        lambda *args: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert main(["--config", str(config_file), "install", "--load"]) == EXIT_OK
+
+    assert [call[0] for call in calls] == ["bootout", "bootstrap"]
+    assert calls[1][-1] == str(plist)
+
+
+def test_uninstall_unloads_the_job_and_removes_its_plist(monkeypatch, capsys, tmp_path):
+    plist = tmp_path / "LaunchAgents" / "job.plist"
+    install.write_plist(plist)
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    calls = []
+    monkeypatch.setattr(install, "is_loaded", lambda: True)
+    monkeypatch.setattr(
+        install, "launchctl",
+        lambda *args: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert main(["uninstall", "--remove-plist"]) == EXIT_OK
+
+    assert [call[0] for call in calls] == ["bootout"]
+    assert not plist.exists()
 
 
 def test_init_writes_a_repo_config_that_parses(tmp_path, capsys):
@@ -466,3 +533,111 @@ def test_a_control_command_completes_without_the_scheduled_job(capsys, config_fi
     assert main(["--config", str(config_file), "cancel", "ABC-1"]) == EXIT_OK
 
     assert "worktree kept" in capsys.readouterr().out
+
+
+# ----- the daemon -----------------------------------------------------------
+
+
+def _doctor(capsys, config_file):
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+    return {c["name"]: c for c in json.loads(capsys.readouterr().out)}
+
+
+def test_doctor_reports_the_daemon_and_its_token(capsys, config_file, harness, tmp_path):
+    from support import daemon as support
+
+    token = tmp_path / "board.token"
+    config = support.daemon_config(harness.config, token)
+    daemon = support.build(config, token=None)
+    with support.running(daemon, loop=False):
+        with config_file.open("a") as handle:
+            handle.write(f"\n[serve]\nport = {daemon.port}\ntoken_file = \"{token}\"\n")
+        checks = _doctor(capsys, config_file)
+        assert checks["daemon"]["status"] == install.OK
+        assert f"127.0.0.1:{daemon.port}" in checks["daemon"]["detail"]
+        assert checks["daemon token"]["status"] == install.OK
+
+        token.chmod(0o644)
+        checks = _doctor(capsys, config_file)
+        assert checks["daemon token"]["status"] == install.FAIL
+        assert "mode 644" in checks["daemon token"]["detail"]
+        token.chmod(0o600)
+
+    checks = _doctor(capsys, config_file)
+    assert checks["daemon"]["status"] == install.FAIL
+    assert "nothing answers" in checks["daemon"]["detail"]
+    assert main(["--config", str(config_file), "doctor", "--no-tracker"]) == 1
+
+
+def test_doctor_names_a_daemon_that_serves_another_ledger(capsys, config_file, harness, tmp_path):
+    from support import daemon as support
+
+    config = support.daemon_config(harness.config, tmp_path / "board.token")
+    daemon = support.build(config, ledger_path=tmp_path / "other" / "ledger.sqlite")
+    with support.running(daemon, loop=False):
+        with config_file.open("a") as handle:
+            handle.write(f"\n[serve]\nport = {daemon.port}\n")
+        checks = _doctor(capsys, config_file)
+
+    assert checks["daemon"]["status"] == install.FAIL
+    assert "another ledger" in checks["daemon"]["detail"]
+
+
+def test_doctor_warns_about_a_missing_token_file(capsys, config_file, harness):
+    checks = _doctor(capsys, config_file)
+
+    assert checks["daemon token"]["status"] == install.WARN
+    assert "writes it when it starts" in checks["daemon token"]["detail"]
+
+
+def test_doctor_warns_about_a_timer_job_from_before_the_daemon(
+    monkeypatch, capsys, config_file, harness, tmp_path
+):
+    plist = tmp_path / "job.plist"
+    data = install.build_plist()
+    data.pop("KeepAlive")
+    data["StartInterval"] = 180
+    data["ProgramArguments"] = [*data["ProgramArguments"][:-1], "tick"]
+    with plist.open("wb") as handle:
+        plistlib.dump(data, handle)
+    monkeypatch.setattr(paths, "launch_agent_plist", lambda: plist)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    notes = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "launchd"]
+    assert any("timer instead of the daemon" in c["detail"] for c in notes)
+
+
+def test_doctor_warns_about_a_review_request_without_a_notification_thread(
+    capsys, config_file, harness, tmp_path, monkeypatch
+):
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from support.fake_gh import GhState
+
+    fake_gh = Path(__file__).parent / "support" / "fake_gh.py"
+    monkeypatch.setenv("FAKE_GH_STATE", str(tmp_path / "gh.json"))
+    gh = GhState(tmp_path / "gh.json")
+    an_hour_ago = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc)
+    gh.add_pull("octo/app#7", updated_at=an_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    with config_file.open("a") as handle:
+        handle.write(f'\n[[source]]\nname = "github"\ntype = "github"\ngh_bin = "{fake_gh}"\n')
+
+    main(["--config", str(config_file), "doctor", "--json"])
+    checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
+
+    assert [c["status"] for c in checks] == [install.WARN]
+    assert "octo_app_7" in checks[0]["detail"] and '"On GitHub" setting' in checks[0]["detail"]
+
+    gh.notify("review_requested", "octo/app#7", updated_at=an_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    main(["--config", str(config_file), "doctor", "--json"])
+    checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
+    assert [c["status"] for c in checks] == [install.OK]
+
+    # The check calls GitHub, so --no-tracker skips it.
+    gh.clear_calls()
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+    checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
+    assert checks == [] and gh.calls == []

@@ -73,6 +73,25 @@ DEFAULT_DENY_RULES = (
     "Bash(*bypassPermissions*)",
 )
 
+# The daemon's port, which `[serve]` can change.
+DEFAULT_SERVE_PORT = 7878
+TOKEN_FILE_NAME = "board.token"
+
+
+def serve_deny_rules(port: int) -> tuple[str, ...]:
+    """The launch deny rules for the daemon's port, which depend on the configured port.
+
+    The daemon binds 127.0.0.1 only, so these name the two spellings a command uses to
+    reach it. `WebFetch` takes no port, so its rules deny the whole loopback host.
+    """
+    return (
+        f"Bash(*127.0.0.1:{port}*)",
+        f"Bash(*localhost:{port}*)",
+        "WebFetch(domain:127.0.0.1)",
+        "WebFetch(domain:localhost)",
+    )
+
+
 _PERMISSION_RULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_*]*(\(.*\))?$")
 
 
@@ -252,6 +271,51 @@ class SourceConfig:
         options = {k: v for k, v in table.items() if k not in ("name", "type")}
         return cls(name=name, type=kind, options=options)
 
+
+@dataclass(frozen=True)
+class ServeConfig:
+    """The `[serve]` table: the resident daemon.
+
+    There is no address key on purpose: the daemon binds 127.0.0.1 and nothing else.
+    """
+
+    port: int = DEFAULT_SERVE_PORT
+    token_file: Path = field(default_factory=lambda: paths.config_dir() / TOKEN_FILE_NAME)
+    tick_interval_secs: int = 60
+    # Where the status line wrapper writes the usage windows and the daemon reads them.
+    usage_file: Path = field(default_factory=lambda: paths.usage_file())
+
+    @classmethod
+    def parse(cls, table: Mapping[str, object] | None) -> "ServeConfig":
+        if table is None:
+            return cls()
+        where = "serve"
+        if not isinstance(table, Mapping):
+            raise ConfigError(f"{where}: expected a table")
+        _unknown_keys(table, ("port", "token_file", "tick_interval_secs", "usage_file"), where)
+        port = _as_int(table.get("port", DEFAULT_SERVE_PORT), f"{where}.port", minimum=1)
+        if port > 65535:
+            raise ConfigError(f"{where}.port: must be <= 65535")
+        token = table.get("token_file")
+        usage = table.get("usage_file")
+        return cls(
+            port=port,
+            token_file=(
+                _expand(_as_str(token, f"{where}.token_file"))
+                if token is not None
+                else paths.config_dir() / TOKEN_FILE_NAME
+            ),
+            tick_interval_secs=_as_int(
+                table.get("tick_interval_secs", 60), f"{where}.tick_interval_secs", minimum=1
+            ),
+            usage_file=(
+                _expand(_as_str(usage, f"{where}.usage_file"))
+                if usage is not None
+                else paths.usage_file()
+            ),
+        )
+
+
 DEFAULT_ROLES = ("implementer",)
 
 # chargehand no longer runs a lease tool: banksman finds a worker's leases by itself and
@@ -361,6 +425,7 @@ class MachineConfig:
     ignored_keys: tuple[str, ...] = ()
     source: Path | None = None
     sources: tuple[SourceConfig, ...] = ()
+    serve: ServeConfig = field(default_factory=ServeConfig)
 
     _TOP_LEVEL = (
         "poll_interval_secs",
@@ -383,6 +448,7 @@ class MachineConfig:
         "repository",
         "route",
         "source",
+        "serve",
     )
 
     def repository_by_name(self, name: str) -> Repository | None:
@@ -437,8 +503,13 @@ class MachineConfig:
         deny = data.get("deny_rules", list(DEFAULT_DENY_RULES))
         if not isinstance(deny, list) or any(not isinstance(rule, str) for rule in deny):
             raise ConfigError("config.deny_rules: expected a list of strings")
+        deny = list(deny)
         for rule in deny:
             validate_deny_rule(rule)
+        serve = ServeConfig.parse(data.get("serve"))
+        # Added to the operator's own list too: a list written for an older release would
+        # otherwise leave the daemon's port open to every session.
+        deny.extend(rule for rule in serve_deny_rules(serve.port) if rule not in deny)
 
         max_concurrent = _as_int(data.get("max_concurrent", 2), "config.max_concurrent", minimum=0)
         if "max_open_workers" in data and "max_open_attempts" in data:
@@ -481,6 +552,7 @@ class MachineConfig:
             ignored_keys=tuple(key for key in _IGNORED_KEYS if key in data),
             source=source,
             sources=sources,
+            serve=serve,
         )
 
     def source_by_name(self, name: str) -> SourceConfig | None:

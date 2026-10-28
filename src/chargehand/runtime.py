@@ -91,6 +91,8 @@ class Capabilities:
     ``fork``: a session can be copied into a new one that keeps the conversation.
     ``external_supervisor``: a supervisor outside chargehand hosts the session processes;
     without it chargehand hosts them, and a process ends with the runner.
+    ``session_hooks``: the sessions post their turn ends, failures and permission prompts
+    to the daemon, and :meth:`Runtime.parse_hook` reads those posts.
     """
 
     live_attach: bool = False
@@ -99,9 +101,43 @@ class Capabilities:
     usage_readings: bool = False
     fork: bool = False
     external_supervisor: bool = False
+    session_hooks: bool = False
 
     def as_dict(self) -> dict[str, bool]:
         return asdict(self)
+
+
+# What a session hook reports, in every runtime's terms.
+HOOK_SESSION_START = "session_start"
+HOOK_TURN_END = "turn_end"
+HOOK_TURN_FAILED = "turn_failed"
+HOOK_PERMISSION = "permission"
+HOOK_NOTIFICATION = "notification"
+
+
+@dataclass(frozen=True)
+class Hook:
+    """One post from a session, as its runtime read it. Every text field is untrusted.
+
+    *observed* is the session state the post shows, one of SESSION_STATES, or None when
+    the post changes no state. *usage_limit* marks a failure caused by the provider's
+    usage limit, and *reset_at* is when that limit resets, when the failure said.
+    """
+
+    kind: str
+    event: str
+    session_uuid: str | None = None
+    cwd: str | None = None
+    observed: str | None = None
+    transcript_path: str | None = None
+    last_answer: str | None = None
+    error: str | None = None
+    usage_limit: bool = False
+    reset_at: float | None = None
+    notification_type: str | None = None
+    tool_name: str | None = None
+    tool_input: str | None = None
+    source: str | None = None
 
 
 # Statuses of a health check, as `doctor` prints them.
@@ -191,6 +227,14 @@ class Runtime(ABC):
     def check_role(cls, role: "Role", repo: Path) -> None:
         """Check what a role needs outside its file, such as an agent definition. Raise ConfigError."""
 
+    # The event names a session of this runtime posts to `/hooks/<event>`.
+    hook_events: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def parse_hook(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
+        """The post *payload* to `/hooks/<event>`, or None when it is not this runtime's."""
+        return None
+
     # ----- sessions ---------------------------------------------------------
 
     @abstractmethod
@@ -237,6 +281,9 @@ class Runtime(ABC):
     def is_stopped(self, session: Session) -> bool:
         """Whether the listed *session* has no process left. The one rule for confirming a stop."""
         return session.state in (STOPPED, FAILED)
+
+    def release(self, worktree: Path) -> None:
+        """Delete what the launch in *worktree* kept for its session, once that session is removed."""
 
     @abstractmethod
     def respawn(self, session_id: str) -> CommandResult:
@@ -402,6 +449,7 @@ __all__ = [
     "CHECK_WARN",
     "FAILED",
     "HealthCheck",
+    "Hook",
     "LaunchResult",
     "LaunchSpec",
     "Runtime",

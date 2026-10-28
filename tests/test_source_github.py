@@ -61,6 +61,7 @@ def source(gh, clock) -> GithubSource:
     built = sources_mod.build(SourceConfig("github", "github", {"gh_bin": str(FAKE_GH)}))
     assert isinstance(built, GithubSource)
     built.clock = clock
+    gh.now = clock.now
     return built
 
 
@@ -253,6 +254,179 @@ def test_a_thread_read_before_the_poll_is_not_lost(source, gh, clock):
 
     assert ("review_requested", PR_KEY) in [(e.kind, e.item.key) for e in events]
     assert "all=true" in [p for p in api_paths(gh) if p.startswith("notifications")][-1]
+
+
+def notification_calls(gh: GhState) -> list[list[str]]:
+    return [
+        call for call in gh.calls
+        if call[:2] == ["api", "-i"] and any(arg.startswith("notifications") for arg in call)
+    ]
+
+
+def test_an_empty_list_is_asked_with_its_etag_and_ends_the_first_poll(source, gh, clock):
+    gh.set(date="Mon, 26 Oct 2026 10:00:30 GMT")
+    events, cursor = source.poll(None, [])
+
+    # An empty list has an ETag but no Last-Modified.
+    state = json.loads(cursor)
+    assert events == [] and state["last_modified"] is None and state["etag"]
+    # The first poll is over all the same: the next one starts from the server's Date.
+    assert state["listed_at"] == datetime(2026, 10, 26, 10, 0, 30, tzinfo=timezone.utc).timestamp()
+
+    # A 200 would take this Date; the 304 keeps the window of the first poll.
+    gh.set(date="Mon, 26 Oct 2026 10:01:30 GMT")
+    clock.now += 61
+    events, cursor = source.poll(cursor, [])
+
+    assert json.loads(cursor)["listed_at"] == state["listed_at"]
+    second = notification_calls(gh)[-1]
+    assert f"If-None-Match: {state['etag']}" in second
+    assert not any(arg.startswith("If-Modified-Since") for arg in second)
+    assert "all=true" in api_paths(gh)[-1] and "since=2026-10-26T09:55:30Z" in api_paths(gh)[-1]
+    assert events == [] and json.loads(cursor)["etag"] == state["etag"]
+    assert json.loads(cursor)["next_poll_at"] == clock.now + 60
+
+    # A thread that the operator read before this poll still arrives.
+    gh.add_pull(PR)
+    gh.notify("review_requested", PR, updated_at="2026-10-26T10:01:00Z", unread=False)
+    clock.now += 61
+    events, cursor = source.poll(cursor, [])
+
+    assert [(e.kind, e.item.key) for e in events] == [("review_requested", PR_KEY)]
+    assert json.loads(cursor)["last_modified"] == gh.read()["last_modified"]
+
+
+def test_a_cursor_from_before_the_etag_keeps_its_window(source, gh, clock):
+    old = json.dumps({
+        "last_modified": "Mon, 26 Oct 2026 10:00:00 GMT", "poll_interval": 60,
+        "next_poll_at": 0, "polled_at": NOW - 60, "items": {},
+    })
+    gh.notify("review_requested", PR)
+
+    source.poll(old, [])
+
+    assert "since=2026-10-26T09:55:00Z" in api_paths(gh)[0]
+    assert "If-Modified-Since: Mon, 26 Oct 2026 10:00:00 GMT" in notification_calls(gh)[0]
+
+
+# ----- review requests without a notification thread --------------------------------
+
+
+OLD_REQUEST = "2026-10-26T09:00:00Z"
+
+
+def review_warnings(source, gh, cursor=None):
+    _, cursor = source.poll(cursor, [])
+    return source.take_warnings(), cursor
+
+
+def test_a_review_request_without_a_thread_warns_once_a_day(source, gh, clock):
+    gh.add_pull(PR, updated_at=OLD_REQUEST, created_at="2026-10-20T08:00:00Z")
+
+    warnings, cursor = review_warnings(source, gh)
+
+    assert len(warnings) == 1
+    assert PR_KEY in warnings[0] and '"On GitHub" setting' in warnings[0]
+    search = next(call for call in gh.calls if any("search/issues" in arg for arg in call))
+    assert "--paginate" in search
+    # The threads are read back to the pull request's creation, read ones included.
+    listed = [p for p in api_paths(gh) if p.startswith("notifications") and "since=2026-10-20T07:55" in p]
+    assert listed and "all=true" in listed[0]
+
+    gh.clear_calls()
+    clock.now += 23 * 3600
+    warnings, cursor = review_warnings(source, gh, cursor)
+    assert warnings == [] and not any("search/issues" in p for p in api_paths(gh))
+
+    clock.now += 3600
+    warnings, _ = review_warnings(source, gh, cursor)
+    assert len(warnings) == 1
+
+
+def test_the_printed_warning_keeps_the_hint_with_long_keys(source, gh, capsys):
+    from chargehand import cli
+    from chargehand.tick import TickReport
+
+    for number in (101, 102, 103):
+        gh.add_pull(f"octo/{'long-repository-name-' * 4}{number}#{number}", updated_at=OLD_REQUEST)
+    warnings, _ = review_warnings(source, gh)
+    assert len(warnings) == 1 and len(warnings[0]) > 200
+
+    cli._print_report(TickReport(warnings=warnings))
+
+    line = capsys.readouterr().out.strip()
+    assert line.endswith("…")
+    assert 'check that GitHub\'s "On GitHub" setting for participating notifications is on' in line
+
+
+def test_a_review_request_with_a_thread_does_not_warn(source, gh):
+    gh.add_pull(PR, updated_at=OLD_REQUEST)
+    gh.notify("review_requested", PR, updated_at=OLD_REQUEST, unread=False)
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert warnings == []
+
+
+def test_a_young_review_request_does_not_warn(source, gh, clock):
+    gh.add_pull(PR, updated_at=iso(NOW - 5 * 60))
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert warnings == []
+    # Nothing to compare, so the threads are not read for the check.
+    assert not any("all=true" in p for p in api_paths(gh) if p.startswith("notifications"))
+
+
+def test_a_long_thread_list_is_read_in_a_few_pages_and_old_requests_are_not_guessed(
+    source, gh, monkeypatch
+):
+    from chargehand.sources import github as github_mod
+
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_PAGE_SIZE", 2)
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_MAX_PAGES", 1)
+    # Requested before the oldest thread that one page holds: not known either way.
+    gh.add_pull("octo/app#1", created_at="2026-10-26T08:00:00Z", updated_at=OLD_REQUEST)
+    # Requested after it: its thread would be on the page, so it has none.
+    gh.add_pull("octo/app#2", created_at="2026-10-26T09:20:00Z", updated_at="2026-10-26T09:30:00Z")
+    for number, at in ((10, "2026-10-26T08:30:00Z"), (11, "2026-10-26T09:10:00Z"),
+                       (12, "2026-10-26T09:40:00Z")):
+        gh.notify("mention", f"octo/app#{number}", kind="Issue", updated_at=at, unread=False)
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert len(warnings) == 1 and "octo_app_2" in warnings[0] and "octo_app_1" not in warnings[0]
+    pages = [p for p in api_paths(gh) if p.startswith("notifications") and "&page=" in p]
+    assert len(pages) == 1 and "per_page=2&page=1" in pages[0]
+
+
+def test_a_thread_on_a_later_page_counts(source, gh, monkeypatch):
+    from chargehand.sources import github as github_mod
+
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_PAGE_SIZE", 2)
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_MAX_PAGES", 3)
+    gh.add_pull(PR, created_at="2026-10-26T08:00:00Z", updated_at=OLD_REQUEST)
+    # Newest first: the two mentions fill page 1, the review request is on page 2.
+    gh.notify("review_requested", PR, updated_at="2026-10-26T08:10:00Z", unread=False)
+    for number, at in ((10, "2026-10-26T09:10:00Z"), (11, "2026-10-26T09:40:00Z")):
+        gh.notify("mention", f"octo/app#{number}", kind="Issue", updated_at=at, unread=False)
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert warnings == []
+    pages = [p for p in api_paths(gh) if p.startswith("notifications") and "&page=" in p]
+    assert [p.split("&page=")[1].split("&")[0] for p in pages] == ["1", "2"]
+
+
+def test_a_failed_review_request_check_does_not_fail_the_poll(source, gh):
+    gh.add_pull(PR, updated_at=OLD_REQUEST)
+    gh.notify("review_requested", PR)
+    gh.set(fail=[{"match": "search/issues", "stderr": "HTTP 403: rate limit"}])
+
+    events, _ = source.poll(None, [])
+
+    assert [e.kind for e in events] == ["review_requested"]
+    assert source.take_warnings() == []
 
 
 # ----- per pull request ------------------------------------------------------------
@@ -735,6 +909,27 @@ def test_a_review_request_starts_a_reviewer_and_a_comment_reaches_its_inbox(tick
     assert inbox_rows(ticking) == [(reviewer.id, "comment", "issue_comment:41")]
 
 
+def test_a_comment_from_before_the_reviewer_started_does_not_wake_it(ticking, gh):
+    """The first read of a followed pull request reaches five minutes back; the router does not."""
+    gh.add_pull(PR)
+    gh.notify("review_requested", PR)
+    assert ticking.tick().launched == [PR_KEY]
+    reviewer = ticking.worker(PR_KEY, "pr-reviewer")
+    for comment_id, offset in ((51, -240), (52, 10)):
+        gh.add("issue_comments", PR, {"id": comment_id, "user": {"login": "alice"}, "body": "hm",
+                                      "created_at": iso(reviewer.created_at + offset)})
+    ticking.claude_state.set_session_state(PR_KEY, "done")
+
+    report = ticking.next_tick()
+
+    assert report.errors == []
+    assert inbox_rows(ticking) == [(reviewer.id, "comment", "issue_comment:52")]
+    assert any("1 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
+    assert report.woken == [f"pr-reviewer/{PR_KEY}"]
+    assert len(ticking.claude_state.read()["resumes"]) == 1
+
+
 def test_an_unchanged_notification_list_is_no_error_in_the_tick(ticking, gh):
     gh.notify("mention", "octo/app#9", kind="Issue")
     ticking.tick()
@@ -747,6 +942,24 @@ def test_an_unchanged_notification_list_is_no_error_in_the_tick(ticking, gh):
 
     assert report.errors == []
     assert any(call[:2] == ["api", "-i"] for call in gh.calls[-2:])
+
+
+def test_a_review_request_without_a_thread_is_one_tick_warning_a_day(ticking, gh, caplog):
+    gh.add_pull(PR, updated_at=iso(time.time() - 3600))
+
+    with caplog.at_level("DEBUG"):
+        report = ticking.tick()
+
+    assert report.errors == []
+    warnings = [w for w in report.warnings if "no notification thread" in w]
+    assert len(warnings) == 1 and PR_KEY in warnings[0]
+    # `tick` and `serve` print the report's warnings; a log line would print it twice.
+    assert not any("no notification thread" in r.getMessage() for r in caplog.records)
+    assert ticking.ledger.live_worker_for(PR_KEY) is None
+
+    # The check runs once a day, so the next tick does not warn again.
+    report = ticking.next_tick()
+    assert not any("no notification thread" in w for w in report.warnings)
 
 
 @pytest.mark.parametrize("cursor", ["not json", "[]", '{"poll_interval": "soon"}'])

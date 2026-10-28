@@ -16,11 +16,16 @@ from pathlib import Path
 
 import pytest
 
-from chargehand.config import DEFAULT_DENY_RULES
+from chargehand.config import DEFAULT_DENY_RULES, serve_deny_rules
 from deny_rules import (
     ALLOWED,
     BLOCKED,
+    BODY_DIR,
     INCONCLUSIVE,
+    LAUNCH_RULES,
+    PR,
+    RAN,
+    REFUSED,
     Attempt,
     Outcome,
     battery,
@@ -78,11 +83,11 @@ def test_a_deny_rule_matches_past_a_wrapper_and_an_assignment():
 
 def test_every_attempt_in_the_battery_is_covered_or_is_the_control(tmp_path):
     for attempt in battery(tmp_path):
-        matched = first_matching_rule(DEFAULT_DENY_RULES, attempt.command)
+        matched = first_matching_rule(LAUNCH_RULES, attempt.command)
         if attempt.expect_blocked:
             assert matched, f"no rule covers {attempt.name}: {attempt.command}"
         else:
-            assert matched is None, f"the control attempt is denied by {matched}"
+            assert matched is None, f"{attempt.name} is denied by {matched}"
 
 
 def test_the_control_survives_a_scratch_path_that_mentions_the_tool(tmp_path):
@@ -94,7 +99,7 @@ def test_the_control_survives_a_scratch_path_that_mentions_the_tool(tmp_path):
     scratch = tmp_path / "chargehand-scratch"
     scratch.mkdir()
     control = next(a for a in battery(scratch) if not a.expect_blocked)
-    assert first_matching_rule(DEFAULT_DENY_RULES, control.command) is None
+    assert first_matching_rule(LAUNCH_RULES, control.command) is None
 
 
 @pytest.mark.parametrize(
@@ -209,6 +214,12 @@ def test_a_verdict_needs_both_arms():
     assert _outcome(without=False, with_=False).verdict == INCONCLUSIVE
 
 
+def test_a_form_that_must_pass_fails_when_only_the_rules_refuse_it():
+    assert _outcome(without=True, with_=True, expect_blocked=False).verdict == RAN
+    assert _outcome(without=True, with_=False, expect_blocked=False).verdict == REFUSED
+    assert _outcome(without=False, with_=False, expect_blocked=False).verdict == INCONCLUSIVE
+
+
 def test_the_probe_ships_outside_the_wheel():
     """It drives a real Claude Code install, so it is a repository tool, not a feature."""
     root = Path(__file__).resolve().parent.parent
@@ -251,7 +262,71 @@ def test_the_template_ships_the_same_rules_the_runner_passes():
     from chargehand import paths
 
     shipped = json.loads((paths.templates_dir() / "launch-deny-rules.json").read_text())
-    assert shipped["permissions"]["deny"] == list(DEFAULT_DENY_RULES)
+    assert shipped["permissions"]["deny"] == list(LAUNCH_RULES)
+
+
+# ----- the daemon's port ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "curl -s http://127.0.0.1:7878/api/state",
+        "curl -X POST -H 'Authorization: Bearer x' http://localhost:7878/api/anything",
+        "/usr/bin/curl 127.0.0.1:7878",
+        "sh -c 'curl -s localhost:7878/api/health'",
+        "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7878/')\"",
+    ),
+)
+def test_the_daemons_port_is_denied_however_it_is_reached(command):
+    assert first_matching_rule(LAUNCH_RULES, command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "curl -s http://127.0.0.1:3000/",
+        "npm run dev -- --port 8080",
+        "curl https://example.com/7878",
+    ),
+)
+def test_a_session_keeps_its_own_local_servers(command):
+    assert first_matching_rule(LAUNCH_RULES, command) is None
+
+
+def test_the_port_rules_follow_the_configured_port():
+    from chargehand.config import MachineConfig
+
+    data = {
+        "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
+        "serve": {"port": 9123},
+    }
+    rules = MachineConfig.parse(data).deny_rules
+
+    assert first_matching_rule(rules, "curl -s http://127.0.0.1:9123/api/state")
+    assert first_matching_rule(rules, "curl -s http://localhost:9123/api/state")
+    assert first_matching_rule(rules, "curl -s http://127.0.0.1:7878/api/state") is None
+    assert set(DEFAULT_DENY_RULES) <= set(rules)
+    assert "WebFetch(domain:127.0.0.1)" in rules and "WebFetch(domain:localhost)" in rules
+
+
+def test_an_operators_own_rule_list_still_gets_the_port_rules():
+    """A list written before the daemon existed must not leave its port open to sessions."""
+    from chargehand.config import MachineConfig
+
+    data = {
+        "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
+        "deny_rules": ["Bash(*chargehand *)"],
+    }
+
+    assert MachineConfig.parse(data).deny_rules == ("Bash(*chargehand *)", *serve_deny_rules(7878))
+
+
+def test_the_port_rules_pass_their_own_validation():
+    from chargehand.config import validate_deny_rule
+
+    for rule in serve_deny_rules(7878):
+        validate_deny_rule(rule)
 
 
 
@@ -264,11 +339,117 @@ def test_the_template_ships_the_same_rules_the_runner_passes():
     ),
 )
 def test_a_worker_may_post_a_comment_that_carries_the_marker(command):
-    # Workers post with the body on the command line; a marker that the rules refuse
-    # would leave every worker unable to post at all.
+    # Workers post from a body file, but a body that still ends up on a command line
+    # must not be refused for its marker alone.
     assert first_matching_rule(DEFAULT_DENY_RULES, command) is None
 
 
 def test_the_first_marker_spelling_is_refused_on_a_command_line():
     # Why the marker changed: the name followed by a space is what the rules refuse.
     assert first_matching_rule(DEFAULT_DENY_RULES, 'gh pr comment 1 --body "ok <!-- chargehand -->"')
+
+
+# ----- posting from a body file ---------------------------------------------
+
+
+def _shipped_role(name: str):
+    import tomllib
+
+    from chargehand import paths
+    from chargehand.roles import Role
+
+    text = (paths.templates_dir() / "roles" / f"{name}.toml").read_text(encoding="utf-8")
+    return Role.parse(name, tomllib.loads(text))
+
+
+@pytest.mark.parametrize(
+    "role,command",
+    (
+        ("pr-reviewer", f"gh pr comment {PR} --body-file {BODY_DIR}/o-r-1-1.md"),
+        ("pr-reviewer", f"gh pr review {PR} --comment --body-file {BODY_DIR}/o-r-1-2.md"),
+        ("implementer", f"gh pr comment {PR} --body-file {BODY_DIR}/item-1.md"),
+        ("implementer", f"gh pr create --base main --title 'Fix' --body-file {BODY_DIR}/item-2.md"),
+        ("implementer", f"gh pr create --body-file {BODY_DIR}/item-3.md --title 'Fix'"),
+    ),
+)
+def test_the_body_file_forms_pass_the_deny_rules_and_match_the_roles_allow_rules(role, command):
+    assert first_matching_rule(LAUNCH_RULES, command) is None
+    assert first_matching_rule(_shipped_role(role).allow, command), command
+
+
+def test_the_body_file_forms_in_the_battery_pass_every_deny_rule(tmp_path):
+    forms = [a for a in battery(tmp_path) if a.name.startswith("body-file-")]
+
+    assert {a.name for a in forms} == {
+        "body-file-comment", "body-file-review", "body-file-create", "body-file-api",
+        "body-file-api-review",
+    }
+    for attempt in forms:
+        assert not attempt.expect_blocked
+        assert first_matching_rule(LAUNCH_RULES, attempt.command) is None, attempt.command
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        f"gh api repos/o/r/pulls/1/comments/2/replies -F body=@{BODY_DIR}/o-r-1-3.md",
+        f"gh api repos/o/r/pulls/1/reviews --input {BODY_DIR}/o-r-1-4.json",
+    ),
+)
+def test_a_gh_api_post_from_a_file_passes_the_deny_rules_and_no_allow_rule(command):
+    """A reply or a review with inline comments goes to the classifier: no role allows
+    `gh api`."""
+    assert first_matching_rule(LAUNCH_RULES, command) is None
+    for role in ("pr-reviewer", "implementer"):
+        assert first_matching_rule(_shipped_role(role).allow, command) is None
+
+
+def test_a_reply_rule_for_gh_api_would_also_allow_a_merge():
+    """Why the reviewer has no `gh api` rule, not even one for the reply endpoint.
+
+    A `*` matches spaces too, so the endpoint pattern stretches over a different call
+    that carries the rest of the pattern in its arguments.
+    """
+    reply_rule = ("Bash(gh api repos/*/comments/*/replies -F body=@*)",)
+    merge = (
+        "gh api repos/o/r/pulls/1/merge -X PUT -f note=x/comments/2/replies "
+        f"-F body=@{BODY_DIR}/x.md"
+    )
+
+    assert first_matching_rule(reply_rule, merge)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "This changes the bypassPermissions rule.",
+        "Run claude stop on the old session first.",
+        "The chargehand status output is wrong here.",
+        "Keep the dangerously-skip-permissions flag out of the launcher.",
+    ),
+)
+def test_an_inline_body_that_names_a_denied_word_is_refused(body):
+    """Why workers post from a file: the rules match the whole command text, the body
+    included, and a file's content never reaches them."""
+    assert first_matching_rule(LAUNCH_RULES, f"gh pr comment {PR} --body '{body}'")
+    assert first_matching_rule(LAUNCH_RULES, f"gh pr comment {PR} --body-file {BODY_DIR}/x.md") is None
+
+
+def test_the_battery_refuses_an_inline_body_that_names_bypass_permissions(tmp_path):
+    (inline,) = [a for a in battery(tmp_path) if a.name == "inline-body"]
+
+    assert inline.expect_blocked and "bypassPermissions" in inline.command
+    assert first_matching_rule(LAUNCH_RULES, inline.command) == "Bash(*bypassPermissions*)"
+
+
+def test_the_body_directory_is_per_user_and_outside_every_checkout():
+    # Under the home directory, so a body file never lands in a worktree or an item
+    # checkout, and other users do not share it.
+    assert BODY_DIR.startswith("~/")
+    for role in ("pr-reviewer", "implementer"):
+        allow = _shipped_role(role).allow
+        assert f"Edit({BODY_DIR}/**)" in allow, role
+        assert f"Bash(mkdir -p -m 700 {BODY_DIR})" in allow, role
+        assert first_matching_rule(LAUNCH_RULES, f"mkdir -p -m 700 {BODY_DIR}") is None
+        # No rule deletes: a wildcard would also match a second path.
+        assert not any(rule.startswith("Bash(rm") for rule in allow), role
