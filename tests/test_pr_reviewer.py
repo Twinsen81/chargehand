@@ -270,8 +270,7 @@ def test_an_unmarked_comment_of_the_account_wakes_once_and_the_daily_cap_stops_a
 def test_a_second_review_request_wakes_the_reviewer_and_starts_none(reviewing, gh):
     reviewer = start_reviewer(reviewing, gh)
     go_idle(reviewing)
-    # Asked again after the reviewer started: a request from before its start is not news.
-    gh.notify("review_requested", PR, thread="1", updated_at=iso(time.time()),
+    gh.notify("review_requested", PR, thread="1", updated_at=iso(time.time() + 1),
               last_modified="Mon, 26 Oct 2026 11:00:00 GMT")
     ask_notifications_again(reviewing)
 

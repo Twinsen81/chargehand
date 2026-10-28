@@ -61,6 +61,7 @@ def source(gh, clock) -> GithubSource:
     built = sources_mod.build(SourceConfig("github", "github", {"gh_bin": str(FAKE_GH)}))
     assert isinstance(built, GithubSource)
     built.clock = clock
+    gh.now = clock.now
     return built
 
 
