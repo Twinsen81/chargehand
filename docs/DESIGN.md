@@ -204,7 +204,9 @@ sends review requests and mentions by email only, the list stays empty, and noth
 starts. GitHub has no API for the setting, so `doctor`, and the source once a day, compare
 the open pull requests that ask the account for a review (`is:pr is:open
 review-requested:@me`) with the `review_requested` threads, read ones included, and warn
-with the item keys of the requests older than ten minutes that have no thread. A review request counts only
+with the item keys of the requests older than ten minutes that have no thread. The check
+reads at most 500 threads, newest first; on a longer list it skips the requests made before
+the oldest thread it read, because their thread may be further down. A review request counts only
 while the pull request is open and still asks the account, or a team it is in, for a review,
 because a notification thread keeps its reason when later activity updates it. When `gh`
 may not list the account's teams, any requested team counts. Then, for each pull request a live worker subscribes to, the source reads the

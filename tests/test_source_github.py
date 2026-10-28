@@ -384,6 +384,24 @@ def test_a_long_thread_list_is_read_in_a_few_pages_and_old_requests_are_not_gues
     assert len(pages) == 1 and "per_page=2&page=1" in pages[0]
 
 
+def test_a_thread_on_a_later_page_counts(source, gh, monkeypatch):
+    from chargehand.sources import github as github_mod
+
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_PAGE_SIZE", 2)
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_MAX_PAGES", 3)
+    gh.add_pull(PR, created_at="2026-10-26T08:00:00Z", updated_at=OLD_REQUEST)
+    # Newest first: the two mentions fill page 1, the review request is on page 2.
+    gh.notify("review_requested", PR, updated_at="2026-10-26T08:10:00Z", unread=False)
+    for number, at in ((10, "2026-10-26T09:10:00Z"), (11, "2026-10-26T09:40:00Z")):
+        gh.notify("mention", f"octo/app#{number}", kind="Issue", updated_at=at, unread=False)
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert warnings == []
+    pages = [p for p in api_paths(gh) if p.startswith("notifications") and "&page=" in p]
+    assert [p.split("&page=")[1].split("&")[0] for p in pages] == ["1", "2"]
+
+
 def test_a_failed_review_request_check_does_not_fail_the_poll(source, gh):
     gh.add_pull(PR, updated_at=OLD_REQUEST)
     gh.notify("review_requested", PR)

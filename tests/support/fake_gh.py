@@ -217,9 +217,8 @@ def notifications(state: dict, args: list[str], query: dict) -> int:
             f"Date: {date}\r\nEtag: {etag}\r\n"
             + (f"Last-Modified: {last_modified}\r\n" if last_modified else "")
             + f"X-Poll-Interval: {interval}\r\n\r\n"
+            + text
         )
-    if show:
-        sys.stdout.write(text)
         return 0
     # Without -i, one page by `page` and `per_page`, newest first, as GitHub lists them.
     body = sorted(body, key=lambda thread: thread.get("updated_at") or "", reverse=True)
