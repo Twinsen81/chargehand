@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -40,7 +41,9 @@ class Board:
         self.comments: list[Comment] = []
         self.viewer = "tester@example.invalid"
         self.calls: list[tuple[str, str]] = []
-        self.clock = 1_000_000.0
+        # Near this machine's clock: the router drops an event from before its
+        # subscriber started, and a worker's start is stamped with time.time().
+        self.clock = float(int(time.time()))
         # Fault injection, each consumed once.
         self.fail_next_write: str | None = None
         self.silently_drop_next_write = False

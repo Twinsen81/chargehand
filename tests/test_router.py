@@ -19,7 +19,13 @@ from chargehand.gitutil import Git
 from chargehand.ledger import Ledger
 from chargehand.notify import Notifier
 from chargehand.roles import StartRule
-from chargehand.router import Router, kind_matches, suitable_worker_exists
+from chargehand.router import (
+    START_ALLOWANCE_SECS,
+    Router,
+    deliver_to_holders,
+    kind_matches,
+    suitable_worker_exists,
+)
 from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
 from chargehand.tick import Runner
 from support import fake_source
@@ -96,10 +102,14 @@ def worker(ledger, role="implementer", item="ABC-1", kinds=("comment",), state=l
     return created
 
 
-def event(kind="comment", item="ABC-1", dedupe_id="e1", actor="someone", marked=False) -> Event:
+def event(
+    kind="comment", item="ABC-1", dedupe_id="e1", actor="someone", marked=False,
+    occurred_at: float | None = None,
+) -> Event:
     return Event(
         source="fake", kind=kind, item=WorkItem("fake", item, f"id-{item}", hint="test"),
-        actor=actor, occurred_at=1.0, dedupe_id=dedupe_id,
+        actor=actor, occurred_at=time.time() if occurred_at is None else occurred_at,
+        dedupe_id=dedupe_id,
         pointer=f"https://t.invalid/{item}#{dedupe_id}", marked=marked,
     )
 
@@ -175,6 +185,58 @@ def test_only_the_subscribed_kinds_of_live_workers_are_delivered(ledger):
     assert [e.dedupe_id for e in ledger.inbox(qualified)] == ["r1"]
     assert ledger.inbox(other_source) == []
     assert ledger.inbox(finished) == []
+
+
+@pytest.mark.parametrize(
+    "offset, delivered",
+    [(-240.0, False), (-START_ALLOWANCE_SECS - 1, False), (-30.0, True), (10.0, True)],
+)
+def test_an_event_from_before_the_worker_started_wakes_nobody(ledger, offset, delivered):
+    """The sources read some minutes back; only the clock allowance reaches back with them."""
+    subscriber = worker(ledger)
+    starts = Starts()
+    router = Router(ledger, start=starts)
+
+    result = router.route([event(occurred_at=subscriber.created_at + offset)], signed_in="me")
+
+    assert len(ledger.inbox(subscriber)) == int(delivered)
+    assert (result.delivered, result.before_start) == (int(delivered), int(not delivered))
+    # The event is still seen, so a later poll's overlap does not bring it back, and it is
+    # still offered to the start rules.
+    assert ledger.event_seen("fake", "e1")
+    assert starts.seen == ["e1"]
+
+
+def test_a_followed_item_counts_from_the_workers_start_and_not_from_the_follow(ledger):
+    """A pull request is followed up to one tick after the push; a comment in that gap counts."""
+    implementer = worker(ledger)
+    pull = WorkItem("fake", "PR-7", "id-PR-7")
+    ledger.subscribe(implementer, pull, ("comment",), now=implementer.created_at + 600)
+    router = Router(ledger, start=Starts())
+
+    before, gap = (
+        event(item="PR-7", dedupe_id=dedupe_id, occurred_at=implementer.created_at + offset)
+        for dedupe_id, offset in (("before", -240.0), ("gap", 300.0))
+    )
+    result = router.route([before, gap], signed_in="me")
+
+    assert [e.dedupe_id for e in ledger.inbox(implementer)] == ["gap"]
+    assert (result.delivered, result.before_start) == (1, 1)
+
+
+def test_a_start_event_from_before_the_holder_started_does_not_reach_it(ledger):
+    holder = worker(ledger, role="pr-reviewer", item="PR-7")
+    follower = worker(ledger, role="pr-reviewer", item="PR-8")
+    ledger.subscribe(follower, WorkItem("fake", "PR-7", "id-PR-7"), ("comment",))
+    old = event(kind="review_requested", item="PR-7", dedupe_id="old",
+                occurred_at=holder.created_at - 240)
+    new = event(kind="review_requested", item="PR-7", dedupe_id="new",
+                occurred_at=holder.created_at + 10)
+
+    assert deliver_to_holders(ledger, "pr-reviewer", old) == 0
+    assert deliver_to_holders(ledger, "pr-reviewer", new) == 2
+    assert [e.dedupe_id for e in ledger.inbox(holder)] == ["new"]
+    assert [e.dedupe_id for e in ledger.inbox(follower)] == ["new"]
 
 
 def test_a_deferred_start_is_offered_again_and_not_lost_to_dedupe(ledger):

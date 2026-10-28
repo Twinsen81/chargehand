@@ -8,7 +8,11 @@ Once per tick, after the polls, every event goes through the same steps in this 
    post as the operator, and two workers on one pull request would otherwise wake each
    other in turn.
 2. Delivery. One inbox row for every live worker with a subscription to the item that
-   names the event's kind.
+   names the event's kind, unless the event occurred before the worker started. The
+   sources read some minutes back from their previous poll, so that a late write is not
+   lost, and that overlap must not wake a new worker for an event that it reads by itself
+   at its start. ``START_ALLOWANCE_SECS`` allows for the clock difference between a source
+   and this machine.
 3. Close. A worker whose primary item the event closes, by its start rule's
    ``close_on``, ends. On an item the worker only follows, the same event is an ordinary
    delivery.
@@ -29,9 +33,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from chargehand import roles as roles_mod
-from chargehand.ledger import Ledger
+from chargehand.ledger import Ledger, Worker
 from chargehand.roles import StartRule
 from chargehand.sources.base import Event, WorkItem
+
+# An event that occurred up to this long before a worker started still reaches it: the
+# source's clock and this machine's clock can differ. A minute is enough for that.
+START_ALLOWANCE_SECS = 60.0
 
 # Called with an event that passed the filters; returns True when a start rule wanted a
 # worker for it and the launch had to wait.
@@ -45,6 +53,17 @@ def kind_matches(kinds: Iterable[str], kind: str, source: str) -> bool:
     """A subscription or a rule names a kind bare (any source) or qualified by source."""
     names = set(kinds)
     return kind in names or f"{source}.{kind}" in names
+
+
+def before_start(event: Event, worker: Worker) -> bool:
+    """Whether *event* occurred before *worker* started, beyond the clock allowance.
+
+    The cutoff is the worker's start, which is also when its primary subscription is made.
+    A pull request that the worker follows is subscribed up to one tick after the push, so a
+    comment in that gap is older than the follow; it still reaches the worker, because the
+    cutoff is the start of the worker and not the time of the follow.
+    """
+    return event.occurred_at < worker.created_at - START_ALLOWANCE_SECS
 
 
 def suitable_worker_exists(ledger: Ledger, rule: StartRule, role: str, item: WorkItem) -> bool:
@@ -66,17 +85,22 @@ def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> int:
     A start event that finds its worker is news for that worker, whether or not its
     subscription names the kind: a second review request asks the reviewer to look again.
     The inbox is unique per worker and event, so a subscriber that already got it gets
-    no second row.
+    no second row. A worker that started more than ``START_ALLOWANCE_SECS`` after
+    the event gets none (``before_start``).
     """
     holders = {
-        worker.id
+        worker.id: worker
         for _, worker in ledger.live_subscriptions(event.item.source, event.item.key)
         if worker.role == role
     }
     own = ledger.live_worker_for(event.item.key, role)
     if own is not None:
-        holders.add(own.id)
-    return sum(int(ledger.enqueue(worker_id, event)) for worker_id in sorted(holders))
+        holders[own.id] = own
+    return sum(
+        int(ledger.enqueue(worker_id, event))
+        for worker_id, worker in sorted(holders.items())
+        if not before_start(event, worker)
+    )
 
 
 @dataclass
@@ -86,6 +110,8 @@ class RouteResult:
     delivered: int = 0
     deferred: int = 0
     closed: int = 0
+    # Subscribers that did not get an event because it occurred before they started.
+    before_start: int = 0
 
     def merge(self, other: "RouteResult") -> None:
         self.duplicates += other.duplicates
@@ -93,6 +119,7 @@ class RouteResult:
         self.delivered += other.delivered
         self.deferred += other.deferred
         self.closed += other.closed
+        self.before_start += other.before_start
 
 
 class Router:
@@ -115,7 +142,9 @@ class Router:
                 self.ledger.record_event(event)
                 result.own += 1
                 continue
-            result.delivered += self.deliver(event)
+            delivered, skipped = self.deliver(event)
+            result.delivered += delivered
+            result.before_start += skipped
             if self._close is not None:
                 result.closed += self._close(event)
             deferred = self._start(event)
@@ -123,12 +152,20 @@ class Router:
             result.deferred += int(deferred)
         return result
 
-    def deliver(self, event: Event) -> int:
-        delivered = 0
-        for subscription, _ in self.ledger.live_subscriptions(event.source, event.item.key):
-            if kind_matches(subscription.kinds, event.kind, event.source):
-                delivered += int(self.ledger.enqueue(subscription.worker_id, event))
-        return delivered
+    def deliver(self, event: Event) -> tuple[int, int]:
+        """Put *event* into the inbox of each matching subscriber.
+
+        Returns the rows added and the matching subscribers skipped by ``before_start``.
+        """
+        delivered = skipped = 0
+        for subscription, worker in self.ledger.live_subscriptions(event.source, event.item.key):
+            if not kind_matches(subscription.kinds, event.kind, event.source):
+                continue
+            if before_start(event, worker):
+                skipped += 1
+                continue
+            delivered += int(self.ledger.enqueue(subscription.worker_id, event))
+        return delivered, skipped
 
     def retry_pending_starts(self) -> RouteResult:
         """Offer the starts that the caps deferred on an earlier tick to the rules again."""
@@ -145,7 +182,9 @@ __all__ = [
     "Closer",
     "RouteResult",
     "Router",
+    "START_ALLOWANCE_SECS",
     "Starter",
+    "before_start",
     "deliver_to_holders",
     "kind_matches",
     "suitable_worker_exists",
