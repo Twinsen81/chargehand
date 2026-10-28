@@ -21,6 +21,8 @@ from support import daemon as support
 from support import fake_tracker
 
 AUTH = {"Authorization": f"Bearer {support.TOKEN}", "Content-Type": "application/json"}
+# A plain URL to sanitize.safe_url, with markup in its path.
+HOSTILE_POINTER = "https://x.invalid/<img/src=x/onerror=alert(1)>"
 HOSTILE = "\x1b]0;owned\x07\x1b[2J<img src=x onerror=alert(1)>\u202eevil"
 
 
@@ -243,10 +245,14 @@ def test_untrusted_text_never_reaches_the_output_unescaped_or_as_a_link(daemon, 
     )
     harness.ledger.update(worker, url="javascript:alert(document.cookie)")
     harness.ledger.record_permission_prompt(worker, tool_name=HOSTILE, tool_input=HOSTILE)
-    harness.ledger.enqueue(worker.id, Event(
-        source="fake", kind="comment", item=WorkItem("fake", "ABC-1", "id-ABC-1"),
-        actor="x", occurred_at=time.time(), dedupe_id="e1", pointer="javascript:alert(1)",
-    ))
+    for dedupe, pointer in (("e1", "javascript:alert(1)"), ("e2", HOSTILE_POINTER)):
+        harness.ledger.enqueue(worker.id, Event(
+            source="fake", kind="comment", item=WorkItem("fake", "ABC-1", "id-ABC-1"),
+            actor="x", occurred_at=time.time(), dedupe_id=dedupe, pointer=pointer,
+        ))
+    wake_at = time.time() - 30
+    harness.ledger.mark_delivered(harness.ledger.inbox(worker), now=wake_at)
+    harness.ledger.update(worker, wakes=1, last_wake_at=wake_at)
 
     status, headers, raw = get(daemon, "/api/board")
 
@@ -258,6 +264,10 @@ def test_untrusted_text_never_reaches_the_output_unescaped_or_as_a_link(daemon, 
     assert card["item_url"] is None
     assert card["pr_url"] is None
     assert card["last_answer"] == "<img src=x onerror=alert(1)>evil"
+    # The wake message keeps the plain URL, markup and all, as text, and drops the other.
+    assert card["last_prompt"] == f"{delivery.MESSAGE_HEADER}\ncomment: {HOSTILE_POINTER}"
+    assert "javascript:" not in card["last_prompt"]
+    assert "<img" not in text and "\\u003cimg/src=x" in text
     # No string on the card kept a control sequence or a direction override.
     assert all("\x1b" not in s and "\u202e" not in s for s in _strings(card))
     links = [card["item_url"], card["pr_url"]]
