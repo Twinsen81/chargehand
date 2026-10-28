@@ -131,8 +131,18 @@ class _RowChanged(Exception):
     """Another thread changed the worker's row between a read and the state write."""
 
 
-# The notification detail of a worker whose turn ended without a question.
+# The detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
+
+# The worker states that are never notified. A worker that waits for events ends a turn
+# for each event it answers; `status` and the board show it. Blocked, parked, failed, done
+# by a status file and the watchdog states send a notification.
+QUIET_STATES = (ledger_mod.IDLE, ledger_mod.QUEUED)
+
+# The session states that a transition line leaves out, because the new worker state
+# already says them. Any other session state is named, as for a blocked worker whose
+# session failed, stopped or is gone.
+EXPLAINED_SESSION_STATES = (runtime_mod.WORKING, runtime_mod.BLOCKED, runtime_mod.DONE)
 
 # How much of a control request's outcome the CLI prints. An outcome that must carry a
 # hint keeps within it.
@@ -303,6 +313,8 @@ class TickReport:
     notified: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
     routed: list[str] = field(default_factory=list)
+    # The pull requests that workers started to follow, one line each.
+    follows: list[str] = field(default_factory=list)
     woken: list[str] = field(default_factory=list)
     collected: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
@@ -323,6 +335,7 @@ class TickReport:
             "notified": self.notified,
             "requests": self.requests,
             "routed": self.routed,
+            "follows": self.follows,
             "woken": self.woken,
             "collected": self.collected,
             "skipped": self.skipped,
@@ -1319,7 +1332,7 @@ class Runner:
                 with self.ledger.transaction():
                     if (item.source, item.key) not in followed:
                         self.ledger.subscribe(worker, item, PULL_REQUEST_KINDS)
-                        report.routed.append(f"{worker.handle}: follows {item.key}")
+                        report.follows.append(f"{worker.handle} follows {item.key}")
                     self.ledger.set_state(key, item.key)
                 break
 
@@ -1570,7 +1583,7 @@ class Runner:
             f"source {event.source}: ignored a start event for {hint}, which no [[repository]] "
             f"names; reported once per repository"
         )
-        log.warning("%s", message)
+        # Only in the report: the tick prints its warnings into the log the logger writes.
         report.warnings.append(message)
 
     def _some_role_starts_on(self, event: Event) -> bool:
@@ -1810,14 +1823,21 @@ class Runner:
             target_state, detail = ledger_mod.BLOCKED, "session state not recognised — go look"
 
         if target_state != worker.state:
+            before = worker.state
             written = self.ledger.update_if_unchanged(worker, state=target_state)
             if written is None:
                 raise _RowChanged(worker.handle)
             worker = written
-            report.transitions.append(f"{worker.item}: {observed} -> {target_state}")
+            report.transitions.append(_transition_line(worker.item, before, target_state, observed))
         self._sync_labels(worker, context, report)
 
-        if observed != worker.notified_state and observed != runtime_mod.WORKING:
+        if target_state in QUIET_STATES:
+            # No notification for a turn end that waits for events. The record is
+            # cleared, so the next state that needs the operator is notified even when
+            # its session state is the one notified before this turn end.
+            if worker.notified_state is not None:
+                worker = self.ledger.update(worker, notified_state=None)
+        elif observed != worker.notified_state and observed != runtime_mod.WORKING:
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
@@ -2723,12 +2743,12 @@ class Runner:
                 continue
             if not self._stop_session(worker):
                 report.warnings.append(
-                    f"{worker.item}: issue is closed but its session would not stop"
+                    f"{worker.item}: item is closed but its session would not stop"
                 )
                 continue
             updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
             self._sync_labels(updated, context, report)
-            report.transitions.append(f"{worker.item}: issue closed -> done")
+            report.transitions.append(f"{worker.item}: item closed -> done")
 
     def _item_closed(self, worker: Worker, context: RepositoryContext) -> bool:
         """True once the worker's own item is closed or gone; False when open or unknown.
@@ -2808,6 +2828,14 @@ class Runner:
         report.warnings.append(f"notification for {item} ({state}) failed; see the log")
         return False
 
+
+
+def _transition_line(item: str | None, before: str, after: str, observed: str) -> str:
+    """The worker's old and new state, and the session state when it explains the change."""
+    line = f"{item}: {before} -> {after}"
+    if observed not in EXPLAINED_SESSION_STATES:
+        line += f" (session {sanitize.one_line(observed, limit=40)})"
+    return line
 
 
 def run_tick(

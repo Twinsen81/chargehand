@@ -82,5 +82,6 @@ chargehand tick                             # run a tick now
 - `repositories` lists each repository with the roles it enables and their prompts.
 - A finished turn makes a worker `idle`, not `done`, for every role: it waits for
   events. `idle` does not mean "succeeded"; the user may look at what the turn left.
+  `idle` and `queued` send no notification; `status` and the board show them.
   A worker becomes `done` when its item is closed, or when a status file says
   `complete`.

@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 import pytest
 
 from chargehand import __version__, ledger as ledger_mod
 from chargehand.cli import EXIT_OK, EXIT_REFUSED, main
+from conftest import run_git
+from support.fake_gh import GhState
 
 STAMP = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+FAKE_GH = Path(__file__).parent / "support" / "fake_gh.py"
 
 
 def run(argv, config_file):
@@ -160,6 +164,75 @@ def test_a_failing_source_is_one_line_per_tick(capsys, caplog, config_file, harn
     assert not [
         r for r in caplog.records if r.levelno >= logging.WARNING and r.name.startswith("chargehand")
     ]
+
+
+@pytest.fixture
+def on_github(tmp_path, monkeypatch, config_file, harness) -> GhState:
+    """The repository is octo/app on the fake GitHub, and a role starts on a review request."""
+    state = tmp_path / "gh-state.json"
+    monkeypatch.setenv("FAKE_GH_STATE", str(state))
+    role = harness.repo / ".chargehand" / "roles" / "watcher.toml"
+    role.parent.mkdir(parents=True, exist_ok=True)
+    role.write_text('prompt = "{item}"\n\n[[start]]\non = "github.review_requested"\n')
+    with config_file.open("a") as config:
+        # Appended to the [[repository]] table, the last one in the file.
+        config.write('github = "octo/app"\nroles = ["implementer", "watcher"]\n')
+        config.write(f'\n[[source]]\nname = "github"\ntype = "github"\ngh_bin = "{FAKE_GH}"\n')
+    return GhState(state)
+
+
+def test_a_start_event_for_an_unconfigured_repository_is_one_line(
+    capsys, caplog, config_file, harness, on_github
+):
+    on_github.add_pull("elsewhere/other#1")
+    on_github.notify("review_requested", "elsewhere/other#1")
+
+    assert run(["tick"], config_file) == EXIT_OK
+
+    out = capsys.readouterr()
+    lines = [line for line in (out.out + out.err).splitlines() if "elsewhere/other" in line]
+    assert len(lines) == 1, lines
+    assert re.fullmatch(
+        f"{STAMP}warning: source github: ignored a start event for elsewhere/other, which no "
+        r"\[\[repository\]\] names; reported once per repository",
+        lines[0],
+    ), lines
+    # The tick prints the report into the same log the logger writes, so not both.
+    assert not [r for r in caplog.records if "elsewhere/other" in r.getMessage()]
+
+
+def test_the_tick_prints_that_a_worker_follows_the_pull_request_of_its_branch(
+    capsys, config_file, harness, on_github
+):
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    worker = harness.worker("ABC-1")
+    worktree = Path(worker.worktree)
+    (worktree / "change.txt").write_text("change\n")
+    run_git("add", "-A", cwd=worktree)
+    run_git("commit", "-m", "change", cwd=worktree)
+    run_git("push", "-u", "origin", worker.branch, cwd=worktree)
+    on_github.add_pull("octo/app#9", branch=worker.branch, reviewers=())
+    capsys.readouterr()
+
+    assert run(["tick"], config_file) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert re.search(f"^{STAMP}follow: implementer/ABC-1 follows octo_app_9$", out, re.M), out
+    # The per-source summaries of the routing phase stay out of the text output.
+    assert "routed:" not in out
+
+
+def test_a_turn_end_prints_the_old_and_the_new_worker_state(capsys, config_file, harness):
+    harness.board.add("ABC-1")
+    run(["tick"], config_file)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    capsys.readouterr()
+
+    run(["tick"], config_file)
+
+    out = capsys.readouterr().out
+    assert re.search(f"^{STAMP}transition: ABC-1: running -> idle$", out, re.M), out
 
 
 def test_continue_force_is_recorded_as_such(config_file, harness):

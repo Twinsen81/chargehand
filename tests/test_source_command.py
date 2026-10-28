@@ -466,7 +466,7 @@ def test_the_fake_tracker_as_a_command_source_starts_and_wakes_a_worker(wired, f
     wired.claude_state.set_session_state("DEMO-1", "done", status="idle")
     fake_board.close("DEMO-1")
     report = wired.next_tick()
-    assert "DEMO-1: issue closed -> done" in report.transitions
+    assert "DEMO-1: item closed -> done" in report.transitions
     assert wired.ledger.get(watcher.id).state == ledger_mod.DONE
 
 

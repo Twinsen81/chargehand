@@ -592,7 +592,7 @@ as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown.
 |---|---|---|
 | `working` | A turn is running | — |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
-| `done` | The turn finished | read the status file if configured, then notify; the worker is `idle` |
+| `done` | The turn finished | read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the status file says, which is |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
 A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without a
@@ -669,7 +669,18 @@ setup script, or the tracker goes into it; that stays local and is reached throu
 `status --verbose-titles` and `logs`. Worst-case latency is one poll interval. A session's new
 state counts as notified only when the command succeeds, so a send that failed, for example
 on the first tick after a wake while the network is still down, is tried again on the next
-tick. A finished run's last notification is tried again for up to a day.
+tick. A finished run's last notification is tried again for up to a day. Only a worker that
+needs you or ends is notified: `blocked`, `parked`, `failed`, `done` through the status file,
+and the watchdog states. A worker that ends because its item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not, because a worker that answers
+ten comments ends ten turns; `status` and the board show it. The turn end clears the record
+of the last notified session state, so the next question is notified even when it is the
+same state as the one before.
+
+The tick prints one line per change: a transition names the worker's old and new state, and
+the session state only when the new state alone does not say why (`<item>: running ->
+blocked (session failed)`); `follow:` lines name the pull requests that workers started to
+follow. `serve` prints the changes that a session hook makes in the same lines, and nothing
+for a hook that changes nothing.
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude

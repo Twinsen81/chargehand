@@ -146,7 +146,10 @@ prompt before anything runs.
 
 ## Notifications
 
-The runner calls `~/.config/chargehand/notify.sh` on every state change. As shipped it
+The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or ends:
+blocked, parked, failed, done through the status file, or stopped by the watchdog. A
+turn end that waits for events (`idle`) and a worker that ends because its item closed
+are not notified; `chargehand status` shows them. As shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an
 email, and a push service, and you can enable more than one. The hook receives only the

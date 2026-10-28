@@ -76,10 +76,9 @@ def receive(request: Request) -> Response:
         # The session must not see an error it could act on; the next diff catches up.
         log.exception("hook %s for %s failed", event, worker.handle)
         return NO_DECISION
-    for line in report.transitions:
-        log.info("hook %s: %s", event, line)
-    for line in report.errors:
-        log.warning("hook %s: %s", event, line)
+    # Into the daemon's log in the tick's own format, so a turn end shows there as the
+    # change it made. A report with nothing in it prints nothing.
+    request.daemon.report(report)
     return NO_DECISION
 
 
