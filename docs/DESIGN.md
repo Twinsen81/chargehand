@@ -528,22 +528,22 @@ The settings of a launch with hooks are in a file of mode 0600 under the state d
 one per worktree, so the token is never on a command line. The file stays while the
 session exists, because a resume, a respawn and an attach apply the saved `--settings`
 again; it is deleted when the session is removed (`discard`, `retry`, garbage collection).
-A new session runs no `SessionStart` hook in most launches whose stdin is /dev/null or a
-pipe already at its end, and in every launch whose stdin is a pipe that stays open, so a
-launch gets an empty pipe that chargehand closes when the launcher exits; the daemon's own
-stdin is /dev/null under launchd. The daemon applies each post to the ledger at once,
-through the same transition and notification code as the tick. `claude agents --json --all`, diffed against the ledger
-on every tick, stays the fallback for anything a hook missed: a session launched before the
-daemon wrote its token, a post while the daemon was down, a process that died.
+In most launches whose stdin is /dev/null or a pipe already at its end, a new session runs
+no `SessionStart` hook; it runs one in every launch whose stdin is a pipe that stays open.
+So a launch gets an empty pipe that chargehand closes when the launcher exits, and does not
+depend on the daemon's own stdin, which is /dev/null under launchd. The daemon applies each
+post to the ledger at once, through the same transition and notification code as the tick.
+`claude agents --json --all`, diffed against the ledger on every tick, stays the fallback
+for anything a hook missed: a session launched before the daemon wrote its token, a post
+while the daemon was down, a process that died.
 
-**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which an http hook
-carries in its `Authorization` header and the `SessionStart` command reads from `token_file`;
-a post without it changes nothing. The runtime reads the payload (`claude` reads
-`session_id`, `cwd`, `transcript_path`,
-`last_assistant_message`, `error`, `notification_type`, `tool_name`, `tool_input` and
-`source`), and the post maps to the live worker with that session id, else to the live
-worker without a session id yet whose worktree is the session's working directory, after
-symlinks are resolved. A post that maps to no live worker changes nothing. Every answer is
+**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which an http
+hook carries in its `Authorization` header and the `SessionStart` command reads from
+`token_file`; a post without it changes nothing. The runtime reads the payload (`claude`
+reads `session_id`, `cwd`, `transcript_path`, `last_assistant_message`, `error`,
+`notification_type`, `tool_name`, `tool_input` and `source`), and the post maps to the
+live worker with that session id, else to the live worker without a session id yet whose
+worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer is
 `{}`: a `Stop` gets no decision that would keep the turn running, a `SessionStart` gets no
 context for the model, and a `PermissionRequest` gets no decision, so the session keeps its
 own dialog. A hook that times out, or finds no daemon, is an error that Claude Code reports

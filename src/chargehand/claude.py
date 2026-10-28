@@ -316,9 +316,9 @@ class ClaudeCLI:
         # Nothing here reads stdin, and `-p` waits for input on an open pipe.
         stdin: int = subprocess.DEVNULL
         keep_open: int | None = None
-        if open_stdin:
-            stdin, keep_open = os.pipe()
         try:
+            if open_stdin:
+                stdin, keep_open = os.pipe()
             completed = subprocess.run(
                 argv,
                 cwd=str(cwd) if cwd else None,

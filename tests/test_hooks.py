@@ -636,6 +636,78 @@ def test_discard_deletes_the_session_settings_file(harness, tmp_path):
     assert not settings.exists()
 
 
+def test_garbage_collection_deletes_the_session_settings_file(harness, tmp_path):
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    settings = claude.settings_file_for(Path(worker.worktree))
+    # Finished, and its session gone: a listed session without a live owner is adopted.
+    harness.claude_state.drop_sessions()
+    harness.ledger.update(harness.worker("ABC-1"), state=ledger_mod.DONE)
+
+    harness.board.close("ABC-1")
+    report = harness.next_tick()
+
+    assert "ABC-1" in report.collected
+    assert not settings.exists()
+
+
+def test_retry_releases_the_settings_of_the_session_it_removes(harness, tmp_path, monkeypatch):
+    # The retry launches again in the same worktree, which writes the file anew, so the
+    # release itself is what this looks at.
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    harness.ledger.record_request("cancel", "ABC-1")
+    harness.next_tick()
+    released = []
+    real_release = claude.ClaudeRuntime.release
+
+    def spy(self, worktree):
+        released.append((Path(worktree), claude.settings_file_for(Path(worktree)).exists()))
+        real_release(self, worktree)
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "release", spy)
+
+    request_id = harness.ledger.record_request("retry", "ABC-1")
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert released == [(Path(worker.worktree), True)]
+
+
+def test_a_session_still_listed_after_its_removal_keeps_its_settings_file(harness, tmp_path):
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    settings = claude.settings_file_for(Path(worker.worktree))
+    harness.claude_state.set(rm_returncode=1)
+
+    assert harness.fresh_runner()._remove_session(harness.worker("ABC-1")) is False
+
+    assert settings.exists()
+
+
+def test_the_settings_file_stays_while_another_live_worker_has_the_worktree(harness, tmp_path):
+    # An adopted session gets a new row in the worktree of the row it replaces.
+    _with_token(harness, tmp_path)
+    old = launch(harness)
+    settings = claude.settings_file_for(Path(old.worktree))
+    harness.ledger.update(old, state=ledger_mod.CANCELLED)
+    newer = harness.ledger.create_worker(
+        role=old.role, item=old.item, item_id=old.item_id, url=old.url,
+        repository=old.repository, repo=Path(old.repo), worktree=Path(old.worktree),
+        branch=old.branch, origin=ledger_mod.ORIGIN_BOARD,
+    )
+    harness.ledger.update(newer, state=ledger_mod.RUNNING)
+    runner = harness.fresh_runner()
+
+    assert runner._remove_session(harness.ledger.get(old.id)) is True
+    assert settings.exists()
+
+    # Once no live worker has the worktree, the file goes with the session.
+    harness.ledger.update(harness.ledger.get(newer.id), state=ledger_mod.CANCELLED)
+    assert runner._remove_session(harness.ledger.get(old.id)) is True
+    assert not settings.exists()
+
+
 def test_a_cancelled_worker_keeps_the_settings_file_of_its_kept_session(harness, tmp_path):
     # A kept session can still be attached or respawned, which reads the file again.
     _with_token(harness, tmp_path)
@@ -654,12 +726,15 @@ def test_the_status_payload_names_the_last_hook_but_not_its_text(daemon, harness
     worker = launch(harness)
     post(daemon, "StopFailure", {
         "session_id": worker.session_uuid, "error": "rate_limit",
+        "error_details": f"Claude usage limit reached|{int(time.time()) + 3600}",
         "last_assistant_message": "secret session text",
     })
 
-    payload = cli._worker_dict(harness.worker("ABC-1"), verbose=False)
+    worker = harness.worker("ABC-1")
+    payload = cli._worker_dict(worker, verbose=False)
 
+    assert payload["state"] == ledger_mod.PARKED
     assert payload["last_hook"] == "StopFailure"
-    assert payload["last_hook_at"] is not None
-    assert "reset_at" in payload
+    assert payload["last_hook_at"] == worker.last_hook_at is not None
+    assert payload["reset_at"] == worker.reset_at is not None
     assert "secret session text" not in json.dumps(payload)
