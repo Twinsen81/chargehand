@@ -13,7 +13,7 @@ import pytest
 from conftest import Harness, make_config, run_git
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
-from chargehand import paths
+from chargehand import paths, sanitize
 from chargehand.config import SourceConfig
 from chargehand.delivery import (
     MESSAGE_HEADER,
@@ -175,6 +175,13 @@ def test_a_kind_that_is_not_a_plain_name_is_replaced_and_its_pointer_kept():
     )
 
 
+def test_an_event_kind_is_a_bare_lower_case_name_of_up_to_64_characters():
+    assert sanitize.is_event_kind("review_requested")
+    assert sanitize.is_event_kind("k" + "_" * 63)
+    for kind in ("", "Comment", "1st", "a.b", "a-b", "k" * 65, "comment\n"):
+        assert not sanitize.is_event_kind(kind), kind
+
+
 def test_no_usable_pointer_gives_no_message():
     assert wake_message([entry("not a pointer")]) == (None, 1)
 
@@ -184,8 +191,14 @@ def test_the_shipped_implementer_prompt_says_what_each_event_kind_asks_for():
     prompt = Role.parse("implementer", tomllib.loads(role_file.read_text("utf-8"))).prompt
 
     assert "each line names an event kind and a link" in prompt
-    for kind in ("comment", "review", "mention", "ci_status", "labeled", "done", "pr_closed"):
-        assert kind in prompt, kind
+    for phrase in (
+        "comment, review and mention are new comments or reviews to read and answer",
+        "ci_status is a CI result to check",
+        "labeled is a new label on the issue",
+        "done means the issue is closed",
+        "pr_closed that the pull request is closed or merged",
+    ):
+        assert phrase in prompt, phrase
 
 
 def test_an_unknown_or_old_usage_reading_admits_a_wake():

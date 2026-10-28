@@ -84,6 +84,15 @@ def is_safe_identifier(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value))
 
 
+# An event kind as a source stores it and as it goes into a wake message.
+_EVENT_KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def is_event_kind(value: str) -> bool:
+    """Whether *value* is a bare lower-case event kind, such as ``review_requested``."""
+    return bool(_EVENT_KIND.fullmatch(value))
+
+
 def scrub_identifier(value: str) -> str:
     """Best-effort identifier for display when a tracker returns something odd."""
     cleaned = clean(value, keep_newlines=False).strip()

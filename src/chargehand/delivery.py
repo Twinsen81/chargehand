@@ -17,7 +17,7 @@ events in its inbox goes through these steps:
    worker and in the sessions table. It comes after the wake: a crash between the two
    leaves the events in the inbox, and a later tick wakes the worker with them again.
    A second wake costs one turn and is otherwise harmless, because the message carries
-   pointers only.
+   kinds and pointers only.
 
 A worker that is launching, running, blocked or paused is not woken; its events wait. A
 blocked worker has an open question or permission prompt, which a stop would discard.
@@ -25,7 +25,6 @@ blocked worker has an open question or permission prompt, which a stop would dis
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,10 +50,9 @@ USAGE_MAX_AGE_SECS = 30 * 60
 
 MESSAGE_HEADER = "New events on the work you follow. Read each one yourself:"
 
-# The kind as it goes into the message. Sources store bare kinds; the check is a second
-# line of defence, because the message is a trusted user turn.
-_KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
-# The kind a line names when the event's own kind does not pass the check.
+# The kind a line names when the event's own kind is not a bare lower-case name. Sources
+# store bare kinds; the check is a second line of defence, because the message is a
+# trusted user turn.
 UNKNOWN_KIND = "event"
 
 
@@ -92,7 +90,7 @@ def safe_pointer(pointer: str) -> str | None:
 
 def safe_kind(kind: str) -> str:
     """The kind when it is a plain lower-case name, otherwise ``UNKNOWN_KIND``."""
-    return kind if _KIND.fullmatch(kind) else UNKNOWN_KIND
+    return kind if sanitize.is_event_kind(kind) else UNKNOWN_KIND
 
 
 def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
