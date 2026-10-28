@@ -35,7 +35,8 @@ Non-goals:
 Issue: queue label + assigned to me (+ optional state filter)
         │  poll every few minutes
         ▼
-launchd timer ──► chargehand tick
+launchd KeepAlive job ──► chargehand serve: a tick every tick_interval_secs,
+                          and at once when a control request waits
    1. reconcile incomplete launches
    2. apply recorded control requests
    3. watchdog long runs
@@ -57,6 +58,7 @@ Claude Code supervisor (background sessions, one per worker)
 whatever the prompt produces — typically a draft pull request
 
 Operator: chargehand status|watch|cancel…  ·  Claude Code agent view for replies
+          GET 127.0.0.1:7878/api/state, /api/health (the daemon's loopback API)
 ```
 
 Components:
@@ -66,7 +68,8 @@ Components:
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised workers |
 | Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
 | Runtimes | The coding agent behind one interface; `claude` is the only one that ships |
-| Control CLI | See and steer the runner; no server |
+| Daemon (`chargehand serve`) | Runs the tick on a timer and applies control requests; serves a loopback API with a token |
+| Control CLI | See and steer the runner; records requests for the daemon |
 | Tracker adapters | `linear` and `github` |
 | Event sources | `github`, the repository's tracker, and a `command` source for anything else |
 | A lease tool such as banksman (external, optional, never called by chargehand) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
@@ -82,7 +85,7 @@ queue starts drives it, so re-adding the label while a worker runs starts nothin
 - **Per-assignee filtering removes cross-machine races by construction.** Two developers'
   runners never see the same issue. Assigning the issue *is* the routing decision, and the
   pull request's author, its reviewer, and the Claude Code quota all follow the assignee. One
-  person with two machines enables the timer on exactly one.
+  person with two machines runs the daemon on exactly one.
 - **Queue the issue before work starts, not by marking it "in progress".** Whatever the
   prompt runs is free to move the issue forward once it decides the work is feasible; if it
   declines, the issue should not be left looking active.
@@ -273,6 +276,18 @@ type = "github"
 
 `[[route]]` with `repo` and `max_open_attempts` are the older spellings and stay accepted.
 
+The daemon reads one more table. Every key is optional; these are the defaults:
+
+```toml
+[serve]
+port = 7878                         # on 127.0.0.1; no key binds another address
+token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
+tick_interval_secs = 60             # how often the daemon ticks
+```
+
+`poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
+interval of `watch`, capped at 30 seconds.
+
 Repository layer — `.chargehand.toml`, checked in:
 
 ```toml
@@ -437,8 +452,8 @@ idempotent, and the row's `step` advances after each one.
 
 ### Reconciliation (start of every tick)
 
-launchd runs one tick at a time, so a row still `launching` when a tick starts is an
-interrupted launch, not a concurrent one.
+Ticks never overlap (see the tick lock below), so a row still `launching` when a tick
+starts is an interrupted launch, not a concurrent one.
 
 - **Ledger side:** for a row stuck in `launching`, look for a session whose working
   directory is the row's worktree or whose name is the worker's name (or the issue
@@ -463,9 +478,11 @@ The queue status last *verified* on the tracker is stored separately from the wo
 state, so a write that could not be confirmed is retried on the next tick instead of being
 assumed to have landed.
 
-launchd will not run two instances of one job, but `chargehand tick` is also a command, so
-the tick takes an exclusive file lock rather than assuming it is alone. The kernel releases
-that lock when its holder dies, so a killed tick needs no recovery.
+The daemon runs one tick at a time, but `chargehand tick` is also a command, so every tick
+takes an exclusive file lock rather than assuming it is alone. The daemon holds the lock
+only while one of its ticks runs, so a tick by hand waits for it or reports that a tick is
+running. The kernel releases the lock when its holder dies, so a killed tick needs no
+recovery.
 
 ## 6. Supervision, notifications, questions
 
@@ -559,14 +576,17 @@ notify after `max_run_hours`, stop the session after `hard_stop_hours`.
 session and its worktree are removed — never when commits are unpushed. Low disk space is
 reported.
 
-## 7. Control: a CLI, no server
+## 7. Control: a CLI and a loopback daemon
 
-The control surface is a CLI, and nothing else. There is no port, no token, and no browser
-to attack. chargehand runs on the machine you work on and is steered from a terminal on it.
+chargehand runs on the machine you work on and is steered from a terminal on it. A
+resident daemon, `chargehand serve`, does the work: it runs the tick every
+`tick_interval_secs`, applies control requests, and serves a small HTTP API on 127.0.0.1.
+The CLI is how you steer it.
 
 It is a plain CLI, so it also works over SSH if you want to reach the machine from
 elsewhere, but nothing depends on that and it is not part of what is tested. Reaching a
-machine remotely is the operating system's job, not this tool's.
+machine remotely is the operating system's job, not this tool's. The daemon's API is
+reachable from the machine itself and from nowhere else.
 
 ```
 chargehand status [--json]          # queue, workers, repositories, sessions — no free text
@@ -579,23 +599,43 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
-chargehand tick                     # run a tick now
+chargehand tick                     # run a tick now, under the tick lock
+chargehand serve                    # the daemon; `install` writes the job that runs it
 ```
 
 Commands that take an item also take `--role`, which is needed when workers of several
 roles hold the item. `--route` stays accepted for `--repository`.
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
-  tracker. It records the request in the ledger, kick-starts the scheduled tick when that job
-  is loaded, otherwise runs a tick itself under the tick lock, and waits for the outcome.
-  launchd ignores a kick-start while a tick is running, and that tick can be past the point
-  where it reads requests, so the command repeats the kick-start until a tick applies the
-  request. launchd also starts a job at most once every ten seconds and holds a kick-start
-  back until then, so the second of two quick commands can take that long. The command runs
-  a tick itself only when the job has not applied the request within 30 seconds. A
-  `cancel` therefore cannot race a launch in progress. Reconciliation runs *before* recorded
-  requests, so a cancel issued during a launch acts on a session that is known rather than
-  leaving one that the dying tick had already started running unsupervised.
+  tracker. It records the request in the ledger and waits for the outcome. The daemon is
+  the writer: between ticks it looks for new requests about once a second and runs a tick
+  at once when one waits, so a command usually returns within a second or two, and after
+  the tick in progress when there is one. While the daemon answers on its port the command
+  never runs a tick itself. The daemon reports which ledger it serves, so a second
+  instance (`CHARGEHAND_STATE_DIR`, `--config`) does not wait on another instance's
+  daemon. With no daemon, the command runs a tick itself under the tick lock; a timer job
+  from before the daemon is still kick-started first. A `cancel` therefore cannot race a
+  launch in progress. Reconciliation runs *before* recorded requests, so a cancel issued
+  during a launch acts on a session that is known rather than leaving one that the dying
+  tick had already started running unsupervised.
+- **The daemon's API.** It binds 127.0.0.1 only, on the `[serve]` port; no setting binds
+  another address. `GET /api/health` says that the daemon runs, which ledger it serves and
+  how its ticks went. `GET /api/state` is the `status --json` payload with a `daemon`
+  object added, read from the ledger, with no tracker call; its sessions are the ones the
+  last tick listed, so a request runs no `claude agents`. Reads need no token. Every other
+  method must carry `Authorization: Bearer <token>`, where the token is in the file
+  `token_file`, which the daemon writes with mode 0600 when it is missing and refuses to
+  use when other users can read it. A request whose `Host` header is not
+  `127.0.0.1:<port>` or `localhost:<port>` is refused, so a web page that points its own
+  name at 127.0.0.1 (DNS rebinding) cannot read the API. No response has a CORS header, so
+  a page on another origin cannot read one either. A body is capped at 1 MiB and must come
+  with a `Content-Length`. Each request opens its own ledger connection.
+- **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
+  progress finishes, the rest of that tick is skipped, the server shuts down, and the exit
+  code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL
+  when the daemon has not exited after the job's `ExitTimeOut`, 300 seconds; a phase that
+  runs longer, such as a slow setup script, is then killed and reconciled as an
+  interrupted launch.
 - **Untrusted text.** Issue titles and agent output are attacker-influenced, so `status` and
   `watch` omit free text by default; titles and a session's waiting text need
   `--verbose-titles`, output needs `logs`. That covers what a session can put into fields
@@ -626,13 +666,15 @@ roles hold the item. `--route` stays accepted for `--repository`.
   sessions get deny rules for all three, and one more for the operator commands of the
   lease tool banksman, which all start with `banksman admin` and which banksman asks every
   caller to deny to agents. The rule matches nothing on a machine without banksman, and
-  the other banksman commands stay open, because the repository's scripts use them. A `Bash` rule matches command text rather
+  the other banksman commands stay open, because the repository's scripts use them. They
+  also get deny rules for the daemon's port, written for the port in `[serve]` and added
+  to an operator's own `deny_rules` too: `Bash(*127.0.0.1:<port>*)`,
+  `Bash(*localhost:<port>*)`, and `WebFetch` for both hosts. A `Bash` rule matches command text rather
   than the program behind it, so every pattern leads with a wildcard to cover an absolute
   path and a `sh -c '...'` wrapper alongside the bare name; `probes/deny_rules.py` checks
   each form against a real install. That makes the rules a guardrail against the careless
   path and not a boundary against a deliberate one. Running agents under a separate user
   is the stronger option.
-- **Optional later:** a read-only, loopback-only status page with no mutating endpoints.
 
 ## 8. Sharing devices
 
@@ -671,6 +713,12 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 - A logged-in session is required: Claude Code's credentials and tracker keys live in the
   login keychain, and launchd agents run in that session. A locked screen is fine; a logged
   out one is not.
+- `install` writes a LaunchAgent with `KeepAlive` and `RunAtLoad` that runs
+  `chargehand serve`. launchd starts the daemon when you log in and starts it again when it
+  exits, at most once every ten seconds. The label is still `dev.chargehand.tick`, so
+  `install --load` unloads a timer job from an older release before it loads the new one,
+  and `doctor` warns when the installed job is still that timer. `doctor` also checks that
+  the daemon answers on its port and that the token file has mode 0600.
 - launchd starts jobs with a minimal `PATH`; everything the tick shells out to must be
   reachable through the `PATH` set in the job definition. `install` copies the `PATH` of the
   shell it runs in, and `doctor` resolves `claude` and `git` through the job's `PATH`
@@ -699,7 +747,8 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 | Agent hangs | The watchdog notifies after `max_run_hours` and stops the session after `hard_stop_hours`. |
 | Several blocked runs resumed at once | Sessions wake together; `max_open_workers` bounds how many there can be. |
 | Tracker unavailable | The tick logs and exits; the next one retries. |
-| Control command during a tick | Recorded, then applied by the next, kick-started tick. |
+| Control command during a tick | Recorded, then applied by the daemon's next tick, which starts within about a second of the current one ending. |
+| Daemon killed or crashed | launchd starts it again; the tick lock was released by the kernel, and the first tick reconciles. |
 | Prompt injection through issue text | Mitigated, not eliminated — see `SECURITY.md`. |
 
 ## 11. Roadmap
@@ -708,6 +757,8 @@ Done:
 
 - Runner: configuration, the `linear` adapter, ledger-first launch,
   reconciliation, label lifecycle, state diffing, the control CLI, the launchd job.
+- The resident daemon: the tick on a timer, control requests applied within a second, and
+  a loopback API with a token.
 - Control surface: `watch`, `logs`, request plumbing through the tick, output sanitizing,
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
@@ -726,9 +777,9 @@ Next:
   banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
-- A resident daemon on loopback with a local board, replacing the scheduled job.
+- A local board on the daemon's loopback API.
 - Packaging, first release.
-- Optional: the read-only status page, agents under a separate user.
+- Optional: agents under a separate user.
 
 Acceptance for the runner runs against a throwaway repository and a cheap prompt, with fault
 injection after every launch step, before any expensive real run. `probes/smoke_route.py`

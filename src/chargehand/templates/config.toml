@@ -25,6 +25,15 @@ worktree_root = "~/chargehand-worktrees"
 # Warn when the worktree root's filesystem drops below this.
 min_free_disk_gb = 30
 
+# The daemon, `chargehand serve`, which `chargehand install` sets up as a launchd job. It
+# listens on 127.0.0.1 only; nothing here binds another address. Mutating requests need
+# the token in token_file, which the daemon writes with mode 0600 when it is missing.
+# poll_interval_secs above is now only the refresh interval of `chargehand watch`.
+[serve]
+port = 7878
+# token_file = "~/.config/chargehand/board.token"   # the default: next to this file
+tick_interval_secs = 60
+
 [notify]
 # Receives CHARGEHAND_ITEM, CHARGEHAND_ROLE, CHARGEHAND_STATE, CHARGEHAND_URL,
 # CHARGEHAND_REPOSITORY and CHARGEHAND_DETAIL as environment variables (CHARGEHAND_ISSUE and

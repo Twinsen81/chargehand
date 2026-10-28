@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The tick runs in a resident daemon, `chargehand serve`, in place of the launchd timer:
+  `install` writes a KeepAlive job that runs it, control commands are applied within a
+  second or two, and a loopback API (`/api/health`, `/api/state`) with a token in a mode
+  0600 file serves the status; `doctor` checks both, and sessions get deny rules for the
+  port.
 - The authorship marker that workers add to their comments is now
   `<!-- chargehand-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
   the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that
