@@ -271,6 +271,7 @@ class SourceConfig:
         options = {k: v for k, v in table.items() if k not in ("name", "type")}
         return cls(name=name, type=kind, options=options)
 
+
 @dataclass(frozen=True)
 class ServeConfig:
     """The `[serve]` table: the resident daemon.

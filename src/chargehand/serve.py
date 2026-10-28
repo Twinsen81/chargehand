@@ -56,6 +56,10 @@ REQUEST_POLL_SECS = 1.0
 MAX_BODY_BYTES = 1024 * 1024
 # How long a client waits for `/api/health`.
 HEALTH_TIMEOUT_SECS = 2.0
+# How long a connection may stay idle or slow before the server drops it. Without a limit,
+# connections that send nothing would hold a thread and a file descriptor each until the
+# daemon has none left for the tick's own subprocesses.
+CONNECTION_TIMEOUT_SECS = 10.0
 
 # The methods that change nothing and need no token.
 SAFE_METHODS = ("GET", "HEAD")
@@ -233,8 +237,10 @@ StatusBuilder = Callable[
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    # A port held by another process must fail the start, not be shared with it.
-    allow_reuse_address = False
+    # The server closes each connection first, so its port stays in TIME_WAIT for about
+    # half a minute after a stop. Without SO_REUSEADDR a daemon that launchd starts again
+    # in that time cannot bind. A port that another socket listens on is still refused.
+    allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], owner: "Daemon") -> None:
         self.owner = owner
@@ -242,8 +248,10 @@ class _Server(ThreadingHTTPServer):
 
 
 class _HTTPHandler(BaseHTTPRequestHandler):
-    server_version = "chargehand"
-    sys_version = ""
+    timeout = CONNECTION_TIMEOUT_SECS
+
+    def version_string(self) -> str:
+        return "chargehand"
 
     def _handle(self) -> None:
         owner: Daemon = self.server.owner  # type: ignore[attr-defined]

@@ -211,11 +211,13 @@ def build_status(
     include_queue: bool = True,
     sessions: serve.Sessions | None = None,
     daemon: dict[str, object] | None = None,
+    launchd_loaded: bool | None = None,
 ) -> dict[str, object]:
     """The status payload.
 
-    The daemon passes the sessions its last tick listed and its own health, so a request
-    for its state lists no sessions and sends no request to itself.
+    The daemon passes the sessions its last tick listed, its own health and whether its
+    job is loaded, so a request for its state lists no sessions, sends no request to
+    itself and runs no `launchctl`.
     """
     now = time.time()
     workers = ledger.live_workers()
@@ -285,7 +287,7 @@ def build_status(
             "worktree_root": str(root),
             "free_disk_gb": free_gb,
             "min_free_disk_gb": config.min_free_disk_gb,
-            "launchd_loaded": install.is_loaded(),
+            "launchd_loaded": install.is_loaded() if launchd_loaded is None else launchd_loaded,
             "poll_interval_secs": config.poll_interval_secs,
         },
         "daemon": daemon if daemon is not None else _daemon_payload(config),
@@ -417,8 +419,31 @@ def _print_report(report: TickReport, *, quiet: bool = False) -> None:
     sys.stdout.flush()
 
 
+class _Cached:
+    """A value read again at most every *ttl_secs*, for state the board asks about often."""
+
+    def __init__(self, read, ttl_secs: float) -> None:
+        self._read = read
+        self._ttl = ttl_secs
+        self._value = None
+        self._read_at: float | None = None
+
+    def __call__(self):
+        now = time.monotonic()
+        if self._read_at is None or now - self._read_at >= self._ttl:
+            self._value = self._read()
+            self._read_at = now
+        return self._value
+
+
+# How often the daemon's state asks launchd whether its job is loaded. A board polls the
+# state about once a second, and each answer from launchd is a subprocess.
+LAUNCHD_CHECK_SECS = 60.0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     # The job appends this output to its log, so every line is stamped as a tick's is.
+    loaded = _Cached(install.is_loaded, LAUNCHD_CHECK_SECS)
     try:
         config = _load_config(args)
         daemon = serve.Daemon(
@@ -426,7 +451,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
             load_config=lambda: _load_config(args),
             runner_factory=_runner,
             status=lambda cfg, ledger, sessions, health: build_status(
-                cfg, ledger, include_queue=False, sessions=sessions, daemon=health
+                cfg, ledger, include_queue=False, sessions=sessions, daemon=health,
+                launchd_loaded=loaded(),
             ),
             sessions=list_sessions,
             # A tick every minute that did nothing would fill the log with one line each.

@@ -444,6 +444,69 @@ def test_a_port_in_use_fails_the_start(config):
             daemon.start()
 
 
+def test_a_daemon_starts_again_on_its_port_right_after_a_stop(config):
+    """The port of a server that closed its connections stays in TIME_WAIT for a while,
+    and launchd starts the daemon again within seconds."""
+    first = support.build(config)
+    with support.running(first, loop=False):
+        port = first.port
+        for _ in range(3):
+            assert support.request(port, "GET", "/api/health")[0] == 200
+
+    second = support.build(config, port=port)
+    with support.running(second, loop=False):
+        assert serve.probe(port)["ok"] is True
+
+
+def test_an_idle_connection_is_dropped(config, monkeypatch):
+    monkeypatch.setattr(serve._HTTPHandler, "timeout", 0.2)
+    daemon = support.build(config)
+    with support.running(daemon, loop=False):
+        with socket.create_connection(("127.0.0.1", daemon.port), timeout=5) as idle:
+            # The server closes the connection, so the read ends instead of waiting.
+            assert idle.recv(1024) == b""
+        assert serve.probe(daemon.port)["ok"] is True
+
+
+def test_the_server_header_names_chargehand_only(config):
+    import http.client
+
+    daemon = support.build(config)
+    with support.running(daemon, loop=False):
+        connection = http.client.HTTPConnection("127.0.0.1", daemon.port, timeout=5)
+        connection.request("GET", "/api/health")
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+
+    assert response.getheader("Server") == "chargehand"
+
+
+def test_the_state_asks_launchd_at_most_once_a_minute(monkeypatch):
+    calls = []
+    now = [100.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+    cached = cli._Cached(lambda: calls.append(1) or True, cli.LAUNCHD_CHECK_SECS)
+
+    assert cached() is True and cached() is True
+    assert len(calls) == 1
+    now[0] += cli.LAUNCHD_CHECK_SECS
+    assert cached() is True
+    assert len(calls) == 2
+
+
+def test_the_status_takes_the_launchd_state_it_is_given(config, harness, monkeypatch):
+    monkeypatch.setattr(
+        "chargehand.cli.install.is_loaded", lambda: pytest.fail("the state ran launchctl")
+    )
+    payload = cli.build_status(
+        config, harness.ledger, include_queue=False, sessions=([], None),
+        daemon={"answers": True}, launchd_loaded=True,
+    )
+
+    assert payload["machine"]["launchd_loaded"] is True
+
+
 def test_the_default_token_file_sits_next_to_the_configuration(tmp_path, monkeypatch):
     from chargehand import paths
 
