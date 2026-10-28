@@ -598,6 +598,13 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
             "poll_interval_secs": 180,
         },
         "daemon": {"answers": False, "port": 7878},
+        "usage": {
+            "known": True,
+            "written_at": now - 120,
+            "age_secs": 120.0,
+            "five_hour": {"used_percent": 41.0, "resets_at": now + 7200, "level": "green"},
+            "seven_day": {"used_percent": 63.0, "resets_at": now + 259200, "level": "amber"},
+        },
         "runner": {
             "paused": False,
             "paused_repositories": [],

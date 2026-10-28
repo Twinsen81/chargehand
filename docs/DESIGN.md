@@ -283,6 +283,7 @@ The daemon reads one more table. Every key is optional; these are the defaults:
 port = 7878                         # on 127.0.0.1; no key binds another address
 token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
 tick_interval_secs = 60             # how often the daemon ticks
+usage_file = "~/.cache/chargehand/usage.json"     # the status line wrapper writes it
 ```
 
 `poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
@@ -606,6 +607,7 @@ chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
 chargehand tick                     # run a tick now, under the tick lock
 chargehand serve                    # the daemon; `install` writes the job that runs it
+chargehand statusline -- '<command>'   # status line wrapper: records the usage windows
 ```
 
 Commands that take an item also take `--role`, which is needed when workers of several
@@ -635,6 +637,29 @@ roles hold the item. `--route` stays accepted for `--repository`.
   name at 127.0.0.1 (DNS rebinding) cannot read the API. No response has a CORS header, so
   a page on another origin cannot read one either. A body is capped at 1 MiB and must come
   with a `Content-Length`. Each request opens its own ledger connection.
+- **Usage readings.** Claude Code gives a status line command the subscription's
+  `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
+  `resets_at`. It sends them on subscription plans only, and only after the session's first
+  API response. `chargehand statusline -- '<command>'` reads that payload, writes both
+  windows with the time it wrote them to `usage_file` (atomically, mode 0600), and then
+  runs `<command>` through a shell with the same stdin, passing its output and exit code
+  through. A payload without `rate_limits` leaves the file as it is, and a file that cannot
+  be written changes nothing in the status line. chargehand does not edit your settings;
+  you wrap your own command in `~/.claude/settings.json`:
+
+  ```json
+  "statusLine": {
+    "type": "command",
+    "command": "chargehand statusline -- '~/.claude/statusline.sh'"
+  }
+  ```
+
+  Without a status line of your own, leave out `-- '<command>'`; the status line is then
+  empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for each
+  window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
+  `red` from 80 %. A reading older than 30 minutes, a missing or unreadable file, and a
+  window whose reset time has passed are unknown, with the level `grey`. `status --json`
+  carries the same object.
 - **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
   progress finishes, the rest of that tick is skipped, the server shuts down, and the exit
   code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL

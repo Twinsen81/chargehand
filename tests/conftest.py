@@ -174,6 +174,9 @@ def isolated_state(tmp_path, monkeypatch):
     claude_config = tmp_path / "claude-config"
     claude_config.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config))
+    # Every status payload reads the usage file, which by default is in the home directory.
+    usage_file = tmp_path / "usage-cache" / "usage.json"
+    monkeypatch.setattr(paths, "usage_file", lambda: usage_file)
     fake_tracker.reset()
     fake_source.reset()
     fake_runtime.reset()
