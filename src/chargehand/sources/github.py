@@ -56,6 +56,10 @@ REVIEW_CHECK_INTERVAL_SECS = 24 * 3600
 # A review request younger than this may not have its notification thread yet.
 REVIEW_THREAD_GRACE_SECS = 10 * 60
 REVIEW_REQUEST_QUERY = "is:pr is:open review-requested:@me"
+# The check reads the notification threads page by page: the endpoint gives at most 50
+# a page, and the check stops after this many pages.
+REVIEW_CHECK_PAGE_SIZE = 50
+REVIEW_CHECK_MAX_PAGES = 10
 
 # A notification's reason, as the event kind it becomes. The other reasons (assign,
 # author, state_change, subscribed, ...) say nothing a worker acts on.
@@ -537,7 +541,9 @@ class GithubSource(Source):
         only, and the source never sees it. GitHub has no API for the setting, so this
         compares the two lists. The search result has no request time, but its
         ``updated_at`` is not earlier than the request, so a pull request updated within
-        :data:`REVIEW_THREAD_GRACE_SECS` is skipped: its thread may not exist yet.
+        :data:`REVIEW_THREAD_GRACE_SECS` is skipped: its thread may not exist yet. When the
+        thread list is longer than the check reads, a request older than the oldest thread
+        read is not reported.
         """
         now = self.clock()
         query = quote(REVIEW_REQUEST_QUERY, safe="")
@@ -555,15 +561,44 @@ class GithubSource(Source):
         if not waiting:
             return []
         oldest = min(created for _, created in waiting.values())
-        threads = self.gh.api_list(
-            f"notifications?all=true&per_page={PAGE_SIZE}&since={_iso(oldest - CLOCK_SKEW_SECS)}"
-        )
+        threads, complete = self._threads_since(oldest - CLOCK_SKEW_SECS)
+        if not complete:
+            # The list comes newest first, so a thread of a request made after the oldest
+            # thread read would be among them. An older request is not known either way.
+            floor = min(
+                (t for t in (_timestamp(e.get("updated_at")) for e in threads) if t is not None),
+                default=None,
+            )
+            waiting = {
+                key: value for key, value in waiting.items()
+                if floor is not None and value[1] >= floor
+            }
         for thread in threads:
             subject = thread.get("subject") if isinstance(thread.get("subject"), Mapping) else {}
             match = _API_PATH.search(str(subject.get("url") or ""))
             if thread.get("reason") == "review_requested" and match:
                 waiting.pop(f"{match.group(1)}/{match.group(2)}#{match.group(4)}".lower(), None)
         return sorted(item_key(ref) for ref, _ in waiting.values())
+
+    def _threads_since(self, since: float) -> tuple[list[Mapping[str, Any]], bool]:
+        """The threads updated since *since*, read ones included, newest first, and whether
+        that is all of them.
+
+        At most :data:`REVIEW_CHECK_MAX_PAGES` pages, one gh call each, so that an account
+        with a long history cannot make the check run past the timeout every day.
+        """
+        threads: list[Mapping[str, Any]] = []
+        for page in range(1, REVIEW_CHECK_MAX_PAGES + 1):
+            values = self.gh.api(
+                f"notifications?all=true&per_page={REVIEW_CHECK_PAGE_SIZE}&page={page}"
+                f"&since={_iso(since)}"
+            )
+            if len(values) != 1 or not isinstance(values[0], list):
+                raise TrackerError("github: notifications: expected a list")
+            threads += [entry for entry in values[0] if isinstance(entry, Mapping)]
+            if len(values[0]) < REVIEW_CHECK_PAGE_SIZE:
+                return threads, True
+        return threads, False
 
     def _review_thread_warning(self, keys: Sequence[str]) -> str:
         shown = ", ".join(keys[:10]) + (f" and {len(keys) - 10} more" if len(keys) > 10 else "")

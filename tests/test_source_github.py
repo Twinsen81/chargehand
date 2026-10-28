@@ -273,9 +273,12 @@ def test_an_empty_list_is_asked_with_its_etag_and_ends_the_first_poll(source, gh
     # The first poll is over all the same: the next one starts from the server's Date.
     assert state["listed_at"] == datetime(2026, 10, 26, 10, 0, 30, tzinfo=timezone.utc).timestamp()
 
+    # A 200 would take this Date; the 304 keeps the window of the first poll.
+    gh.set(date="Mon, 26 Oct 2026 10:01:30 GMT")
     clock.now += 61
     events, cursor = source.poll(cursor, [])
 
+    assert json.loads(cursor)["listed_at"] == state["listed_at"]
     second = notification_calls(gh)[-1]
     assert f"If-None-Match: {state['etag']}" in second
     assert not any(arg.startswith("If-Modified-Since") for arg in second)
@@ -357,6 +360,28 @@ def test_a_young_review_request_does_not_warn(source, gh, clock):
     assert warnings == []
     # Nothing to compare, so the threads are not read for the check.
     assert not any("all=true" in p for p in api_paths(gh) if p.startswith("notifications"))
+
+
+def test_a_long_thread_list_is_read_in_a_few_pages_and_old_requests_are_not_guessed(
+    source, gh, monkeypatch
+):
+    from chargehand.sources import github as github_mod
+
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_PAGE_SIZE", 2)
+    monkeypatch.setattr(github_mod, "REVIEW_CHECK_MAX_PAGES", 1)
+    # Requested before the oldest thread that one page holds: not known either way.
+    gh.add_pull("octo/app#1", created_at="2026-10-26T08:00:00Z", updated_at=OLD_REQUEST)
+    # Requested after it: its thread would be on the page, so it has none.
+    gh.add_pull("octo/app#2", created_at="2026-10-26T09:20:00Z", updated_at="2026-10-26T09:30:00Z")
+    for number, at in ((10, "2026-10-26T08:30:00Z"), (11, "2026-10-26T09:10:00Z"),
+                       (12, "2026-10-26T09:40:00Z")):
+        gh.notify("mention", f"octo/app#{number}", kind="Issue", updated_at=at, unread=False)
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert len(warnings) == 1 and "octo_app_2" in warnings[0] and "octo_app_1" not in warnings[0]
+    pages = [p for p in api_paths(gh) if p.startswith("notifications") and "&page=" in p]
+    assert len(pages) == 1 and "per_page=2&page=1" in pages[0]
 
 
 def test_a_failed_review_request_check_does_not_fail_the_poll(source, gh):

@@ -218,10 +218,17 @@ def notifications(state: dict, args: list[str], query: dict) -> int:
             + (f"Last-Modified: {last_modified}\r\n" if last_modified else "")
             + f"X-Poll-Interval: {interval}\r\n\r\n"
         )
-    if "--paginate" in args or not show:
-        emit_pages(body, int(state.get("page_size", 100)), "--paginate" in args)
-    else:
+    if show:
         sys.stdout.write(text)
+        return 0
+    # Without -i, one page by `page` and `per_page`, newest first, as GitHub lists them.
+    body = sorted(body, key=lambda thread: thread.get("updated_at") or "", reverse=True)
+    size = int(query.get("per_page", [state.get("page_size", 100)])[0])
+    if "--paginate" in args:
+        emit_pages(body, size, True)
+        return 0
+    start = (int(query.get("page", ["1"])[0]) - 1) * size
+    sys.stdout.write(json.dumps(body[start : start + size]))
     return 0
 
 
