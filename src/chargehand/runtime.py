@@ -282,6 +282,9 @@ class Runtime(ABC):
         """Whether the listed *session* has no process left. The one rule for confirming a stop."""
         return session.state in (STOPPED, FAILED)
 
+    def release(self, worktree: Path) -> None:
+        """Delete what the launch in *worktree* kept for its session, once that session is removed."""
+
     @abstractmethod
     def respawn(self, session_id: str) -> CommandResult:
         """Start a stopped session's process again, without a new message."""

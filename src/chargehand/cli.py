@@ -148,6 +148,10 @@ def _worker_dict(
         "pr_url": worker.pr_url,
         "label_state": worker.label_state,
         "wakes": worker.wakes,
+        # One of the runtime's own event names, never payload text.
+        "last_hook": worker.last_hook,
+        "last_hook_at": worker.last_hook_at,
+        "reset_at": worker.reset_at,
         "elapsed_secs": round(time.time() - worker.created_at, 1),
         "working_since": worker.working_since,
         "created_at": worker.created_at,

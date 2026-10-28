@@ -803,15 +803,30 @@ class Runner:
         return self.runtime(worker.runtime).is_stopped(session)
 
     def _remove_session(self, worker: Worker) -> bool:
-        if not worker.session_id:
-            return True
-        self.runtime(worker.runtime).remove(worker.session_id)
-        self.invalidate_sessions(worker.runtime)
+        if worker.session_id:
+            self.runtime(worker.runtime).remove(worker.session_id)
+            self.invalidate_sessions(worker.runtime)
+            try:
+                sessions = self.sessions(worker.runtime, refresh=True)
+            except AgentRuntimeError:
+                return False
+            if any(s.id == worker.session_id for s in sessions):
+                return False
+        self._release_launch_files(worker)
+        return True
+
+    def _release_launch_files(self, worker: Worker) -> None:
+        """Delete what the launch kept for a session that is gone, such as its settings file."""
+        if any(
+            other.id != worker.id and other.worktree == worker.worktree
+            for other in self.ledger.live_workers()
+        ):
+            # A newer worker in the same worktree launched with the same files.
+            return
         try:
-            sessions = self.sessions(worker.runtime, refresh=True)
-        except AgentRuntimeError:
-            return False
-        return all(s.id != worker.session_id for s in sessions)
+            self.runtime(worker.runtime).release(worker.worktree_path)
+        except ConfigError:
+            pass
 
     def _adopt(self, worker: Worker, session: Session, report: TickReport) -> Worker:
         worker = self.ledger.update(

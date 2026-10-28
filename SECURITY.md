@@ -161,13 +161,14 @@ public location.
   the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
   0700 under the state directory, and the `SessionStart` command hook names the token
   file, not the token, and runs its script with `python -I`, so nothing in the worktree
-  is imported. A post moves only the
-  live worker whose session posted it. The daemon answers every post with an empty
-  object, so it never makes a permission decision for a session, never keeps a turn
-  running and never adds text to the model's context. The payload is untrusted: the last
-  answer, the tool input and the other fields are cleaned of terminal control sequences
-  and capped when stored, never reach a notification or a prompt, and `GET /api/state`
-  returns them as JSON data for the page to escape.
+  is imported. The settings file is deleted when its session is removed. A post moves
+  only the live worker whose session posted it. The daemon answers every post with an
+  empty object, so it never makes a permission decision for a session, never keeps a
+  turn running and never adds text to the model's context. The payload is untrusted: the
+  last answer, the tool input and the other fields are cleaned of terminal control
+  sequences and capped when stored, never reach a notification or a prompt, and
+  `GET /api/state` returns them as JSON data for the page to escape. `status --json`
+  names the last hook event and the reset time, but no payload text.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is

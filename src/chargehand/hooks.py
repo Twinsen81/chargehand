@@ -121,8 +121,9 @@ def _prompt(prompt: PermissionPrompt) -> dict[str, object]:
 def add_to_state(request: Request, payload: dict[str, object]) -> None:
     """Add what the hooks reported to each live worker of `/api/state`.
 
-    The `status --json` keys stay as they are; each worker gains its last hook, its
-    last answer, the reset time of a usage limit and its open permission prompts.
+    The `status --json` keys stay as they are, its last hook and reset time included;
+    each worker gains its last answer and its open permission prompts, which are
+    session text and stay out of `status`.
     """
     ledger = request.ledger()
     # The status payload has no row id; a live worker's worktree and creation time name it.
@@ -134,10 +135,7 @@ def add_to_state(request: Request, payload: dict[str, object]) -> None:
         worker = by_key.get((entry.get("worktree"), entry.get("created_at")))
         if worker is None:
             continue
-        entry["last_hook"] = worker.last_hook
-        entry["last_hook_at"] = worker.last_hook_at
         entry["last_answer"] = sanitize.clean(worker.last_answer) if worker.last_answer else None
-        entry["reset_at"] = worker.reset_at
         entry["permission_prompts"] = [
             _prompt(prompt) for prompt in prompts if prompt.worker_id == worker.id
         ]
