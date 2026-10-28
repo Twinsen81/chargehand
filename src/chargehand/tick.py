@@ -197,6 +197,23 @@ def item_checkout_path(worker: Worker) -> Path:
     return worktree.parent.parent / ITEM_CHECKOUTS / worktree.parent.name / worktree.name
 
 
+def template_values(worker: Worker) -> dict[str, str]:
+    """The values a role's prompt, setup and status file templates are filled with."""
+    checkout = item_checkout_path(worker)
+    values = {
+        "item": worker.item,
+        "item_url": worker.url or "",
+        "item_checkout": str(checkout if checkout.exists() else worker.worktree_path),
+        "worktree": str(worker.worktree_path),
+        "branch": worker.branch,
+        "repo": str(worker.repo_path),
+    }
+    # The names from before work items existed.
+    values["issue"] = values["item"]
+    values["url"] = values["item_url"]
+    return values
+
+
 @dataclass(frozen=True)
 class WorkspaceCheck:
     """Whether a worker's own worktree may host its session again.
@@ -1888,7 +1905,7 @@ class Runner:
         path = Path(
             config_mod.render(
                 role.status_file,
-                self._template_values(worker),
+                template_values(worker),
                 where=f"{role.source or role.name}.status_file",
             )
         ).expanduser()
@@ -2498,7 +2515,7 @@ class Runner:
         """
         if not template:
             return None
-        argv = config_mod.render_argv(template, self._template_values(worker), where=where)
+        argv = config_mod.render_argv(template, template_values(worker), where=where)
         roots = (
             *(((worker.worktree_path, "the worktree"),) if trust_worktree else ()),
             (worker.repo_path, "the main checkout"),
@@ -2562,7 +2579,7 @@ class Runner:
                 )
             prompt = config_mod.render(
                 role.prompt,
-                self._template_values(worker),
+                template_values(worker),
                 where=f"{role.source or 'role ' + role.name}.prompt",
             )
             result = runtime.launch(
@@ -2637,21 +2654,6 @@ class Runner:
         # two worktrees, so the role is part of the placeholder name.
         prefix = repo_config.branch_prefix if repo_config else "chargehand/"
         return f"{prefix}{role}/{item}"
-
-    def _template_values(self, worker: Worker) -> dict[str, str]:
-        checkout = item_checkout_path(worker)
-        values = {
-            "item": worker.item,
-            "item_url": worker.url or "",
-            "item_checkout": str(checkout if checkout.exists() else worker.worktree_path),
-            "worktree": str(worker.worktree_path),
-            "branch": worker.branch,
-            "repo": str(worker.repo_path),
-        }
-        # The names from before work items existed.
-        values["issue"] = values["item"]
-        values["url"] = values["item_url"]
-        return values
 
     @staticmethod
     def _check_crash(step: int, crash_after_step: int | None) -> None:

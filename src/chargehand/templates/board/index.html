@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chargehand</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="stylesheet" href="/board.css">
+<script src="/board.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <h1>chargehand</h1>
+  <div class="stats" id="stats"></div>
+  <div class="gauges">
+    <div class="gauge grey" id="gauge-five_hour" title="Five-hour usage window">
+      <span class="name">5 h</span><span class="bar"><span class="fill"></span></span>
+      <span class="value">-</span><span class="reset"></span>
+    </div>
+    <div class="gauge grey" id="gauge-seven_day" title="Weekly usage window">
+      <span class="name">week</span><span class="bar"><span class="fill"></span></span>
+      <span class="value">-</span><span class="reset"></span>
+    </div>
+  </div>
+  <div class="throttle" id="throttle"></div>
+  <div class="health" id="health"><span class="dot"></span><span class="text">-</span></div>
+  <div class="refresh" id="refresh">loading</div>
+</header>
+<main id="board"></main>
+<footer id="foot">read-only · polling every second</footer>
+</body>
+</html>

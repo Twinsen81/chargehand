@@ -169,6 +169,20 @@ public location.
   sequences and capped when stored, never reach a notification or a prompt, and
   `GET /api/state` returns them as JSON data for the page to escape. `status --json`
   names the last hook event and the reset time, but no payload text.
+- **A read-only board.** `GET /` serves one static page, its script and its style sheet,
+  all from the package; nothing else is served as a file, and the page loads nothing
+  from another origin. They are sent with `Content-Security-Policy: default-src 'none';
+  script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri
+  'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, so no inline script or
+  style runs and no other site can frame the page. The page reads `GET /api/board` and
+  has no action: it sends no request other than that read, and it holds no token. Every
+  text field in that answer is cleaned of control sequences and direction overrides on
+  the server, `<`, `>` and `&` are escaped in its JSON, and the page sets text with
+  `textContent` only, never as markup. A link is made only from a plain http(s) URL, and
+  opens with `rel="noopener noreferrer"`. The board shows session text (the last prompt,
+  the last answer, a permission prompt's tool input) that `status` leaves out, so it is
+  for the operator's own browser on the machine.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is

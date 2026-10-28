@@ -13,7 +13,8 @@ host is refused, which stops a web page that rebinds its own name to 127.0.0.1 f
 reading the API, and no response carries a CORS header. Other modules add their
 handlers to the route table, and their part of `/api/state`; each handler thread opens
 its own ledger connection, because a SQLite connection belongs to the thread that opened
-it. :mod:`chargehand.hooks` receives the posts of the worker sessions there.
+it. :mod:`chargehand.hooks` receives the posts of the worker sessions there, and
+:mod:`chargehand.board` serves the read-only board.
 
 SIGTERM and SIGINT end the loop between two tick phases: the phase in progress
 finishes, the rest of that tick is skipped, the server shuts down, and the exit code
@@ -67,7 +68,7 @@ CONNECTION_TIMEOUT_SECS = 10.0
 SAFE_METHODS = ("GET", "HEAD")
 
 # Modules that add routes, each through a `register_routes(routes)` function.
-ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks",)
+ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks", "chargehand.board")
 
 # What `/api/state` says about sessions before the first tick has listed them.
 NO_SESSIONS_YET = "the daemon has not listed the sessions yet"
@@ -173,6 +174,8 @@ class Response:
     status: int = 200
     body: bytes = b""
     content_type: str = "application/json"
+    # Sent after the headers every response carries.
+    headers: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def json(cls, payload: object, status: int = 200) -> "Response":
@@ -283,6 +286,8 @@ class _HTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(response.body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in response.headers:
+            self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(response.body)
