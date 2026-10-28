@@ -111,7 +111,7 @@ class RouteResult:
     deferred: int = 0
     closed: int = 0
     # Subscribers that did not get an event because it occurred before they started.
-    before_start: int = 0
+    skipped_before_start: int = 0
 
     def merge(self, other: "RouteResult") -> None:
         self.duplicates += other.duplicates
@@ -119,7 +119,7 @@ class RouteResult:
         self.delivered += other.delivered
         self.deferred += other.deferred
         self.closed += other.closed
-        self.before_start += other.before_start
+        self.skipped_before_start += other.skipped_before_start
 
 
 class Router:
@@ -144,7 +144,7 @@ class Router:
                 continue
             delivered, skipped = self.deliver(event)
             result.delivered += delivered
-            result.before_start += skipped
+            result.skipped_before_start += skipped
             if self._close is not None:
                 result.closed += self._close(event)
             deferred = self._start(event)

@@ -200,7 +200,7 @@ def test_an_event_from_before_the_worker_started_wakes_nobody(ledger, offset, de
     result = router.route([event(occurred_at=subscriber.created_at + offset)], signed_in="me")
 
     assert len(ledger.inbox(subscriber)) == int(delivered)
-    assert (result.delivered, result.before_start) == (int(delivered), int(not delivered))
+    assert (result.delivered, result.skipped_before_start) == (int(delivered), int(not delivered))
     # The event is still seen, so a later poll's overlap does not bring it back, and it is
     # still offered to the start rules.
     assert ledger.event_seen("fake", "e1")
@@ -221,7 +221,7 @@ def test_a_followed_item_counts_from_the_workers_start_and_not_from_the_follow(l
     result = router.route([before, gap], signed_in="me")
 
     assert [e.dedupe_id for e in ledger.inbox(implementer)] == ["gap"]
-    assert (result.delivered, result.before_start) == (1, 1)
+    assert (result.delivered, result.skipped_before_start) == (1, 1)
 
 
 def test_a_start_event_from_before_the_holder_started_does_not_reach_it(ledger):
