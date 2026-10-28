@@ -75,7 +75,7 @@ skipped:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `kind` | yes | What happened, as a bare lower-case name (`comment`, `assigned`). A role's start rule or subscription names it bare, or qualified by the source's name (`jira.assigned`). `labeled` is reserved for a repository's own queue label: from a command source it can be delivered, but it starts no worker. |
+| `kind` | yes | What happened, as a bare lower-case name (`comment`, `assigned`), up to 64 characters. It names the event in the wake message, so a role's prompt or agent file should say what each kind asks for. A role's start rule or subscription names it bare, or qualified by the source's name (`jira.assigned`). `labeled` is reserved for a repository's own queue label: from a command source it can be delivered, but it starts no worker. |
 | `item` | yes | The work item's key. It becomes a worker's item, its worktree and branch name, and its session name, so it is 1 to 64 characters of letters, digits, `.`, `_` and `-`, starting with a letter or digit. |
 | `actor` | yes | Who did it, as text; may be empty. Used only for the authorship filter. |
 | `occurred_at` | yes | When it happened: seconds since the epoch, or an ISO 8601 time with a time zone. |

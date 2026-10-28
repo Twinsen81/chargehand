@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Each line of the wake message now names the event's kind before its pointer, for example
+  `review_requested: https://github.com/o/r/pull/1`, so a woken worker knows what each link
+  asks for. The shipped role prompts and the `pr-reviewer` agent file describe the kinds.
 - The authorship marker that workers add to their comments is now
   `<!-- chargehand-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
   the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that

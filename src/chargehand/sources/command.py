@@ -23,7 +23,6 @@ import json
 import logging
 import math
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -61,7 +60,6 @@ CURSOR_KEY = "cursor"
 # The refs of the items that live workers follow, one per line, for the poll command.
 REFS_ENV = "CHARGEHAND_REFS"
 
-_KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _MAX_TEXT = 256
 _MAX_POINTER = 2048
 
@@ -433,7 +431,7 @@ class CommandSource(Source):
         if "source" in entry and entry["source"] != self.name:
             raise Skip("the event names another source")
         kind = _text(entry, "kind")
-        if not _KIND.fullmatch(kind):
+        if not sanitize.is_event_kind(kind):
             raise Skip("kind is not a bare lower-case name")
         key = _text(entry, "item")
         if not sanitize.is_safe_identifier(key):
