@@ -495,18 +495,26 @@ recovery.
 
 ## 6. Supervision, notifications, questions
 
-**Session state** comes from two places. Each session is launched with settings hooks of
-type `http` that post to the daemon: `SessionStart` with its source, `Stop` with the last
-answer, `StopFailure` with the error category, `Notification` with its type, and
+**Session state** comes from two places. Each session is launched with settings hooks that
+post to the daemon: `SessionStart` with its source, `Stop` with the last answer,
+`StopFailure` with the error category, `Notification` with its type, and
 `PermissionRequest` with the tool and its input. These fire in unattended background
-sessions. The daemon applies each post to the ledger at once, through the same transition
+sessions. Four of them are hooks of type `http`. Claude Code does not run an `http` hook on
+`SessionStart`, so that one is a `command` hook: it runs `hook_post.py` from the installed
+package with `python -I`, which imports nothing from the worktree, reads the token from
+`token_file`, posts its stdin to the daemon, prints nothing (the output of a `SessionStart`
+command reaches the model) and exits 0 within a few seconds, also when no daemon answers.
+The settings of a launch with hooks are in a file of mode 0600 under the state directory,
+one per worktree, so the token is never on a command line; the file stays for the worker's
+life, because a resume applies the saved `--settings` again. The daemon applies each post to the ledger at once, through the same transition
 and notification code as the tick. `claude agents --json --all`, diffed against the ledger
 on every tick, stays the fallback for anything a hook missed: a session launched before the
 daemon wrote its token, a post while the daemon was down, a process that died.
 
-**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which the launch
-puts in the hook's `Authorization` header; a post without it changes nothing. The runtime
-reads the payload (`claude` reads `session_id`, `cwd`, `transcript_path`,
+**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which an http hook
+carries in its `Authorization` header and the `SessionStart` command reads from `token_file`;
+a post without it changes nothing. The runtime reads the payload (`claude` reads
+`session_id`, `cwd`, `transcript_path`,
 `last_assistant_message`, `error`, `notification_type`, `tool_name`, `tool_input` and
 `source`), and the post maps to the live worker with that session id, else to the live
 worker without a session id yet whose worktree is the session's working directory, after
@@ -529,14 +537,15 @@ existed is followed by the diff alone.
 | `Notification`, other types | no change |
 
 A hook never moves a `launching` or `paused` worker. The tick and the hooks write the same
-rows from two threads, so a state write succeeds only while the row has the state and the
-last hook it was read with; the loser reads the row again. A listing that the tick asked
+rows from two threads, so the diff's writes and a hook's state write succeed only while
+the row has the state and the last hook they were read with; the loser reads the row
+again. A listing that the tick asked
 for before a hook arrived is older than that hook, and the diff leaves that worker until
 the next tick. The last answer, the tool input and the other payload text are untrusted:
 they are cleaned of control sequences and capped when stored, kept out of notifications,
 and escaped when the page renders them. `/api/state` shows each worker's last hook, its
 last answer, its reset time and its open permission prompts. A prompt is resolved when the
-worker leaves `blocked`.
+worker leaves `blocked` by any path, a `stop` or a `cancel` included.
 
 The usage-limit category has not been observed yet (a missing model gives
 `model_not_found`), so it is matched defensively: a category such as `rate_limit` or

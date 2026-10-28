@@ -9,6 +9,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shlex
+import socket
+import stat
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,17 +64,25 @@ def state_of(daemon, item):
 
 def _settings_of_last_launch(harness) -> dict:
     argv = harness.claude_state.launches[-1]["argv"]
-    return json.loads(argv[argv.index("--settings") + 1]) if "--settings" in argv else {}
+    if "--settings" not in argv:
+        return {}
+    value = argv[argv.index("--settings") + 1]
+    return json.loads(value) if value.startswith("{") else json.loads(Path(value).read_text())
 
 
-def test_a_launch_carries_an_http_hook_per_event_with_the_port_and_the_token(harness, tmp_path):
+def _with_token(harness, tmp_path, port=4567):
     token_file = tmp_path / "hooks.token"
     token_file.write_text("the-daemon-token\n")
     token_file.chmod(0o600)
     harness.config = dataclasses.replace(
-        harness.config, serve=ServeConfig(port=4567, token_file=token_file)
+        harness.config, serve=ServeConfig(port=port, token_file=token_file)
     )
     harness.fresh_runner()
+    return token_file
+
+
+def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_token(harness, tmp_path):
+    token_file = _with_token(harness, tmp_path)
 
     launch(harness)
 
@@ -78,11 +91,95 @@ def test_a_launch_carries_an_http_hook_per_event_with_the_port_and_the_token(har
     for event, groups in hooks_settings.items():
         [group] = groups
         [hook] = group["hooks"]
+        assert 0 < hook["timeout"] <= 30
+        if event == "SessionStart":
+            continue
         assert hook["type"] == "http"
         assert hook["url"] == f"http://127.0.0.1:4567/hooks/{event}"
         assert hook["headers"] == {"Authorization": "Bearer the-daemon-token"}
-        assert 0 < hook["timeout"] <= 30
     assert hooks_settings["PermissionRequest"][0]["matcher"] == "*"
+    # Claude Code runs only command hooks on SessionStart. The command names the token
+    # file, never the token.
+    [start] = hooks_settings["SessionStart"][0]["hooks"]
+    assert start["type"] == "command"
+    command = shlex.split(start["command"])
+    assert command[1:3] == ["-I", str(claude.HOOK_POST_SCRIPT)]
+    assert command[3:] == ["--port", "4567", "--token-file", str(token_file), "SessionStart"]
+    assert "the-daemon-token" not in start["command"]
+
+
+def test_the_hook_settings_are_in_a_private_file_and_not_on_the_command_line(harness, tmp_path):
+    _with_token(harness, tmp_path)
+
+    launch(harness)
+
+    argv = harness.claude_state.launches[-1]["argv"]
+    assert not any("the-daemon-token" in arg for arg in argv)
+    path = Path(argv[argv.index("--settings") + 1])
+    assert path == claude.settings_file_for(Path(harness.worker("ABC-1").worktree))
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    # The deny rules travel in the same file.
+    assert json.loads(path.read_text())["permissions"]["deny"] == list(harness.config.deny_rules)
+
+
+def _run_session_start_hook(harness, payload, *, timeout=10):
+    """Run the SessionStart command of the last launch as Claude Code would: a shell, stdin."""
+    [start] = _settings_of_last_launch(harness)["hooks"]["SessionStart"][0]["hooks"]
+    began = time.monotonic()
+    result = subprocess.run(
+        start["command"], shell=True, input=json.dumps(payload).encode(), capture_output=True,
+        timeout=timeout, cwd=harness.worker("ABC-1").worktree,
+    )
+    return result, time.monotonic() - began
+
+
+def test_the_session_start_command_posts_the_payload_to_the_daemon(harness, tmp_path):
+    token_file = tmp_path / "hooks.token"
+    token_file.write_text(support.TOKEN + "\n")
+    token_file.chmod(0o600)
+    config = support.daemon_config(harness.config, token_file)
+    built = support.build(config, notifier=harness.notifier, interval_secs=3600)
+    with support.running(built, loop=False):
+        harness.config = dataclasses.replace(
+            harness.config, serve=ServeConfig(port=built.port, token_file=token_file)
+        )
+        harness.fresh_runner()
+        worker = launch(harness)
+        harness.ledger.update(worker, state=ledger_mod.IDLE)
+
+        result, _ = _run_session_start_hook(
+            harness, {"session_id": worker.session_uuid, "hook_event_name": "SessionStart", "source": "resume"}
+        )
+
+        assert result.returncode == 0
+        # Claude Code gives a SessionStart command's output to the model.
+        assert result.stdout == b""
+        after = harness.worker("ABC-1")
+        assert (after.state, after.last_hook) == (ledger_mod.RUNNING, "SessionStart")
+
+
+def test_the_session_start_command_exits_at_once_when_no_daemon_answers(harness, tmp_path):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    _with_token(harness, tmp_path, port=free_port)
+    worker = launch(harness)
+
+    result, took = _run_session_start_hook(harness, {"session_id": worker.session_uuid})
+
+    assert (result.returncode, result.stdout) == (0, b"")
+    assert took < 5
+
+
+@pytest.mark.parametrize("argv", [[], ["--port", "x", "Stop"], ["--port", "1", "--token-file", "/none", "Stop"]])
+def test_the_poster_exits_zero_on_any_input(argv, monkeypatch):
+    import io
+
+    from chargehand import hook_post
+
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"{}")))
+    assert hook_post.main(argv) == 0
 
 
 def test_a_launch_before_the_daemon_wrote_its_token_carries_no_hooks(harness, tmp_path):
@@ -273,6 +370,20 @@ def test_a_permission_prompt_is_recorded_and_gets_no_decision(daemon, harness):
     post(daemon, "Stop", {"session_id": worker.session_uuid})
 
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    assert harness.ledger.open_permission_prompts() == []
+    assert state_of(daemon, "ABC-1")["permission_prompts"] == []
+
+
+def test_a_stop_resolves_the_open_prompt(daemon, harness):
+    worker = launch(harness)
+    post(daemon, "PermissionRequest", {"session_id": worker.session_uuid, "tool_name": "Bash"})
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+
+    request_id = harness.ledger.record_request("stop", "ABC-1")
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert harness.worker("ABC-1").state == ledger_mod.PAUSED
     assert harness.ledger.open_permission_prompts() == []
     assert state_of(daemon, "ABC-1")["permission_prompts"] == []
 

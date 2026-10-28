@@ -154,9 +154,14 @@ public location.
   and no response carries a CORS header, so a web page on another origin cannot read a
   response. A cross-origin page can still send a request without reading the answer,
   which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
-- **Session hooks.** Launched sessions post their turn ends, failures, notifications and
-  permission prompts to `POST /hooks/<event>` on that port, with the token in the hook's
-  `Authorization` header; a post without the token changes nothing. A post moves only the
+- **Session hooks.** Launched sessions post their start, turn ends, failures,
+  notifications and permission prompts to `POST /hooks/<event>` on that port, with the
+  token in the `Authorization` header; a post without the token changes nothing. The token
+  is never on a command line, where other users of the machine could read it with `ps`:
+  the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
+  0700 under the state directory, and the `SessionStart` command hook names the token
+  file, not the token, and runs its script with `python -I`, so nothing in the worktree
+  is imported. A post moves only the
   live worker whose session posted it. The daemon answers every post with an empty
   object, so it never makes a permission decision for a session, never keeps a turn
   running and never adds text to the model's context. The payload is untrusted: the last

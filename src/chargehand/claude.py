@@ -37,8 +37,11 @@ import json
 import logging
 import os
 import re
+import hashlib
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -46,6 +49,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from chargehand import paths
 from chargehand import runtime as runtime_mod
 from chargehand import sanitize
 from chargehand.config import PERMISSION_MODES, validate_permission_rule
@@ -366,10 +370,13 @@ class ClaudeCLI:
         model: str | None = None,
         effort: str | None = None,
         plugin_dirs: Sequence[Path | str] = (),
-        settings: Mapping[str, Any] | None = None,
+        settings: Mapping[str, Any] | Path | None = None,
         timeout_secs: float = 180.0,
     ) -> CommandResult:
         """Start a background session inside *worktree*.
+
+        *settings* is passed inline as JSON, or a path is passed as it is: a settings
+        file keeps a secret off the command line, which other users can read.
 
         Starting inside a linked worktree is deliberate: Claude Code skips its own
         background-session worktree isolation, so no nested worktree appears.
@@ -390,7 +397,9 @@ class ClaudeCLI:
             args += ["--effort", effort]
         for plugin_dir in plugin_dirs:
             args += ["--plugin-dir", str(plugin_dir)]
-        if settings:
+        if isinstance(settings, Path):
+            args += ["--settings", str(settings)]
+        elif settings:
             args += ["--settings", json.dumps(settings, sort_keys=True)]
         args.append(prompt)
         result = self._run(args, cwd=worktree, timeout=timeout_secs, check=False)
@@ -645,8 +654,14 @@ def launch_settings(
 # ----- session hooks ---------------------------------------------------------
 
 # The settings hooks every session posts to the daemon. Claude Code sends an http hook
-# itself, so the deny rules for the daemon's port do not stop it.
+# itself, and runs a command hook outside the Bash tool, so the deny rules for the
+# daemon's port stop neither.
 HOOK_EVENTS = ("SessionStart", "Stop", "StopFailure", "Notification", "PermissionRequest")
+# Observed in Claude Code 2.1.312: SessionStart skips an http hook ("HTTP hooks are not
+# supported for SessionStart") and runs only command hooks. That event goes through
+# hook_post.py, which reads the token from its file and posts the payload.
+COMMAND_HOOK_EVENTS = ("SessionStart",)
+HOOK_POST_SCRIPT = Path(__file__).resolve().parent / "hook_post.py"
 # How long Claude Code waits for the daemon. A hook that times out, or finds no daemon, is
 # an error that Claude Code reports and goes past: the session runs on, and the next tick
 # reads its state from the listing.
@@ -671,24 +686,73 @@ _USAGE_LIMIT_TEXT = re.compile(
 )
 
 
-def hook_settings(port: int, token: str, *, timeout_secs: int = HOOK_TIMEOUT_SECS) -> dict[str, object]:
-    """The `hooks` settings: for each event one http hook to the daemon on 127.0.0.1:*port*."""
+def hook_settings(
+    port: int,
+    token: str,
+    token_file: Path,
+    *,
+    python: str = sys.executable,
+    timeout_secs: int = HOOK_TIMEOUT_SECS,
+) -> dict[str, object]:
+    """The `hooks` settings: for each event one hook that posts to the daemon on 127.0.0.1:*port*.
+
+    An http hook where Claude Code runs one, else a command hook that runs
+    hook_post.py with *python* in isolated mode, so nothing in the worktree is imported.
+    That command names the token file, not the token.
+    """
+
+    def hook(event: str) -> dict[str, object]:
+        if event in COMMAND_HOOK_EVENTS:
+            return {
+                "type": "command",
+                "command": shlex.join([
+                    python, "-I", str(HOOK_POST_SCRIPT), "--port", str(port),
+                    "--token-file", str(token_file), event,
+                ]),
+                "timeout": timeout_secs,
+            }
+        return {
+            "type": "http",
+            "url": f"http://127.0.0.1:{port}/hooks/{event}",
+            "headers": {"Authorization": f"Bearer {token}"},
+            "timeout": timeout_secs,
+        }
 
     def group(event: str) -> dict[str, object]:
-        entry: dict[str, object] = {
-            "hooks": [{
-                "type": "http",
-                "url": f"http://127.0.0.1:{port}/hooks/{event}",
-                "headers": {"Authorization": f"Bearer {token}"},
-                "timeout": timeout_secs,
-            }]
-        }
+        entry: dict[str, object] = {"hooks": [hook(event)]}
         if event == "PermissionRequest":
             # Matched against the tool name: the prompt of every tool is recorded.
             entry["matcher"] = "*"
         return entry
 
     return {event: [group(event)] for event in HOOK_EVENTS}
+
+
+def settings_file_for(worktree: Path) -> Path:
+    """Where the settings of the session in *worktree* are kept, under the state directory.
+
+    The file stays for the worker's life: a resume or a respawn applies the saved
+    `--settings` again, which reads it again.
+    """
+    digest = hashlib.sha256(str(worktree).encode("utf-8")).hexdigest()[:24]
+    return paths.state_dir() / "session-settings" / f"{digest}.json"
+
+
+def write_settings_file(path: Path, settings: Mapping[str, Any]) -> Path:
+    """Write *settings* to *path* with mode 0600, in one step, in a directory of mode 0700."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(f".{path.name}.tmp")
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as writer:
+            json.dump(settings, writer, sort_keys=True)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    os.replace(temporary, path)
+    return path
 
 
 def _text(payload: Mapping[str, Any], key: str, limit: int) -> str | None:
@@ -933,7 +997,24 @@ class ClaudeRuntime(Runtime):
         from chargehand.serve import read_token
 
         token = read_token(self.token_file)
-        return hook_settings(self.hook_port, token) if token else None
+        return hook_settings(self.hook_port, token, self.token_file) if token else None
+
+    def _settings_for(
+        self, spec: LaunchSpec, warn: Callable[[str], None] | None
+    ) -> dict[str, object] | Path | None:
+        """The launch settings, in a private file when they carry the hooks and their token."""
+        hooks = self.hooks()
+        settings = launch_settings(spec.options, self.deny_rules, spec.read_paths, hooks=hooks)
+        if not hooks or settings is None:
+            return settings
+        path = settings_file_for(spec.worktree)
+        try:
+            return write_settings_file(path, settings)
+        except OSError as exc:
+            # The token must not go on the command line; the session diff follows it.
+            if warn is not None:
+                warn(f"{spec.name}: could not write {path} ({exc}); the session posts no hooks")
+            return launch_settings(spec.options, self.deny_rules, spec.read_paths)
 
     @classmethod
     def parse_role_options(cls, table: Mapping[str, object], where: str) -> dict[str, object]:
@@ -1009,6 +1090,7 @@ class ClaudeRuntime(Runtime):
         file has another cause, and is reported at once.
         """
         attempt = 1
+        settings = self._settings_for(spec, warn)
         while True:
             trusted = self._trust(spec, warn)
             try:
@@ -1020,9 +1102,7 @@ class ClaudeRuntime(Runtime):
                     agent=spec.options.get("agent") or None,
                     model=spec.model,
                     effort=spec.effort,
-                    settings=launch_settings(
-                        spec.options, self.deny_rules, spec.read_paths, hooks=self.hooks()
-                    ),
+                    settings=settings,
                 )
             except WorkspaceNotTrusted as exc:
                 if not trusted:

@@ -68,6 +68,7 @@ def receive(request: Request) -> Response:
     if worker is None:
         log.debug("hook %s: no live worker has this session", event)
         return NO_DECISION
+    log.debug("hook %s for %s", event, worker.handle)
     report = TickReport()
     try:
         request.daemon.runner(ledger).apply_hook(worker, hook, report)
