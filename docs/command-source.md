@@ -78,7 +78,7 @@ skipped:
 | `kind` | yes | What happened, as a bare lower-case name (`comment`, `assigned`), up to 64 characters. It names the event in the wake message, so a role's prompt or agent file should say what each kind asks for. A role's start rule or subscription names it bare, or qualified by the source's name (`jira.assigned`). `labeled` is reserved for a repository's own queue label: from a command source it can be delivered, but it starts no worker. |
 | `item` | yes | The work item's key. It becomes a worker's item, its worktree and branch name, and its session name, so it is 1 to 64 characters of letters, digits, `.`, `_` and `-`, starting with a letter or digit. |
 | `actor` | yes | Who did it, as text; may be empty. Used only for the authorship filter. |
-| `occurred_at` | yes | When it happened: seconds since the epoch, or an ISO 8601 time with a time zone. |
+| `occurred_at` | yes | When it happened: seconds since the epoch, or an ISO 8601 time with a time zone. Report the time of the event itself, not an approximation such as the item's last update: an event that occurred more than a minute before a worker started is not delivered to that worker. |
 | `dedupe_id` | yes | A non-empty id, unique within this source for this event. chargehand drops an event whose id it has seen before, so a poll may report the same event again. |
 | `pointer` | yes | Where the worker looks: a URL or an identifier. A wake lists only pointers that are plain http(s) URLs or plain identifiers. |
 | `source` | no | The source's name. An event that names another source is skipped. |

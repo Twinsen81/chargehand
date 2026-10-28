@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +35,11 @@ class CommandBoard:
     def __init__(self, path: Path) -> None:
         self.path = path
         if not path.exists():
+            # The clock starts near this machine's clock, because the router drops an
+            # event from before its subscriber started. ``update(clock=...)`` moves it.
             self.write(
                 {
-                    "clock": 1_000_000,
+                    "clock": int(time.time()),
                     "issues": {},
                     "comments": [],
                     "cursors": [],

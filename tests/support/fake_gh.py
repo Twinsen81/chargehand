@@ -17,6 +17,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -41,6 +43,9 @@ class GhState:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # The default time of a notification; None is this machine's clock. A test that
+        # gives the source a fixed clock sets the same time here.
+        self.now: float | None = None
         self.write({"login": "operator", "poll_interval": 60, "page_size": 100})
 
     def read(self) -> dict:
@@ -66,10 +71,19 @@ class GhState:
 
     def notify(
         self, reason: str, ref: str, *, kind: str = "PullRequest", thread: str | None = None,
-        updated_at: str = "2026-10-26T10:00:00Z", last_modified: str | None = None,
+        updated_at: str | None = None, last_modified: str | None = None,
         unread: bool = True,
     ) -> None:
-        """Add or update a notification thread, and move Last-Modified on."""
+        """Add or update a notification thread, and move Last-Modified on.
+
+        The thread is updated now unless *updated_at* says otherwise: the router drops an
+        event that occurred before its subscriber started.
+        """
+        if updated_at is None:
+            now = time.time() if self.now is None else self.now
+            updated_at = datetime.fromtimestamp(now, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
         owner_repo, number = ref.split("#")
         segment = "pulls" if kind == "PullRequest" else "issues"
 

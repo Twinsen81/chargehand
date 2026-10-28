@@ -73,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands and reconciliation reach it only through that interface, and a role's runtime
   checks its own role-file keys. `status --json` reports each worker's and session's
   `runtime`.
+- The router no longer wakes a worker for an event that occurred before the worker started
+  (with a one-minute allowance for clock differences). The sources still read a few minutes
+  back from their previous poll, but that overlap no longer reaches a new worker.
 
 ### Added
 

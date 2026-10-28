@@ -167,7 +167,12 @@ The router runs once per tick after the polls, in this order:
    workers post as you, and two workers on one pull request would otherwise wake each other
    in turn.
 2. Delivery: one inbox row per matching live subscriber. The inbox is unique per worker and
-   event, so routing an event twice adds nothing.
+   event, so routing an event twice adds nothing. A subscriber does not get an event that
+   occurred more than a minute before the worker started: the sources read some minutes
+   back from their previous poll so that a late write is not lost, and on a new worker's
+   first read that overlap would only bring events that the worker reads by itself at its
+   start. The minute allows for the clock difference between a source and this machine.
+   The event is still recorded as seen, and still goes to the start rules.
 3. Close: an event that a worker's start rule names in `close_on`, on the worker's primary
    item, ends that worker. The session is stopped first, then the worker is `done`, and
    garbage collection removes the session and the worktree, never over unpushed commits.
@@ -176,7 +181,8 @@ The router runs once per tick after the polls, in this order:
 4. Start rules of the enabled roles, checked in code. A rule whose `unless_subscribed` check
    finds a live worker that has the item (`role`: of its own role, `any`: of any role)
    starts none, and the event goes to the inbox of the rule's own workers on the item, so a
-   second review request wakes the reviewer that has the pull request. Otherwise it
+   second review request wakes the reviewer that has the pull request (not one that started
+   after the request, by the rule in step 2). Otherwise it
    launches a worker under the same caps as the queue, with a primary subscription carrying
    the rule's `subscribe` kinds. A start that the caps, a pause or a previous worktree hold
    back is kept and offered to the rules again on the next tick. A start event for a
@@ -466,7 +472,9 @@ identifier alone, for a session from before roles). Found → adopt it.
   that landed without a row.
 - **Session side:** a background session under the worktree root with no ledger row is
   adopted when the role and the issue can be derived from its name or path, otherwise
-  reported. No
+  reported. An adopted session's primary subscription keeps the time of the row it
+  replaces, so the events since that start still reach it; its new row has the time of the
+  adoption, so a status file from the earlier run stays stale. No
   unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
@@ -558,7 +566,9 @@ When a worker's branch is on its remote and has an open pull request, the tick s
 the worker to that pull request for `comment`, `review` and `ci_status`, once, so a review
 comment on an implementer's pull request wakes the implementer. The pull request is not its
 primary item, so its close does not end the worker. The source is asked only about a
-pushed branch.
+pushed branch. The follow is made up to one tick after the push, so a comment can be older
+than the follow; it still reaches the worker, because the router compares an event with the
+start of the worker and not with the time of the subscription.
 
 **Notifications** run a command you configure: a desktop notification, email, a push service,
 anything. The bundled hook has commented examples of the first three. The payload

@@ -61,6 +61,7 @@ def source(gh, clock) -> GithubSource:
     built = sources_mod.build(SourceConfig("github", "github", {"gh_bin": str(FAKE_GH)}))
     assert isinstance(built, GithubSource)
     built.clock = clock
+    gh.now = clock.now
     return built
 
 
@@ -733,6 +734,27 @@ def test_a_review_request_starts_a_reviewer_and_a_comment_reaches_its_inbox(tick
 
     assert report.errors == []
     assert inbox_rows(ticking) == [(reviewer.id, "comment", "issue_comment:41")]
+
+
+def test_a_comment_from_before_the_reviewer_started_does_not_wake_it(ticking, gh):
+    """The first read of a followed pull request reaches five minutes back; the router does not."""
+    gh.add_pull(PR)
+    gh.notify("review_requested", PR)
+    assert ticking.tick().launched == [PR_KEY]
+    reviewer = ticking.worker(PR_KEY, "pr-reviewer")
+    for comment_id, offset in ((51, -240), (52, 10)):
+        gh.add("issue_comments", PR, {"id": comment_id, "user": {"login": "alice"}, "body": "hm",
+                                      "created_at": iso(reviewer.created_at + offset)})
+    ticking.claude_state.set_session_state(PR_KEY, "done")
+
+    report = ticking.next_tick()
+
+    assert report.errors == []
+    assert inbox_rows(ticking) == [(reviewer.id, "comment", "issue_comment:52")]
+    assert any("1 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
+    assert report.woken == [f"pr-reviewer/{PR_KEY}"]
+    assert len(ticking.claude_state.read()["resumes"]) == 1
 
 
 def test_an_unchanged_notification_list_is_no_error_in_the_tick(ticking, gh):

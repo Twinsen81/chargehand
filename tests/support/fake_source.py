@@ -15,6 +15,7 @@ events after the cursor.
 from __future__ import annotations
 
 import itertools
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,9 +47,13 @@ class Feed:
         dedupe_id: str | None = None,
         pointer: str | None = None,
         marked: bool = False,
-        occurred_at: float = 1.0,
+        occurred_at: float | None = None,
     ) -> str:
-        """Queue one event for the next poll and return its dedupe id."""
+        """Queue one event for the next poll and return its dedupe id.
+
+        The event occurs now unless *occurred_at* says otherwise: the router drops an event
+        that occurred before its subscriber started.
+        """
         dedupe = dedupe_id or f"evt-{next(_COUNTER)}"
         self.entries.append(
             {
@@ -58,7 +63,7 @@ class Feed:
                 "dedupe_id": dedupe,
                 "pointer": pointer or f"https://tracker.invalid/{item}#{dedupe}",
                 "marked": marked,
-                "occurred_at": occurred_at,
+                "occurred_at": time.time() if occurred_at is None else occurred_at,
             }
         )
         return dedupe

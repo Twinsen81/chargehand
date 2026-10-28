@@ -823,7 +823,10 @@ class Runner:
 
         The new row inherits *previous*'s label ownership and primary subscription, so a
         worker that a source event started does not become the label's owner by being
-        adopted. With no previous row, the role's own start rules decide.
+        adopted. With no previous row, the role's own start rules decide. The subscription
+        keeps its time, because the session has run since then and the router delivers no
+        event from before a worker's start. The row gets the time of the adoption, so a
+        status file that the earlier run wrote stays stale.
         """
         worktree = Path(session.cwd) if session.cwd else None
         if worktree is None:
@@ -866,7 +869,10 @@ class Runner:
                 runtime=runtime,
             )
             if primary is not None:
-                self.ledger.subscribe(worker, primary.work_item, primary.kinds, primary=True)
+                self.ledger.subscribe(
+                    worker, primary.work_item, primary.kinds, primary=True,
+                    now=primary.created_at,
+                )
         worker = self._adopt(worker, session, report)
         report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
         return worker
@@ -1359,6 +1365,7 @@ class Runner:
                 report.routed.append(
                     f"{config.name}: {len(own)} event(s), {result.duplicates} seen before, "
                     f"{result.own} by chargehand, {result.delivered} inbox row(s), "
+                    f"{result.skipped_before_start} from before the worker's start, "
                     f"{result.closed} worker(s) closed, {result.deferred} start(s) deferred"
                 )
         _, given_up = self.ledger.prune_events()
@@ -1441,10 +1448,14 @@ class Runner:
                     deferred = True
                     continue
             elif router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
-                if router_mod.deliver_to_holders(self.ledger, role.name, event):
+                delivered, skipped = router_mod.deliver_to_holders(self.ledger, role.name, event)
+                handle = f"{role.name}/{sanitize.scrub_identifier(item)}"
+                if delivered:
+                    report.routed.append(f"{handle}: {rule.on} goes to the worker that has it")
+                elif skipped:
                     report.routed.append(
-                        f"{role.name}/{sanitize.scrub_identifier(item)}: {rule.on} goes to "
-                        f"the worker that has it"
+                        f"{handle}: {rule.on} is from before the start of the worker that has "
+                        f"it, not delivered"
                     )
                 continue
             if not sanitize.is_safe_identifier(item):
@@ -2059,10 +2070,12 @@ class Runner:
                 continue
             result = router.route(events, signed_in=signed_in)
             self.ledger.set_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}", cursor)
-            if result.delivered or result.own or result.closed:
+            if result.delivered or result.own or result.closed or result.skipped_before_start:
                 report.routed.append(
                     f"{repository.name}: {len(events)} tracker event(s), {result.own} by "
-                    f"chargehand, {result.delivered} inbox row(s), {result.closed} worker(s) closed"
+                    f"chargehand, {result.delivered} inbox row(s), "
+                    f"{result.skipped_before_start} from before the worker's start, "
+                    f"{result.closed} worker(s) closed"
                 )
 
     def _admit(self, report: TickReport, *, crash_after_step: int | None = None) -> None:
