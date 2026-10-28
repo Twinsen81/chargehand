@@ -49,7 +49,7 @@ SCHEDULED_JOB_WAIT_SECS = 30.0
 KICKSTART_RETRY_SECS = 2.0
 
 # The worker states whose session `status` offers to attach to.
-ATTACH_STATES = ("blocked", "idle", "queued")
+ATTACH_STATES = ("blocked", "idle", "queued", "parked")
 
 # The parts of a tick report that `tick` prints, in this order. `skipped` holds the
 # launches and wakes that a cap or a pause held back.

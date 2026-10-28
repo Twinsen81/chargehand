@@ -713,6 +713,7 @@ class Ledger:
             f"UPDATE workers SET {assignments} WHERE id = ?",
             (*changes.values(), worker.id),
         )
+        self._after_state_write(worker, changes)
         return replace(worker, **changes)
 
     def update_if_unchanged(self, worker: Worker, **changes: Any) -> Worker | None:
@@ -729,7 +730,16 @@ class Ledger:
             f"UPDATE workers SET {assignments} WHERE id = ? AND state = ? AND last_hook_at IS ?",
             (*changes.values(), worker.id, worker.state, worker.last_hook_at),
         )
-        return replace(worker, **changes) if cursor.rowcount else None
+        if not cursor.rowcount:
+            return None
+        self._after_state_write(worker, changes)
+        return replace(worker, **changes)
+
+    def _after_state_write(self, worker: Worker, changes: Mapping[str, Any]) -> None:
+        # A worker that leaves `blocked` by any path, a stop or a cancel included, no
+        # longer shows a permission dialog.
+        if "state" in changes and changes["state"] != BLOCKED:
+            self.resolve_permission_prompts(worker, now=changes["updated_at"])
 
     @staticmethod
     def _checked(changes: dict[str, Any]) -> dict[str, Any]:

@@ -1062,7 +1062,6 @@ class Runner:
             worker, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0,
             reset_at=None,
         )
-        self.ledger.resolve_permission_prompts(worker)
         self._sync_labels(worker, context, report)
         return True, "session respawned"
 
@@ -1658,13 +1657,17 @@ class Runner:
                 # A usage limit ended the turn, and the listing shows that failed turn
                 # until the session runs again. Only the operator or a hook moves it.
                 changes.pop("session_state", None)
+            # Every write from this listing is conditional: a hook written meanwhile is
+            # newer, and keeps its session state.
             if changes:
-                worker = self.ledger.update(worker, **changes)
+                written = self.ledger.update_if_unchanged(worker, **changes)
+                if written is None:
+                    continue
+                worker = written
 
             try:
                 worker = self._apply_session_state(worker, observed, report, session=session)
             except _RowChanged:
-                # A hook wrote the row meanwhile, and it is newer than this listing.
                 continue
 
     def _hook_is_newer(self, worker: Worker) -> bool:
@@ -1745,7 +1748,6 @@ class Runner:
         context = self.context_for_worker(worker)
         detail: str | None = None
         target_state = worker.state
-        previous_state = worker.state
 
         if worker.state == ledger_mod.PARKED and hook is None:
             return worker
@@ -1759,9 +1761,12 @@ class Runner:
             target_state = ledger_mod.RUNNING
             if worker.state != ledger_mod.RUNNING:
                 # A reply landed in agent view; the run is live again.
-                worker = self.ledger.update(
+                written = self.ledger.update_if_unchanged(
                     worker, working_since=time.time(), watchdog_notified=0, last_error=None
                 )
+                if written is None:
+                    raise _RowChanged(worker.handle)
+                worker = written
         elif observed == runtime_mod.BLOCKED:
             # waiting_for comes from the session listing and can quote whatever the
             # agent was about to run. It stays in the ledger and in `status`; it never
@@ -1794,8 +1799,6 @@ class Runner:
                 raise _RowChanged(worker.handle)
             worker = written
             report.transitions.append(f"{worker.item}: {observed} -> {target_state}")
-            if previous_state == ledger_mod.BLOCKED:
-                self.ledger.resolve_permission_prompts(worker)
         self._sync_labels(worker, context, report)
 
         if observed != worker.notified_state and observed != runtime_mod.WORKING:
