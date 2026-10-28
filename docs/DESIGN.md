@@ -533,8 +533,13 @@ pull-request URL comes from. Without it, or when this worker has not written it 
 it over a question.
 
 **Delivery.** Once per tick, after the state diff, each `idle` or `queued` worker with
-events in its inbox gets one wake. Its events become one message that lists their pointers
-and nothing else; a pointer that is not a plain http(s) URL or identifier is left out. The
+events in its inbox gets one wake. Its events become one message: a header line, then one
+line per event with its kind, a colon and its pointer, for example
+`review_requested: https://github.com/o/r/pull/1`, and nothing else. Two events of one kind
+on one pointer give one line; one pointer with two kinds gives two lines. A pointer that is
+not a plain http(s) URL or identifier is left out, and a kind that is not a plain lower-case
+name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. The role
+prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
 no reserve). A worker that is not admitted becomes `queued` and keeps its events. The

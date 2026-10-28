@@ -126,10 +126,12 @@ public location.
   power. Git filters that the operator configured, such as
   Git LFS, still run on the files the head selects through `.gitattributes`, and a
   session that the operator resumes by hand, outside chargehand, is not checked.
-- **A wake carries pointers only.** The message that wakes a worker is a fixed line that
-  chargehand writes, followed by the events' pointers. A pointer that is not a plain
-  http(s) URL or a plain identifier is left out, and no actor name, title or body is
-  added, so the wake crosses the same boundary as the launch prompt.
+- **A wake carries kinds and pointers only.** The message that wakes a worker is a fixed
+  line that chargehand writes, followed by one line per event with its kind and its
+  pointer. A pointer that is not a plain http(s) URL or a plain identifier is left out. A
+  kind comes from a source, so it must match `[a-z][a-z0-9_]{0,63}`, or the line names
+  `event` instead. No actor name, title or body is added, so the wake crosses the same
+  boundary as the launch prompt.
 - **Auto permission mode by default.** Sessions run behind Claude Code's safety classifier,
   which is documented as blocking, among others, download-and-execute, data exfiltration,
   force pushes, and destroying files that predate the session, and which falls back to a
