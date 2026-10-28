@@ -1353,6 +1353,7 @@ class Runner:
             except Exception as exc:
                 self._source_failed(report, config.name, exc)
                 continue
+            report.warnings.extend(source.take_warnings())
             own = [event for event in events if event.source == config.name]
             if len(own) != len(events):
                 report.warnings.append(

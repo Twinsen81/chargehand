@@ -8,6 +8,7 @@ import json
 import plistlib
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -606,3 +607,37 @@ def test_doctor_warns_about_a_timer_job_from_before_the_daemon(
 
     notes = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "launchd"]
     assert any("timer instead of the daemon" in c["detail"] for c in notes)
+
+
+def test_doctor_warns_about_a_review_request_without_a_notification_thread(
+    capsys, config_file, harness, tmp_path, monkeypatch
+):
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from support.fake_gh import GhState
+
+    fake_gh = Path(__file__).parent / "support" / "fake_gh.py"
+    monkeypatch.setenv("FAKE_GH_STATE", str(tmp_path / "gh.json"))
+    gh = GhState(tmp_path / "gh.json")
+    an_hour_ago = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc)
+    gh.add_pull("octo/app#7", updated_at=an_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    with config_file.open("a") as handle:
+        handle.write(f'\n[[source]]\nname = "github"\ntype = "github"\ngh_bin = "{fake_gh}"\n')
+
+    main(["--config", str(config_file), "doctor", "--json"])
+    checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
+
+    assert [c["status"] for c in checks] == [install.WARN]
+    assert "octo_app_7" in checks[0]["detail"] and '"On GitHub" setting' in checks[0]["detail"]
+
+    gh.notify("review_requested", "octo/app#7", updated_at=an_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    main(["--config", str(config_file), "doctor", "--json"])
+    checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
+    assert [c["status"] for c in checks] == [install.OK]
+
+    # The check calls GitHub, so --no-tracker skips it.
+    gh.clear_calls()
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+    checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
+    assert checks == [] and gh.calls == []

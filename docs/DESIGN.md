@@ -192,11 +192,21 @@ The router runs once per tick after the polls, in this order:
 The `github` source works through the `gh` CLI, so chargehand handles no token, and it is
 the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
 signed-in account gives `review_requested`, `comment`, `mention` and `ci_status` (GitHub's
-`ci_activity`); it is asked with `If-Modified-Since`, so an unchanged list costs nothing
-against the rate limit, and no more often than its `X-Poll-Interval` header allows. The
-first poll reads the unread threads only, so turning the source on does not replay the
-account's history; later polls read the threads you have already read too, so a review
-request opened in a browser before the poll still arrives. A review request counts only
+`ci_activity`); it is asked with `If-Modified-Since` and `If-None-Match`, so an unchanged
+list costs nothing against the rate limit, and no more often than its `X-Poll-Interval`
+header allows. The first poll reads the unread threads only, so turning the source on does
+not replay the account's history; later polls read the threads you have already read too,
+from the list's `Last-Modified` on, or from the `Date` of the previous response when the
+list was empty and had no `Last-Modified`, so a review request opened in a browser before
+the poll still arrives. The source needs the account's "On GitHub" setting for
+participating notifications (in GitHub's notification settings): while it is off, GitHub
+sends review requests and mentions by email only, the list stays empty, and nothing
+starts. GitHub has no API for the setting, so `doctor`, and the source once a day, compare
+the open pull requests that ask the account for a review (`is:pr is:open
+review-requested:@me`) with the `review_requested` threads, read ones included, and warn
+with the item keys of the requests older than ten minutes that have no thread. The check
+reads at most 500 threads, newest first; on a longer list it skips the requests made before
+the oldest thread it read, because their thread may be further down. A review request counts only
 while the pull request is open and still asks the account, or a team it is in, for a review,
 because a notification thread keeps its reason when later activity updates it. When `gh`
 may not list the account's teams, any requested team counts. Then, for each pull request a live worker subscribes to, the source reads the
