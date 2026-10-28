@@ -1,16 +1,15 @@
 """Usage readings: the subscription's five-hour and weekly windows.
 
-Claude Code gives a status line command a JSON payload on stdin. On a subscription
-plan, after the session's first API response, the payload has ``rate_limits`` with a
-``five_hour`` and a ``seven_day`` window, each with ``used_percentage`` and
-``resets_at``. The wrapper (``chargehand statusline -- '<your command>'``) writes those
-two windows to the usage file and then runs the user's own status line command with
-the same stdin, so the status line shows what it showed before.
+A status line command gets a JSON payload on stdin, and
+:func:`chargehand.claude.status_line_windows` finds the two windows in it. The wrapper
+(``chargehand statusline -- '<your command>'``) writes those two windows to the usage
+file and then runs the user's own status line command with the same stdin, so the
+status line shows what it showed before.
 
 The wrapper runs on every status line refresh, so it does little: one read of stdin,
 one small atomic write, one subprocess. Nothing it does to the usage file can change
-the status line: a payload without ``rate_limits`` leaves the file as it is, and a
-failed write is ignored.
+the status line: a payload without the windows leaves the file as it is, and a failed
+write is ignored.
 
 The daemon reads the file for each ``/api/state``. A reading older than
 :data:`~chargehand.delivery.USAGE_MAX_AGE_SECS` is unknown, and so is a window whose
@@ -31,7 +30,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chargehand import paths
+from chargehand import claude, paths
 from chargehand.config import ServeConfig
 from chargehand.delivery import USAGE_MAX_AGE_SECS
 
@@ -78,7 +77,7 @@ def resets_at(value: object) -> float | None:
         return None
     text = value.strip()
     try:
-        return float(text)
+        return _number(float(text))
     except ValueError:
         pass
     try:
@@ -91,23 +90,12 @@ def resets_at(value: object) -> float | None:
 
 
 def windows_from_payload(raw: bytes) -> dict[str, dict[str, float | None]] | None:
-    """The windows of a status line payload, or None when it carries none."""
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    limits = payload.get("rate_limits") if isinstance(payload, Mapping) else None
-    if not isinstance(limits, Mapping):
-        return None
+    """The windows of a status line payload with a percentage, or None when none has one."""
     windows: dict[str, dict[str, float | None]] = {}
-    for name in WINDOWS:
-        window = limits.get(name)
-        if not isinstance(window, Mapping):
-            continue
-        used = percent(window.get("used_percentage"))
-        if used is None:
-            continue
-        windows[name] = {"used_percent": used, "resets_at": resets_at(window.get("resets_at"))}
+    for name, window in (claude.status_line_windows(raw) or {}).items():
+        used = percent(window.get("used_percent"))
+        if name in WINDOWS and used is not None:
+            windows[name] = {"used_percent": used, "resets_at": resets_at(window.get("resets_at"))}
     return windows or None
 
 

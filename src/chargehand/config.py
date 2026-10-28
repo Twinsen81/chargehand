@@ -283,7 +283,7 @@ class ServeConfig:
     token_file: Path = field(default_factory=lambda: paths.config_dir() / TOKEN_FILE_NAME)
     tick_interval_secs: int = 60
     # Where the status line wrapper writes the usage windows and the daemon reads them.
-    usage_file: Path = field(default_factory=paths.usage_file)
+    usage_file: Path = field(default_factory=lambda: paths.usage_file())
 
     @classmethod
     def parse(cls, table: Mapping[str, object] | None) -> "ServeConfig":

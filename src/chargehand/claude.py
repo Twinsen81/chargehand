@@ -247,6 +247,33 @@ def parse_sessions(payload: str) -> list[Session]:
     return sessions
 
 
+def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
+    """The usage windows of a status line payload, or None when it carries none.
+
+    Claude Code gives a status line command ``rate_limits`` on subscription plans, after
+    the session's first API response: a ``five_hour`` and a ``seven_day`` window, each
+    with ``used_percentage`` and ``resets_at``. Each window that is a table comes back
+    as ``{"used_percent": ..., "resets_at": ...}`` with the values as given; checking
+    them is the caller's work.
+    """
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    limits = payload.get("rate_limits") if isinstance(payload, Mapping) else None
+    if not isinstance(limits, Mapping):
+        return None
+    windows = {}
+    for name in ("five_hour", "seven_day"):
+        window = limits.get(name)
+        if isinstance(window, Mapping):
+            windows[name] = {
+                "used_percent": window.get("used_percentage"),
+                "resets_at": window.get("resets_at"),
+            }
+    return windows or None
+
+
 # The start of the refusal Claude Code prints when a background session would start in a
 # directory without a persisted trust entry. Observed in Claude Code 2.1.306:
 # "Workspace not trusted. Run `claude` in <path> once and accept the trust prompt, then
@@ -922,5 +949,6 @@ __all__ = [
     "launch_settings",
     "parse_session",
     "parse_sessions",
+    "status_line_windows",
     "worker_from_session",
 ]

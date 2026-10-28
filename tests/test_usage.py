@@ -14,12 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import cli, usage
+from chargehand import claude, cli, paths, usage
 from chargehand.config import ServeConfig, load_machine_config
 from chargehand.delivery import USAGE_MAX_AGE_SECS
 from chargehand.errors import ConfigError
 from conftest import write_machine_config
 from support import daemon as support
+
+# The real default, before conftest points it into the test's directory.
+REAL_USAGE_FILE = paths.usage_file
 
 NOW = 1_800_000_000.0
 
@@ -110,6 +113,15 @@ def test_percentages_are_clamped_and_reset_times_accept_iso_8601(usage_file):
     assert data["seven_day"] == {"used_percent": 0.0, "resets_at": expected - 7200}
 
 
+def test_the_windows_come_from_the_runtime_payload_parser():
+    assert claude.status_line_windows(_payload(5, 7)) == {
+        "five_hour": {"used_percent": 5, "resets_at": NOW + 3600},
+        "seven_day": {"used_percent": 7, "resets_at": NOW + 86400},
+    }
+    assert claude.status_line_windows(b'{"rate_limits": {"five_hour": 3}}') is None
+    assert claude.status_line_windows(b"[]") is None
+
+
 def test_reset_times_in_other_shapes():
     assert usage.resets_at(1_700_000_000) == 1_700_000_000.0
     assert usage.resets_at("1700000000") == 1_700_000_000.0
@@ -117,7 +129,7 @@ def test_reset_times_in_other_shapes():
     assert usage.resets_at("2027-01-15T10:00:00") == datetime(
         2027, 1, 15, 10, tzinfo=timezone.utc
     ).timestamp()
-    for value in (None, True, "", "soon", float("nan"), [1]):
+    for value in (None, True, "", "soon", float("nan"), "nan", "inf", "1e999", [1]):
         assert usage.resets_at(value) is None
 
 
@@ -222,7 +234,8 @@ def test_levels(percent, level):
 def test_the_serve_table_names_the_usage_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    assert ServeConfig().usage_file == tmp_path / ".cache" / "chargehand" / "usage.json"
+    assert REAL_USAGE_FILE() == tmp_path / ".cache" / "chargehand" / "usage.json"
+    assert ServeConfig().usage_file == paths.usage_file() == tmp_path / "usage-cache" / "usage.json"
     assert ServeConfig.parse({}).usage_file == ServeConfig().usage_file
     assert ServeConfig.parse({"usage_file": "~/u.json"}).usage_file == tmp_path / "u.json"
 
