@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The tick runs in a resident daemon, `chargehand serve`, in place of the launchd timer:
+  `install` writes a KeepAlive job that runs it, control commands are applied within a
+  second or two, and a loopback API (`/api/health`, `/api/state`) with a token in a mode
+  0600 file serves the status; `doctor` checks both, and sessions get deny rules for the
+  port.
 - Each line of the wake message now names the event's kind before its pointer, for example
   `review_requested: https://github.com/o/r/pull/1`, so a woken worker knows what each link
   asks for. The shipped role prompts and the `pr-reviewer` agent file describe the kinds.

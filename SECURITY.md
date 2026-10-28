@@ -143,8 +143,17 @@ public location.
   is an explicit opt-in intended for a dedicated machine, user account, or VM. Deny rules
   apply in every mode, including `bypassPermissions`, and unlike the classifier they are
   deterministic - but see below for what they are deterministic *about*.
-- **No server.** chargehand opens no port. It is steered by a CLI on the machine it runs on. There
-  is no token to leak and no browser-borne attack surface (CSRF, DNS rebinding, XSS).
+- **A loopback daemon with a token.** The daemon (`chargehand serve`) listens on
+  127.0.0.1 only, on the `[serve]` port, and no setting binds another address. Reads
+  (`GET`) need no token and return what `status --json` returns: identifiers, states,
+  timings and URLs. Every other method needs `Authorization: Bearer <token>`, compared in
+  constant time. The token is in `token_file` (next to `config.toml` by default), which
+  the daemon creates with mode 0600 and refuses to use when it is not a regular file of
+  the operator's with mode 0600; `doctor` checks the same. A request whose `Host` header
+  is not `127.0.0.1:<port>` or `localhost:<port>` is refused, which stops DNS rebinding,
+  and no response carries a CORS header, so a web page on another origin cannot read a
+  response. A cross-origin page can still send a request without reading the answer,
+  which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
@@ -165,7 +174,8 @@ public location.
 - **Agents are discouraged from steering the runner.** Sessions that chargehand launches
   get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
   other sessions, for the operator commands of the lease tool banksman (`banksman admin`),
-  and for the
+  for the daemon's port (`127.0.0.1:<port>` and `localhost:<port>` in a command, and
+  `WebFetch` to either host), and for the
   flags that would start a fresh session without these rules. Read that as a guardrail
   and not as a boundary. A Claude Code `Bash` rule matches the command text the model
   writes, not the program it ends up running, which its documentation states plainly:
@@ -177,8 +187,8 @@ public location.
   another name, or a script that calls the API directly all still get through, and no
   list of patterns can change that. The boundary is the operating system, not the rule
   list; see the first known limit below.
-- **One writer of side effects.** Mutating commands record a request; only the periodic
-  tick acts on it. Control actions cannot race a launch in progress.
+- **One writer of side effects.** Mutating commands record a request; only the daemon's
+  tick acts on it, under the tick lock. Control actions cannot race a launch in progress.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
   issue URL, and a short reason chargehand itself writes — never question text, agent
   output, issue titles, a status file's `stop_reason`, or a setup script's output —
@@ -201,6 +211,9 @@ public location.
   human review remain the final gate; chargehand never merges.
 - The machine running chargehand holds tracker credentials and an authenticated Claude Code
   install. Treat it as you would a CI worker with write access.
+- A session runs as the operator's user, so it can read the daemon's token file and the
+  ledger. The deny rules for the port are a guardrail against the careless path; a session
+  that reads the token and reaches the port another way can send what the CLI can.
 - A session can read any credential that the runner or a notification hook reads from the
   login keychain, because it runs as the same user. Give a hook a credential that protects
   nothing else, such as the password of a mailbox that exists only to send alerts.

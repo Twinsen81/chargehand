@@ -248,8 +248,9 @@ def hardened_git_env(environ: Mapping[str, str]) -> dict[str, str]:
 def tick_lock(path: Path | None = None, *, wait_secs: float = 0.0):
     """Serialize ticks.
 
-    launchd will not run two instances of one job, but `chargehand tick` and a control
-    command can both want to act, so the invariant is enforced here rather than assumed.
+    The daemon holds it while each of its ticks runs, and `chargehand tick` and a control
+    command with no daemon to apply it take it too, so the invariant is enforced here
+    rather than assumed.
     The kernel releases a flock when its holder dies, so a killed tick needs no recovery.
     """
     target = path or paths.tick_lock_file()
@@ -290,6 +291,8 @@ class TickReport:
     skipped: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # The phase a stop request ended the tick before; None for a tick that ran every phase.
+    stopped_before: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -308,6 +311,7 @@ class TickReport:
             "skipped": self.skipped,
             "warnings": self.warnings,
             "errors": self.errors,
+            "stopped_before": self.stopped_before,
         }
 
 
@@ -546,8 +550,18 @@ class Runner:
     # ----- the tick ---------------------------------------------------------
 
     def tick(
-        self, *, crash_after_step: int | None = None, crash_after_wake: bool = False
+        self,
+        *,
+        crash_after_step: int | None = None,
+        crash_after_wake: bool = False,
+        stop: Callable[[], bool] | None = None,
     ) -> TickReport:
+        """Run every phase once.
+
+        *stop* is asked before each phase. Once it answers true the phase in progress has
+        already ended, and the remaining ones are skipped: the daemon shuts down between
+        two phases rather than in the middle of a launch or a wake.
+        """
         report = TickReport()
         for context in self._contexts.values():
             if context.source is not None:
@@ -578,6 +592,10 @@ class Runner:
             ("collect", lambda: self._collect_garbage(report)),
         )
         for name, phase in phases:
+            if stop is not None and stop():
+                log.info("stopping: the tick ends before phase %s", name)
+                report.stopped_before = name
+                break
             try:
                 phase()
             except (LaunchAborted, DeliveryAborted):
