@@ -32,7 +32,7 @@ from chargehand.errors import ChargehandError
 from chargehand.ledger import Ledger, Worker
 from chargehand.roles import Role
 from chargehand.serve import Request, Response, Routes
-from chargehand.tick import item_checkout_path
+from chargehand.tick import template_values
 
 # The columns in page order: key, title, hint, and the worker states each one shows.
 COLUMNS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
@@ -291,36 +291,17 @@ def last_prompt(worker: Worker, ledger: Ledger, role: Role | None) -> str | None
     that built it, so the card shows what the session read.
     """
     if worker.last_wake_at is not None:
-        entries = [
-            entry
-            for entry in ledger.inbox(worker, pending_only=False)
-            if entry.delivered_at == worker.last_wake_at
-        ]
-        message, _ = wake_message(entries)
+        message, _ = wake_message(ledger.delivered_at(worker, worker.last_wake_at))
         return _text(message, PROMPT_LIMIT)
     if role is None:
         return None
     try:
-        rendered = config_mod.render(role.prompt, prompt_values(worker), where=f"role {role.name}")
+        # A worker without an item has None for {item}; the card shows it empty.
+        values = {name: value or "" for name, value in template_values(worker).items()}
+        rendered = config_mod.render(role.prompt, values, where=f"role {role.name}")
     except ChargehandError:
         return None
     return _text(rendered, PROMPT_LIMIT)
-
-
-def prompt_values(worker: Worker) -> dict[str, str]:
-    """The values the launch fills into the role's prompt, as the tick fills them."""
-    checkout = item_checkout_path(worker)
-    values = {
-        "item": worker.item or "",
-        "item_url": worker.url or "",
-        "item_checkout": str(checkout if checkout.exists() else worker.worktree_path),
-        "worktree": worker.worktree,
-        "branch": worker.branch,
-        "repo": worker.repo,
-    }
-    values["issue"] = values["item"]
-    values["url"] = values["item_url"]
-    return values
 
 
 def tokens_estimate(transcript_path: str | None) -> int | None:

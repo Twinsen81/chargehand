@@ -950,6 +950,14 @@ class Ledger:
         rows = self._conn.execute(query + " ORDER BY id", (worker.id,)).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
 
+    def delivered_at(self, worker: Worker, at: float) -> list[InboxEntry]:
+        """The inbox entries of *worker* that one wake delivered: those marked at *at*."""
+        rows = self._conn.execute(
+            "SELECT * FROM inbox WHERE worker_id = ? AND delivered_at = ? ORDER BY id",
+            (worker.id, at),
+        ).fetchall()
+        return [InboxEntry(**dict(row)) for row in rows]
+
     def mark_delivered(self, entries: Iterable[InboxEntry], *, now: float | None = None) -> None:
         ids = [entry.id for entry in entries]
         if not ids:
