@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import pytest
@@ -538,6 +539,28 @@ def test_a_status_file_from_an_earlier_attempt_is_ignored(harness, repo, tmp_pat
     after = harness.worker("ABC-1")
     assert after.state == ledger_mod.IDLE
     assert harness.notifier.sent[-1].state == "idle"
+
+
+def test_a_status_file_from_the_run_before_an_adoption_is_ignored(harness, repo, tmp_path):
+    """An adopted session gets a new row; the verdict of the row it replaces is not its own."""
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    first = launch(harness)
+    status = status_dir / "ABC-1.json"
+    status.write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
+    # Written during the earlier run, after its start.
+    os.utime(status, (first.created_at + 0.01, first.created_at + 0.01))
+
+    harness.claude_state.set_session_state("ABC-1", "working")
+    report = harness.next_tick()
+    adopted = harness.worker("ABC-1")
+    assert report.adopted == ["ABC-1"] and adopted.id != first.id
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
 
 
 def test_a_status_file_written_by_this_attempt_is_still_honoured(harness, repo, tmp_path):

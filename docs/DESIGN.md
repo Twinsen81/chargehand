@@ -471,8 +471,9 @@ identifier alone, for a session from before roles). Found → adopt it.
   that landed without a row.
 - **Session side:** a background session under the worktree root with no ledger row is
   adopted when the role and the issue can be derived from its name or path, otherwise
-  reported. An adopted session keeps the start time of the row it replaces, so the events
-  since that start still reach it. No
+  reported. An adopted session's primary subscription keeps the time of the row it
+  replaces, so the events since that start still reach it; its new row has the time of the
+  adoption, so a status file from the earlier run stays stale. No
   unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which

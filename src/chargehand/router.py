@@ -55,15 +55,28 @@ def kind_matches(kinds: Iterable[str], kind: str, source: str) -> bool:
     return kind in names or f"{source}.{kind}" in names
 
 
-def before_start(event: Event, worker: Worker) -> bool:
-    """Whether *event* occurred before *worker* started, beyond the clock allowance.
+def worker_start(ledger: Ledger, worker: Worker) -> float:
+    """When *worker* started, for delivery: its row, or its primary subscription if older.
 
-    The cutoff is the worker's start, which is also when its primary subscription is made.
-    A pull request that the worker follows is subscribed up to one tick after the push, so a
-    comment in that gap is older than the follow; it still reaches the worker, because the
-    cutoff is the start of the worker and not the time of the follow.
+    A worker's primary subscription is made with its row. An adopted session gets a new
+    row, but its primary subscription keeps the time of the row it replaces, because the
+    session has run since then. The row itself keeps the time of the adoption, so a status
+    file of the earlier run stays stale.
     """
-    return event.occurred_at < worker.created_at - START_ALLOWANCE_SECS
+    primary = ledger.primary_subscription(worker)
+    if primary is None:
+        return worker.created_at
+    return min(worker.created_at, primary.created_at)
+
+
+def before_start(event: Event, started: float) -> bool:
+    """Whether *event* occurred before a worker *started*, beyond the clock allowance.
+
+    The cutoff is the worker's start (``worker_start``), not the time of the subscription
+    that matches. A pull request that the worker follows is subscribed up to one tick after
+    the push, so a comment in that gap is older than the follow; it still reaches the worker.
+    """
+    return event.occurred_at < started - START_ALLOWANCE_SECS
 
 
 def suitable_worker_exists(ledger: Ledger, rule: StartRule, role: str, item: WorkItem) -> bool:
@@ -98,7 +111,7 @@ def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> tuple[int, in
         holders[own.id] = own
     delivered = skipped = 0
     for worker_id, worker in sorted(holders.items()):
-        if before_start(event, worker):
+        if before_start(event, worker_start(ledger, worker)):
             skipped += 1
         else:
             delivered += int(ledger.enqueue(worker_id, event))
@@ -163,7 +176,7 @@ class Router:
         for subscription, worker in self.ledger.live_subscriptions(event.source, event.item.key):
             if not kind_matches(subscription.kinds, event.kind, event.source):
                 continue
-            if before_start(event, worker):
+            if before_start(event, worker_start(self.ledger, worker)):
                 skipped += 1
                 continue
             delivered += int(self.ledger.enqueue(subscription.worker_id, event))
@@ -190,4 +203,5 @@ __all__ = [
     "deliver_to_holders",
     "kind_matches",
     "suitable_worker_exists",
+    "worker_start",
 ]

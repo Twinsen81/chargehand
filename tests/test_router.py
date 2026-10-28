@@ -25,6 +25,7 @@ from chargehand.router import (
     deliver_to_holders,
     kind_matches,
     suitable_worker_exists,
+    worker_start,
 )
 from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
 from chargehand.tick import Runner
@@ -691,15 +692,18 @@ def test_an_adopted_session_of_a_worker_another_event_started_does_not_own_the_l
     assert routed.labels("ABC-1") == ()
 
 
-def test_an_adopted_session_keeps_the_start_of_the_row_it_replaces(routed):
+def test_an_adopted_session_keeps_the_delivery_start_of_the_row_it_replaces(routed):
     """The session has run since the first start, so its events from since then still count."""
     routed.board.add("ABC-1", labels=())
     fake_source.feed().emit("review_requested", "ABC-1")
     routed.tick()
     routed.ledger.record_request("cancel", "ABC-1", role="reviewer")
     routed.next_tick()
-    cancelled = routed.ledger.update(
-        routed.worker("ABC-1", "reviewer"), created_at=time.time() - 3600
+    # The first start was an hour ago: the row and its primary subscription.
+    started = time.time() - 3600
+    cancelled = routed.ledger.update(routed.worker("ABC-1", "reviewer"), created_at=started)
+    routed.ledger._conn.execute(
+        "UPDATE subscriptions SET created_at = ? WHERE worker_id = ?", (started, cancelled.id)
     )
     routed.claude_state.set_session_state("ABC-1", "working")
     routed.next_tick()
@@ -707,12 +711,14 @@ def test_an_adopted_session_keeps_the_start_of_the_row_it_replaces(routed):
     assert adopted is not None and adopted.id != cancelled.id
     fake_source.feed().emit("comment", "ABC-1", dedupe_id="since", occurred_at=time.time() - 600)
     fake_source.feed().emit(
-        "comment", "ABC-1", dedupe_id="before", occurred_at=cancelled.created_at - 240
+        "comment", "ABC-1", dedupe_id="before", occurred_at=started - 240
     )
 
     report = routed.next_tick()
 
-    assert adopted.created_at == cancelled.created_at
+    # The row has the time of the adoption; delivery counts from the first start.
+    assert adopted.created_at > started + 3000
+    assert worker_start(routed.ledger, adopted) == started
     assert [e.dedupe_id for e in routed.ledger.inbox(adopted, pending_only=False)] == ["since"]
     assert any("1 inbox row(s), 1 from before the worker's start" in line
                for line in report.routed), report.routed

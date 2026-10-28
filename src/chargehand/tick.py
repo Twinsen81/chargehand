@@ -823,9 +823,10 @@ class Runner:
 
         The new row inherits *previous*'s label ownership and primary subscription, so a
         worker that a source event started does not become the label's owner by being
-        adopted. With no previous row, the role's own start rules decide. It also keeps
-        *previous*'s start, because the session has run since then: the router delivers
-        no event from before a worker's start.
+        adopted. With no previous row, the role's own start rules decide. The subscription
+        keeps its time, because the session has run since then and the router delivers no
+        event from before a worker's start. The row gets the time of the adoption, so a
+        status file that the earlier run wrote stays stale.
         """
         worktree = Path(session.cwd) if session.cwd else None
         if worktree is None:
@@ -866,10 +867,12 @@ class Runner:
                 branch=branch,
                 owns_label=owns_label,
                 runtime=runtime,
-                now=previous.created_at if previous is not None else None,
             )
             if primary is not None:
-                self.ledger.subscribe(worker, primary.work_item, primary.kinds, primary=True)
+                self.ledger.subscribe(
+                    worker, primary.work_item, primary.kinds, primary=True,
+                    now=primary.created_at,
+                )
         worker = self._adopt(worker, session, report)
         report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
         return worker
