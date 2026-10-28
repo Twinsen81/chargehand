@@ -301,16 +301,23 @@ def test_the_daemon_waits_for_a_hand_tick_and_then_runs_its_own(config):
     from chargehand.tick import tick_lock
 
     daemon = support.build(config, interval_secs=3600, poll_secs=0.02)
-    with support.running(daemon):
-        hand_tick = tick_lock()
-        hand_tick.__enter__()
-        try:
-            support.wait_for(lambda: False, timeout=0.3)
-            assert daemon.health_data.ticks == 0
-            assert daemon.health_data.failed_ticks == 0
-        finally:
+    # The hand tick holds the lock before the daemon starts, so the daemon's first tick
+    # cannot take it first.
+    hand_tick = tick_lock()
+    hand_tick.__enter__()
+    try:
+        with support.running(daemon):
+            try:
+                support.wait_for(lambda: False, timeout=0.3)
+                assert daemon.health_data.ticks == 0
+                assert daemon.health_data.failed_ticks == 0
+            finally:
+                hand_tick.__exit__(None, None, None)
+                hand_tick = None
+            assert support.wait_for(lambda: daemon.health_data.ticks >= 1)
+    finally:
+        if hand_tick is not None:
             hand_tick.__exit__(None, None, None)
-        assert support.wait_for(lambda: daemon.health_data.ticks >= 1)
 
 
 def test_a_stop_during_a_phase_finishes_it_and_skips_the_rest(harness, monkeypatch):
@@ -364,15 +371,32 @@ def test_sigterm_ends_the_process_with_exit_code_zero(tmp_path, repo, harness):
     config_file = write_machine_config(tmp_path / "serve-config.toml", repo, harness.worktree_root)
     with config_file.open("a") as handle:
         handle.write(f"\n[serve]\nport = {port}\ntoken_file = \"{tmp_path / 'serve.token'}\"\n")
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    # Unbuffered, and with a traceback of every thread on SIGABRT, so that a daemon that
+    # never answers says where it waits.
+    env = {
+        **os.environ, "PYTHONPATH": os.pathsep.join(sys.path),
+        "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1",
+    }
     process = subprocess.Popen(
         [sys.executable, "-m", "chargehand", "--config", str(config_file), "serve"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
     )
+
+    def stuck(what: str) -> str:
+        if process.poll() is None:
+            process.send_signal(signal.SIGABRT)
+        try:
+            output, _ = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output, _ = process.communicate()
+        return f"{what}; exit code {process.returncode}; output:\n{output}"
+
     try:
         health = support.wait_for(lambda: serve.probe(port, timeout=0.5), timeout=20)
-        assert health, "the daemon never answered"
-        assert support.wait_for(lambda: (serve.probe(port) or {}).get("ticks", 0) >= 1, timeout=20)
+        assert health, stuck("the daemon never answered")
+        ticked = support.wait_for(lambda: (serve.probe(port) or {}).get("ticks", 0) >= 1, timeout=20)
+        assert ticked, stuck("the daemon never finished a tick")
         process.send_signal(signal.SIGTERM)
         output, _ = process.communicate(timeout=30)
     finally:
@@ -432,6 +456,16 @@ def test_the_daemon_writes_its_token_when_it_starts(harness, tmp_path):
             headers={"Authorization": f"Bearer {token}"},
         )
     assert status == 200
+
+
+def test_binding_does_not_look_the_address_up(config, monkeypatch):
+    """A reverse lookup before listen() can take tens of seconds on a slow resolver."""
+    monkeypatch.setattr(
+        "socket.getfqdn", lambda *args: pytest.fail("the server looked its address up")
+    )
+    daemon = support.build(config)
+    with support.running(daemon, loop=False):
+        assert serve.probe(daemon.port)["ok"] is True
 
 
 def test_a_port_in_use_fails_the_start(config):

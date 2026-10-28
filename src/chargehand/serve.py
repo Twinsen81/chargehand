@@ -29,6 +29,7 @@ import logging
 import os
 import secrets
 import signal
+import socketserver
 import stat
 import threading
 import time
@@ -246,6 +247,15 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], owner: "Daemon") -> None:
         self.owner = owner
         super().__init__(address, _HTTPHandler)
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind looks the address up with socket.getfqdn before the socket
+        # listens. That reverse lookup can take tens of seconds on a machine whose resolver
+        # is slow, and the daemon answers nothing meanwhile. The name is only used in CGI
+        # variables, so the address itself is enough.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = HOST
+        self.server_port = self.server_address[1]
 
 
 class _HTTPHandler(BaseHTTPRequestHandler):
