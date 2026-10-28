@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import stat
 import sys
 from pathlib import Path
 
@@ -35,6 +37,20 @@ Commands:
   rm <id>
   logs <id>
 """
+
+
+def stdin_kind() -> str:
+    """`open-pipe`, `closed-pipe` (at end of file), `devnull`, or `other`: what a launch got."""
+    try:
+        info = os.fstat(0)
+    except OSError:
+        return "other"
+    if stat.S_ISFIFO(info.st_mode):
+        readable, _, _ = select.select([0], [], [], 0)
+        return "closed-pipe" if readable else "open-pipe"
+    if stat.S_ISCHR(info.st_mode) and os.path.samestat(info, os.stat(os.devnull)):
+        return "devnull"
+    return "other"
 
 
 def state_path() -> Path:
@@ -213,7 +229,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     if "--bg" in argv:
-        record(state, "launches", {"argv": argv, "cwd": os.getcwd()})
+        record(state, "launches", {"argv": argv, "cwd": os.getcwd(), "stdin": stdin_kind()})
         if len(state["launches"]) in state.get("drop_trust_at_launches", []):
             drop_trust(os.getcwd())
         # refuse_as_untrusted models a refusal with another cause: the entry is in the

@@ -525,9 +525,14 @@ package with `python -I`, which imports nothing from the worktree, reads the tok
 `token_file`, posts its stdin to the daemon, prints nothing (the output of a `SessionStart`
 command reaches the model) and exits 0 within a few seconds, also when no daemon answers.
 The settings of a launch with hooks are in a file of mode 0600 under the state directory,
-one per worktree, so the token is never on a command line; the file stays for the worker's
-life, because a resume applies the saved `--settings` again. The daemon applies each post to the ledger at once, through the same transition
-and notification code as the tick. `claude agents --json --all`, diffed against the ledger
+one per worktree, so the token is never on a command line. The file stays while the
+session exists, because a resume, a respawn and an attach apply the saved `--settings`
+again; it is deleted when the session is removed (`discard`, `retry`, garbage collection).
+A new session runs no `SessionStart` hook in most launches whose stdin is /dev/null or a
+pipe already at its end, and in every launch whose stdin is a pipe that stays open, so a
+launch gets an empty pipe that chargehand closes when the launcher exits; the daemon's own
+stdin is /dev/null under launchd. The daemon applies each post to the ledger at once,
+through the same transition and notification code as the tick. `claude agents --json --all`, diffed against the ledger
 on every tick, stays the fallback for anything a hook missed: a session launched before the
 daemon wrote its token, a post while the daemon was down, a process that died.
 

@@ -308,14 +308,21 @@ class ClaudeCLI:
         timeout: float | None = None,
         check: bool = True,
         env: Mapping[str, str] | None = None,
+        open_stdin: bool = False,
     ) -> CommandResult:
+        """Run the binary. stdin is /dev/null, or with *open_stdin* an empty pipe that stays
+        open until the command exits; it never is the caller's own stdin."""
         argv = (self.binary, *args)
+        # Nothing here reads stdin, and `-p` waits for input on an open pipe.
+        stdin: int = subprocess.DEVNULL
+        keep_open: int | None = None
+        if open_stdin:
+            stdin, keep_open = os.pipe()
         try:
             completed = subprocess.run(
                 argv,
                 cwd=str(cwd) if cwd else None,
-                # Nothing here reads stdin, and `-p` waits for input on an open pipe.
-                stdin=subprocess.DEVNULL,
+                stdin=stdin,
                 capture_output=True,
                 text=True,
                 timeout=timeout or self.timeout_secs,
@@ -331,6 +338,10 @@ class ClaudeCLI:
             raise ClaudeError(f"`{' '.join(argv)}` timed out after {exc.timeout:.0f}s") from exc
         except OSError as exc:
             raise ClaudeError(f"could not run `{' '.join(argv)}`: {exc}") from exc
+        finally:
+            if keep_open is not None:
+                os.close(stdin)
+                os.close(keep_open)
         result = CommandResult(argv, completed.returncode, completed.stdout, completed.stderr)
         if check:
             _check(result)
@@ -402,7 +413,12 @@ class ClaudeCLI:
         elif settings:
             args += ["--settings", json.dumps(settings, sort_keys=True)]
         args.append(prompt)
-        result = self._run(args, cwd=worktree, timeout=timeout_secs, check=False)
+        # Observed in Claude Code 2.1.312: a new background session runs no SessionStart
+        # hook in most launches whose stdin is /dev/null or a pipe already at its end,
+        # and in every launch whose stdin is a pipe that stays open. The launcher does
+        # not read it and exits as before. The daemon's own stdin is /dev/null under
+        # launchd, so the pipe is made here.
+        result = self._run(args, cwd=worktree, timeout=timeout_secs, check=False, open_stdin=True)
         if result.returncode != 0 and _UNTRUSTED_WORKSPACE in result.stdout + result.stderr:
             raise WorkspaceNotTrusted(
                 f"Claude Code refused {worktree} as an untrusted workspace: "
@@ -1248,6 +1264,17 @@ class ClaudeRuntime(Runtime):
 
     def remove(self, session_id: str) -> CommandResult:
         return self.cli.remove(session_id)
+
+    def release(self, worktree: Path) -> None:
+        """Delete the session's settings file, which holds the daemon's token.
+
+        Only after the session is removed: a stopped session that is kept can still be
+        respawned or attached, and that reads the saved `--settings` path again.
+        """
+        try:
+            settings_file_for(worktree).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not delete the session settings of %s: %s", worktree, exc)
 
     def logs(self, session_id: str, *, lines: int = 200) -> str:
         return self.cli.logs(session_id, lines=lines)

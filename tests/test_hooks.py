@@ -596,3 +596,70 @@ def test_the_reset_time_is_read_from_several_spellings():
 def test_only_runtimes_with_session_hooks_receive_posts():
     assert [runtime.name for runtime in hooks.hook_runtimes("Stop")] == ["claude"]
     assert hooks.hook_runtimes("PreToolUse") == []
+
+
+# ----- the launch stdin, the settings file's life, the status payload ---------------
+
+
+def test_a_launch_gets_an_empty_pipe_that_stays_open_as_stdin(harness):
+    # Claude Code runs no SessionStart hook in most launches whose stdin is /dev/null or
+    # a pipe at its end. The daemon's own stdin is /dev/null under launchd.
+    launch(harness)
+
+    assert harness.claude_state.launches[-1]["stdin"] == "open-pipe"
+
+
+def test_other_claude_commands_keep_dev_null_as_stdin(harness, monkeypatch):
+    seen = []
+    real_run = subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        seen.append((tuple(argv[1:3]), kwargs.get("stdin")))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    claude.ClaudeCLI(harness.config.claude_bin).list_sessions()
+
+    assert seen == [(("agents", "--json"), subprocess.DEVNULL)]
+
+
+def test_discard_deletes_the_session_settings_file(harness, tmp_path):
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    settings = claude.settings_file_for(Path(worker.worktree))
+    assert settings.exists()
+
+    request_id = harness.ledger.record_request("discard", "ABC-1", force=False)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert not settings.exists()
+
+
+def test_a_cancelled_worker_keeps_the_settings_file_of_its_kept_session(harness, tmp_path):
+    # A kept session can still be attached or respawned, which reads the file again.
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+
+    harness.ledger.record_request("cancel", "ABC-1")
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.CANCELLED
+    assert claude.settings_file_for(Path(worker.worktree)).exists()
+
+
+def test_the_status_payload_names_the_last_hook_but_not_its_text(daemon, harness):
+    from chargehand import cli
+
+    worker = launch(harness)
+    post(daemon, "StopFailure", {
+        "session_id": worker.session_uuid, "error": "rate_limit",
+        "last_assistant_message": "secret session text",
+    })
+
+    payload = cli._worker_dict(harness.worker("ABC-1"), verbose=False)
+
+    assert payload["last_hook"] == "StopFailure"
+    assert payload["last_hook_at"] is not None
+    assert "reset_at" in payload
+    assert "secret session text" not in json.dumps(payload)
