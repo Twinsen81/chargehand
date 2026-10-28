@@ -239,7 +239,8 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
     # The server closes each connection first, so its port stays in TIME_WAIT for about
     # half a minute after a stop. Without SO_REUSEADDR a daemon that launchd starts again
-    # in that time cannot bind. A port that another socket listens on is still refused.
+    # in that time cannot bind. A socket that listens on 127.0.0.1 at the port still makes
+    # the bind fail; on macOS one that listens on the wildcard address (0.0.0.0) does not.
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], owner: "Daemon") -> None:
