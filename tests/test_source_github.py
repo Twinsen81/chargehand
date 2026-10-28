@@ -256,6 +256,120 @@ def test_a_thread_read_before_the_poll_is_not_lost(source, gh, clock):
     assert "all=true" in [p for p in api_paths(gh) if p.startswith("notifications")][-1]
 
 
+def notification_calls(gh: GhState) -> list[list[str]]:
+    return [
+        call for call in gh.calls
+        if call[:2] == ["api", "-i"] and any(arg.startswith("notifications") for arg in call)
+    ]
+
+
+def test_an_empty_list_is_asked_with_its_etag_and_ends_the_first_poll(source, gh, clock):
+    gh.set(date="Mon, 26 Oct 2026 10:00:30 GMT")
+    events, cursor = source.poll(None, [])
+
+    # An empty list has an ETag but no Last-Modified.
+    state = json.loads(cursor)
+    assert events == [] and state["last_modified"] is None and state["etag"]
+    # The first poll is over all the same: the next one starts from the server's Date.
+    assert state["listed_at"] == datetime(2026, 10, 26, 10, 0, 30, tzinfo=timezone.utc).timestamp()
+
+    clock.now += 61
+    events, cursor = source.poll(cursor, [])
+
+    second = notification_calls(gh)[-1]
+    assert f"If-None-Match: {state['etag']}" in second
+    assert not any(arg.startswith("If-Modified-Since") for arg in second)
+    assert "all=true" in api_paths(gh)[-1] and "since=2026-10-26T09:55:30Z" in api_paths(gh)[-1]
+    assert events == [] and json.loads(cursor)["etag"] == state["etag"]
+    assert json.loads(cursor)["next_poll_at"] == clock.now + 60
+
+    # A thread that the operator read before this poll still arrives.
+    gh.add_pull(PR)
+    gh.notify("review_requested", PR, updated_at="2026-10-26T10:01:00Z", unread=False)
+    clock.now += 61
+    events, cursor = source.poll(cursor, [])
+
+    assert [(e.kind, e.item.key) for e in events] == [("review_requested", PR_KEY)]
+    assert json.loads(cursor)["last_modified"] == gh.read()["last_modified"]
+
+
+def test_a_cursor_from_before_the_etag_keeps_its_window(source, gh, clock):
+    old = json.dumps({
+        "last_modified": "Mon, 26 Oct 2026 10:00:00 GMT", "poll_interval": 60,
+        "next_poll_at": 0, "polled_at": NOW - 60, "items": {},
+    })
+    gh.notify("review_requested", PR)
+
+    source.poll(old, [])
+
+    assert "since=2026-10-26T09:55:00Z" in api_paths(gh)[0]
+    assert "If-Modified-Since: Mon, 26 Oct 2026 10:00:00 GMT" in notification_calls(gh)[0]
+
+
+# ----- review requests without a notification thread --------------------------------
+
+
+OLD_REQUEST = "2026-10-26T09:00:00Z"
+
+
+def review_warnings(source, gh, cursor=None):
+    _, cursor = source.poll(cursor, [])
+    return source.take_warnings(), cursor
+
+
+def test_a_review_request_without_a_thread_warns_once_a_day(source, gh, clock):
+    gh.add_pull(PR, updated_at=OLD_REQUEST, created_at="2026-10-20T08:00:00Z")
+
+    warnings, cursor = review_warnings(source, gh)
+
+    assert len(warnings) == 1
+    assert PR_KEY in warnings[0] and '"On GitHub" setting' in warnings[0]
+    search = next(call for call in gh.calls if any("search/issues" in arg for arg in call))
+    assert "--paginate" in search
+    # The threads are read back to the pull request's creation, read ones included.
+    listed = [p for p in api_paths(gh) if p.startswith("notifications") and "since=2026-10-20T07:55" in p]
+    assert listed and "all=true" in listed[0]
+
+    gh.clear_calls()
+    clock.now += 23 * 3600
+    warnings, cursor = review_warnings(source, gh, cursor)
+    assert warnings == [] and not any("search/issues" in p for p in api_paths(gh))
+
+    clock.now += 3600
+    warnings, _ = review_warnings(source, gh, cursor)
+    assert len(warnings) == 1
+
+
+def test_a_review_request_with_a_thread_does_not_warn(source, gh):
+    gh.add_pull(PR, updated_at=OLD_REQUEST)
+    gh.notify("review_requested", PR, updated_at=OLD_REQUEST, unread=False)
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert warnings == []
+
+
+def test_a_young_review_request_does_not_warn(source, gh, clock):
+    gh.add_pull(PR, updated_at=iso(NOW - 5 * 60))
+
+    warnings, _ = review_warnings(source, gh)
+
+    assert warnings == []
+    # Nothing to compare, so the threads are not read for the check.
+    assert not any("all=true" in p for p in api_paths(gh) if p.startswith("notifications"))
+
+
+def test_a_failed_review_request_check_does_not_fail_the_poll(source, gh):
+    gh.add_pull(PR, updated_at=OLD_REQUEST)
+    gh.notify("review_requested", PR)
+    gh.set(fail=[{"match": "search/issues", "stderr": "HTTP 403: rate limit"}])
+
+    events, _ = source.poll(None, [])
+
+    assert [e.kind for e in events] == ["review_requested"]
+    assert source.take_warnings() == []
+
+
 # ----- per pull request ------------------------------------------------------------
 
 

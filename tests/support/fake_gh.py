@@ -13,6 +13,7 @@ The test-side helper is :class:`GhState`; the script itself is :func:`main`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -181,25 +182,79 @@ def since_filter(entries: list, query: dict, field: str) -> list:
 
 
 def notifications(state: dict, args: list[str], query: dict) -> int:
+    """The notifications list. Like GitHub, an empty list has an ETag but no Last-Modified.
+
+    Either validator answers 304 when it matches. The Date header is the state's `date`,
+    or the fixed time the tests use.
+    """
     headers = {}
     for index, arg in enumerate(args):
         if arg == "-H":
             name, _, value = args[index + 1].partition(":")
             headers[name.strip().lower()] = value.strip()
-    last_modified = state.get("last_modified", LAST_MODIFIED)
-    interval = state.get("poll_interval", 60)
-    if headers.get("if-modified-since") == last_modified:
-        sys.stdout.write(f"HTTP/2.0 304 Not Modified\r\nX-Poll-Interval: {interval}\r\n\r\n")
-        return fail("HTTP 304")
     body = since_filter(state.get("notifications", []), query, "updated_at")
     # Without all=true, GitHub lists the unread threads only.
     if query.get("all", ["false"])[0] != "true":
         body = [thread for thread in body if thread.get("unread", True)]
-    sys.stdout.write(
-        f"HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
-        f"Last-Modified: {last_modified}\r\nX-Poll-Interval: {interval}\r\n\r\n"
-    )
-    sys.stdout.write(json.dumps(body))
+    text = json.dumps(body)
+    etag = f'W/"{hashlib.sha1(text.encode()).hexdigest()}"'
+    last_modified = state.get("last_modified", LAST_MODIFIED) if body else None
+    interval = state.get("poll_interval", 60)
+    date = state.get("date", LAST_MODIFIED)
+    show = "-i" in args
+    if headers.get("if-none-match") == etag or (
+        last_modified and headers.get("if-modified-since") == last_modified
+    ):
+        if show:
+            sys.stdout.write(
+                f"HTTP/2.0 304 Not Modified\r\nDate: {date}\r\nEtag: {etag}\r\n"
+                f"X-Poll-Interval: {interval}\r\n\r\n"
+            )
+        return fail("HTTP 304")
+    if show:
+        sys.stdout.write(
+            f"HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+            f"Date: {date}\r\nEtag: {etag}\r\n"
+            + (f"Last-Modified: {last_modified}\r\n" if last_modified else "")
+            + f"X-Poll-Interval: {interval}\r\n\r\n"
+        )
+    if "--paginate" in args or not show:
+        emit_pages(body, int(state.get("page_size", 100)), "--paginate" in args)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def search_review_requests(state: dict, query: dict, paginate: bool) -> int:
+    """`search/issues` for `is:pr is:open review-requested:@me`, the only query asked.
+
+    A pull request's `updated_at` defaults to the fixed time the tests use.
+    """
+    q = query.get("q", [""])[0]
+    if q != "is:pr is:open review-requested:@me":
+        return fail(f"the fake gh does not search for {q!r}")
+    login = state.get("login", "operator")
+    teams = set(state.get("teams") or ())
+    found = []
+    for ref, pull in state.get("pulls", {}).items():
+        owner_repo, _ = ref.split("#")
+        requested = {r["login"] for r in pull.get("requested_reviewers", [])}
+        requested_teams = {t["id"] for t in pull.get("requested_teams", [])}
+        if pull["state"] != "open" or (login not in requested and not requested_teams & teams):
+            continue
+        updated_at = pull.get("updated_at", "2026-10-26T10:00:00Z")
+        found.append(
+            {
+                "number": pull["number"],
+                "state": "open",
+                "html_url": pull["html_url"],
+                "repository_url": f"https://api.github.com/repos/{owner_repo}",
+                "pull_request": {"url": f"https://api.github.com/repos/{owner_repo}/pulls/{pull['number']}"},
+                "created_at": pull.get("created_at", updated_at),
+                "updated_at": updated_at,
+            }
+        )
+    emit_pages(found, int(state.get("page_size", 100)), paginate, "items")
     return 0
 
 
@@ -225,6 +280,8 @@ def api(state: dict, args: list[str]) -> int:
         return 0
     if path == "notifications":
         return notifications(state, args, query)
+    if path == "search/issues":
+        return search_review_requests(state, query, paginate)
     if path == "user/teams":
         if state.get("teams") is None:
             return fail("Resource not accessible by integration (HTTP 403)")

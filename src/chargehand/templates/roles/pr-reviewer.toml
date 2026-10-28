@@ -5,6 +5,10 @@
 # machine configuration needs a `[[source]]` of type "github", and the repository needs
 # its `github = "owner/repo"` key. `chargehand init --role pr-reviewer` writes this file
 # and the agent file it names, .claude/agents/pr-reviewer.md.
+# The source reads review requests from your GitHub notifications, so turn on the "On
+# GitHub" setting for participating notifications in GitHub's notification settings.
+# While it is off, GitHub sends review requests by email only and no reviewer starts;
+# `chargehand doctor` warns about a review request that has no notification.
 
 # The agent file holds the reviewer's instructions. Claude Code looks for it in the
 # session's working directory, a fresh checkout of `base`, and then in ~/.claude/agents.

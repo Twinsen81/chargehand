@@ -93,6 +93,24 @@ class Source(abc.ABC):
         self.options = dict(options)
         # The configured repositories, once the tick has given them; None while unknown.
         self.configured_repositories: tuple[Repository, ...] | None = None
+        self._warnings: list[str] = []
+
+    def warn(self, message: str) -> None:
+        """Keep *message* for the tick report. It is chargehand's own text, never input."""
+        self._warnings.append(message)
+
+    def take_warnings(self) -> list[str]:
+        """The warnings that the polls since the last call produced, each one once."""
+        warnings, self._warnings = self._warnings, []
+        return warnings
+
+    def setup_warnings(self) -> list[str] | None:
+        """Problems in the account's setup that stop events from arriving, for `doctor`.
+
+        None for a source that has no such check, and an empty list when the check found
+        nothing. The check makes the source's own calls, so `doctor --no-tracker` skips it.
+        """
+        return None
 
     def use_repositories(self, repositories: Sequence[Repository]) -> None:
         """Tell the source which repositories are configured, once it is built.

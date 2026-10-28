@@ -24,6 +24,7 @@ from chargehand import serve
 from chargehand.config import MachineConfig, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError
 from chargehand.gitutil import Git
+from chargehand.sources import build as build_source
 from chargehand.trackers import build as build_tracker
 
 OK = "ok"
@@ -422,6 +423,9 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
             except ChargehandError as exc:
                 checks.append(Check(f"{label} tracker", FAIL, str(exc)))
 
+    if check_trackers:
+        checks.extend(source_checks(config))
+
     job: dict[str, object] | None = None
     if sys.platform == "darwin":
         plist = paths.launch_agent_plist()
@@ -451,6 +455,29 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
                   "not macOS: run `chargehand serve` under your own service manager")
         )
     checks.extend(daemon_checks(config))
+    return checks
+
+
+def source_checks(config: MachineConfig) -> list[Check]:
+    """One check per ``[[source]]`` that can tell whether its events can arrive at all.
+
+    The github source, for example, compares the review requests with the notification
+    threads. The checks call the source's system, so `doctor --no-tracker` skips them.
+    """
+    checks: list[Check] = []
+    for source_config in config.sources:
+        label = f"source {source_config.name}"
+        try:
+            source = build_source(source_config)
+            warnings = source.setup_warnings()
+        except ChargehandError as exc:
+            checks.append(Check(label, FAIL, str(exc)))
+            continue
+        if warnings is None:
+            continue
+        if not warnings:
+            checks.append(Check(label, OK, source.describe()))
+        checks.extend(Check(label, WARN, warning) for warning in warnings)
     return checks
 
 
