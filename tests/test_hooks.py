@@ -220,7 +220,8 @@ def test_a_turn_end_moves_the_worker_to_idle_by_session_id(daemon, harness):
     after = harness.worker("ABC-1")
     assert after.state == ledger_mod.IDLE
     assert (after.last_hook, after.last_answer, after.transcript_path) == ("Stop", "all done", "/t/session.jsonl")
-    assert harness.notifications().count(("ABC-1", "idle")) == 1
+    # A turn end that waits for events is on the board, not in a notification.
+    assert harness.notifications() == []
     entry = state_of(daemon, "ABC-1")
     assert entry["state"] == "idle"
     assert entry["last_answer"] == "all done"
@@ -494,10 +495,12 @@ def test_a_listing_older_than_a_hook_does_not_undo_it(daemon, harness):
     # ... and the turn ends before its supervise phase.
     post(daemon, "Stop", {"session_id": worker.session_uuid})
 
-    runner._diff_and_notify(TickReport())
+    report = TickReport()
+    runner._diff_and_notify(report)
 
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
-    assert harness.notifications().count(("ABC-1", "idle")) == 1
+    assert report.transitions == []
+    assert harness.notifications() == []
 
 
 def test_a_tick_write_between_the_read_and_the_write_of_a_hook_is_not_overwritten(harness):

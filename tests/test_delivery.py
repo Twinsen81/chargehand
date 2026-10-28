@@ -538,7 +538,7 @@ def test_a_comment_on_the_pull_request_of_the_workers_branch_wakes_it(on_github,
     report = on_github.next_tick()
 
     assert report.errors == []
-    assert "implementer/ABC-1: follows octo_app_9" in report.routed
+    assert report.follows == ["implementer/ABC-1 follows octo_app_9"]
     followed = [s for s in on_github.ledger.subscriptions_of(implementer) if not s.is_primary]
     assert [(s.source, s.item, s.item_ref, s.kinds) for s in followed] == [
         ("github", "octo_app_9", "octo/app#9", ("comment", "review", "ci_status"))

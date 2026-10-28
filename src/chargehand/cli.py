@@ -52,10 +52,11 @@ KICKSTART_RETRY_SECS = 2.0
 ATTACH_STATES = ("blocked", "idle", "queued", "parked")
 
 # The parts of a tick report that `tick` prints, in this order. `skipped` holds the
-# launches and wakes that a cap or a pause held back.
+# launches and wakes that a cap or a pause held back. `routed` is left out: it holds a
+# summary of each source on every tick.
 TICK_FIELDS = (
-    "launched", "adopted", "resumed", "woken", "failed", "transitions", "requests",
-    "collected", "skipped", "warnings", "errors",
+    "launched", "adopted", "resumed", "woken", "failed", "transitions", "follows",
+    "requests", "collected", "skipped", "warnings", "errors",
 )
 
 log = logging.getLogger("chargehand")

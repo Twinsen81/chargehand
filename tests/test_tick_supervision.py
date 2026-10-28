@@ -128,8 +128,89 @@ def test_done_without_a_status_file_means_idle(harness):
 
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
-    sent = harness.notifier.sent[-1]
-    assert (sent.state, sent.detail) == ("idle", "turn ended; waits for events")
+    # Shown in `status` and on the board; idle is never notified.
+    assert harness.notifier.sent == []
+
+
+
+# ----- which turn ends are notified, and what the tick says ----------------------------
+
+
+def test_a_worker_that_ends_many_turns_sends_no_notification_until_it_needs_the_operator(harness):
+    """Idle is on the board; only blocked, failed and done are notified."""
+    launch(harness)
+    transitions = []
+    for _ in range(3):
+        harness.claude_state.set_session_state("ABC-1", "done")
+        transitions += harness.next_tick().transitions
+        assert harness.worker("ABC-1").state == ledger_mod.IDLE
+        # A reply landed: the next turn runs.
+        harness.claude_state.set_session_state("ABC-1", "working")
+        transitions += harness.next_tick().transitions
+
+    assert harness.notifications() == []
+    assert transitions == ["ABC-1: running -> idle", "ABC-1: idle -> running"] * 3
+
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications() == [("ABC-1", "blocked")]
+
+
+def test_a_question_after_a_turn_end_is_notified_again(harness):
+    """The turn end between the two questions clears the record of the first one."""
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+    harness.next_tick()
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+    harness.next_tick()
+
+    assert harness.notifications() == [("ABC-1", "blocked"), ("ABC-1", "blocked")]
+
+
+def test_a_status_file_that_completes_an_idle_worker_is_notified(harness, repo, tmp_path):
+    """The session state stays `done` from the turn end to the verdict; the verdict is news."""
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    report = harness.next_tick()
+
+    assert "ABC-1: idle -> done" in report.transitions
+    assert harness.notifications() == [("ABC-1", "done")]
+
+
+def test_a_transition_names_the_session_state_only_when_it_explains_the_change(harness):
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+    assert harness.next_tick().transitions == ["ABC-1: running -> blocked"]
+
+    # Still blocked: no line for a change that did not happen.
+    harness.claude_state.set_session_state("ABC-1", "failed")
+    assert harness.next_tick().transitions == []
+
+    harness.claude_state.set_session_state("ABC-1", "working")
+    harness.next_tick()
+    harness.claude_state.set_session_state("ABC-1", "failed")
+    assert harness.next_tick().transitions == ["ABC-1: running -> blocked (session failed)"]
+
+
+def test_a_closed_item_is_reported_as_an_item(harness):
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+
+    harness.board.close("ABC-1")
+    report = harness.next_tick()
+
+    assert "ABC-1: item closed -> done" in report.transitions
+    assert not any("issue closed" in line for line in report.transitions)
 
 
 def _with_status_file(harness, repo, tmp_path):
@@ -538,7 +619,8 @@ def test_a_status_file_from_an_earlier_attempt_is_ignored(harness, repo, tmp_pat
 
     after = harness.worker("ABC-1")
     assert after.state == ledger_mod.IDLE
-    assert harness.notifier.sent[-1].state == "idle"
+    # The old verdict sends no second failure; the turn end itself is not notified.
+    assert [n.state for n in harness.notifier.sent] == ["failed"]
 
 
 def test_a_status_file_from_the_run_before_an_adoption_is_ignored(harness, repo, tmp_path):
