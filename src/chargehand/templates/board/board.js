@@ -110,7 +110,7 @@ function renderHealth(h, now) {
   box.className = 'health' + (h.last_tick_error ? ' bad' : '');
   const text = box.querySelector('.text');
   text.textContent = parts.join(' · ');
-  text.title = h.last_tick_error || '';
+  text.title = parts.join(' · ');
 }
 
 function renderStats(columns) {

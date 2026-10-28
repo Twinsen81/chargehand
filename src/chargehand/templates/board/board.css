@@ -18,7 +18,7 @@ header.top h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2
 .gauges { display: flex; gap: 14px; margin-left: auto; }
 .gauge { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .gauge .name { color: var(--muted); }
-.gauge .bar { display: inline-block; width: 90px; height: 7px; border-radius: 4px; background: var(--card); border: 1px solid var(--border); overflow: hidden; }
+.gauge .bar { display: inline-block; width: 70px; height: 7px; border-radius: 4px; background: var(--card); border: 1px solid var(--border); overflow: hidden; }
 .gauge .fill { display: block; height: 100%; width: 0; background: var(--grey); transition: width .3s; }
 .gauge .value { color: var(--text); min-width: 32px; text-align: right; }
 .gauge .reset { color: var(--faint); }
@@ -32,8 +32,9 @@ header.top h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2
 .throttle { color: var(--muted); font-size: 12px; display: flex; gap: 10px; }
 .throttle b { color: var(--text); font-weight: 600; }
 .throttle .paused { color: var(--amber); font-weight: 600; }
-.health { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-family: var(--mono); max-width: 420px; }
-.health .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.health { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-family: var(--mono); flex: 1 1 0; min-width: 120px; max-width: 420px; }
+.health .dot { flex: none; }
+.health .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .health.bad .text { color: var(--red); }
 .refresh { color: var(--faint); font-family: var(--mono); font-size: 11px; min-width: 90px; text-align: right; }
 .refresh.stale { color: var(--red); }
