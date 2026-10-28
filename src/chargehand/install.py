@@ -1,7 +1,8 @@
 """Installation helpers: the launchd job, `doctor`, and `init`.
 
-Nothing here runs as part of a tick. `install` writes the job definition and, only
-when asked, loads it; `doctor` reports and never repairs.
+Nothing here runs as part of a tick. `install` writes the definition of the job that
+keeps the daemon running and, only when asked, loads it; `doctor` reports and never
+repairs.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from xml.parsers.expat import ExpatError
 from chargehand import __version__, paths
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
+from chargehand import serve
 from chargehand.config import MachineConfig, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError
 from chargehand.gitutil import Git
@@ -43,6 +45,10 @@ LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # throttled band, where CPU-bound work measured about three times slower than from a
 # terminal. Interactive gives them the priority a terminal gives.
 JOB_PROCESS_TYPE = "Interactive"
+# How long launchd waits after SIGTERM before it sends SIGKILL. The daemon finishes the
+# tick phase in progress first; a phase that runs longer, such as a slow setup script, is
+# killed, and the next start reconciles it as an interrupted launch.
+JOB_EXIT_TIMEOUT_SECS = 300
 
 
 @dataclass(frozen=True)
@@ -58,17 +64,18 @@ class Check:
 def build_plist(
     *,
     program: Iterable[str] | None = None,
-    interval_secs: int = 180,
     job_path: str | None = None,
     log_path: Path | None = None,
 ) -> dict[str, object]:
+    """A job that keeps `chargehand serve` running: started at load, restarted on exit."""
     argv = list(program) if program else chargehand_argv()
     extra_path = os.environ.get("PATH", "")
     return {
         "Label": paths.LAUNCHD_LABEL,
         "ProgramArguments": argv,
-        "StartInterval": int(interval_secs),
         "RunAtLoad": True,
+        "KeepAlive": True,
+        "ExitTimeOut": JOB_EXIT_TIMEOUT_SECS,
         "ProcessType": JOB_PROCESS_TYPE,
         "EnvironmentVariables": {"PATH": job_path or _merge_path(DEFAULT_JOB_PATH, extra_path)},
         "StandardOutPath": str(log_path or paths.log_file()),
@@ -85,7 +92,7 @@ def _merge_path(base: str, extra: str) -> str:
 
 
 def chargehand_argv() -> list[str]:
-    """How launchd should invoke a tick, as a full argument list.
+    """How launchd should start the daemon, as a full argument list.
 
     The console script when one is on PATH, and the module form otherwise. Both halves
     matter: a virtual environment that was not activated puts neither `chargehand` nor
@@ -95,19 +102,14 @@ def chargehand_argv() -> list[str]:
     """
     script = shutil.which("chargehand")
     if script:
-        return [script, "tick"]
-    return [sys.executable, "-m", "chargehand", "tick"]
+        return [script, "serve"]
+    return [sys.executable, "-m", "chargehand", "serve"]
 
 
-def write_plist(
-    destination: Path | None = None,
-    *,
-    interval_secs: int = 180,
-    job_path: str | None = None,
-) -> Path:
+def write_plist(destination: Path | None = None, *, job_path: str | None = None) -> Path:
     target = destination or paths.launch_agent_plist()
     target.parent.mkdir(parents=True, exist_ok=True)
-    data = build_plist(interval_secs=interval_secs, job_path=job_path)
+    data = build_plist(job_path=job_path)
     with target.open("wb") as handle:
         plistlib.dump(data, handle)
     return target
@@ -120,6 +122,46 @@ def installed_job(plist: Path | None = None) -> dict[str, object] | None:
     except (OSError, ValueError, ExpatError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def is_timer_job(job: Mapping[str, object]) -> bool:
+    """Whether *job* is the timer that ran one tick at a time, from before the daemon."""
+    argv = job.get("ProgramArguments")
+    return "StartInterval" in job or not (isinstance(argv, list) and argv[-1:] == ["serve"])
+
+
+def daemon_checks(config: MachineConfig) -> list[Check]:
+    """Whether this instance's daemon answers on its port, and whether its token is private."""
+    port = config.serve.port
+    checks: list[Check] = []
+    health = serve.probe(port)
+    if health is None:
+        checks.append(
+            Check("daemon", FAIL,
+                  f"nothing answers on {serve.HOST}:{port}; run `chargehand install --load`, "
+                  "or `chargehand serve` in a terminal")
+        )
+    elif not serve.serves_this_ledger(health):
+        checks.append(
+            Check("daemon", FAIL,
+                  f"the daemon on {serve.HOST}:{port} serves another ledger, {health.get('ledger')}; "
+                  "give this instance a port of its own in [serve]")
+        )
+    else:
+        checks.append(
+            Check("daemon", OK,
+                  f"answers on {serve.HOST}:{port} · pid {health.get('pid')} · "
+                  f"{health.get('ticks')} ticks, {health.get('failed_ticks')} failed")
+        )
+    token = config.serve.token_file
+    problem = serve.token_problem(token)
+    if problem is None:
+        checks.append(Check("daemon token", OK, f"{token} · mode 600"))
+    elif not token.exists() and not token.is_symlink():
+        checks.append(Check("daemon token", WARN, problem))
+    else:
+        checks.append(Check("daemon token", FAIL, problem))
+    return checks
 
 
 def job_checks(config: MachineConfig, job: Mapping[str, object]) -> list[Check]:
@@ -396,11 +438,19 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
             if job is None:
                 checks.append(Check("launchd", FAIL, f"{plist} cannot be read as a property list"))
             else:
+                if is_timer_job(job):
+                    checks.append(
+                        Check("launchd", WARN,
+                              f"{plist} runs a tick on a timer instead of the daemon; "
+                              "re-run `chargehand install --load`")
+                    )
                 checks.extend(job_checks(config, job))
     else:
         checks.append(
-            Check("launchd", WARN, "not macOS: schedule `chargehand tick` with your own timer")
+            Check("launchd", WARN,
+                  "not macOS: run `chargehand serve` under your own service manager")
         )
+    checks.extend(daemon_checks(config))
     return checks
 
 

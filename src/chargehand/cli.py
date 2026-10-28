@@ -1,10 +1,12 @@
-"""The control surface: a CLI, reached over SSH. There is no server.
+"""The control surface: a CLI on the machine that runs chargehand.
 
 Two rules shape this module. A mutating command never calls a runtime, git, or a
 tracker itself — it records a request and lets a tick apply it, so a cancel cannot
-race a launch in progress. And nothing that originated outside chargehand is printed
-without going through :mod:`chargehand.sanitize`; issue titles and agent output are
-attacker-influenced, so they stay out of default output entirely.
+race a launch in progress. The daemon (`chargehand serve`) runs those ticks when it
+answers; without one, the command runs a tick itself under the tick lock. And nothing
+that originated outside chargehand is printed without going through
+:mod:`chargehand.sanitize`; issue titles and agent output are attacker-influenced, so
+they stay out of default output entirely.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from chargehand import __version__, install, paths, sanitize, trackers
+from chargehand import __version__, install, paths, sanitize, serve, trackers
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
@@ -28,7 +30,7 @@ from chargehand.errors import ChargehandError, ConfigError, TickBusy
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
-from chargehand.tick import REQUEST_MESSAGE_LIMIT, Runner, tick_lock
+from chargehand.tick import REQUEST_MESSAGE_LIMIT, Runner, TickReport, tick_lock
 from chargehand.trackers import Status
 
 DESCRIPTION = (
@@ -40,8 +42,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REFUSED = 3
 
-# How long a control command waits for the scheduled job to apply its request, and how
-# often it kick-starts the job meanwhile.
+# How long a control command waits for a timer job, from before the daemon, to apply its
+# request, and how often it kick-starts the job meanwhile.
 SCHEDULED_JOB_WAIT_SECS = 30.0
 KICKSTART_RETRY_SECS = 2.0
 
@@ -164,22 +166,17 @@ def _worker_dict(
     return payload
 
 
-def build_status(
-    config: MachineConfig,
-    ledger: Ledger,
-    *,
-    verbose: bool = False,
-    include_queue: bool = True,
-) -> dict[str, object]:
-    now = time.time()
-    workers = ledger.live_workers()
-    runner = _runner(config, ledger)
+def list_sessions(runner: Runner, *, verbose: bool = False) -> serve.Sessions:
+    """The sessions of every runtime, as `status` prints them, and the listing errors.
 
+    A runner that has just ticked answers from the listing that tick made.
+    """
+    now = time.time()
     sessions_payload: list[dict[str, object]] = []
     session_errors: list[str] = []
     for runtime_name in runner.runtime_names():
         try:
-            sessions = runner.runtime(runtime_name).list_sessions()
+            sessions = runner.sessions(runtime_name)
         except ChargehandError as exc:
             session_errors.append(f"{runtime_name}: {exc}")
             continue
@@ -196,7 +193,36 @@ def build_status(
                 entry["name"] = sanitize.one_line(session.name or "", limit=64)
                 entry["waiting_for"] = sanitize.one_line(session.waiting_for or "", limit=120)
             sessions_payload.append(entry)
-    session_error = "; ".join(session_errors) or None
+    return sessions_payload, "; ".join(session_errors) or None
+
+
+def _daemon_payload(config: MachineConfig) -> dict[str, object]:
+    health = serve.daemon_for(config, timeout=1.0)
+    if health is None:
+        return {"answers": False, "port": config.serve.port}
+    return {"answers": True, **health}
+
+
+def build_status(
+    config: MachineConfig,
+    ledger: Ledger,
+    *,
+    verbose: bool = False,
+    include_queue: bool = True,
+    sessions: serve.Sessions | None = None,
+    daemon: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """The status payload.
+
+    The daemon passes the sessions its last tick listed and its own health, so a request
+    for its state lists no sessions and sends no request to itself.
+    """
+    now = time.time()
+    workers = ledger.live_workers()
+    runner = _runner(config, ledger)
+    sessions_payload, session_error = (
+        sessions if sessions is not None else list_sessions(runner, verbose=verbose)
+    )
 
     repositories_payload = []
     for repository in config.repositories:
@@ -262,6 +288,7 @@ def build_status(
             "launchd_loaded": install.is_loaded(),
             "poll_interval_secs": config.poll_interval_secs,
         },
+        "daemon": daemon if daemon is not None else _daemon_payload(config),
         "runner": {
             "paused": ledger.is_paused(),
             "paused_repositories": ledger.paused_repositories(),
@@ -372,14 +399,49 @@ def cmd_tick(args: argparse.Namespace) -> int:
     if args.json:
         _emit_json(report.as_dict())
     else:
-        stamp = _stamp()
-        for field in TICK_FIELDS:
-            for entry in getattr(report, field):
-                _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
-                       f"{sanitize.one_line(str(entry), limit=200)}")
-        if not any(getattr(report, f) for f in TICK_FIELDS):
-            _print(f"{stamp} nothing to do")
+        _print_report(report)
     return EXIT_ERROR if report.errors else EXIT_OK
+
+
+def _print_report(report: TickReport, *, quiet: bool = False) -> None:
+    """One stamped line per entry. *quiet* leaves out the line for a tick that did nothing."""
+    stamp = _stamp()
+    for field in TICK_FIELDS:
+        for entry in getattr(report, field):
+            _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
+                   f"{sanitize.one_line(str(entry), limit=200)}")
+    if report.stopped_before:
+        _print(f"{stamp} stopped before phase {report.stopped_before}")
+    elif not quiet and not any(getattr(report, f) for f in TICK_FIELDS):
+        _print(f"{stamp} nothing to do")
+    sys.stdout.flush()
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    # The job appends this output to its log, so every line is stamped as a tick's is.
+    try:
+        config = _load_config(args)
+        daemon = serve.Daemon(
+            config,
+            load_config=lambda: _load_config(args),
+            runner_factory=_runner,
+            status=lambda cfg, ledger, sessions, health: build_status(
+                cfg, ledger, include_queue=False, sessions=sessions, daemon=health
+            ),
+            sessions=list_sessions,
+            # A tick every minute that did nothing would fill the log with one line each.
+            report=lambda report: _print_report(report, quiet=True),
+        )
+        daemon.start()
+    except ChargehandError as exc:
+        print(f"{_stamp()} chargehand: {sanitize.one_line(str(exc), limit=500)}", file=sys.stderr)
+        return EXIT_ERROR
+    _print(f"{_stamp()} serving on http://{serve.HOST}:{daemon.port}, "
+           f"a tick every {daemon.interval_secs}s")
+    sys.stdout.flush()
+    code = daemon.run()
+    _print(f"{_stamp()} stopped")
+    return code
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -497,8 +559,19 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
             _print(f"recorded: {_described(kind, target)}")
             return EXIT_OK
 
-        # Prefer the scheduled job when it is loaded: it runs inside the GUI session,
-        # where the keychain and Claude Code's credentials are reachable.
+        # The daemon of this ledger looks for new requests about once a second and ticks
+        # at once. While it answers, this command never ticks itself: the daemon is the
+        # one writer, and its tick may be running a long launch step right now.
+        if serve.daemon_for(config) is not None:
+            applied = _wait_for_request(ledger, request_id, args.wait)
+            if applied is None or applied["applied_at"] is None:
+                _print(f"recorded: {_described(kind, target)}; the daemon will apply it")
+                return EXIT_OK
+            return _report_request(applied, kind, target)
+
+        # A timer job from before the daemon: prefer it when it is loaded, because it
+        # runs inside the GUI session, where the keychain and Claude Code's credentials
+        # are reachable.
         #
         # Only when this process is the instance that job runs, though. The plist carries
         # no path overrides, so a second instance started with CHARGEHAND_CONFIG or
@@ -520,6 +593,10 @@ def _request(args: argparse.Namespace, kind: str, target: str | None = None, **e
     if applied is None or applied["applied_at"] is None:
         _print(f"recorded: {_described(kind, target)} — the next tick will apply it")
         return EXIT_OK
+    return _report_request(applied, kind, target)
+
+
+def _report_request(applied: dict, kind: str, target: str | None) -> int:
     message = sanitize.one_line(applied["message"] or "", limit=REQUEST_MESSAGE_LIMIT)
     if applied["ok"]:
         _print(f"{_described(kind, target)}: {message}")
@@ -570,21 +647,23 @@ def cmd_discard(args: argparse.Namespace) -> int:
 def cmd_install(args: argparse.Namespace) -> int:
     if sys.platform != "darwin":
         print("install writes a launchd LaunchAgent, which is macOS only. On other "
-              "platforms schedule `chargehand tick` with your own timer.", file=sys.stderr)
+              "platforms run `chargehand serve` under your own service manager.", file=sys.stderr)
         return EXIT_ERROR
     config = _load_config(args)
-    plist = install.write_plist(interval_secs=args.interval or config.poll_interval_secs)
+    if args.interval:
+        print("warning: --interval is ignored; the daemon ticks every "
+              "[serve] tick_interval_secs", file=sys.stderr)
+    plist = install.write_plist()
     _print(f"wrote {plist}")
     for check in install.job_checks(config, install.installed_job(plist) or {}):
         if check.status in (install.WARN, install.FAIL):
             print(f"warning: {check.detail}", file=sys.stderr)
     if not args.load:
         _print("")
-        _print("Not loaded. To start it:")
+        _print("Not loaded. To start it, after unloading a timer job of this label:")
         _print(f"  launchctl bootstrap {install.domain()} {plist}")
-        _print(f"  launchctl kickstart {install.service_target()}   # run a tick now")
         _print("")
-        _print("Re-run with --load to do that now.")
+        _print("Re-run with --load to do both now.")
         return EXIT_OK
     if install.is_loaded():
         install.bootout()
@@ -774,9 +853,13 @@ def build_parser() -> argparse.ArgumentParser:
     discard.add_argument("--force", action="store_true", help="discard even with unpushed commits")
     _add_request_flags(discard)
 
-    install_cmd = add("install", cmd_install, "write the launchd job that runs the tick")
-    install_cmd.add_argument("--load", action="store_true", help="also bootstrap it now")
-    install_cmd.add_argument("--interval", type=int, help="seconds between ticks")
+    add("serve", cmd_serve, "run the daemon: the tick on a timer and the loopback API")
+
+    install_cmd = add("install", cmd_install, "write the launchd job that runs the daemon")
+    install_cmd.add_argument("--load", action="store_true",
+                             help="also bootstrap it now, in place of a loaded job of this label")
+    install_cmd.add_argument("--interval", type=int,
+                             help="ignored; set tick_interval_secs in [serve]")
 
     uninstall = add("uninstall", cmd_uninstall, "unload the launchd job")
     uninstall.add_argument("--remove-plist", action="store_true")
