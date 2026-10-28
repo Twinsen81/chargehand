@@ -885,6 +885,21 @@ def test_an_unchanged_notification_list_is_no_error_in_the_tick(ticking, gh):
     assert any(call[:2] == ["api", "-i"] for call in gh.calls[-2:])
 
 
+def test_a_review_request_without_a_thread_is_one_tick_warning_a_day(ticking, gh):
+    gh.add_pull(PR, updated_at=iso(time.time() - 3600))
+
+    report = ticking.tick()
+
+    assert report.errors == []
+    warnings = [w for w in report.warnings if "no notification thread" in w]
+    assert len(warnings) == 1 and PR_KEY in warnings[0]
+    assert ticking.ledger.live_worker_for(PR_KEY) is None
+
+    # The check runs once a day, so the next tick does not warn again.
+    report = ticking.next_tick()
+    assert not any("no notification thread" in w for w in report.warnings)
+
+
 @pytest.mark.parametrize("cursor", ["not json", "[]", '{"poll_interval": "soon"}'])
 def test_an_unreadable_cursor_starts_again(source, gh, cursor):
     gh.add_pull(PR)
