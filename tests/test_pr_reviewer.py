@@ -187,7 +187,7 @@ def test_the_shipped_reviewer_posts_every_body_from_a_file():
     role = Role.parse("pr-reviewer", tomllib.loads(role_file.read_text("utf-8")))
 
     for text in (agent, role.prompt):
-        assert "/tmp/gh-body/" in text
+        assert "mkdir -p -m 700 ~/.cache/gh-body" in text
         assert "--body-file" in text and "-F body=@<file>" in text
         assert "Write tool" in text
     assert "gh pr comment <url> --body-file <file>" in agent
@@ -197,8 +197,13 @@ def test_the_shipped_reviewer_posts_every_body_from_a_file():
     assert "Bash(gh pr comment *--body-file *)" in role.allow
     assert "Bash(gh pr review * --comment --body-file *)" in role.allow
     assert "Bash(gh pr comment *)" not in role.allow
-    assert "Edit(//tmp/gh-body/**)" in role.allow
-    assert "Edit(//private/tmp/gh-body/**)" in role.allow
+    assert "Bash(mkdir -p -m 700 ~/.cache/gh-body)" in role.allow
+    assert "Edit(~/.cache/gh-body/**)" in role.allow
+    assert "delete the file" in role.prompt and "Delete the file" in agent
+    # The agent file names the session's tools, so the Write tool must be one of them.
+    frontmatter = agent.split("---\n")[1]
+    (tools,) = [line for line in frontmatter.splitlines() if line.startswith("tools:")]
+    assert "Write" in [t.strip() for t in tools.removeprefix("tools:").split(",")]
 
 
 def test_the_shipped_reviewer_says_what_each_event_kind_in_a_wake_asks_for():

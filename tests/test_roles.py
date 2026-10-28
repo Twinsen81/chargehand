@@ -146,11 +146,12 @@ def test_the_shipped_implementer_posts_bodies_from_a_file():
     path = paths.templates_dir() / "roles" / "implementer.toml"
     shipped = Role.parse("implementer", tomllib.loads(path.read_text(encoding="utf-8")))
 
-    assert "/tmp/gh-body/" in shipped.prompt and "Write tool" in shipped.prompt
+    assert "mkdir -p -m 700 ~/.cache/gh-body" in shipped.prompt
+    assert "Write tool" in shipped.prompt and "delete the file" in shipped.prompt
     assert "--body-file" in shipped.prompt and "-F body=@<file>" in shipped.prompt
     assert shipped.allow == (
-        "Edit(//tmp/gh-body/**)",
-        "Edit(//private/tmp/gh-body/**)",
+        "Bash(mkdir -p -m 700 ~/.cache/gh-body)",
+        "Edit(~/.cache/gh-body/**)",
         "Bash(gh pr create *--body-file *)",
         "Bash(gh pr comment *--body-file *)",
     )

@@ -435,10 +435,14 @@ def test_the_battery_refuses_an_inline_body_that_names_bypass_permissions(tmp_pa
     assert first_matching_rule(LAUNCH_RULES, inline.command) == "Bash(*bypassPermissions*)"
 
 
-def test_the_body_directory_is_absolute_and_outside_every_checkout():
-    # Relative to nothing, so a body file never lands in a worktree or an item checkout.
-    assert BODY_DIR.startswith("/tmp/")
+def test_the_body_directory_is_per_user_and_outside_every_checkout():
+    # Under the home directory, so a body file never lands in a worktree or an item
+    # checkout, and other users do not share it.
+    assert BODY_DIR.startswith("~/")
     for role in ("pr-reviewer", "implementer"):
         allow = _shipped_role(role).allow
-        assert f"Edit(/{BODY_DIR}/**)" in allow, role
-        assert f"Edit(//private{BODY_DIR}/**)" in allow, role
+        assert f"Edit({BODY_DIR}/**)" in allow, role
+        assert f"Bash(mkdir -p -m 700 {BODY_DIR})" in allow, role
+        assert first_matching_rule(LAUNCH_RULES, f"mkdir -p -m 700 {BODY_DIR}") is None
+        # No rule deletes: a wildcard would also match a second path.
+        assert not any(rule.startswith("Bash(rm") for rule in allow), role

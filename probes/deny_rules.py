@@ -62,7 +62,7 @@ LAUNCH_RULES = DEFAULT_DENY_RULES + serve_deny_rules(DEFAULT_SERVE_PORT)
 CONTROL = "probe-control"
 
 # Where the shipped role templates tell a worker to write the bodies it posts.
-BODY_DIR = "/tmp/gh-body"
+BODY_DIR = "~/.cache/gh-body"
 PR = "https://github.com/o/r/pull/1"
 
 BLOCKED = "blocked"
