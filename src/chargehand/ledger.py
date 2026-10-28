@@ -29,24 +29,27 @@ from typing import Any
 from chargehand import paths
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
 # ended without a question and the worker waits for events. `queued`: events wait in its
 # inbox for a wake that admission held back. `blocked` needs the operator, and delivery
-# never wakes it: a stop and resume would discard an open prompt.
+# never wakes it: a stop and resume would discard an open prompt. `parked`: a usage limit
+# ended the turn; it waits for the reset, and neither delivery, the watchdog nor the
+# session diff moves it.
 LAUNCHING = "launching"
 RUNNING = "running"
 IDLE = "idle"
 QUEUED = "queued"
 BLOCKED = "blocked"
 PAUSED = "paused"
+PARKED = "parked"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
-NON_TERMINAL = (LAUNCHING, RUNNING, IDLE, QUEUED, BLOCKED, PAUSED)
+NON_TERMINAL = (LAUNCHING, RUNNING, IDLE, QUEUED, BLOCKED, PAUSED, PARKED)
 TERMINAL = (DONE, FAILED, CANCELLED)
 WORKER_STATES = NON_TERMINAL + TERMINAL
 
@@ -118,6 +121,11 @@ _WORKER_COLUMNS = (
     "updated_at",
     "finished_at",
     "owns_label",
+    "reset_at",
+    "last_hook",
+    "last_hook_at",
+    "last_answer",
+    "transcript_path",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -161,7 +169,15 @@ CREATE TABLE IF NOT EXISTS workers (
     -- What this worker shows its state on, one of LABEL_OWNERS: 0 nothing, 1 the
     -- tracker's queue label (the queue label started it; every worker before version 3
     -- was started that way), 2 its primary item on the [[source]] that started it.
-    owns_label       INTEGER NOT NULL DEFAULT 1
+    owns_label       INTEGER NOT NULL DEFAULT 1,
+    -- When a parked worker's usage limit resets, as the failure said; NULL when unknown.
+    reset_at         REAL,
+    -- The last hook its session posted, when, and what it carried. Untrusted text,
+    -- sanitized and capped when stored.
+    last_hook        TEXT,
+    last_hook_at     REAL,
+    last_answer      TEXT,
+    transcript_path  TEXT
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -266,6 +282,19 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_pending ON events (start_pending);
 
+-- A permission prompt a session reported. The session keeps its own dialog; the row is
+-- resolved when the worker leaves `blocked`. The tool input is untrusted text.
+CREATE TABLE IF NOT EXISTS permission_prompts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id   INTEGER NOT NULL REFERENCES workers (id),
+    tool_name   TEXT    NOT NULL,
+    tool_input  TEXT    NOT NULL DEFAULT '',
+    created_at  REAL    NOT NULL,
+    resolved_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS permission_prompts_open ON permission_prompts (worker_id, resolved_at);
+
 -- Where each source's last poll stopped.
 CREATE TABLE IF NOT EXISTS cursors (
     source     TEXT PRIMARY KEY,
@@ -310,6 +339,19 @@ DROP INDEX IF EXISTS workers_one_live_per_role_item;
 {_SCHEMA}
 """
 
+# Version 4 adds the `parked` state, what the session hooks report, and the permission
+# prompts. It only adds, like version 3; the index is created again because `parked` is
+# a live state.
+_MIGRATE_V3_TO_V4 = f"""
+ALTER TABLE workers ADD COLUMN reset_at REAL;
+ALTER TABLE workers ADD COLUMN last_hook TEXT;
+ALTER TABLE workers ADD COLUMN last_hook_at REAL;
+ALTER TABLE workers ADD COLUMN last_answer TEXT;
+ALTER TABLE workers ADD COLUMN transcript_path TEXT;
+DROP INDEX IF EXISTS workers_one_live_per_role_item;
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -345,6 +387,11 @@ class Worker:
     updated_at: float
     finished_at: float | None
     owns_label: int = 1
+    reset_at: float | None = None
+    last_hook: str | None = None
+    last_hook_at: float | None = None
+    last_answer: str | None = None
+    transcript_path: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -373,6 +420,16 @@ class SessionRecord:
     kind: str
     started_at: float
     ended_at: float | None
+
+
+@dataclass(frozen=True)
+class PermissionPrompt:
+    id: int
+    worker_id: int
+    tool_name: str
+    tool_input: str
+    created_at: float
+    resolved_at: float | None
 
 
 @dataclass(frozen=True)
@@ -483,7 +540,12 @@ class Ledger:
         # old ledger as it was, instead of a renamed table that the next open cannot rename.
         # Every statement of the schema is idempotent: the version 1 copy includes the
         # whole schema, and a version 2 ledger only gains the tables it lacks.
-        script = _MIGRATE_V1_TO_V2 if version == 1 else _MIGRATE_V2_TO_V3 if version == 2 else _SCHEMA
+        # A version 2 file takes both later steps; the version 1 copy includes the whole schema.
+        script = {
+            1: _MIGRATE_V1_TO_V2,
+            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4,
+            3: _MIGRATE_V3_TO_V4,
+        }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
                 f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;"
@@ -645,6 +707,32 @@ class Ledger:
         """Write *changes* to the worker's row and return the updated value."""
         if not changes:
             return worker
+        changes = self._checked(changes)
+        assignments = ", ".join(f"{column} = ?" for column in changes)
+        self._conn.execute(
+            f"UPDATE workers SET {assignments} WHERE id = ?",
+            (*changes.values(), worker.id),
+        )
+        return replace(worker, **changes)
+
+    def update_if_unchanged(self, worker: Worker, **changes: Any) -> Worker | None:
+        """Like :meth:`update`, but only while the row has *worker*'s state and last hook.
+
+        None when the state changed, or a session hook was applied, since *worker* was
+        read: the daemon applies hooks on its request threads while the tick runs.
+        """
+        if not changes:
+            return worker
+        changes = self._checked(changes)
+        assignments = ", ".join(f"{column} = ?" for column in changes)
+        cursor = self._conn.execute(
+            f"UPDATE workers SET {assignments} WHERE id = ? AND state = ? AND last_hook_at IS ?",
+            (*changes.values(), worker.id, worker.state, worker.last_hook_at),
+        )
+        return replace(worker, **changes) if cursor.rowcount else None
+
+    @staticmethod
+    def _checked(changes: dict[str, Any]) -> dict[str, Any]:
         unknown = set(changes) - set(_WORKER_COLUMNS)
         if unknown:
             raise ValueError(f"unknown worker column(s): {', '.join(sorted(unknown))}")
@@ -653,12 +741,52 @@ class Ledger:
         changes.setdefault("updated_at", time.time())
         if changes.get("state") in TERMINAL and "finished_at" not in changes:
             changes["finished_at"] = changes["updated_at"]
-        assignments = ", ".join(f"{column} = ?" for column in changes)
-        self._conn.execute(
-            f"UPDATE workers SET {assignments} WHERE id = ?",
-            (*changes.values(), worker.id),
+        return changes
+
+    def live_worker_by_session_uuid(self, session_uuid: str) -> Worker | None:
+        row = self._conn.execute(
+            f"SELECT * FROM workers WHERE session_uuid = ? AND state IN "
+            f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY id DESC LIMIT 1",
+            (session_uuid, *NON_TERMINAL),
+        ).fetchone()
+        return _row_to_worker(row) if row else None
+
+    # ----- permission prompts -----------------------------------------------
+
+    def record_permission_prompt(
+        self, worker: Worker, *, tool_name: str, tool_input: str, now: float | None = None
+    ) -> int:
+        cursor = self._conn.execute(
+            "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (worker.id, tool_name, tool_input, time.time() if now is None else now),
         )
-        return replace(worker, **changes)
+        return int(cursor.lastrowid)
+
+    def open_permission_prompts(self, worker: Worker | None = None) -> list[PermissionPrompt]:
+        """The prompts not yet resolved, of *worker* or of every live worker."""
+        if worker is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM permission_prompts WHERE worker_id = ? AND resolved_at IS NULL "
+                "ORDER BY id",
+                (worker.id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT p.* FROM permission_prompts p JOIN workers w ON w.id = p.worker_id "
+                f"WHERE p.resolved_at IS NULL AND w.state IN "
+                f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY p.id",
+                NON_TERMINAL,
+            ).fetchall()
+        return [PermissionPrompt(**dict(row)) for row in rows]
+
+    def resolve_permission_prompts(self, worker: Worker, *, now: float | None = None) -> int:
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET resolved_at = ? "
+            "WHERE worker_id = ? AND resolved_at IS NULL",
+            (time.time() if now is None else now, worker.id),
+        )
+        return cursor.rowcount
 
     # ----- sessions ---------------------------------------------------------
 
@@ -991,6 +1119,7 @@ __all__ = [
     "SessionRecord",
     "Subscription",
     "InboxEntry",
+    "PermissionPrompt",
     "Ledger",
     "open_ledger",
     "summarize",
