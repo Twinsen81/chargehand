@@ -20,8 +20,12 @@ from chargehand.config import DEFAULT_DENY_RULES, serve_deny_rules
 from deny_rules import (
     ALLOWED,
     BLOCKED,
+    BODY_DIR,
     INCONCLUSIVE,
     LAUNCH_RULES,
+    PR,
+    RAN,
+    REFUSED,
     Attempt,
     Outcome,
     battery,
@@ -83,7 +87,7 @@ def test_every_attempt_in_the_battery_is_covered_or_is_the_control(tmp_path):
         if attempt.expect_blocked:
             assert matched, f"no rule covers {attempt.name}: {attempt.command}"
         else:
-            assert matched is None, f"the control attempt is denied by {matched}"
+            assert matched is None, f"{attempt.name} is denied by {matched}"
 
 
 def test_the_control_survives_a_scratch_path_that_mentions_the_tool(tmp_path):
@@ -210,6 +214,12 @@ def test_a_verdict_needs_both_arms():
     assert _outcome(without=False, with_=False).verdict == INCONCLUSIVE
 
 
+def test_a_form_that_must_pass_fails_when_only_the_rules_refuse_it():
+    assert _outcome(without=True, with_=True, expect_blocked=False).verdict == RAN
+    assert _outcome(without=True, with_=False, expect_blocked=False).verdict == REFUSED
+    assert _outcome(without=False, with_=False, expect_blocked=False).verdict == INCONCLUSIVE
+
+
 def test_the_probe_ships_outside_the_wheel():
     """It drives a real Claude Code install, so it is a repository tool, not a feature."""
     root = Path(__file__).resolve().parent.parent
@@ -329,11 +339,106 @@ def test_the_port_rules_pass_their_own_validation():
     ),
 )
 def test_a_worker_may_post_a_comment_that_carries_the_marker(command):
-    # Workers post with the body on the command line; a marker that the rules refuse
-    # would leave every worker unable to post at all.
+    # Workers post from a body file, but a body that still ends up on a command line
+    # must not be refused for its marker alone.
     assert first_matching_rule(DEFAULT_DENY_RULES, command) is None
 
 
 def test_the_first_marker_spelling_is_refused_on_a_command_line():
     # Why the marker changed: the name followed by a space is what the rules refuse.
     assert first_matching_rule(DEFAULT_DENY_RULES, 'gh pr comment 1 --body "ok <!-- chargehand -->"')
+
+
+# ----- posting from a body file ---------------------------------------------
+
+
+def _shipped_role(name: str):
+    import tomllib
+
+    from chargehand import paths
+    from chargehand.roles import Role
+
+    text = (paths.templates_dir() / "roles" / f"{name}.toml").read_text(encoding="utf-8")
+    return Role.parse(name, tomllib.loads(text))
+
+
+@pytest.mark.parametrize(
+    "role,command",
+    (
+        ("pr-reviewer", f"gh pr comment {PR} --body-file {BODY_DIR}/o-r-1-1.md"),
+        ("pr-reviewer", f"gh pr review {PR} --comment --body-file {BODY_DIR}/o-r-1-2.md"),
+        ("implementer", f"gh pr comment {PR} --body-file {BODY_DIR}/item-1.md"),
+        ("implementer", f"gh pr create --base main --title 'Fix' --body-file {BODY_DIR}/item-2.md"),
+        ("implementer", f"gh pr create --body-file {BODY_DIR}/item-3.md --title 'Fix'"),
+    ),
+)
+def test_the_body_file_forms_pass_the_deny_rules_and_match_the_roles_allow_rules(role, command):
+    assert first_matching_rule(LAUNCH_RULES, command) is None
+    assert first_matching_rule(_shipped_role(role).allow, command), command
+
+
+def test_the_body_file_forms_in_the_battery_pass_every_deny_rule(tmp_path):
+    forms = [a for a in battery(tmp_path) if a.name.startswith("body-file-")]
+
+    assert {a.name for a in forms} == {
+        "body-file-comment", "body-file-review", "body-file-create", "body-file-api",
+    }
+    for attempt in forms:
+        assert not attempt.expect_blocked
+        assert first_matching_rule(LAUNCH_RULES, attempt.command) is None, attempt.command
+
+
+def test_a_reply_through_gh_api_passes_the_deny_rules_and_no_allow_rule():
+    """The reply goes to the classifier: no role allows `gh api`."""
+    command = f"gh api repos/o/r/pulls/1/comments/2/replies -F body=@{BODY_DIR}/o-r-1-3.md"
+
+    assert first_matching_rule(LAUNCH_RULES, command) is None
+    for role in ("pr-reviewer", "implementer"):
+        assert first_matching_rule(_shipped_role(role).allow, command) is None
+
+
+def test_a_reply_rule_for_gh_api_would_also_allow_a_merge():
+    """Why the reviewer has no `gh api` rule, not even one for the reply endpoint.
+
+    A `*` matches spaces too, so the endpoint pattern stretches over a different call
+    that carries the rest of the pattern in its arguments.
+    """
+    reply_rule = ("Bash(gh api repos/*/comments/*/replies -F body=@*)",)
+    merge = (
+        "gh api repos/o/r/pulls/1/merge -X PUT -f note=x/comments/2/replies "
+        f"-F body=@{BODY_DIR}/x.md"
+    )
+
+    assert first_matching_rule(reply_rule, merge)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "This changes the bypassPermissions rule.",
+        "Run claude stop on the old session first.",
+        "The chargehand status output is wrong here.",
+        "Keep the dangerously-skip-permissions flag out of the launcher.",
+    ),
+)
+def test_an_inline_body_that_names_a_denied_word_is_refused(body):
+    """Why workers post from a file: the rules match the whole command text, the body
+    included, and a file's content never reaches them."""
+    assert first_matching_rule(LAUNCH_RULES, f"gh pr comment {PR} --body '{body}'")
+    assert first_matching_rule(LAUNCH_RULES, f"gh pr comment {PR} --body-file {BODY_DIR}/x.md") is None
+
+
+def test_the_battery_refuses_an_inline_body_that_names_bypass_permissions(tmp_path):
+    (inline,) = [a for a in battery(tmp_path) if a.name == "inline-body"]
+
+    assert inline.expect_blocked and "bypassPermissions" in inline.command
+    assert first_matching_rule(LAUNCH_RULES, inline.command) == "Bash(*bypassPermissions*)"
+
+
+def test_the_body_directory_is_absolute_and_outside_every_checkout():
+    # Relative to nothing, so a body file never lands in a worktree or an item checkout.
+    assert BODY_DIR.startswith("/tmp/")
+    for role in ("pr-reviewer", "implementer"):
+        allow = _shipped_role(role).allow
+        assert f"Edit(/{BODY_DIR}/**)" in allow, role
+        assert f"Edit(//private{BODY_DIR}/**)" in allow, role
