@@ -217,6 +217,12 @@ def battery(scratch: Path) -> tuple[Attempt, ...]:
             "a reply in a review thread, posted from a file",
             expect_blocked=False,
         ),
+        Attempt(
+            "body-file-api-review",
+            f"gh api repos/o/r/pulls/1/reviews --input {BODY_DIR}/o-r-1-4.json",
+            "a review with inline comments, sent as a request in a file",
+            expect_blocked=False,
+        ),
     )
 
 

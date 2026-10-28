@@ -395,9 +395,10 @@ post it with `--body-file` (`gh pr create`, `gh pr comment`, `gh pr review`) or
 `-F body=@<file>` (`gh api`), and to delete it after the post. The file's content never
 reaches the rules. The directory is outside every checkout, so a body file cannot be
 committed and does not count as untracked work for garbage collection or the wake checks.
-It is per user, and the worker creates it with mode 0700, so another account on the
-machine cannot read a draft or replace it before the post; a shared directory under `/tmp`
-would allow both. The roles' allow rules let the worker create the directory and write
+It is per user, and the worker creates it with mode 0700 before its first write, so
+another account on the machine cannot read a draft or replace it before the post; a shared
+directory under `/tmp` would allow both. `mkdir -m` does not change a directory that
+already exists, so a directory created another way keeps its own mode. The roles' allow rules let the worker create the directory and write
 there without a prompt, and name only the `--body-file` forms of the `gh` commands. The
 reviewer's agent file lists the Write tool for this, and says to use it for nothing else.
 Deleting a file has no rule, and `gh api` has none either, not even for the reply

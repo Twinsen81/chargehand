@@ -382,16 +382,23 @@ def test_the_body_file_forms_in_the_battery_pass_every_deny_rule(tmp_path):
 
     assert {a.name for a in forms} == {
         "body-file-comment", "body-file-review", "body-file-create", "body-file-api",
+        "body-file-api-review",
     }
     for attempt in forms:
         assert not attempt.expect_blocked
         assert first_matching_rule(LAUNCH_RULES, attempt.command) is None, attempt.command
 
 
-def test_a_reply_through_gh_api_passes_the_deny_rules_and_no_allow_rule():
-    """The reply goes to the classifier: no role allows `gh api`."""
-    command = f"gh api repos/o/r/pulls/1/comments/2/replies -F body=@{BODY_DIR}/o-r-1-3.md"
-
+@pytest.mark.parametrize(
+    "command",
+    (
+        f"gh api repos/o/r/pulls/1/comments/2/replies -F body=@{BODY_DIR}/o-r-1-3.md",
+        f"gh api repos/o/r/pulls/1/reviews --input {BODY_DIR}/o-r-1-4.json",
+    ),
+)
+def test_a_gh_api_post_from_a_file_passes_the_deny_rules_and_no_allow_rule(command):
+    """A reply or a review with inline comments goes to the classifier: no role allows
+    `gh api`."""
     assert first_matching_rule(LAUNCH_RULES, command) is None
     for role in ("pr-reviewer", "implementer"):
         assert first_matching_rule(_shipped_role(role).allow, command) is None
