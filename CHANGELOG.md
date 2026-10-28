@@ -76,6 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `chargehand statusline -- '<command>'`, a status line wrapper that writes the
+  subscription's five-hour and weekly usage windows to `usage_file` in `[serve]` and then
+  runs your own status line command unchanged; `/api/state` and `status --json` show the
+  reading, unknown when it is older than 30 minutes.
 - A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
   pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
   pull request head from a separate checkout, `{item_checkout}`, so the author's Claude

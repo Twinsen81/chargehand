@@ -86,6 +86,22 @@ the token file has mode 0600. The daemon appends timestamped lines to
 `~/Library/Logs/chargehand.log`. To try the daemon without the job, run `chargehand serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
+To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
+status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
+the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then
+runs your command with the same input, so your status line does not change. chargehand
+does not edit the settings file for you:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "chargehand statusline -- '~/.claude/statusline.sh'"
+}
+```
+
+`/api/state` then shows each window's percentage and reset time; a reading older than
+30 minutes counts as unknown.
+
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).
 chargehand does not call it and needs no setting for it.
