@@ -46,5 +46,18 @@ You post as the owner of this machine, and chargehand wakes you for new comments
 pull request. The line above is how it knows that a comment is yours, so a comment
 without it wakes you again.
 
+Never put a body on a command line. The rules this session runs under refuse a command
+whose text names certain words, and a review of a change to those words names them.
+Write each comment, review or reply body with the Write tool to a new file under
+`/tmp/gh-body/`, with a name of its own such as `/tmp/gh-body/<owner>-<repo>-<number>-1.md`.
+Do not write it with a shell command such as `cat` or `echo`: that puts the text on the
+command line again. The file holds the whole body, the line above included. Then post the file:
+
+- a comment: `gh pr comment <url> --body-file <file>`
+- a review without inline comments: `gh pr review <url> --comment --body-file <file>`
+- a reply in a review thread: `gh api <endpoint> -F body=@<file>`
+- a review with inline comments: `gh api <endpoint> --input <file>`, with the request as
+  JSON in the file
+
 Never approve, merge or close the pull request, and never push to its branch. End your
 turn when nothing is left to do.

@@ -179,6 +179,28 @@ def test_the_shipped_agent_file_tells_the_worker_to_mark_its_comments():
     assert AUTHORSHIP_MARKER in text
 
 
+def test_the_shipped_reviewer_posts_every_body_from_a_file():
+    """A body on the command line that names a denied word is refused; a file is not read
+    by the rules."""
+    agent = (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text(encoding="utf-8")
+    role_file = paths.templates_dir() / "roles" / "pr-reviewer.toml"
+    role = Role.parse("pr-reviewer", tomllib.loads(role_file.read_text("utf-8")))
+
+    for text in (agent, role.prompt):
+        assert "/tmp/gh-body/" in text
+        assert "--body-file" in text and "-F body=@<file>" in text
+        assert "Write tool" in text
+    assert "gh pr comment <url> --body-file <file>" in agent
+    assert "gh pr review <url> --comment --body-file <file>" in agent
+    # Only the body-file forms post without the classifier, and the body directory is
+    # writable without a prompt.
+    assert "Bash(gh pr comment *--body-file *)" in role.allow
+    assert "Bash(gh pr review * --comment --body-file *)" in role.allow
+    assert "Bash(gh pr comment *)" not in role.allow
+    assert "Edit(//tmp/gh-body/**)" in role.allow
+    assert "Edit(//private/tmp/gh-body/**)" in role.allow
+
+
 def test_the_shipped_reviewer_says_what_each_event_kind_in_a_wake_asks_for():
     agent = (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text(encoding="utf-8")
     role_file = paths.templates_dir() / "roles" / "pr-reviewer.toml"
