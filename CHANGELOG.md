@@ -211,6 +211,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `github` source keeps the notification list's ETag and asks with `If-None-Match`,
+  and an empty list, which has no `Last-Modified`, now ends the first poll too, so later
+  polls read threads you already opened. `doctor`, and the source once a day, warn about a
+  review request that has no notification thread, which means GitHub's "On GitHub" setting
+  for participating notifications is off.
 - One notification thread whose pull request `gh` cannot read (a server error, a timeout)
   no longer fails the whole `github` source on every tick. The thread is logged and
   skipped, the other threads and the followed pull requests arrive, and the list keeps its
