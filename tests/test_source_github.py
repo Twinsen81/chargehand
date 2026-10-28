@@ -928,14 +928,17 @@ def test_an_unchanged_notification_list_is_no_error_in_the_tick(ticking, gh):
     assert any(call[:2] == ["api", "-i"] for call in gh.calls[-2:])
 
 
-def test_a_review_request_without_a_thread_is_one_tick_warning_a_day(ticking, gh):
+def test_a_review_request_without_a_thread_is_one_tick_warning_a_day(ticking, gh, caplog):
     gh.add_pull(PR, updated_at=iso(time.time() - 3600))
 
-    report = ticking.tick()
+    with caplog.at_level("DEBUG"):
+        report = ticking.tick()
 
     assert report.errors == []
     warnings = [w for w in report.warnings if "no notification thread" in w]
     assert len(warnings) == 1 and PR_KEY in warnings[0]
+    # `tick` and `serve` print the report's warnings; a log line would print it twice.
+    assert not any("no notification thread" in r.getMessage() for r in caplog.records)
     assert ticking.ledger.live_worker_for(PR_KEY) is None
 
     # The check runs once a day, so the next tick does not warn again.

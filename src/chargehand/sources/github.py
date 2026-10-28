@@ -609,7 +609,11 @@ class GithubSource(Source):
         )
 
     def _check_review_threads(self) -> None:
-        """The daily check: one warning for the tick report when a request has no thread."""
+        """The daily check: one warning for the tick report when a request has no thread.
+
+        Not logged as well: `tick` and `serve` print the report's warnings, so a log line
+        would show the same text twice.
+        """
         try:
             missing = self.unthreaded_review_requests()
         except TrackerAuthError:
@@ -618,9 +622,7 @@ class GithubSource(Source):
             log.warning("github: could not compare the review requests with the threads: %s", exc)
             return
         if missing:
-            message = self._review_thread_warning(missing)
-            log.warning("%s", message)
-            self.warn(message)
+            self.warn(self._review_thread_warning(missing))
 
     # ----- notifications ------------------------------------------------------
 
