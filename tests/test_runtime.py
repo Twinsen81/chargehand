@@ -63,6 +63,7 @@ def test_claude_declares_every_capability():
         "usage_readings": True,
         "fork": True,
         "external_supervisor": True,
+        "session_hooks": True,
     }
 
 

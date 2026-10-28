@@ -11,8 +11,9 @@ A second thread serves HTTP on 127.0.0.1 only. Reads need nothing; every other m
 must carry the token from a mode 0600 file. A request whose Host header names another
 host is refused, which stops a web page that rebinds its own name to 127.0.0.1 from
 reading the API, and no response carries a CORS header. Other modules add their
-handlers to the route table; each handler thread opens its own ledger connection,
-because a SQLite connection belongs to the thread that opened it.
+handlers to the route table, and their part of `/api/state`; each handler thread opens
+its own ledger connection, because a SQLite connection belongs to the thread that opened
+it. :mod:`chargehand.hooks` receives the posts of the worker sessions there.
 
 SIGTERM and SIGINT end the loop between two tick phases: the phase in progress
 finishes, the rest of that tick is skipped, the server shuts down, and the exit code
@@ -66,7 +67,7 @@ CONNECTION_TIMEOUT_SECS = 10.0
 SAFE_METHODS = ("GET", "HEAD")
 
 # Modules that add routes, each through a `register_routes(routes)` function.
-ROUTE_PROVIDERS: tuple[str, ...] = ()
+ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks",)
 
 # What `/api/state` says about sessions before the first tick has listed them.
 NO_SESSIONS_YET = "the daemon has not listed the sessions yet"
@@ -184,6 +185,8 @@ class Response:
 
 
 Handler = Callable[[Request], Response]
+# Adds a module's part to the `/api/state` payload, in place.
+StateExtender = Callable[[Request, dict[str, object]], None]
 
 
 class Routes:
@@ -191,6 +194,10 @@ class Routes:
 
     def __init__(self) -> None:
         self._routes: list[tuple[str, str, bool, Handler]] = []
+        self.state_extenders: list[StateExtender] = []
+
+    def extend_state(self, extender: StateExtender) -> None:
+        self.state_extenders.append(extender)
 
     def add(self, method: str, path: str, handler: Handler, *, prefix: bool = False) -> None:
         method = method.upper()
@@ -455,9 +462,16 @@ class Daemon:
         """The `status --json` payload, from the ledger and the sessions of the last tick."""
         if self._status is None:
             raise HTTPError(404, "not found")
-        return self._status(
+        payload = self._status(
             self.config, request.ledger(), self._sessions, {"answers": True, **self.health()}
         )
+        for extend in self.routes.state_extenders:
+            extend(request, payload)
+        return payload
+
+    def runner(self, ledger: Ledger) -> Runner:
+        """A runner on a handler thread's *ledger*, built as the loop builds one for a tick."""
+        return self._runner_factory(self.config, ledger)
 
     # ----- the loop -------------------------------------------------------
 
