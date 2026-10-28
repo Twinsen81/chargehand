@@ -86,6 +86,10 @@ the token file has mode 0600. The daemon appends timestamped lines to
 `~/Library/Logs/chargehand.log`. To try the daemon without the job, run `chargehand serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
+Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle and the
+daemon's health in the top bar, and a card per worker in the columns Needs you, Working,
+Queued, Idle and Closed. It refreshes every second and is read-only.
+
 To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
 status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
 the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then

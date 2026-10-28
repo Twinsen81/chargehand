@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted for one release, and `doctor` says that it is ignored. The deny rule for
   `banksman admin` stays in the launch deny rules.
 
+### Added
+
+- A read-only board at `http://127.0.0.1:<port>/`, served by the daemon: the usage
+  windows, the launch throttle and the daemon's health in a top bar, and a card per
+  worker (role, item, branch, worktree, model and effort, last prompt and last answer,
+  wakes today, estimated tokens, attach command) in the columns Needs you, Working,
+  Queued, Idle and Closed. One static page under a strict content security policy.
+
 ### Changed
 
 - The tick runs in a resident daemon, `chargehand serve`, in place of the launchd timer:

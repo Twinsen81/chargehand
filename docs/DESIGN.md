@@ -5,8 +5,7 @@ Claude Code and a fake tracker, and the whole sequence has been run against a re
 and real Claude Code on a scratch repository, including a crash after every launch step and a
 reboot that killed a session mid-turn. It has not
 yet been left running unattended for a working day. The unit of work is a *worker* of a
-*role* (section 4); event sources other than the tracker queue, a resident daemon and a
-board are not built yet.
+*role* (section 4); the board on the daemon's loopback API is read-only so far.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -741,6 +740,24 @@ roles hold the item. `--route` stays accepted for `--repository`.
   `POST /hooks/<event>` receives the posts of the worker sessions (section 6); each
   worker in `/api/state` also carries its last hook, its last answer, the reset time of a
   usage limit and its open permission prompts.
+- **The board.** `GET /` is one static page with its script and style sheet
+  (`templates/board/`), under a content security policy that allows only those two files
+  and requests to the daemon itself. The page polls `GET /api/board` about once a second
+  and patches its cards in place, keyed by worker, so a hook shows within a second and
+  the scroll position of each column stays. That answer is built from the ledger, the
+  role files and the usage file only: no tracker call and no session listing per
+  request. The top bar shows the two usage windows with their reset times and levels
+  (grey when unknown), the launch throttle (working against `max_concurrent`, open
+  against `max_open_workers`, pauses) and the daemon's health (last tick, its duration,
+  errors, uptime, version). The columns are Needs you (`blocked`), Working (`launching`,
+  `running`), Queued (`queued`, and `parked` with its reset time), Idle (`idle`,
+  `paused`) and Closed (workers that finished in the last 24 hours). A card shows the
+  role, the item with its link, the branch, the worktree, the model and effort of the
+  role, the last prompt (the role's first prompt before any wake, else the wake message
+  of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open
+  permission prompt, the wakes in the window of the daily wake cap, an approximate token
+  count (the transcript's size over four) and the attach command. The board is
+  read-only: actions on workers are not built yet.
 - **Usage readings.** Claude Code gives a status line command the subscription's
   `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
   `resets_at`. It sends them on subscription plans only, and only after the session's first
@@ -911,7 +928,7 @@ Next:
   banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
-- A local board on the daemon's loopback API.
+- Actions on the board: new worker, reply, pause, cancel, discard.
 - Packaging, first release.
 - Optional: agents under a separate user.
 
