@@ -24,10 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0600 file serves the status; `doctor` checks both, and sessions get deny rules for the
   port.
 - Worker sessions post their start, turn ends, failures, notifications and permission
-  prompts to the daemon through http settings hooks, and the daemon updates the ledger at
+  prompts to the daemon through settings hooks, and the daemon updates the ledger at
   once; the session diff of each tick stays as the fallback. A usage-limit failure makes a
   worker `parked`, with the reset time when the message gives one, and nothing wakes it
   until `continue`. The ledger goes to version 4, in place.
+- Workers post every comment, review and pull request body from a file in
+  `~/.cache/gh-body/` (mode 0700) with `--body-file` or `gh api -F body=@<file>`, and
+  delete it after the post, so a body that names a word the launch deny rules refuse no
+  longer stops the worker. The shipped role prompts, the `pr-reviewer` agent file (which
+  gains the Write tool) and the roles' allow rules use the body-file forms, and
+  `probes/deny_rules.py` checks that they pass the rules.
 - Each line of the wake message now names the event's kind before its pointer, for example
   `review_requested: https://github.com/o/r/pull/1`, so a woken worker knows what each link
   asks for. The shipped role prompts and the `pr-reviewer` agent file describe the kinds.
