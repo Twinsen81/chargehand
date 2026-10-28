@@ -495,9 +495,54 @@ recovery.
 
 ## 6. Supervision, notifications, questions
 
-**Session state** comes from `claude agents --json --all`, diffed against the ledger on every
-tick. A notification hook is not used: the relevant hook types fire only while Claude Code's
-agent view is open in a terminal, which an unattended run cannot guarantee.
+**Session state** comes from two places. Each session is launched with settings hooks of
+type `http` that post to the daemon: `SessionStart` with its source, `Stop` with the last
+answer, `StopFailure` with the error category, `Notification` with its type, and
+`PermissionRequest` with the tool and its input. These fire in unattended background
+sessions. The daemon applies each post to the ledger at once, through the same transition
+and notification code as the tick. `claude agents --json --all`, diffed against the ledger
+on every tick, stays the fallback for anything a hook missed: a session launched before the
+daemon wrote its token, a post while the daemon was down, a process that died.
+
+**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which the launch
+puts in the hook's `Authorization` header; a post without it changes nothing. The runtime
+reads the payload (`claude` reads `session_id`, `cwd`, `transcript_path`,
+`last_assistant_message`, `error`, `notification_type`, `tool_name`, `tool_input` and
+`source`), and the post maps to the live worker with that session id, else to the live
+worker without a session id yet whose worktree is the session's working directory, after
+symlinks are resolved. A post that maps to no live worker changes nothing. Every answer is
+`{}`: a `Stop` gets no decision that would keep the turn running, a `SessionStart` gets no
+context for the model, and a `PermissionRequest` gets no decision, so the session keeps its
+own dialog. A hook that times out, or finds no daemon, is an error that Claude Code reports
+and goes past; the session runs on, and the next tick reads its state from the listing.
+`--resume` re-applies the settings of the launch, so a worker launched before the hooks
+existed is followed by the diff alone.
+
+| Post | Effect |
+|---|---|
+| `SessionStart` | the worker is `running` |
+| `Stop` | as a `done` session: the status file, then `idle` (or what the file says) |
+| `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one |
+| `StopFailure`, any other error | the worker is `blocked`, "session failed" |
+| `PermissionRequest` | the worker is `blocked`, and the prompt is recorded with its tool and input |
+| `Notification` `permission_prompt` | the worker is `blocked` |
+| `Notification`, other types | no change |
+
+A hook never moves a `launching` or `paused` worker. The tick and the hooks write the same
+rows from two threads, so a state write succeeds only while the row has the state and the
+last hook it was read with; the loser reads the row again. A listing that the tick asked
+for before a hook arrived is older than that hook, and the diff leaves that worker until
+the next tick. The last answer, the tool input and the other payload text are untrusted:
+they are cleaned of control sequences and capped when stored, kept out of notifications,
+and escaped when the page renders them. `/api/state` shows each worker's last hook, its
+last answer, its reset time and its open permission prompts. A prompt is resolved when the
+worker leaves `blocked`.
+
+The usage-limit category has not been observed yet (a missing model gives
+`model_not_found`), so it is matched defensively: a category such as `rate_limit` or
+`usage_limit`, or an unnamed one whose message says so. The raw category is kept in
+`last_error`. The reset time is read from an epoch, an ISO 8601 time, or a clock time such
+as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown.
 
 | Session state | Meaning | Action |
 |---|---|---|
@@ -508,9 +553,11 @@ agent view is open in a terminal, which an unattended run cannot guarantee.
 
 A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without a
 question and the worker waits for events), `queued` (events wait in its inbox for a wake
-that admission held back), `blocked` (it needs you) or `paused` (stopped by `stop`). On the
-tracker, `idle` and `queued` keep the blocked label, as a finished turn did before: the
-operator may want to look at what the turn left.
+that admission held back), `blocked` (it needs you), `paused` (stopped by `stop`) or
+`parked` (a usage limit ended its turn; it waits for the reset). On the tracker, `idle`,
+`queued` and `parked` keep the blocked label, as a finished turn did before: the operator
+may want to look at what the turn left. Delivery, the watchdog and the session diff never
+move a `parked` worker; `continue` respawns it.
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -560,7 +607,7 @@ the events delivered and records the wake on the worker and as a `wake` row in `
 A crash between the two leaves the events in the inbox, and a later tick wakes the worker
 with them again, which costs one turn. A resume that starts a copy is a fault: the worker
 is paused with the reason, keeps its session and its events, and you are notified. A
-`blocked`, `paused` or `launching` worker is not woken; its events wait.
+`blocked`, `paused`, `parked` or `launching` worker is not woken; its events wait.
 
 When a worker's branch is on its remote and has an open pull request, the tick subscribes
 the worker to that pull request for `comment`, `review` and `ci_status`, once, so a review
@@ -647,6 +694,9 @@ roles hold the item. `--route` stays accepted for `--repository`.
   name at 127.0.0.1 (DNS rebinding) cannot read the API. No response has a CORS header, so
   a page on another origin cannot read one either. A body is capped at 1 MiB and must come
   with a `Content-Length`. Each request opens its own ledger connection.
+  `POST /hooks/<event>` receives the posts of the worker sessions (section 6); each
+  worker in `/api/state` also carries its last hook, its last answer, the reset time of a
+  usage limit and its open permission prompts.
 - **Usage readings.** Claude Code gives a status line command the subscription's
   `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
   `resets_at`. It sends them on subscription plans only, and only after the session's first

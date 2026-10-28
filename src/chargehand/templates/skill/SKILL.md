@@ -62,9 +62,11 @@ chargehand tick                             # run a tick now
 
 - `workers` lists the live workers; each has `item`, `role` and `repository`.
 - `state` is the worker: `launching`, `running`, `idle`, `queued`, `blocked`, `paused`,
-  `done`, `failed`, `cancelled`. `idle` means its turn ended and it waits for events on
-  the items it follows; `queued` means events wait for it and the wake is held back, by
-  a cap or because its checkout could not be refreshed.
+  `parked`, `done`, `failed`, `cancelled`. `idle` means its turn ended and it waits for
+  events on the items it follows; `queued` means events wait for it and the wake is held
+  back, by a cap or because its checkout could not be refreshed. `parked` means the
+  account's usage limit ended its turn; it waits for the reset, and nothing wakes it.
+  The user may choose `chargehand continue <ITEM>` after the reset.
 - `paused` with a `last_error` that starts with `wake refused` means the worker's own
   worktree changed in a way chargehand does not resume. The user looks at the worktree
   and chooses `chargehand continue <ITEM> --force`, which accepts it, or `discard`. Give
