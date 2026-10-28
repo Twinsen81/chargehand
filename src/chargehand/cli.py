@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from chargehand import __version__, install, paths, sanitize, serve, trackers
+from chargehand import usage as usage_mod
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
@@ -291,6 +292,7 @@ def build_status(
             "poll_interval_secs": config.poll_interval_secs,
         },
         "daemon": daemon if daemon is not None else _daemon_payload(config),
+        "usage": usage_mod.read_usage(config.serve.usage_file, now),
         "runner": {
             "paused": ledger.is_paused(),
             "paused_repositories": ledger.paused_repositories(),
@@ -468,6 +470,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
     code = daemon.run()
     _print(f"{_stamp()} stopped")
     return code
+
+
+def cmd_statusline(args: argparse.Namespace) -> int:
+    # Every failure to find or write the usage file is silent: the output belongs to the
+    # user's status line.
+    stdin = sys.stdin.buffer.read()
+    try:
+        config_path = Path(args.config).expanduser() if args.config else paths.config_file()
+        usage_path: Path | None = usage_mod.configured_usage_file(config_path)
+    except (ChargehandError, OSError, ValueError):
+        usage_path = None
+    sys.stdout.flush()
+    return usage_mod.run_statusline(stdin, usage_mod.user_command(args.user_command), usage_path)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -880,6 +895,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_request_flags(discard)
 
     add("serve", cmd_serve, "run the daemon: the tick on a timer and the loopback API")
+
+    statusline = add(
+        "statusline", cmd_statusline,
+        "status line wrapper: record the usage windows, then run your own status line command",
+    )
+    statusline.add_argument(
+        "user_command", nargs="*", metavar="-- COMMAND",
+        help="your status line command, after --; it gets the same stdin",
+    )
 
     install_cmd = add("install", cmd_install, "write the launchd job that runs the daemon")
     install_cmd.add_argument("--load", action="store_true",

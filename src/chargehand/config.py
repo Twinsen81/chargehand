@@ -282,6 +282,8 @@ class ServeConfig:
     port: int = DEFAULT_SERVE_PORT
     token_file: Path = field(default_factory=lambda: paths.config_dir() / TOKEN_FILE_NAME)
     tick_interval_secs: int = 60
+    # Where the status line wrapper writes the usage windows and the daemon reads them.
+    usage_file: Path = field(default_factory=paths.usage_file)
 
     @classmethod
     def parse(cls, table: Mapping[str, object] | None) -> "ServeConfig":
@@ -290,11 +292,12 @@ class ServeConfig:
         where = "serve"
         if not isinstance(table, Mapping):
             raise ConfigError(f"{where}: expected a table")
-        _unknown_keys(table, ("port", "token_file", "tick_interval_secs"), where)
+        _unknown_keys(table, ("port", "token_file", "tick_interval_secs", "usage_file"), where)
         port = _as_int(table.get("port", DEFAULT_SERVE_PORT), f"{where}.port", minimum=1)
         if port > 65535:
             raise ConfigError(f"{where}.port: must be <= 65535")
         token = table.get("token_file")
+        usage = table.get("usage_file")
         return cls(
             port=port,
             token_file=(
@@ -304,6 +307,11 @@ class ServeConfig:
             ),
             tick_interval_secs=_as_int(
                 table.get("tick_interval_secs", 60), f"{where}.tick_interval_secs", minimum=1
+            ),
+            usage_file=(
+                _expand(_as_str(usage, f"{where}.usage_file"))
+                if usage is not None
+                else paths.usage_file()
             ),
         )
 
