@@ -295,6 +295,23 @@ def test_a_second_review_request_wakes_the_reviewer_and_starts_none(reviewing, g
     assert resume["prompt"].splitlines()[1:] == [f"review_requested: {PR_URL}"]
 
 
+def test_a_review_request_from_before_the_reviewer_started_does_not_wake_it(reviewing, gh):
+    reviewer = start_reviewer(reviewing, gh)
+    go_idle(reviewing)
+    gh.notify("review_requested", PR, thread="1", updated_at=iso(reviewer.created_at - 240),
+              last_modified="Mon, 26 Oct 2026 11:00:00 GMT")
+    ask_notifications_again(reviewing)
+
+    report = reviewing.next_tick()
+
+    assert report.errors == [] and report.launched == [] and report.woken == []
+    assert inbox_rows(reviewing) == []
+    assert (
+        f"{HANDLE}: github.review_requested is from before the start of the worker that has "
+        f"it, not delivered"
+    ) in report.routed, report.routed
+
+
 def test_a_second_subscriber_of_the_pull_request_gets_the_same_events(reviewing, gh):
     reviewing.board.add("ABC-1")
     reviewing.next_tick()

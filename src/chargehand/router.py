@@ -79,14 +79,14 @@ def suitable_worker_exists(ledger: Ledger, rule: StartRule, role: str, item: Wor
     return ledger.live_worker_for(item.key, None if any_role else role) is not None
 
 
-def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> int:
+def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> tuple[int, int]:
     """Put a start event into the inbox of the live workers of *role* that have its item.
 
     A start event that finds its worker is news for that worker, whether or not its
     subscription names the kind: a second review request asks the reviewer to look again.
     The inbox is unique per worker and event, so a subscriber that already got it gets
     no second row. A worker that started more than ``START_ALLOWANCE_SECS`` after
-    the event gets none (``before_start``).
+    the event gets none (``before_start``). Returns the rows added and the holders skipped.
     """
     holders = {
         worker.id: worker
@@ -96,11 +96,13 @@ def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> int:
     own = ledger.live_worker_for(event.item.key, role)
     if own is not None:
         holders[own.id] = own
-    return sum(
-        int(ledger.enqueue(worker_id, event))
-        for worker_id, worker in sorted(holders.items())
-        if not before_start(event, worker)
-    )
+    delivered = skipped = 0
+    for worker_id, worker in sorted(holders.items()):
+        if before_start(event, worker):
+            skipped += 1
+        else:
+            delivered += int(ledger.enqueue(worker_id, event))
+    return delivered, skipped
 
 
 @dataclass

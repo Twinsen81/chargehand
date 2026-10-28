@@ -65,7 +65,22 @@ def test_a_comment_from_before_the_worker_started_wakes_nobody(harness):
     assert report.woken == ["implementer/ABC-1"]
     entries = harness.ledger.inbox(harness.worker("ABC-1"), pending_only=False)
     assert [entry.dedupe_id for entry in entries] == [f"tracker:comment:{after.id}"]
+    assert any("1 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
     assert len(harness.claude_state.read()["resumes"]) == 1
+
+
+def test_a_poll_that_only_skips_old_comments_still_says_so(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    harness.board.clock = harness.worker("ABC-1").created_at - 241
+    harness.board.comment("ABC-1", author="reviewer@example.invalid")
+
+    report = harness.next_tick()
+
+    assert harness.ledger.inbox(harness.worker("ABC-1"), pending_only=False) == []
+    assert any("0 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
 
 
 def test_a_comment_a_worker_posted_wakes_nobody(harness):

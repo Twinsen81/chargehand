@@ -751,6 +751,8 @@ def test_a_comment_from_before_the_reviewer_started_does_not_wake_it(ticking, gh
 
     assert report.errors == []
     assert inbox_rows(ticking) == [(reviewer.id, "comment", "issue_comment:52")]
+    assert any("1 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
     assert report.woken == [f"pr-reviewer/{PR_KEY}"]
     assert len(ticking.claude_state.read()["resumes"]) == 1
 

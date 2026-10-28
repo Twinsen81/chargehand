@@ -233,8 +233,8 @@ def test_a_start_event_from_before_the_holder_started_does_not_reach_it(ledger):
     new = event(kind="review_requested", item="PR-7", dedupe_id="new",
                 occurred_at=holder.created_at + 10)
 
-    assert deliver_to_holders(ledger, "pr-reviewer", old) == 0
-    assert deliver_to_holders(ledger, "pr-reviewer", new) == 2
+    assert deliver_to_holders(ledger, "pr-reviewer", old) == (0, 2)
+    assert deliver_to_holders(ledger, "pr-reviewer", new) == (2, 0)
     assert [e.dedupe_id for e in ledger.inbox(holder)] == ["new"]
     assert [e.dedupe_id for e in ledger.inbox(follower)] == ["new"]
 
@@ -689,6 +689,33 @@ def test_an_adopted_session_of_a_worker_another_event_started_does_not_own_the_l
     )
     assert not any(call[0] == "mark" for call in routed.board.calls)
     assert routed.labels("ABC-1") == ()
+
+
+def test_an_adopted_session_keeps_the_start_of_the_row_it_replaces(routed):
+    """The session has run since the first start, so its events from since then still count."""
+    routed.board.add("ABC-1", labels=())
+    fake_source.feed().emit("review_requested", "ABC-1")
+    routed.tick()
+    routed.ledger.record_request("cancel", "ABC-1", role="reviewer")
+    routed.next_tick()
+    cancelled = routed.ledger.update(
+        routed.worker("ABC-1", "reviewer"), created_at=time.time() - 3600
+    )
+    routed.claude_state.set_session_state("ABC-1", "working")
+    routed.next_tick()
+    adopted = routed.ledger.live_worker_for("ABC-1", "reviewer")
+    assert adopted is not None and adopted.id != cancelled.id
+    fake_source.feed().emit("comment", "ABC-1", dedupe_id="since", occurred_at=time.time() - 600)
+    fake_source.feed().emit(
+        "comment", "ABC-1", dedupe_id="before", occurred_at=cancelled.created_at - 240
+    )
+
+    report = routed.next_tick()
+
+    assert adopted.created_at == cancelled.created_at
+    assert [e.dedupe_id for e in routed.ledger.inbox(adopted, pending_only=False)] == ["since"]
+    assert any("1 inbox row(s), 1 from before the worker's start" in line
+               for line in report.routed), report.routed
 
 
 @pytest.mark.parametrize("role, owns", [("reviewer", 0), ("implementer", 1)])
