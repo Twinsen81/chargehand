@@ -679,7 +679,8 @@ same state as the one before.
 The tick prints one line per change: a transition names the worker's old and new state, and
 the session state only when the new state alone does not say why (`<item>: running ->
 blocked (session failed)`); `follow:` lines name the pull requests that workers started to
-follow.
+follow. `serve` prints the changes that a session hook makes in the same lines, and nothing
+for a hook that changes nothing.
 
 **Questions stay in the session.** There is no tracker polling and no reply parsing: the
 session asks, the runner notifies you and marks the issue blocked, and you answer in Claude

@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import shlex
 import socket
 import stat
@@ -472,6 +473,29 @@ def test_the_diff_catches_up_on_a_turn_end_no_hook_reported(harness):
     harness.next_tick()
 
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
+
+
+def test_the_daemon_prints_each_change_a_hook_makes_as_a_tick_line(harness, tmp_path, capsys):
+    """`serve` runs without -v, so the line is the daemon's printed report, not an INFO log."""
+    from chargehand import cli
+
+    config = support.daemon_config(harness.config, tmp_path / "board.token")
+    built = support.build(
+        config, notifier=harness.notifier, interval_secs=3600,
+        report=lambda report: cli._print_report(report, quiet=True),
+    )
+    with support.running(built, loop=False):
+        worker = launch(harness)
+        capsys.readouterr()
+
+        post(built, "Stop", {"session_id": worker.session_uuid})
+        # Hooks that change nothing print nothing.
+        post(built, "Stop", {"session_id": worker.session_uuid})
+        post(built, "Notification", {"session_id": worker.session_uuid, "notification_type": "idle_prompt"})
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1, lines
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} transition: ABC-1: running -> idle", lines[0]), lines
 
 
 def test_the_diff_does_not_undo_a_parked_worker(daemon, harness):

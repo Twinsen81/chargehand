@@ -331,6 +331,8 @@ class Daemon:
         self._status = status
         self._list_sessions = sessions
         self._report = report or (lambda report: None)
+        # The tick and the hook threads print reports into the same log.
+        self._report_lock = threading.Lock()
         self.ledger_path = ledger_path or paths.ledger_file()
         self._lock_path = lock_path
         self._port = config.serve.port if port is None else port
@@ -501,6 +503,11 @@ class Daemon:
     def stop_requested(self) -> bool:
         return self._signalled or self.stopping.is_set()
 
+    def report(self, report: TickReport) -> None:
+        """Print *report* as a tick's is printed; a hook thread calls it for its own changes."""
+        with self._report_lock:
+            self._report(report)
+
     def _on_signal(self, signum: int, frame: object) -> None:
         self._signalled = True
 
@@ -546,7 +553,7 @@ class Daemon:
             return True
         self.health_data.ticks += 1
         self.health_data.last_tick_error = _error_line(report.errors[0]) if report.errors else None
-        self._report(report)
+        self.report(report)
         return True
 
     def _mark_requests_seen(self, ledger: Ledger) -> None:
