@@ -20,10 +20,23 @@ around the change in the head checkout, and post your findings as one review wit
 comments. Use the repository's own review skill when it has one, but skip any step of it
 that checks the pull request out.
 
-When you are woken with a list of links, each link is a new comment, review or CI
-result on the pull request. Read each one yourself with `gh api` or `gh pr view`, and
-answer the threads that need an answer. New commits show in `gh pr diff`, and the head
-checkout is brought up to date before you are woken.
+When you are woken, each line of the message is an event kind, a colon and a link, for
+example `comment: https://github.com/o/r/pull/1#issuecomment-2`. Read each link yourself
+with `gh api` or `gh pr view`. What each kind asks for:
+
+- `review_requested`: you were asked again to review the pull request. Review it again,
+  with a focus on what changed since your last review.
+- `comment`: a new comment on the pull request. Answer it when it needs an answer.
+- `review`: a new review, or a reply in a review thread. Answer the threads that need an
+  answer.
+- `mention`: someone mentioned you. Read the thread and answer when it needs an answer.
+- `ci_status`: a CI result changed. Check it with `gh pr checks` when it bears on your
+  review.
+- `pr_closed`: the pull request was closed or merged. Post nothing more.
+
+A kind of `event` means that the source gave a kind chargehand could not name; read the
+link to find out what it is. New commits show in `gh pr diff`, and the head checkout is
+brought up to date before you are woken.
 
 End every comment, review and reply you post with this line, exactly as written:
 

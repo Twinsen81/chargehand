@@ -16,11 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from chargehand.config import DEFAULT_DENY_RULES
+from chargehand.config import DEFAULT_DENY_RULES, serve_deny_rules
 from deny_rules import (
     ALLOWED,
     BLOCKED,
     INCONCLUSIVE,
+    LAUNCH_RULES,
     Attempt,
     Outcome,
     battery,
@@ -78,7 +79,7 @@ def test_a_deny_rule_matches_past_a_wrapper_and_an_assignment():
 
 def test_every_attempt_in_the_battery_is_covered_or_is_the_control(tmp_path):
     for attempt in battery(tmp_path):
-        matched = first_matching_rule(DEFAULT_DENY_RULES, attempt.command)
+        matched = first_matching_rule(LAUNCH_RULES, attempt.command)
         if attempt.expect_blocked:
             assert matched, f"no rule covers {attempt.name}: {attempt.command}"
         else:
@@ -94,7 +95,7 @@ def test_the_control_survives_a_scratch_path_that_mentions_the_tool(tmp_path):
     scratch = tmp_path / "chargehand-scratch"
     scratch.mkdir()
     control = next(a for a in battery(scratch) if not a.expect_blocked)
-    assert first_matching_rule(DEFAULT_DENY_RULES, control.command) is None
+    assert first_matching_rule(LAUNCH_RULES, control.command) is None
 
 
 @pytest.mark.parametrize(
@@ -251,7 +252,71 @@ def test_the_template_ships_the_same_rules_the_runner_passes():
     from chargehand import paths
 
     shipped = json.loads((paths.templates_dir() / "launch-deny-rules.json").read_text())
-    assert shipped["permissions"]["deny"] == list(DEFAULT_DENY_RULES)
+    assert shipped["permissions"]["deny"] == list(LAUNCH_RULES)
+
+
+# ----- the daemon's port ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "curl -s http://127.0.0.1:7878/api/state",
+        "curl -X POST -H 'Authorization: Bearer x' http://localhost:7878/api/anything",
+        "/usr/bin/curl 127.0.0.1:7878",
+        "sh -c 'curl -s localhost:7878/api/health'",
+        "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7878/')\"",
+    ),
+)
+def test_the_daemons_port_is_denied_however_it_is_reached(command):
+    assert first_matching_rule(LAUNCH_RULES, command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "curl -s http://127.0.0.1:3000/",
+        "npm run dev -- --port 8080",
+        "curl https://example.com/7878",
+    ),
+)
+def test_a_session_keeps_its_own_local_servers(command):
+    assert first_matching_rule(LAUNCH_RULES, command) is None
+
+
+def test_the_port_rules_follow_the_configured_port():
+    from chargehand.config import MachineConfig
+
+    data = {
+        "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
+        "serve": {"port": 9123},
+    }
+    rules = MachineConfig.parse(data).deny_rules
+
+    assert first_matching_rule(rules, "curl -s http://127.0.0.1:9123/api/state")
+    assert first_matching_rule(rules, "curl -s http://localhost:9123/api/state")
+    assert first_matching_rule(rules, "curl -s http://127.0.0.1:7878/api/state") is None
+    assert set(DEFAULT_DENY_RULES) <= set(rules)
+    assert "WebFetch(domain:127.0.0.1)" in rules and "WebFetch(domain:localhost)" in rules
+
+
+def test_an_operators_own_rule_list_still_gets_the_port_rules():
+    """A list written before the daemon existed must not leave its port open to sessions."""
+    from chargehand.config import MachineConfig
+
+    data = {
+        "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
+        "deny_rules": ["Bash(*chargehand *)"],
+    }
+
+    assert MachineConfig.parse(data).deny_rules == ("Bash(*chargehand *)", *serve_deny_rules(7878))
+
+
+def test_the_port_rules_pass_their_own_validation():
+    from chargehand.config import validate_deny_rule
+
+    for rule in serve_deny_rules(7878):
+        validate_deny_rule(rule)
 
 
 

@@ -385,3 +385,79 @@ def test_verbose_titles_reveal_the_waiting_text(capsys, config_file, harness):
     run(["status", "--json", "--no-queue", "--verbose-titles"], config_file)
 
     assert "needs a decision" in capsys.readouterr().out
+
+
+# ----- with the daemon ------------------------------------------------------
+
+
+def _serve_config(config_file, port):
+    with config_file.open("a") as handle:
+        handle.write(f"\n[serve]\nport = {port}\n")
+    return config_file
+
+
+def test_with_the_daemon_answering_a_control_command_leaves_the_tick_to_it(
+    monkeypatch, capsys, config_file, harness, tmp_path
+):
+    from support import daemon as support
+
+    # Everything that would let the command act itself fails the test.
+    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr(
+        "chargehand.cli.install.kickstart",
+        lambda **kwargs: pytest.fail("the command kick-started a job while the daemon answers"),
+    )
+    monkeypatch.setattr(
+        "chargehand.cli.tick_lock",
+        lambda **kwargs: pytest.fail("the command ticked itself while the daemon answers"),
+    )
+    config = support.daemon_config(harness.config, tmp_path / "board.token")
+    daemon = support.build(config, notifier=harness.notifier, interval_secs=3600, poll_secs=0.05)
+    with support.running(daemon):
+        assert support.wait_for(lambda: daemon.health_data.ticks >= 1)
+        _serve_config(config_file, daemon.port)
+
+        assert run(["pause"], config_file) == EXIT_OK
+
+    assert capsys.readouterr().out == "pause: all repositories paused\n"
+    assert harness.ledger.is_paused()
+    assert daemon.health_data.ticks == 2
+
+
+def test_a_daemon_of_another_ledger_does_not_apply_this_ones_requests(
+    capsys, config_file, harness, tmp_path
+):
+    from support import daemon as support
+
+    config = support.daemon_config(harness.config, tmp_path / "board.token")
+    daemon = support.build(config, ledger_path=tmp_path / "other" / "ledger.sqlite")
+    with support.running(daemon, loop=False):
+        _serve_config(config_file, daemon.port)
+
+        assert run(["pause"], config_file) == EXIT_OK
+
+    # Applied by an inline tick, against this instance's ledger.
+    assert capsys.readouterr().out == "pause: all repositories paused\n"
+    assert harness.ledger.is_paused()
+
+
+def test_status_says_whether_the_daemon_answers(capsys, config_file, harness, tmp_path):
+    from support import daemon as support
+
+    config = support.daemon_config(harness.config, tmp_path / "board.token")
+    daemon = support.build(config)
+    with support.running(daemon, loop=False):
+        port = daemon.port
+        _serve_config(config_file, port)
+        run(["status", "--json", "--no-queue"], config_file)
+    answering = json.loads(capsys.readouterr().out)
+
+    run(["status", "--json", "--no-queue"], config_file)
+    stopped = json.loads(capsys.readouterr().out)
+
+    assert answering["daemon"]["answers"] is True
+    assert answering["daemon"]["port"] == port
+    assert stopped["daemon"] == {"answers": False, "port": port}
+    # Added beside the field scripts already read, not in place of it.
+    assert "launchd_loaded" in stopped["machine"]
