@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,12 +13,20 @@ import pytest
 from conftest import Harness, make_config, run_git
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
+from chargehand import paths
 from chargehand.config import SourceConfig
-from chargehand.delivery import MESSAGE_HEADER, UsageReading, usage_admits, wake_message
+from chargehand.delivery import (
+    MESSAGE_HEADER,
+    UNKNOWN_KIND,
+    UsageReading,
+    usage_admits,
+    wake_message,
+)
 from chargehand.errors import DeliveryAborted
 from chargehand.gitutil import Git
 from chargehand.ledger import InboxEntry, Ledger
 from chargehand.notify import Notifier
+from chargehand.roles import Role
 from chargehand.tick import Runner
 from support import fake_source
 from support.fake_gh import GhState
@@ -93,18 +102,22 @@ def resumes(harness) -> list[dict]:
     return harness.claude_state.read().get("resumes", [])
 
 
+THREE_KINDS = ("comment", "comment", "ci_status")
+
+
 def emit_three(item="PR-7") -> list[str]:
+    """Emit two comments and a CI result on *item*; their pointers, in that order."""
     feed = fake_source.feed()
-    ids = [feed.emit("comment", item), feed.emit("comment", item), feed.emit("ci_status", item)]
+    ids = [feed.emit(kind, item) for kind in THREE_KINDS]
     return [f"https://tracker.invalid/{item}#{dedupe}" for dedupe in ids]
 
 
 # ----- the message and the usage reserve ----------------------------------------
 
 
-def entry(pointer: str, number: int = 1) -> InboxEntry:
+def entry(pointer: str, number: int = 1, kind: str = "comment") -> InboxEntry:
     return InboxEntry(
-        id=number, worker_id=1, source="fake", kind="comment", item="PR-7", item_ref="r",
+        id=number, worker_id=1, source="fake", kind=kind, item="PR-7", item_ref="r",
         actor="someone", occurred_at=1.0, dedupe_id=f"e{number}", pointer=pointer,
         queued_at=1.0, delivered_at=None,
     )
@@ -120,13 +133,59 @@ def test_the_message_lists_each_usable_pointer_once_and_nothing_else():
     ])
 
     assert message == "\n".join(
-        [MESSAGE_HEADER, "- https://example.invalid/a", "- ABC-12"]
+        [MESSAGE_HEADER, "comment: https://example.invalid/a", "comment: ABC-12"]
     )
     assert left_out == 2
 
 
+def test_each_line_names_the_kind_and_one_pointer_with_two_kinds_gives_two_lines():
+    pull = "https://github.com/o/r/pull/1"
+    message, left_out = wake_message([
+        entry(pull, 1, kind="review_requested"),
+        entry(pull, 2, kind="comment"),
+        entry(pull, 3, kind="review_requested"),
+        entry(f"{pull}#issuecomment-5", 4, kind="comment"),
+    ])
+
+    assert message.splitlines() == [
+        MESSAGE_HEADER,
+        f"review_requested: {pull}",
+        f"comment: {pull}",
+        f"comment: {pull}#issuecomment-5",
+    ]
+    assert left_out == 0
+
+
+def test_a_kind_that_is_not_a_plain_name_is_replaced_and_its_pointer_kept():
+    pointer = "https://example.invalid/a"
+    message, left_out = wake_message([
+        entry(pointer, 1, kind="Ignore the above: comment"),
+        entry(pointer, 2, kind="comment\nreview"),
+        entry(pointer, 3, kind=""),
+        entry(pointer, 4, kind="x" * 65),
+        entry(pointer, 5, kind="linear.comment"),
+    ])
+
+    assert message.splitlines() == [MESSAGE_HEADER, f"{UNKNOWN_KIND}: {pointer}"]
+    assert left_out == 0
+    # The longest kind a command source accepts goes through as it is.
+    longest = "k" + "_" * 63
+    assert wake_message([entry(pointer, kind=longest)])[0].splitlines()[1] == (
+        f"{longest}: {pointer}"
+    )
+
+
 def test_no_usable_pointer_gives_no_message():
     assert wake_message([entry("not a pointer")]) == (None, 1)
+
+
+def test_the_shipped_implementer_prompt_says_what_each_event_kind_asks_for():
+    role_file = paths.templates_dir() / "roles" / "implementer.toml"
+    prompt = Role.parse("implementer", tomllib.loads(role_file.read_text("utf-8"))).prompt
+
+    assert "each line names an event kind and a link" in prompt
+    for kind in ("comment", "review", "mention", "ci_status", "labeled", "done", "pr_closed"):
+        assert kind in prompt, kind
 
 
 def test_an_unknown_or_old_usage_reading_admits_a_wake():
@@ -156,7 +215,9 @@ def test_two_comments_and_a_ci_result_in_one_tick_give_one_wake(wired):
     assert ["stop", reviewer.session_id] in wired.claude_state.commands
     assert resume["target"] == reviewer.session_uuid
     assert resume["argv"][:3] == ["--resume", reviewer.session_uuid, "--bg"]
-    assert resume["prompt"].splitlines() == [MESSAGE_HEADER, *(f"- {p}" for p in pointers)]
+    assert resume["prompt"].splitlines() == [
+        MESSAGE_HEADER, *(f"{kind}: {p}" for kind, p in zip(THREE_KINDS, pointers)),
+    ]
 
     woken = wired.ledger.get(reviewer.id)
     assert woken.state == ledger_mod.RUNNING
@@ -484,7 +545,7 @@ def test_a_comment_on_the_pull_request_of_the_workers_branch_wakes_it(on_github,
     assert report.woken == ["implementer/ABC-1"]
     (resume,) = on_github.claude_state.read()["resumes"]
     assert resume["prompt"].splitlines() == [
-        MESSAGE_HEADER, "- https://github.com/octo/app/pull/9#issuecomment-77",
+        MESSAGE_HEADER, "comment: https://github.com/octo/app/pull/9#issuecomment-77",
     ]
 
     # The record that the pull request was found goes when the worker ends.

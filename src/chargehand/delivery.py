@@ -3,9 +3,10 @@
 Once per tick, after the state diff, every worker that is ``idle`` or ``queued`` and has
 events in its inbox goes through these steps:
 
-1. Coalesce. The events become one message that lists their pointers and nothing else.
-   A pointer is untrusted, so only a plain http(s) URL or a plain identifier is kept;
-   the worker fetches what a pointer names itself.
+1. Coalesce. The events become one message with a line per event kind and pointer, such
+   as ``comment: https://...``, and nothing else. A pointer is untrusted, so only a plain
+   http(s) URL or a plain identifier is kept; the worker fetches what a pointer names
+   itself.
 2. Admit. The global cap on working turns, the role's daily wake cap and the usage
    reserve. A worker that is not admitted becomes ``queued`` and keeps its events.
 3. Check and prepare, through the caller: a worker whose worktree must not host its
@@ -24,6 +25,7 @@ blocked worker has an open question or permission prompt, which a stop would dis
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -48,6 +50,12 @@ DEFAULT_WAKE_RESERVE_PERCENT = 20.0
 USAGE_MAX_AGE_SECS = 30 * 60
 
 MESSAGE_HEADER = "New events on the work you follow. Read each one yourself:"
+
+# The kind as it goes into the message. Sources store bare kinds; the check is a second
+# line of defence, because the message is a trusted user turn.
+_KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The kind a line names when the event's own kind does not pass the check.
+UNKNOWN_KIND = "event"
 
 
 @dataclass(frozen=True)
@@ -82,23 +90,33 @@ def safe_pointer(pointer: str) -> str | None:
     return pointer if sanitize.is_safe_identifier(pointer) else None
 
 
+def safe_kind(kind: str) -> str:
+    """The kind when it is a plain lower-case name, otherwise ``UNKNOWN_KIND``."""
+    return kind if _KIND.fullmatch(kind) else UNKNOWN_KIND
+
+
 def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
     """The message for *entries*, and how many pointers were left out as unusable.
 
-    The message is None when no pointer is usable. Two events with one pointer, such as
-    two CI results on the same pull request, give one line.
+    Each line is the event's kind, a colon and its pointer. The message is None when no
+    pointer is usable. Two events of one kind with one pointer, such as two CI results on
+    the same pull request, give one line; two kinds on one pointer give two lines. A kind
+    that is not a plain name is replaced with ``UNKNOWN_KIND``, so its pointer still
+    arrives.
     """
-    pointers: list[str] = []
+    lines: list[str] = []
     left_out = 0
     for entry in entries:
         pointer = safe_pointer(entry.pointer)
         if pointer is None:
             left_out += 1
-        elif pointer not in pointers:
-            pointers.append(pointer)
-    if not pointers:
+            continue
+        line = f"{safe_kind(entry.kind)}: {pointer}"
+        if line not in lines:
+            lines.append(line)
+    if not lines:
         return None, left_out
-    return "\n".join([MESSAGE_HEADER, *(f"- {pointer}" for pointer in pointers)]), left_out
+    return "\n".join([MESSAGE_HEADER, *lines]), left_out
 
 
 @dataclass
@@ -293,7 +311,9 @@ __all__ = [
     "DeliveryResult",
     "MESSAGE_HEADER",
     "UsageReading",
+    "UNKNOWN_KIND",
     "WAKE_STATES",
+    "safe_kind",
     "safe_pointer",
     "usage_admits",
     "wake_message",

@@ -179,6 +179,18 @@ def test_the_shipped_agent_file_tells_the_worker_to_mark_its_comments():
     assert AUTHORSHIP_MARKER in text
 
 
+def test_the_shipped_reviewer_says_what_each_event_kind_in_a_wake_asks_for():
+    agent = (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text(encoding="utf-8")
+    role_file = paths.templates_dir() / "roles" / "pr-reviewer.toml"
+    prompt = Role.parse("pr-reviewer", tomllib.loads(role_file.read_text("utf-8"))).prompt
+
+    assert "`review_requested`: you were asked again to review the pull request" in agent
+    assert "review_requested asks you to review the pull request again" in prompt
+    for kind in ("review_requested", "comment", "review", "mention", "ci_status", "pr_closed"):
+        assert f"`{kind}`:" in agent, kind
+        assert kind in prompt, kind
+
+
 # ----- start, wake, filter --------------------------------------------------------------
 
 
@@ -235,7 +247,7 @@ def test_a_reply_wakes_the_reviewer_once_and_its_own_comments_do_not(reviewing, 
     # The marked comment of the signed-in account reached no inbox.
     assert inbox_rows(reviewing) == [(reviewer.id, "comment", "issue_comment:41")]
     (resume,) = reviewing.claude_state.read()["resumes"]
-    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}#issuecomment-41"]
+    assert resume["prompt"].splitlines()[1:] == [f"comment: {PR_URL}#issuecomment-41"]
 
     go_idle(reviewing)
     comment(gh, 43, "operator", f"and another {AUTHORSHIP_MARKER}")
@@ -280,7 +292,7 @@ def test_a_second_review_request_wakes_the_reviewer_and_starts_none(reviewing, g
     assert [w.id for w in reviewing.ledger.live_workers()] == [reviewer.id]
     assert report.woken == [HANDLE]
     (resume,) = reviewing.claude_state.read()["resumes"]
-    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}"]
+    assert resume["prompt"].splitlines()[1:] == [f"review_requested: {PR_URL}"]
 
 
 def test_a_second_subscriber_of_the_pull_request_gets_the_same_events(reviewing, gh):
@@ -685,7 +697,7 @@ def test_continue_force_accepts_the_agents_files_as_they_are(reviewing, gh, tmp_
     report = reviewing.next_tick()
     assert report.woken == [HANDLE]
     (resume,) = reviewing.claude_state.read()["resumes"]
-    assert resume["prompt"].splitlines()[1:] == [f"- {PR_URL}#issuecomment-74"]
+    assert resume["prompt"].splitlines()[1:] == [f"comment: {PR_URL}#issuecomment-74"]
 
 
 def test_continue_force_does_not_accept_a_worktree_off_its_branch(reviewing, gh, tmp_path):
