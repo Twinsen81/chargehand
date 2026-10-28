@@ -147,10 +147,10 @@ collection. It is configured as a `[[source]]` table with a `name`, a `type`, an
 own options. An event names its source, kind, work item, actor, time, a dedupe id and a
 pointer (a URL or identifier the worker fetches itself). It never carries a body: a source
 reads a comment only to find chargehand's authorship marker, `<!-- chargehand-worker -->`,
-and the text stays in the source. No space follows the name, because a worker posts with
-the body on its command line and the launch deny rule `Bash(*chargehand *)` refuses the
-name followed by a space; the first spelling, `<!-- chargehand -->`, is still read as
-marked. Kinds are bare (`comment`, any source) or qualified by the source name
+and the text stays in the source. No space follows the name, because the launch deny rule
+`Bash(*chargehand *)` refuses the name followed by a space in a command, and a body can
+still end up on a command line; the first spelling, `<!-- chargehand -->`, is still read
+as marked. Kinds are bare (`comment`, any source) or qualified by the source name
 (`github.comment`).
 
 Delivery is publish and subscribe. A worker subscribes to work items, each with a set of
@@ -392,6 +392,26 @@ checkouts, and either one with commits of the session's own keeps both.
 Workers post as you. Both starter roles tell the worker in the prompt to end every comment
 it posts with the authorship marker, so its own comments wake no worker; a comment without
 the marker wakes the worker once, and the role's daily wake cap stops a loop.
+
+Workers post every body from a file. A launch deny rule matches the whole command text, so
+a body on the command line that names a denied word is refused: a review of a change to
+the deny rules names them, and the worker would stop with nothing for the operator to
+answer. Both starter roles, and the reviewer's agent file, tell the worker to write each
+body with its file tool, not a shell command, to a new file in `~/.cache/gh-body/`, to
+post it with `--body-file` (`gh pr create`, `gh pr comment`, `gh pr review`) or
+`-F body=@<file>` (`gh api`), and to delete it after the post. The file's content never
+reaches the rules. The directory is outside every checkout, so a body file cannot be
+committed and does not count as untracked work for garbage collection or the wake checks.
+It is per user, and the worker creates it with mode 0700 before its first write, so
+another account on the machine cannot read a draft or replace it before the post; a shared
+directory under `/tmp` would allow both. `mkdir -m` does not change a directory that
+already exists, so a directory created another way keeps its own mode. The roles' allow rules let the worker create the directory and write
+there without a prompt, and name only the `--body-file` forms of the `gh` commands. The
+reviewer's agent file lists the Write tool for this, and says to use it for nothing else.
+Deleting a file has no rule, and `gh api` has none either, not even for the reply
+endpoint: a `*` also matches spaces, so `rm ~/.cache/gh-body/*` would also match a second
+path, and a reply rule would also match a call that merges the pull request with the rest
+of the pattern in its arguments. Those calls go to the auto-mode classifier.
 
 ### Runtimes
 

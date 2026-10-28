@@ -30,10 +30,14 @@
 # <!-- chargehand-worker -->, so the worker must add it to every comment it posts, or its own
 # comments wake it. Keep that instruction here or in the agent file.
 #
+# The worker posts each body from a file. A launch deny rule matches the whole command
+# text, so a body on the command line that names a denied word is refused, and the
+# worker stops. The file's content never reaches the rules. Keep that instruction too.
+#
 # When chargehand wakes the worker, each line of its message is an event kind, a colon
 # and a link, such as `comment: <link>`. The prompt says what each kind asks for; keep
 # that here or in the agent file too.
-prompt = "Work on {item}. When you are woken later, each line names an event kind and a link: comment, review and mention are new comments or reviews to read and answer; ci_status is a CI result to check; labeled is a new label on the issue; done means the issue is closed and pr_closed that the pull request is closed or merged, so stop. End every comment you post on the issue or on its pull request with <!-- chargehand-worker -->"
+prompt = "Work on {item}. When you are woken later, each line names an event kind and a link: comment, review and mention are new comments or reviews to read and answer; ci_status is a CI result to check; labeled is a new label on the issue; done means the issue is closed and pr_closed that the pull request is closed or merged, so stop. Never put a pull request or comment body on a command line. Run mkdir -p -m 700 ~/.cache/gh-body before the first Write. Write each body with the Write tool, not a shell command, to a new file in that directory, by its absolute path $HOME/.cache/gh-body/<name>, and end it with the marker named next. Post the file with --body-file (gh pr create, gh pr comment) or -F body=@<file> (gh api), then delete the file. End every comment you post on the issue or on its pull request with <!-- chargehand-worker -->"
 
 # auto (default) runs behind Claude Code's safety classifier and falls back to a
 # permission prompt, which chargehand surfaces as "blocked". bypassPermissions is a
@@ -42,7 +46,18 @@ permission_mode = "auto"
 
 # Optional. Allow rules for this role's sessions, so the commands it needs do not
 # prompt. Same syntax as Claude Code's permission rules.
-# allow = ["Bash(gh pr *)"]
+#
+# These let the worker write body files to ~/.cache/gh-body/ and post them. The directory
+# is outside every checkout, so a body file cannot be committed and does not make the
+# worktree dirty, and mode 0700 keeps drafts from other users. An Edit rule covers the
+# Write tool too. Deleting a file has no rule: a `*` also matches spaces, so
+# `rm ~/.cache/gh-body/*` would also match a second path; the classifier decides.
+allow = [
+  "Bash(mkdir -p -m 700 ~/.cache/gh-body)",
+  "Edit(~/.cache/gh-body/**)",
+  "Bash(gh pr create *--body-file *)",
+  "Bash(gh pr comment *--body-file *)",
+]
 
 # Optional. `done` is ambiguous: a session that asked its question as plain text and
 # ended its turn also reads done. Write {"state": "needs-input|complete|aborted",
