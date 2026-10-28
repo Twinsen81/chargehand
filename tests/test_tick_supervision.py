@@ -201,16 +201,20 @@ def test_a_transition_names_the_session_state_only_when_it_explains_the_change(h
     assert harness.next_tick().transitions == ["ABC-1: running -> blocked (session failed)"]
 
 
-def test_a_closed_item_is_reported_as_an_item(harness):
+def test_an_item_found_closed_is_reported_as_an_item(harness):
+    """The close-out that finds the item closed, without a close event, says "item" too."""
+    from chargehand.tick import TickReport
+
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
-
     harness.board.close("ABC-1")
-    report = harness.next_tick()
+    report = TickReport()
 
-    assert "ABC-1: item closed -> done" in report.transitions
-    assert not any("issue closed" in line for line in report.transitions)
+    harness.fresh_runner()._close_out_finished_issues(report)
+
+    assert report.transitions == ["ABC-1: item closed -> done"]
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
 
 
 def _with_status_file(harness, repo, tmp_path):

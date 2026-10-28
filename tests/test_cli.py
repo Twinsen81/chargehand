@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 import pytest
-
-from pathlib import Path
 
 from chargehand import __version__, ledger as ledger_mod
 from chargehand.cli import EXIT_OK, EXIT_REFUSED, main

@@ -135,13 +135,13 @@ class _RowChanged(Exception):
 TURN_ENDED = "turn ended; waits for events"
 
 # The worker states that are never notified. A worker that waits for events ends a turn
-# for each event it answers; `status` and the board show it, and only blocked, failed and
-# done send a notification.
+# for each event it answers; `status` and the board show it. Blocked, parked, failed, done
+# by a status file and the watchdog states send a notification.
 QUIET_STATES = (ledger_mod.IDLE, ledger_mod.QUEUED)
 
-# The session states that a transition line names, because the worker state alone does
-# not say why it changed: a blocked worker whose session failed, stopped or is gone.
-# Working, blocked and done are what the new worker state already says.
+# The session states that a transition line leaves out, because the new worker state
+# already says them. Any other session state is named, as for a blocked worker whose
+# session failed, stopped or is gone.
 EXPLAINED_SESSION_STATES = (runtime_mod.WORKING, runtime_mod.BLOCKED, runtime_mod.DONE)
 
 # How much of a control request's outcome the CLI prints. An outcome that must carry a

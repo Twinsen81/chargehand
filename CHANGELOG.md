@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A worker whose turn ends and waits for events (`idle` or `queued`) no longer sends a
-  notification; only blocked, parked, done, failed and the watchdog states do. The tick's
+  notification; only blocked, parked, failed, done through the status file and the
+  watchdog states do. The tick's
   transition lines name the worker's old and new state (the session state only when it
   explains the change), a closed pull request is reported as "item closed", the warning
   for a start event of an unconfigured repository is printed once, and `follow:` lines
