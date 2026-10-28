@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second or two, and a loopback API (`/api/health`, `/api/state`) with a token in a mode
   0600 file serves the status; `doctor` checks both, and sessions get deny rules for the
   port.
+- Worker sessions post their start, turn ends, failures, notifications and permission
+  prompts to the daemon through settings hooks, and the daemon updates the ledger at
+  once; the session diff of each tick stays as the fallback. A usage-limit failure makes a
+  worker `parked`, with the reset time when the message gives one, and nothing wakes it
+  until `continue`. The ledger goes to version 4, in place.
 - Workers post every comment, review and pull request body from a file in
   `~/.cache/gh-body/` (mode 0700) with `--body-file` or `gh api -F body=@<file>`, and
   delete it after the post, so a body that names a word the launch deny rules refuse no

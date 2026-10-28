@@ -49,7 +49,7 @@ SCHEDULED_JOB_WAIT_SECS = 30.0
 KICKSTART_RETRY_SECS = 2.0
 
 # The worker states whose session `status` offers to attach to.
-ATTACH_STATES = ("blocked", "idle", "queued")
+ATTACH_STATES = ("blocked", "idle", "queued", "parked")
 
 # The parts of a tick report that `tick` prints, in this order. `skipped` holds the
 # launches and wakes that a cap or a pause held back.
@@ -148,6 +148,10 @@ def _worker_dict(
         "pr_url": worker.pr_url,
         "label_state": worker.label_state,
         "wakes": worker.wakes,
+        # One of the runtime's own event names, never payload text.
+        "last_hook": worker.last_hook,
+        "last_hook_at": worker.last_hook_at,
+        "reset_at": worker.reset_at,
         "elapsed_secs": round(time.time() - worker.created_at, 1),
         "working_since": worker.working_since,
         "created_at": worker.created_at,

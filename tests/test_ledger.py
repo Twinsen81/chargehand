@@ -341,7 +341,7 @@ def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
         worker = ledger.get(12)
         assert (worker.role, worker.item, worker.state) == ("implementer", "ABC-1", "running")
         # Every worker before version 3 was started by the queue label, so it keeps it.
@@ -460,3 +460,109 @@ def test_a_cursor_is_kept_per_source(ledger):
 
     assert (ledger.get_cursor("fake"), ledger.get_cursor("other")) == ("5", None)
 
+
+
+# ----- version 4: parked, the session hooks, permission prompts -----------------
+
+# A version 3 ledger: version 2 plus the label owner and the routing tables.
+V3_SCHEMA = V2_SCHEMA.replace("PRAGMA user_version = 2;", "") + """
+ALTER TABLE workers ADD COLUMN owns_label INTEGER NOT NULL DEFAULT 1;
+DROP INDEX workers_one_live_per_role_item;
+CREATE UNIQUE INDEX workers_one_live_per_role_item ON workers (role, item)
+    WHERE origin = 'source' AND state IN ('launching', 'running', 'idle', 'queued', 'blocked', 'paused');
+CREATE TABLE subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    source TEXT NOT NULL, item TEXT NOT NULL, item_ref TEXT NOT NULL,
+    kinds TEXT NOT NULL DEFAULT '[]', is_primary INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL, UNIQUE (worker_id, source, item)
+);
+CREATE TABLE inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    source TEXT NOT NULL, kind TEXT NOT NULL, item TEXT NOT NULL, item_ref TEXT NOT NULL,
+    actor TEXT NOT NULL, occurred_at REAL NOT NULL, dedupe_id TEXT NOT NULL,
+    pointer TEXT NOT NULL, queued_at REAL NOT NULL, delivered_at REAL,
+    UNIQUE (worker_id, source, dedupe_id)
+);
+CREATE TABLE events (
+    source TEXT NOT NULL, dedupe_id TEXT NOT NULL, kind TEXT NOT NULL, item TEXT NOT NULL,
+    item_ref TEXT NOT NULL, item_url TEXT, item_hint TEXT, actor TEXT NOT NULL,
+    occurred_at REAL NOT NULL, pointer TEXT NOT NULL, marked INTEGER NOT NULL DEFAULT 0,
+    seen_at REAL NOT NULL, start_pending INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, dedupe_id)
+);
+CREATE TABLE cursors (source TEXT PRIMARY KEY, value TEXT, updated_at REAL NOT NULL);
+PRAGMA user_version = 3;
+"""
+
+
+def test_a_version_three_ledger_gains_the_hook_columns_and_the_prompts_in_place(tmp_path):
+    path = tmp_path / "v3.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V3_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at, owns_label) VALUES (7, 'reviewer', 'PR-1', 'r1', "
+        "'test', '/repo', '/w/PR-1', 'b', 'idle', 4, 1.0, 2.0, 2)"
+    )
+    conn.execute(
+        "INSERT INTO subscriptions (id, worker_id, source, item, item_ref, kinds, is_primary, "
+        "created_at) VALUES (3, 7, 'gh', 'PR-1', 'r1', '[\"comment\"]', 1, 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO inbox (id, worker_id, source, kind, item, item_ref, actor, occurred_at, "
+        "dedupe_id, pointer, queued_at) VALUES (9, 7, 'gh', 'comment', 'PR-1', 'r1', 'a', 1.0, "
+        "'d1', 'p', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        worker = ledger.get(7)
+        assert (worker.role, worker.item, worker.state, worker.owns_label) == ("reviewer", "PR-1", "idle", 2)
+        assert (worker.reset_at, worker.last_hook, worker.last_answer) == (None, None, None)
+        assert [s.id for s in ledger.subscriptions_of(worker)] == [3]
+        assert [e.id for e in ledger.inbox(worker)] == [9]
+        prompt_id = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}")
+        assert [p.id for p in ledger.open_permission_prompts(worker)] == [prompt_id]
+        # `parked` is live, so the index holds a parked worker to one per role and item.
+        ledger.update(worker, state=ledger_mod.PARKED)
+        with pytest.raises(sqlite3.IntegrityError):
+            make(ledger, item="PR-1", worktree="/w/PR-1-again", role="reviewer")
+        assert make(ledger, item="PR-2", worktree="/w/PR-2", role="reviewer").id == 8
+
+    with Ledger(path) as ledger:
+        assert ledger.get(7).state == ledger_mod.PARKED
+
+
+def test_a_version_two_ledger_is_migrated_through_version_three(tmp_path):
+    path = tmp_path / "v2.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V2_SCHEMA)
+    conn.close()
+
+    with Ledger(path) as ledger:
+        worker = make(ledger)
+        ledger.update(worker, last_hook="Stop", last_hook_at=5.0, reset_at=9.0)
+        assert ledger.get(worker.id).reset_at == 9.0
+        assert ledger.open_permission_prompts() == []
+
+
+def test_a_state_write_is_refused_after_a_hook_or_a_state_change(ledger):
+    worker = make(ledger)
+
+    after_hook = ledger.update(worker, last_hook_at=10.0)
+    assert ledger.update_if_unchanged(worker, state=ledger_mod.IDLE) is None
+    moved = ledger.update_if_unchanged(after_hook, state=ledger_mod.RUNNING)
+    assert moved is not None and ledger.get(worker.id).state == ledger_mod.RUNNING
+    assert ledger.update_if_unchanged(after_hook, state=ledger_mod.IDLE) is None
+    # Other columns may change between the read and the write.
+    ledger.update(moved, pr_url="https://example.invalid/pr/1")
+    assert ledger.update_if_unchanged(moved, state=ledger_mod.IDLE).state == ledger_mod.IDLE
+
+
+def test_a_live_worker_is_found_by_its_session_uuid(ledger):
+    worker = ledger.update(make(ledger), session_uuid="u-1")
+    assert ledger.live_worker_by_session_uuid("u-1").id == worker.id
+    ledger.update(worker, state=ledger_mod.DONE)
+    assert ledger.live_worker_by_session_uuid("u-1") is None

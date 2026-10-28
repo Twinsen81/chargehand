@@ -154,6 +154,21 @@ public location.
   and no response carries a CORS header, so a web page on another origin cannot read a
   response. A cross-origin page can still send a request without reading the answer,
   which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
+- **Session hooks.** Launched sessions post their start, turn ends, failures,
+  notifications and permission prompts to `POST /hooks/<event>` on that port, with the
+  token in the `Authorization` header; a post without the token changes nothing. The token
+  is never on a command line, where other users of the machine could read it with `ps`:
+  the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
+  0700 under the state directory, and the `SessionStart` command hook names the token
+  file, not the token, and runs its script with `python -I`, so nothing in the worktree
+  is imported. The settings file is deleted when its session is removed. A post moves
+  only the live worker whose session posted it. The daemon answers every post with an
+  empty object, so it never makes a permission decision for a session, never keeps a
+  turn running and never adds text to the model's context. The payload is untrusted: the
+  last answer, the tool input and the other fields are cleaned of terminal control
+  sequences and capped when stored, never reach a notification or a prompt, and
+  `GET /api/state` returns them as JSON data for the page to escape. `status --json`
+  names the last hook event and the reset time, but no payload text.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
@@ -213,7 +228,10 @@ public location.
   install. Treat it as you would a CI worker with write access.
 - A session runs as the operator's user, so it can read the daemon's token file and the
   ledger. The deny rules for the port are a guardrail against the careless path; a session
-  that reads the token and reaches the port another way can send what the CLI can.
+  that reads the token and reaches the port another way can send what the CLI can. The
+  token is also in each session's own hook settings, so a session can read it there too,
+  and post hooks in the name of another worker's session. That can move another worker's
+  state and its label, but it runs no command and answers no prompt.
 - A session can read any credential that the runner or a notification hook reads from the
   login keychain, because it runs as the same user. Give a hook a credential that protects
   nothing else, such as the password of a mailbox that exists only to send alerts.

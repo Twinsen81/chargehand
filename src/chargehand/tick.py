@@ -63,7 +63,7 @@ from chargehand.errors import (
 from chargehand.ledger import Ledger, Worker
 from chargehand.notify import Notification, Notifier
 from chargehand.roles import Role, StartRule
-from chargehand.runtime import LaunchSpec, Runtime, Session
+from chargehand.runtime import Hook, LaunchSpec, Runtime, Session
 from chargehand.sources import Event, Source, WorkItem
 from chargehand.sources.tracker import TrackerSource
 from chargehand.trackers import Status
@@ -115,6 +115,22 @@ WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_FILES_PREFIX)
 # once per source and repository; this prefix marks the ones reported.
 UNCONFIGURED_PREFIX = "unconfigured:"
 
+# The notification detail of a worker that a usage limit parked.
+USAGE_LIMIT = "usage limit reached; waits for the reset"
+
+# How many times a session hook reads its worker again when the tick changed the row
+# between the read and the write.
+HOOK_WRITE_ATTEMPTS = 3
+
+# The worker states a session hook never moves: a launch in progress sets its own state
+# when its session appears, and a paused worker waits for the operator.
+HOOK_FROZEN_STATES = (ledger_mod.LAUNCHING, ledger_mod.PAUSED)
+
+
+class _RowChanged(Exception):
+    """Another thread changed the worker's row between a read and the state write."""
+
+
 # The notification detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
 
@@ -144,6 +160,7 @@ _STATUS_FOR_STATE = {
     ledger_mod.QUEUED: Status.BLOCKED,
     ledger_mod.BLOCKED: Status.BLOCKED,
     ledger_mod.PAUSED: Status.BLOCKED,
+    ledger_mod.PARKED: Status.BLOCKED,
     ledger_mod.FAILED: Status.BLOCKED,
     ledger_mod.CANCELLED: Status.BLOCKED,
     ledger_mod.DONE: Status.DONE,
@@ -439,6 +456,9 @@ class Runner:
         # waits, with no tracker call: its poll failed and was reported once.
         self._polled_trackers: set[str] = set()
         self._sessions: dict[str, list[Session]] = {}
+        # When each runtime's listing was asked for. A session hook that the daemon
+        # applied after that time is newer than the listing, and the diff leaves it be.
+        self._listed_at: dict[str, float] = {}
 
     # ----- collaborators ----------------------------------------------------
 
@@ -467,8 +487,10 @@ class Runner:
 
     def sessions(self, runtime: str, *, refresh: bool = False) -> list[Session]:
         if refresh or runtime not in self._sessions:
+            asked_at = time.time()
             try:
                 self._sessions[runtime] = self.runtime(runtime).list_sessions()
+                self._listed_at[runtime] = asked_at
             except AgentRuntimeError as exc:
                 log.error("could not list the sessions of runtime %s: %s", runtime, exc)
                 raise
@@ -781,15 +803,30 @@ class Runner:
         return self.runtime(worker.runtime).is_stopped(session)
 
     def _remove_session(self, worker: Worker) -> bool:
-        if not worker.session_id:
-            return True
-        self.runtime(worker.runtime).remove(worker.session_id)
-        self.invalidate_sessions(worker.runtime)
+        if worker.session_id:
+            self.runtime(worker.runtime).remove(worker.session_id)
+            self.invalidate_sessions(worker.runtime)
+            try:
+                sessions = self.sessions(worker.runtime, refresh=True)
+            except AgentRuntimeError:
+                return False
+            if any(s.id == worker.session_id for s in sessions):
+                return False
+        self._release_launch_files(worker)
+        return True
+
+    def _release_launch_files(self, worker: Worker) -> None:
+        """Delete what the launch kept for a session that is gone, such as its settings file."""
+        if any(
+            other.id != worker.id and other.worktree == worker.worktree
+            for other in self.ledger.live_workers()
+        ):
+            # A newer worker in the same worktree launched with the same files.
+            return
         try:
-            sessions = self.sessions(worker.runtime, refresh=True)
-        except AgentRuntimeError:
-            return False
-        return all(s.id != worker.session_id for s in sessions)
+            self.runtime(worker.runtime).release(worker.worktree_path)
+        except ConfigError:
+            pass
 
     def _adopt(self, worker: Worker, session: Session, report: TickReport) -> Worker:
         worker = self.ledger.update(
@@ -1013,8 +1050,8 @@ class Runner:
         """Respawn the session. *force* accepts the agent's files in the worktree as they are."""
         if not worker.session_id:
             return False, f"{worker.item} has no session to respawn"
-        if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED):
-            return False, f"{worker.item} is {worker.state}, not paused or blocked"
+        if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED, ledger_mod.PARKED):
+            return False, f"{worker.item} is {worker.state}, not paused, blocked or parked"
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
             return False, self._refusal_message(worker, check)
@@ -1037,7 +1074,8 @@ class Runner:
                 f"(the session lists as {session.state})"
             )
         worker = self.ledger.update(
-            worker, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0
+            worker, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0,
+            reset_at=None,
         )
         self._sync_labels(worker, context, report)
         return True, "session respawned"
@@ -1599,8 +1637,13 @@ class Runner:
         # being tried twice in this one.
         self._retry_pending_notifications(report)
         listings: dict[str, dict[str, Session]] = {}
-        for worker in self.ledger.live_workers():
-            if worker.state == ledger_mod.LAUNCHING:
+        for listed in self.ledger.live_workers():
+            # Read again: the daemon applies session hooks on other threads while this
+            # phase runs.
+            worker = self.ledger.get(listed.id) or listed
+            if worker.state == ledger_mod.LAUNCHING or worker.is_terminal:
+                continue
+            if self._hook_is_newer(worker):
                 continue
             if worker.runtime not in listings:
                 try:
@@ -1626,18 +1669,104 @@ class Runner:
                 changes["waiting_for"] = sanitize.one_line(waiting) if waiting else None
             if pr_url != worker.pr_url:
                 changes["pr_url"] = pr_url
+            if worker.state == ledger_mod.PARKED:
+                # A usage limit ended the turn, and the listing shows that failed turn
+                # until the session runs again. Only the operator or a hook moves it.
+                changes.pop("session_state", None)
+            # Every write from this listing is conditional: a hook written meanwhile is
+            # newer, and keeps its session state.
             if changes:
-                worker = self.ledger.update(worker, **changes)
+                written = self.ledger.update_if_unchanged(worker, **changes)
+                if written is None:
+                    continue
+                worker = written
 
-            worker = self._apply_session_state(worker, observed, report, session=session)
+            try:
+                worker = self._apply_session_state(worker, observed, report, session=session)
+            except _RowChanged:
+                continue
+
+    def _hook_is_newer(self, worker: Worker) -> bool:
+        listed_at = self._listed_at.get(worker.runtime)
+        return (
+            worker.last_hook_at is not None
+            and listed_at is not None
+            and worker.last_hook_at >= listed_at
+        )
+
+    def apply_hook(
+        self, worker: Worker, hook: Hook, report: TickReport | None = None, *, now: float | None = None
+    ) -> Worker | None:
+        """Apply what one session hook reports to *worker* at once, as the next diff would.
+
+        The daemon calls this on a request thread while its tick may run, so the state is
+        written only if the row still has the state and the last hook it was read with;
+        otherwise the row is read again. The transition, the label and the notification
+        are the session diff's own. Returns the worker as written, or None when it is no
+        longer live.
+        """
+        report = report if report is not None else TickReport()
+        stamp = time.time() if now is None else now
+        current = self.ledger.get(worker.id)
+        if current is None or current.is_terminal:
+            return None
+        changes: dict[str, object] = {"last_hook": hook.event, "last_hook_at": stamp}
+        if hook.transcript_path:
+            changes["transcript_path"] = hook.transcript_path
+        if hook.last_answer is not None:
+            changes["last_answer"] = hook.last_answer
+        if hook.kind == runtime_mod.HOOK_TURN_FAILED:
+            if hook.usage_limit:
+                changes["reset_at"] = hook.reset_at
+            changes["last_error"] = (
+                f"{'usage limit' if hook.usage_limit else 'turn failed'}: {hook.error or 'unknown'}"
+            )
+        if hook.observed is not None and current.state not in HOOK_FROZEN_STATES:
+            changes["session_state"] = hook.observed
+        current = self.ledger.update(current, **changes)
+        if hook.kind == runtime_mod.HOOK_PERMISSION:
+            # A session shows one permission dialog at a time; an older open prompt was
+            # answered in the session.
+            self.ledger.resolve_permission_prompts(current, now=stamp)
+            self.ledger.record_permission_prompt(
+                current, tool_name=hook.tool_name or "unknown", tool_input=hook.tool_input or "",
+                now=stamp,
+            )
+        if hook.observed is None:
+            return current
+        for _ in range(HOOK_WRITE_ATTEMPTS):
+            if current.state in HOOK_FROZEN_STATES:
+                return current
+            try:
+                return self._apply_session_state(current, hook.observed, report, hook=hook)
+            except _RowChanged:
+                current = self.ledger.get(worker.id)
+                if current is None or current.is_terminal:
+                    return None
+        log.warning("%s: the hook %s lost every write to the tick; the next diff applies it",
+                    current.handle, hook.event)
+        return current
 
     def _apply_session_state(
-        self, worker: Worker, observed: str, report: TickReport, *, session: Session | None = None
+        self,
+        worker: Worker,
+        observed: str,
+        report: TickReport,
+        *,
+        session: Session | None = None,
+        hook: Hook | None = None,
     ) -> Worker:
+        """Move *worker* to the state that *observed* means, from the listing or a *hook*.
+
+        The state write fails with _RowChanged when another thread changed the row's
+        state or applied a hook since *worker* was read.
+        """
         context = self.context_for_worker(worker)
         detail: str | None = None
         target_state = worker.state
 
+        if worker.state == ledger_mod.PARKED and hook is None:
+            return worker
         if worker.state == ledger_mod.PAUSED and session is not None and self._is_stopped(
             worker, session
         ):
@@ -1648,9 +1777,12 @@ class Runner:
             target_state = ledger_mod.RUNNING
             if worker.state != ledger_mod.RUNNING:
                 # A reply landed in agent view; the run is live again.
-                worker = self.ledger.update(
+                written = self.ledger.update_if_unchanged(
                     worker, working_since=time.time(), watchdog_notified=0, last_error=None
                 )
+                if written is None:
+                    raise _RowChanged(worker.handle)
+                worker = written
         elif observed == runtime_mod.BLOCKED:
             # waiting_for comes from the session listing and can quote whatever the
             # agent was about to run. It stays in the ledger and in `status`; it never
@@ -1662,7 +1794,10 @@ class Runner:
                 # Still idle, with events that admission held back.
                 target_state = ledger_mod.QUEUED
         elif observed == runtime_mod.FAILED:
-            target_state, detail = ledger_mod.BLOCKED, "session failed"
+            if hook is not None and hook.usage_limit:
+                target_state, detail = ledger_mod.PARKED, USAGE_LIMIT
+            else:
+                target_state, detail = ledger_mod.BLOCKED, "session failed"
         elif observed == runtime_mod.STOPPED:
             if worker.state == ledger_mod.PAUSED:
                 return worker
@@ -1675,7 +1810,10 @@ class Runner:
             target_state, detail = ledger_mod.BLOCKED, "session state not recognised — go look"
 
         if target_state != worker.state:
-            worker = self.ledger.update(worker, state=target_state)
+            written = self.ledger.update_if_unchanged(worker, state=target_state)
+            if written is None:
+                raise _RowChanged(worker.handle)
+            worker = written
             report.transitions.append(f"{worker.item}: {observed} -> {target_state}")
         self._sync_labels(worker, context, report)
 
