@@ -40,7 +40,7 @@ def test_tick_launches_a_queued_issue(capsys, config_file, harness):
 
     assert run(["tick"], config_file) == EXIT_OK
 
-    assert "launched: ABC-1" in capsys.readouterr().out
+    assert "launched: implementer/ABC-1" in capsys.readouterr().out
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
@@ -144,7 +144,7 @@ def test_the_tick_prints_a_held_wake_and_the_move_to_queued(capsys, config_file,
     assert re.search(
         f"^{STAMP}skipped: implementer/ABC-1: wake held by the daily cap \\(0/0\\)$", out, re.M
     ), out
-    assert re.search(f"^{STAMP}transition: ABC-1: wake held -> queued$", out, re.M), out
+    assert re.search(f"^{STAMP}transition: implementer/ABC-1: wake held -> queued$", out, re.M), out
 
 
 def test_a_failing_source_is_one_line_per_tick(capsys, caplog, config_file, harness, tmp_path):
@@ -232,7 +232,7 @@ def test_a_turn_end_prints_the_old_and_the_new_worker_state(capsys, config_file,
     run(["tick"], config_file)
 
     out = capsys.readouterr().out
-    assert re.search(f"^{STAMP}transition: ABC-1: running -> idle$", out, re.M), out
+    assert re.search(f"^{STAMP}transition: implementer/ABC-1: running -> idle$", out, re.M), out
 
 
 def test_continue_force_is_recorded_as_such(config_file, harness):
@@ -348,7 +348,7 @@ def test_every_line_a_tick_prints_says_when_it_was_written(capsys, config_file, 
     main(["--config", str(bad), "tick"])
 
     out, err = capsys.readouterr()
-    assert re.fullmatch(f"{STAMP}launched: ABC-1\n{STAMP}nothing to do\n", out), out
+    assert re.fullmatch(f"{STAMP}launched: implementer/ABC-1\n{STAMP}nothing to do\n", out), out
     assert re.fullmatch(
         f"{STAMP}another chargehand tick is running\n{STAMP}chargehand: .*at least one.*\n", err
     ), err

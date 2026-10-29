@@ -466,7 +466,7 @@ def test_the_fake_tracker_as_a_command_source_starts_and_wakes_a_worker(wired, f
     wired.claude_state.set_session_state("DEMO-1", "done", status="idle")
     fake_board.close("DEMO-1")
     report = wired.next_tick()
-    assert "DEMO-1: item closed -> done" in report.transitions
+    assert "watcher/DEMO-1: item closed -> done" in report.transitions
     assert wired.ledger.get(watcher.id).state == ledger_mod.DONE
 
 
@@ -541,8 +541,8 @@ def test_without_a_mark_command_the_tick_marks_nothing(wired, fake_board):
 @pytest.mark.parametrize(
     "failure, error",
     [
-        ("ambiguous", "DEMO-1: source cmd: mark DEMO-1 running may or may not have landed"),
-        ("failure", "DEMO-1: source cmd: mark exited 1: fake: the write failed"),
+        ("ambiguous", "watcher/DEMO-1: source cmd: mark DEMO-1 running may or may not have landed"),
+        ("failure", "watcher/DEMO-1: source cmd: mark exited 1: fake: the write failed"),
     ],
 )
 def test_a_mark_that_did_not_land_for_sure_is_tried_again_on_the_next_tick(

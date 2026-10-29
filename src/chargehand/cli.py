@@ -22,7 +22,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from chargehand import __version__, install, paths, sanitize, serve, trackers
+from chargehand import __version__, daemonlog, install, paths, sanitize, serve, trackers
 from chargehand import usage as usage_mod
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
@@ -52,24 +52,27 @@ KICKSTART_RETRY_SECS = 2.0
 ATTACH_STATES = ("blocked", "idle", "queued", "parked")
 
 # The parts of a tick report that `tick` prints, in this order. `skipped` holds the
-# launches and wakes that a cap or a pause held back. `routed` is left out: it holds a
-# summary of each source on every tick.
+# launches and wakes that a cap or a pause held back. `routed` has a line only for a poll
+# that found events, so a tick that did nothing still prints nothing.
 TICK_FIELDS = (
     "launched", "adopted", "resumed", "woken", "failed", "transitions", "follows",
-    "requests", "collected", "skipped", "warnings", "errors",
+    "notified", "routed", "requests", "collected", "skipped", "warnings", "errors",
 )
 
+# The level of a report line in the daemon's log, by field; INFO for the others. A
+# daemon at `log_level = "warning"` still records what went wrong.
+REPORT_LEVELS = {"failed": logging.WARNING, "warnings": logging.WARNING, "errors": logging.ERROR}
+
 log = logging.getLogger("chargehand")
+# The daemon writes its tick reports here, in the format of every other log line.
+report_log = logging.getLogger("chargehand.tick")
 
 
 # ----- shared plumbing ------------------------------------------------------
 
 
 def _setup_logging(verbosity: int) -> None:
-    level = logging.WARNING if verbosity <= 0 else (logging.INFO if verbosity == 1 else logging.DEBUG)
-    logging.basicConfig(
-        level=level, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", stream=sys.stderr
-    )
+    daemonlog.setup(daemonlog.level_for(verbosity))
 
 
 def _load_config(args: argparse.Namespace) -> MachineConfig:
@@ -412,18 +415,34 @@ def cmd_tick(args: argparse.Namespace) -> int:
     return EXIT_ERROR if report.errors else EXIT_OK
 
 
-def _print_report(report: TickReport, *, quiet: bool = False) -> None:
-    """One stamped line per entry. *quiet* leaves out the line for a tick that did nothing."""
-    stamp = _stamp()
+def report_lines(report: TickReport) -> list[tuple[int, str]]:
+    """The level and text of each line of *report*: one per entry, sanitized to one line."""
+    lines = []
     for field in TICK_FIELDS:
+        level = REPORT_LEVELS.get(field, logging.INFO)
         for entry in getattr(report, field):
-            _print(f"{stamp} {field[:-1] if field.endswith('s') else field}: "
-                   f"{sanitize.one_line(str(entry), limit=200)}")
+            lines.append((level, f"{field[:-1] if field.endswith('s') else field}: "
+                                 f"{sanitize.one_line(str(entry), limit=200)}"))
     if report.stopped_before:
-        _print(f"{stamp} stopped before phase {report.stopped_before}")
-    elif not quiet and not any(getattr(report, f) for f in TICK_FIELDS):
+        lines.append((logging.INFO, f"stopped before phase {report.stopped_before}"))
+    return lines
+
+
+def _print_report(report: TickReport) -> None:
+    """One stamped line per entry, as the output of a tick run by hand."""
+    stamp = _stamp()
+    lines = report_lines(report)
+    for _, text in lines:
+        _print(f"{stamp} {text}")
+    if not lines:
         _print(f"{stamp} nothing to do")
     sys.stdout.flush()
+
+
+def _log_report(report: TickReport) -> None:
+    """The daemon's report: into its log, with nothing for a tick that did nothing."""
+    for level, text in report_lines(report):
+        report_log.log(level, "%s", text)
 
 
 class _Cached:
@@ -449,10 +468,15 @@ LAUNCHD_CHECK_SECS = 60.0
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    # The job appends this output to its log, so every line is stamped as a tick's is.
     loaded = _Cached(install.is_loaded, LAUNCHD_CHECK_SECS)
+    log_file = Path(args.log_file).expanduser() if args.log_file else None
+
+    def apply_level(config: MachineConfig) -> None:
+        daemonlog.set_level(daemonlog.level_for(args.verbose, config.serve.log_level))
+
     try:
         config = _load_config(args)
+        daemonlog.setup(daemonlog.level_for(args.verbose, config.serve.log_level), log_file=log_file)
         daemon = serve.Daemon(
             config,
             load_config=lambda: _load_config(args),
@@ -462,18 +486,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 launchd_loaded=loaded(),
             ),
             sessions=list_sessions,
-            # A tick every minute that did nothing would fill the log with one line each.
-            report=lambda report: _print_report(report, quiet=True),
+            report=_log_report,
+            on_config=apply_level,
         )
         daemon.start()
     except ChargehandError as exc:
-        print(f"{_stamp()} chargehand: {sanitize.one_line(str(exc), limit=500)}", file=sys.stderr)
+        # Into the log file once it is set up; before that, into the job's own output file.
+        log.error("chargehand: %s", sanitize.one_line(str(exc), limit=500))
         return EXIT_ERROR
-    _print(f"{_stamp()} serving on http://{serve.HOST}:{daemon.port}, "
-           f"a tick every {daemon.interval_secs}s")
-    sys.stdout.flush()
+    log.info("serving on http://%s:%s, a tick every %ss, version %s",
+             serve.HOST, daemon.port, daemon.interval_secs, __version__)
     code = daemon.run()
-    _print(f"{_stamp()} stopped")
+    log.info("stopped")
     return code
 
 
@@ -899,7 +923,11 @@ def build_parser() -> argparse.ArgumentParser:
     discard.add_argument("--force", action="store_true", help="discard even with unpushed commits")
     _add_request_flags(discard)
 
-    add("serve", cmd_serve, "run the daemon: the tick on a timer and the loopback API")
+    serve_cmd = add("serve", cmd_serve, "run the daemon: the tick on a timer and the loopback API")
+    serve_cmd.add_argument(
+        "--log-file", metavar="PATH",
+        help="write the log to PATH, rotated by size, instead of to stderr",
+    )
 
     statusline = add(
         "statusline", cmd_statusline,

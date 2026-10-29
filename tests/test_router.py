@@ -325,7 +325,7 @@ def test_a_start_event_starts_a_worker_subscribed_to_its_item(routed):
 
     report = routed.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["reviewer/ABC-1"]
     assert report.errors == []
     reviewer = routed.worker("ABC-1", "reviewer")
     assert (reviewer.origin, reviewer.start_rule, reviewer.item_id) == (
@@ -430,7 +430,7 @@ def test_a_start_the_caps_defer_is_not_lost(tmp_path, repo, claude_state, board)
 
     assert deferred.launched == []
     assert any("PR-2: launch throttle" in line for line in deferred.skipped)
-    assert started.launched == ["PR-2"]
+    assert started.launched == ["reviewer/PR-2"]
     assert harness.worker("PR-2").role == "reviewer"
     assert ledger.pending_start_events() == []
     ledger.close()
@@ -442,7 +442,7 @@ def test_the_queue_label_still_starts_its_workers_and_labeled_events_start_nothi
 
     report = routed.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     assert [w.role for w in routed.ledger.live_workers_for("ABC-1")] == ["implementer"]
     assert routed.labels("ABC-1") == ("chargehand-running",)
     # The queue's worker follows its issue too, for the kinds its rule names.
@@ -460,7 +460,7 @@ def test_a_failing_source_is_one_error_and_the_tick_goes_on(routed):
 
     # The source's own name at the start of its error is not repeated.
     assert report.errors == ["source fake: 503"]
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     assert routed.ledger.get_cursor("fake") is None
 
 
@@ -489,7 +489,7 @@ def test_an_unknown_source_type_is_one_error(tmp_path, repo, claude_state, board
     report = runner.tick()
 
     assert len(report.errors) == 1 and "unknown source type 'nope'" in report.errors[0]
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     ledger.close()
 
 
@@ -544,7 +544,7 @@ def test_retrying_a_worker_another_event_started_does_not_queue_the_issue(routed
     assert routed.labels("ABC-1") == ()
     assert report.launched == []
     feed.emit("review_requested", "ABC-1")
-    assert routed.next_tick().launched == ["ABC-1"]
+    assert routed.next_tick().launched == ["reviewer/ABC-1"]
     assert routed.worker("ABC-1", "reviewer").id != reviewer.id
 
 
@@ -560,7 +560,7 @@ def test_a_source_url_that_is_not_a_plain_url_never_reaches_the_prompt(routed):
 
     report = routed.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["reviewer/ABC-1"]
     assert routed.worker("ABC-1", "reviewer").url is None
     argv = routed.claude_state.launches[0]["argv"]
     assert not any("IGNORE" in arg for arg in argv)
@@ -647,7 +647,7 @@ def test_a_source_that_cannot_be_built_is_one_error(tmp_path, repo, claude_state
     report = runner.tick()
 
     assert report.errors == ["source fake: boom"]
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     ledger.close()
 
 
@@ -681,7 +681,7 @@ def test_an_adopted_session_of_a_worker_another_event_started_does_not_own_the_l
 
     adopted = routed.ledger.live_worker_for("ABC-1", "reviewer")
     assert adopted is not None and adopted.id != cancelled.id
-    assert report.adopted == ["ABC-1"]
+    assert report.adopted == ["reviewer/ABC-1"]
     assert adopted.owns_label == 0
     assert adopted.item_id == cancelled.item_id
     (subscription,) = routed.ledger.subscriptions_of(adopted)
@@ -757,4 +757,4 @@ def test_a_deferred_start_waits_while_its_source_cannot_be_built(routed, monkeyp
     assert "source fake: boom" in report.errors
     assert [e.dedupe_id for e in routed.ledger.pending_start_events()] == ["e1"]
     monkeypatch.setattr(FakeSource, "__init__", working)
-    assert routed.next_tick().launched == ["ABC-1"]
+    assert routed.next_tick().launched == ["reviewer/ABC-1"]

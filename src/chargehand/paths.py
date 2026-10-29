@@ -60,6 +60,15 @@ def log_file() -> Path:
     return state_dir() / "chargehand.log"
 
 
+def launchd_output_file() -> Path:
+    """Where the launchd job's stdout and stderr go: what the daemon prints before its log.
+
+    Not the log file itself: the daemon rotates that by renaming it, and launchd would go
+    on writing into the renamed file.
+    """
+    return log_file().with_suffix(".launchd.log")
+
+
 def usage_file() -> Path:
     """The usage windows of the provider account.
 

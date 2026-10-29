@@ -13,6 +13,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 
+from chargehand import sanitize
 from chargehand.config import NotifyConfig
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,15 @@ class Notification:
         return payload
 
 
+@dataclass(frozen=True)
+class Outcome:
+    """What a send did. *outcome* is chargehand's own phrase, for the log."""
+
+    sent: bool
+    failed: bool
+    outcome: str
+
+
 class Notifier:
     def __init__(self, config: NotifyConfig) -> None:
         self.config = config
@@ -55,18 +65,19 @@ class Notifier:
         return bool(self.config.command)
 
     def send(self, notification: Notification) -> bool:
+        return self.dispatch(notification).sent
+
+    def dispatch(self, notification: Notification) -> Outcome:
         self.sent.append(notification)
         if not self.config.command:
-            log.info("notify (no command configured): %s -> %s",
-                     notification.item, notification.state)
-            return False
+            return Outcome(sent=False, failed=False, outcome="no command configured")
         try:
             argv = shlex.split(os.path.expanduser(self.config.command))
         except ValueError as exc:
             log.error("notify: cannot parse notify.command: %s", exc)
-            return False
+            return Outcome(sent=False, failed=True, outcome="notify.command does not parse")
         if not argv:
-            return False
+            return Outcome(sent=False, failed=True, outcome="notify.command is empty")
         argv[0] = os.path.expanduser(argv[0])
         try:
             result = subprocess.run(
@@ -77,13 +88,16 @@ class Notifier:
                 check=False,
                 env={**os.environ, **notification.env()},
             )
+        except subprocess.TimeoutExpired:
+            log.error("notify: %s timed out after %ss", argv[0], self.config.timeout_secs)
+            return Outcome(sent=False, failed=True, outcome="timed out")
         except (OSError, subprocess.SubprocessError) as exc:
             log.error("notify: %s failed: %s", argv[0], exc)
-            return False
+            return Outcome(sent=False, failed=True, outcome="could not run the command")
         if result.returncode != 0:
             log.error(
                 "notify: %s exited %s: %s",
-                argv[0], result.returncode, (result.stderr or "").strip()[:200],
+                argv[0], result.returncode, sanitize.one_line(result.stderr or "", limit=200),
             )
-            return False
-        return True
+            return Outcome(sent=False, failed=True, outcome=f"exit {result.returncode}")
+        return Outcome(sent=True, failed=False, outcome="sent")

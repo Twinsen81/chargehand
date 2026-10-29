@@ -23,7 +23,7 @@ def test_the_plist_keeps_the_daemon_running_with_an_explicit_path(monkeypatch):
     data = install.build_plist()
 
     assert data["Label"] == paths.LAUNCHD_LABEL
-    assert data["ProgramArguments"][-1] == "serve"
+    assert data["ProgramArguments"][-3:] == ["serve", "--log-file", str(paths.log_file())]
     assert data["KeepAlive"] is True
     assert data["RunAtLoad"] is True
     # The daemon ticks on its own timer; a StartInterval would start a second process.
@@ -48,10 +48,11 @@ def test_the_plist_can_always_be_run_by_launchd(monkeypatch):
     """
     monkeypatch.setattr(install.shutil, "which", lambda name: None)
     argv = install.build_plist()["ProgramArguments"]
-    assert argv == [sys.executable, "-m", "chargehand", "serve"]
+    log_file = ["--log-file", str(paths.log_file())]
+    assert argv == [sys.executable, "-m", "chargehand", "serve", *log_file]
 
     monkeypatch.setattr(install.shutil, "which", lambda name: "/opt/bin/chargehand")
-    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/chargehand", "serve"]
+    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/chargehand", "serve", *log_file]
 
 
 def test_the_plist_round_trips_through_plistlib(tmp_path):
@@ -61,7 +62,7 @@ def test_the_plist_round_trips_through_plistlib(tmp_path):
         data = plistlib.load(handle)
 
     assert data["KeepAlive"] is True
-    assert data["ProgramArguments"][-1] == "serve"
+    assert data["ProgramArguments"][-3:] == ["serve", "--log-file", str(paths.log_file())]
     assert not install.is_timer_job(data)
 
 
@@ -80,7 +81,7 @@ def test_install_writes_the_daemon_job_and_does_not_load_it(monkeypatch, capsys,
 
     with plist.open("rb") as handle:
         data = plistlib.load(handle)
-    assert data["ProgramArguments"][-1] == "serve"
+    assert data["ProgramArguments"][-3:] == ["serve", "--log-file", str(paths.log_file())]
     assert data["KeepAlive"] is True and data["ProcessType"] == "Interactive"
     assert "StartInterval" not in data
     assert "Not loaded" in capsys.readouterr().out

@@ -68,7 +68,11 @@ def build_plist(
     job_path: str | None = None,
     log_path: Path | None = None,
 ) -> dict[str, object]:
-    """A job that keeps `chargehand serve` running: started at load, restarted on exit."""
+    """A job that keeps `chargehand serve` running: started at load, restarted on exit.
+
+    The daemon writes its own log, rotated; *log_path* only gets what it prints before
+    that, such as a crash on import.
+    """
     argv = list(program) if program else chargehand_argv()
     extra_path = os.environ.get("PATH", "")
     return {
@@ -79,8 +83,8 @@ def build_plist(
         "ExitTimeOut": JOB_EXIT_TIMEOUT_SECS,
         "ProcessType": JOB_PROCESS_TYPE,
         "EnvironmentVariables": {"PATH": job_path or _merge_path(DEFAULT_JOB_PATH, extra_path)},
-        "StandardOutPath": str(log_path or paths.log_file()),
-        "StandardErrorPath": str(log_path or paths.log_file()),
+        "StandardOutPath": str(log_path or paths.launchd_output_file()),
+        "StandardErrorPath": str(log_path or paths.launchd_output_file()),
     }
 
 
@@ -101,10 +105,11 @@ def chargehand_argv() -> list[str]:
     back to the package. Returning the whole argv rather than a program keeps the two
     forms from being recombined wrongly by a caller.
     """
+    serve_args = ["serve", "--log-file", str(paths.log_file())]
     script = shutil.which("chargehand")
     if script:
-        return [script, "serve"]
-    return [sys.executable, "-m", "chargehand", "serve"]
+        return [script, *serve_args]
+    return [sys.executable, "-m", "chargehand", *serve_args]
 
 
 def write_plist(destination: Path | None = None, *, job_path: str | None = None) -> Path:
@@ -128,7 +133,13 @@ def installed_job(plist: Path | None = None) -> dict[str, object] | None:
 def is_timer_job(job: Mapping[str, object]) -> bool:
     """Whether *job* is the timer that ran one tick at a time, from before the daemon."""
     argv = job.get("ProgramArguments")
-    return "StartInterval" in job or not (isinstance(argv, list) and argv[-1:] == ["serve"])
+    return "StartInterval" in job or not (isinstance(argv, list) and "serve" in argv[1:])
+
+
+def writes_own_log(job: Mapping[str, object]) -> bool:
+    """Whether the daemon of *job* writes its own, rotated log, as `install` sets it up now."""
+    argv = job.get("ProgramArguments")
+    return isinstance(argv, list) and "--log-file" in argv
 
 
 def daemon_checks(config: MachineConfig) -> list[Check]:
@@ -447,6 +458,12 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
                         Check("launchd", WARN,
                               f"{plist} runs a tick on a timer instead of the daemon; "
                               "re-run `chargehand install --load`")
+                    )
+                elif not writes_own_log(job):
+                    checks.append(
+                        Check("launchd", WARN,
+                              f"the daemon writes its log through launchd, and nothing rotates "
+                              f"{paths.log_file()}; re-run `chargehand install --load`")
                     )
                 checks.extend(job_checks(config, job))
     else:

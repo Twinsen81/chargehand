@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An investigation log for the daemon. `serve --log-file` writes
+  `~/Library/Logs/chargehand.log` through a rotating handler (10 MB, five old files), and
+  `install` sets it up; the launchd job's own output moves to `chargehand.launchd.log`.
+  `log_level` in `[serve]` (`debug`, `info`, `warning`; default `info`) sets the level, read
+  on every tick. At `info` the log records each poll that found new events with its cursor
+  and duration, the other polls of a source as one line at most every 15 minutes, each
+  routed event with its decision and target worker, each hook post and why no worker
+  matched, each accepted label write, each wake with its kinds and pointers, what the
+  session listing says when it changes, each notification with the notify command's
+  outcome, and a warning for a slow or late tick. The tick report goes through the same
+  handler under `chargehand.tick`, so every line has one format. No line carries what a
+  worker said or did, or an event's actor. `doctor` warns about a job that does not
+  rotate its log.
 - A read-only board at `http://127.0.0.1:<port>/`, served by the daemon: the usage
   windows, the launch throttle and the daemon's health in a top bar, and a card per
   worker (role, item, branch, worktree, model and effort, last prompt and last answer,
@@ -25,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Queued, Idle and Closed. One static page under a strict content security policy.
 
 ### Changed
+
+- Every report line about a worker starts with its handle, `role/item`, as in
+  `launched: implementer/ABC-1` and `transition: implementer/ABC-1: running -> idle`.
+  The printed report of `tick` also carries `notified` and `routed`.
 
 - A worker whose turn ends and waits for events (`idle` or `queued`) no longer sends a
   notification; only blocked, parked, failed, done through the status file and the

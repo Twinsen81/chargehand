@@ -14,7 +14,7 @@ def test_a_queued_issue_becomes_a_supervised_session(harness):
 
     report = harness.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.step == LAST_STEP
@@ -118,7 +118,7 @@ def test_blocked_runs_do_not_hold_a_launch_slot(harness):
     harness.board.add("ABC-2")
     report = harness.next_tick()
 
-    assert "ABC-2" in report.launched
+    assert "implementer/ABC-2" in report.launched
 
 
 def test_open_attempts_bound_the_resume_burst(harness):
@@ -229,7 +229,7 @@ def test_a_re_armed_issue_launches_once_the_worktree_is_gone(harness):
     )
     report = harness.next_tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
 
 
 def test_the_launch_marks_its_worktree_as_a_trusted_workspace(harness):
@@ -249,7 +249,7 @@ def test_a_launch_still_happens_when_trust_cannot_be_recorded(harness, monkeypat
 
     report = harness.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     assert any("trusted workspace" in warning for warning in report.warnings)
 
 
@@ -276,7 +276,7 @@ def test_a_trust_entry_dropped_before_the_launch_is_written_again_in_the_same_ti
 
     report = harness.tick()
 
-    assert sorted(report.launched) == ["ABC-1", "ABC-2"]
+    assert sorted(report.launched) == ["implementer/ABC-1", "implementer/ABC-2"]
     assert report.errors == []
     assert len(harness.claude_state.launches) == 3
     assert harness.worker("ABC-2").launch_attempts == 1
@@ -301,7 +301,7 @@ def test_a_launch_refused_as_untrusted_every_time_is_left_to_the_next_tick(harne
     harness.claude_state.set(drop_trust_at_launches=[])
     report = harness.next_tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
 
 
 def test_a_refusal_while_the_trust_entry_is_still_there_is_not_retried(harness):

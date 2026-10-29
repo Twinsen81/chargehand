@@ -42,7 +42,7 @@ from pathlib import Path
 
 from chargehand import roles as roles_mod
 from chargehand import config as config_mod
-from chargehand import gitutil, ledger as ledger_mod, paths, sanitize, trackers
+from chargehand import daemonlog, gitutil, ledger as ledger_mod, paths, sanitize, trackers
 from chargehand import delivery as delivery_mod
 from chargehand import router as router_mod
 from chargehand import runtime as runtime_mod
@@ -489,6 +489,9 @@ class Runner:
         # When each runtime's listing was asked for. A session hook that the daemon
         # applied after that time is newer than the listing, and the diff leaves it be.
         self._listed_at: dict[str, float] = {}
+        # Writes a line per poll. The daemon gives every tick its own, which holds back the
+        # polls that found nothing.
+        self.polls = daemonlog.PollLog(window_secs=0)
 
     # ----- collaborators ----------------------------------------------------
 
@@ -701,10 +704,10 @@ class Runner:
 
             before = worker.launch_attempts
             worker = self.ledger.update(worker, launch_attempts=before + 1)
-            report.resumed.append(f"{worker.item}@step{worker.step}")
+            report.resumed.append(f"{worker.handle}@step{worker.step}")
             log.info(
-                "resuming launch of %s from step %s (worker %s)",
-                worker.item, worker.step, worker.launch_attempts,
+                "%s: resuming its launch from step %s (attempt %s)",
+                worker.handle, worker.step, worker.launch_attempts,
             )
             try:
                 self._run_launch_steps(context, worker, report)
@@ -716,12 +719,12 @@ class Runner:
                 self.ledger.update(
                     worker, launch_attempts=before, last_error=str(exc)[:500]
                 )
-                report.errors.append(f"{worker.item}: {exc}")
+                report.errors.append(f"{worker.handle}: {exc}")
             except ChargehandError as exc:
                 # Never silently re-queue: that would loop. Leave it launching and let
                 # the worker counter fail it loudly.
                 self.ledger.update(worker, last_error=str(exc)[:500])
-                report.errors.append(f"{worker.item}: {exc}")
+                report.errors.append(f"{worker.handle}: {exc}")
 
     def _reconcile_sessions(self, report: TickReport) -> None:
         """No session under the worktree root runs outside the watchdog."""
@@ -809,6 +812,7 @@ class Runner:
                 except (*TRACKER_FAILURES, ItemGone) as exc:
                     report.errors.append(f"{item.key}: {exc}")
                     continue
+                _log_mark("no live worker", item, source, Status.RUNNING.value, Status.BLOCKED.value)
                 self._notify(report, item.key, "blocked", item.url, repository.name,
                              detail="running label without a live worker")
 
@@ -872,8 +876,8 @@ class Runner:
         self.ledger.record_session(
             worker, kind=ledger_mod.SESSION_ADOPTED, session_id=session.id, session_uuid=session.uuid
         )
-        report.adopted.append(worker.item)
-        log.info("adopted session %s for %s", session.id, worker.handle)
+        report.adopted.append(worker.handle)
+        log.info("%s: adopted session %s", worker.handle, session.id)
         return worker
 
     def _adopt_orphan(
@@ -1182,6 +1186,8 @@ class Runner:
             return False, f"{worker.item} no longer exists on the tracker"
         except TRACKER_FAILURES as exc:
             return False, f"could not re-queue {worker.item}: {exc}"
+        _log_mark(worker.handle, context.item_of(worker), context.source, worker.label_state or "none",
+                  Status.QUEUED.value)
         self.ledger.update(worker, gc_done=1)
         outcome = "re-queued; the next admission pass starts a new worker"
         return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
@@ -1284,7 +1290,7 @@ class Runner:
                     # Leaving the worker `running` keeps working_since intact, so the
                     # next tick tries again instead of handing the run a fresh deadline.
                     report.errors.append(
-                        f"{worker.item}: the watchdog could not stop the session"
+                        f"{worker.handle}: the watchdog could not stop the session"
                     )
                     if worker.watchdog_notified != WATCHDOG_STOP_FAILED:
                         self.ledger.update(worker, watchdog_notified=WATCHDOG_STOP_FAILED)
@@ -1299,7 +1305,7 @@ class Runner:
                 )
                 self._sync_labels(updated, self.context_for_worker(updated), report)
                 self._notify(report, worker.item, "watchdog-stopped", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
-                report.warnings.append(f"{worker.item}: watchdog stopped the session")
+                report.warnings.append(f"{worker.handle}: watchdog stopped the session")
             elif max_run and elapsed > max_run and not worker.watchdog_notified:
                 self.ledger.update(worker, watchdog_notified=WATCHDOG_LONG_RUN)
                 self._notify(report, worker.item, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
@@ -1410,17 +1416,19 @@ class Runner:
                     else source_failure(config.name, problem)
                 )
                 continue
+            before = self.ledger.get_cursor(config.name)
             try:
                 signed_in = source.whoami()
-                events, cursor = source.poll(
-                    self.ledger.get_cursor(config.name),
-                    self.ledger.subscribed_items(config.name),
-                )
+                started = time.monotonic()
+                events, cursor = source.poll(before, self.ledger.subscribed_items(config.name))
             except LaunchAborted:
                 raise
             except Exception as exc:
+                self.polls.failed(config.name)
                 self._source_failed(report, config.name, exc)
                 continue
+            self.polls.polled(config.name, before, cursor, len(events), time.monotonic() - started,
+                              new=self._unseen(events))
             report.warnings.extend(source.take_warnings())
             own = [event for event in events if event.source == config.name]
             if len(own) != len(events):
@@ -1430,7 +1438,9 @@ class Runner:
                 )
             result = router.route(own, signed_in=signed_in)
             self.ledger.set_cursor(config.name, cursor)
-            if own:
+            # A poll reads back over its previous one; a summary of events all seen before
+            # would be a line on every tick.
+            if result.duplicates < len(own):
                 report.routed.append(
                     f"{config.name}: {len(own)} event(s), {result.duplicates} seen before, "
                     f"{result.own} by chargehand, {result.delivered} inbox row(s), "
@@ -1444,10 +1454,28 @@ class Runner:
                 f"an issue still in a tracker's queue is offered again from the queue"
             )
 
+    def _unseen(self, events: Sequence[Event]) -> int:
+        """How many of *events* the dedupe filter has not seen yet."""
+        return sum(not self.ledger.event_seen(event.source, event.dedupe_id) for event in events)
+
     def _start_from_event(
         self, event: Event, report: TickReport, *, crash_after_step: int | None = None
+    ) -> router_mod.StartResult:
+        """Run the start rules for one event; the result says what they did, for the log."""
+        notes: list[str] = []
+        deferred = self._run_start_rules(event, report, notes, crash_after_step=crash_after_step)
+        return router_mod.StartResult(deferred, "; ".join(note for note in notes if note)
+                                      if notes else None)
+
+    def _run_start_rules(
+        self,
+        event: Event,
+        report: TickReport,
+        notes: list[str],
+        *,
+        crash_after_step: int | None = None,
     ) -> bool:
-        """Run the start rules of the enabled roles for one event.
+        """Run the start rules of the enabled roles for one event, adding to *notes* what they did.
 
         Returns True when a rule wanted a worker and the launch has to wait, for the caps,
         a pause or a previous worker's worktree; the router then keeps the event.
@@ -1459,7 +1487,15 @@ class Runner:
         that worker lives, and is dropped once the issue has left the queue.
         """
         if TrackerSource.produced(event) != self._trackers_turn:
-            # Not this step's start: it is tried in the other one, once per tick.
+            # Not this step's start: it is tried in the other one, once per tick. The log
+            # names that only when a role starts on the event's kind; an empty note says
+            # there is nothing to tell.
+            if not self._some_role_starts_on(event):
+                notes.append("")
+            elif TrackerSource.produced(event):
+                notes.append("start tried in the admission step")
+            else:
+                notes.append("start tried in the route step")
             return True
         context = self.tracker_context(event)
         from_tracker = context is not None
@@ -1473,31 +1509,40 @@ class Runner:
             if source is None:
                 # A configured source that cannot be built this tick keeps its starts; the
                 # weekly prune ends the wait. A source no longer configured drops them.
-                return self.config.source_by_name(event.source) is not None
+                kept = self.config.source_by_name(event.source) is not None
+                notes.append("start waits, the source cannot be built" if kept
+                             else "start dropped, the source is no longer configured")
+                return kept
             found = source.repository_for(event.item, self.config.repositories)
             if found is None:
                 self._note_unconfigured(event, report)
+                notes.append("no [[repository]] names its repository")
                 return False
             repository, context = found, self.context(found)
         if not context.usable:
             # Reported by reconciliation; the start waits until the repository is usable.
+            notes.append(f"start waits, repository {repository.name} is not usable")
             return True
         queue = event.kind == roles_mod.LABELED
         if queue and self.ledger.is_paused(repository.name):
             # Not polled while paused, so the queue is not read for it either.
             report.skipped.append(f"{event.item.key}: repository {repository.name} is paused")
+            notes.append(f"start waits, repository {repository.name} is paused")
             return True
         if queue:
             if repository.name not in self._polled_trackers:
                 # This tick's poll failed and is reported; the queue cannot be checked.
+                notes.append("start waits, the tracker poll failed")
                 return True
             # A start that waited may have left the queue since. The trackers are polled
             # before the admission step, so this reads the listing of this tick's poll.
             try:
                 if not context.source.still_queued(event.item):  # type: ignore[union-attr]
+                    notes.append("start dropped, the item left the queue")
                     return False
             except TRACKER_FAILURES as exc:
                 report.errors.append(f"repository {repository.name}: {exc}")
+                notes.append("start waits, the tracker failed")
                 return True
         item = event.item.key
         deferred = False
@@ -1507,34 +1552,43 @@ class Runner:
             except ConfigError:
                 # Reported by the tracker poll, once per tick. The role might start on this
                 # event, so the start waits until the role file loads again.
+                notes.append(f"start waits, role {role_name} does not load")
                 deferred = True
                 continue
             rule = role.start_rule_for(event.kind, event.source, repository.name)
             if rule is None:
                 continue
+            handle = f"{role.name}/{sanitize.scrub_identifier(item)}"
             if queue:
-                if self.ledger.live_worker_for(item) is not None:
+                holder = self.ledger.live_worker_for(item)
+                if holder is not None:
+                    notes.append(f"start waits, {holder.handle} holds the item")
                     deferred = True
                     continue
             elif router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
                 delivered, skipped = router_mod.deliver_to_holders(self.ledger, role.name, event)
-                handle = f"{role.name}/{sanitize.scrub_identifier(item)}"
                 if delivered:
                     report.routed.append(f"{handle}: {rule.on} goes to the worker that has it")
+                    notes.append(f"{rule.on} goes to {handle}, which has it")
                 elif skipped:
                     report.routed.append(
                         f"{handle}: {rule.on} is from before the start of the worker that has "
                         f"it, not delivered"
                     )
+                    notes.append(f"{rule.on} predates the start of {handle}, not delivered")
+                else:
+                    notes.append(f"no start, {handle} has it")
                 continue
             if not sanitize.is_safe_identifier(item):
                 report.warnings.append(
                     f"source {event.source}: skipping an item whose identifier is not usable "
                     f"as a path or branch name: {sanitize.scrub_identifier(item)!r}"
                 )
+                notes.append("start dropped, the identifier is not usable")
                 return False
             if self.ledger.is_paused(repository.name):
                 report.skipped.append(f"{item}: repository {repository.name} is paused")
+                notes.append(f"start waits, repository {repository.name} is paused")
                 deferred = True
                 continue
             stale = self._stale_worktree_for(role.name, item)
@@ -1547,11 +1601,13 @@ class Runner:
                 report.skipped.append(
                     f"{item}: the previous {role.name} worker's worktree is still at {stale}{hint}"
                 )
+                notes.append(f"start of {handle} waits, the previous worktree is still there")
                 deferred = True
                 continue
             refusal = self._launch_refusal(repository, role, item)
             if refusal is not None:
                 report.skipped.append(refusal)
+                notes.append(f"start of {handle} waits, {refusal.removeprefix(f'{item}: ')}")
                 deferred = True
                 continue
             if queue:
@@ -1566,7 +1622,11 @@ class Runner:
             except LaunchAborted:
                 raise
             except ChargehandError as exc:
-                report.errors.append(f"{item}: {exc}")
+                report.errors.append(f"{handle}: {exc}")
+                notes.append(f"launch of {handle} failed")
+            else:
+                live = self.ledger.live_worker_for(item, role.name) is not None
+                notes.append(f"launched {handle}" if live else f"launch of {handle} failed")
         return deferred
 
     def _source_status_owner(self, event: Event) -> int:
@@ -1641,11 +1701,11 @@ class Runner:
                 )
                 continue
             if not self._stop_session(worker):
-                report.warnings.append(f"{worker.item}: item closed but its session would not stop")
+                report.warnings.append(f"{worker.handle}: item closed but its session would not stop")
                 continue
             updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
             self._sync_labels(updated, self.context_for_worker(updated), report)
-            report.transitions.append(f"{worker.item}: item closed -> done")
+            report.transitions.append(f"{worker.handle}: item closed -> done")
             closed += 1
         return closed
 
@@ -1674,12 +1734,14 @@ class Runner:
             if worker.state == ledger_mod.LAUNCHING or worker.is_terminal:
                 continue
             if self._hook_is_newer(worker):
+                log.debug("%s: a hook is newer than the session listing; the diff leaves it",
+                          worker.handle)
                 continue
             if worker.runtime not in listings:
                 try:
                     listings[worker.runtime] = {s.id: s for s in self.sessions(worker.runtime)}
                 except ConfigError as exc:
-                    report.errors.append(f"{worker.item}: {exc}")
+                    report.errors.append(f"{worker.handle}: {exc}")
                     continue
             session = listings[worker.runtime].get(worker.session_id or "")
             if session is None:
@@ -1690,6 +1752,13 @@ class Runner:
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
             waiting = session.waiting_for if session else None
+            # The listed state only, never its waiting text: that quotes the agent.
+            log.log(
+                logging.INFO if observed != worker.session_state else logging.DEBUG,
+                "%s: the listing shows session %s as %s (recorded %s, worker %s)",
+                worker.handle, worker.session_id or "-", sanitize.one_line(observed, limit=40),
+                worker.session_state or "none", worker.state,
+            )
             pr_url = (session.pr_url if session else None) or worker.pr_url
 
             changes: dict[str, object] = {}
@@ -1845,7 +1914,7 @@ class Runner:
             if written is None:
                 raise _RowChanged(worker.handle)
             worker = written
-            report.transitions.append(_transition_line(worker.item, before, target_state, observed))
+            report.transitions.append(_transition_line(worker.handle, before, target_state, observed))
         self._sync_labels(worker, context, report)
 
         if target_state in QUIET_STATES:
@@ -1879,7 +1948,7 @@ class Runner:
             if time.time() - worker.finished_at > PENDING_NOTIFICATION_MAX_AGE_SECS:
                 self.ledger.delete_state(key)
                 report.warnings.append(
-                    f"gave up on the notification for {worker.item} ({worker.state})"
+                    f"gave up on the notification for {worker.handle} ({worker.state})"
                 )
                 continue
             if self._notify(report, worker.item, worker.state, worker.url, worker.repository, role=worker.role, detail=detail or None):
@@ -1955,11 +2024,10 @@ class Runner:
             self.invalidate_sessions()
         for worker in result.woken:
             # The tick log prints transitions, so a wake shows there too.
-            report.transitions.append(f"{worker.item or worker.handle}: wake -> {worker.state}")
-            log.info("woke %s in session %s", worker.handle, worker.session_id)
+            report.transitions.append(f"{worker.handle}: wake -> {worker.state}")
         for worker in self.ledger.workers_in_state([ledger_mod.QUEUED]):
             if worker.id in idle_before:
-                report.transitions.append(f"{worker.item or worker.handle}: wake held -> queued")
+                report.transitions.append(f"{worker.handle}: wake held -> queued")
         for worker, detail in result.faults:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.item or worker.handle, "wake-fault", worker.url,
@@ -2189,17 +2257,19 @@ class Runner:
         if target is None:
             return worker
         source, item = target
+        before = worker.label_state or "none"
         try:
             source.mark(item, desired)
         except ItemGone:
-            report.warnings.append(f"{worker.item} no longer exists on the tracker")
+            report.warnings.append(f"{worker.handle}: its item no longer exists on the tracker")
             return self.ledger.update(worker, label_state=desired.value)
         except AmbiguousWrite as exc:
-            report.errors.append(f"{worker.item}: {exc}")
+            report.errors.append(f"{worker.handle}: {exc}")
             return self.ledger.update(worker, last_error=str(exc)[:500])
         except TRACKER_FAILURES as exc:
-            report.errors.append(f"{worker.item}: {exc}")
+            report.errors.append(f"{worker.handle}: {exc}")
             return worker
+        _log_mark(worker.handle, item, source, before, desired.value)
         # Deliberately does not clear last_error: a successful label write says nothing
         # about why the worker failed, and that reason is what `--verbose-titles` shows.
         return self.ledger.update(worker, label_state=desired.value)
@@ -2290,22 +2360,26 @@ class Runner:
                     report.errors.append(f"repository {repository.name}: {exc}")
             source = context.source
             assert source is not None
+            name = f"{TRACKER_CURSOR_PREFIX}{repository.name}"
+            before = self.ledger.get_cursor(name)
+            started = time.monotonic()
             try:
-                events, cursor = source.poll(
-                    self.ledger.get_cursor(f"{TRACKER_CURSOR_PREFIX}{repository.name}"),
-                    self._followed_items(context),
-                )
+                events, cursor = source.poll(before, self._followed_items(context))
             except ChargehandError as exc:
                 # Expected, and back on every tick while it lasts: the report's error
                 # line is its one record.
+                self.polls.failed(name)
                 report.errors.append(f"repository {repository.name}: {exc}")
                 continue
             except Exception as exc:
+                self.polls.failed(name)
                 log.exception("the tracker of repository %s failed", repository.name)
                 report.errors.append(
                     f"repository {repository.name}: {sanitize.one_line(str(exc), limit=300)}"
                 )
                 continue
+            self.polls.polled(name, before, cursor, len(events), time.monotonic() - started,
+                              new=self._unseen(events))
             polled.append((repository, events, cursor))
         self._polled_trackers = {repository.name for repository, _, _ in polled}
         return polled
@@ -2399,7 +2473,7 @@ class Runner:
                 runtime=role.runtime,
             )
             self.ledger.subscribe(worker, item, rule.subscribe, primary=True)
-        log.info("launching %s in %s", worker.handle, worktree)
+        log.info("%s: launching in %s", worker.handle, worktree)
         self._check_crash(0, crash_after_step)
         self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step)
 
@@ -2442,6 +2516,8 @@ class Runner:
                 # otherwise fail a launch that never went wrong, in three ticks.
                 self.ledger.update(worker, last_error=str(exc)[:500])
                 raise
+            _log_mark(worker.handle, context.item_of(worker), source, worker.label_state or "none",
+                      Status.RUNNING.value)
             worker = self.ledger.update(worker, step=1, label_state=Status.RUNNING.value)
             self._check_crash(1, crash_after_step)
 
@@ -2618,7 +2694,7 @@ class Runner:
         self.ledger.record_session(
             worker, kind=ledger_mod.SESSION_INITIAL, session_id=existing.id, session_uuid=existing.uuid
         )
-        report.launched.append(worker.item)
+        report.launched.append(worker.handle)
         return worker
 
     def _find_worker_session(self, worker: Worker, *, exclude: Collection[str] = ()) -> Session | None:
@@ -2678,8 +2754,8 @@ class Runner:
             worker, state=ledger_mod.FAILED, last_error=sanitize.one_line(reason, limit=400)
         )
         self._sync_labels(worker, context, report)
-        report.failed.append(f"{worker.item}: {reason}")
-        log.error("%s failed: %s", worker.item, reason)
+        report.failed.append(f"{worker.handle}: {reason}")
+        log.error("%s failed: %s", worker.handle, sanitize.one_line(reason, limit=400))
         self._notify(report, worker.item, "failed", worker.url, worker.repository, role=worker.role,
                      detail=notify_detail)
         return worker
@@ -2697,23 +2773,23 @@ class Runner:
                 continue
             blocker = self._worktree_holds_work(worker)
             if blocker:
-                report.warnings.append(f"{worker.item}: not collected, {blocker}")
+                report.warnings.append(f"{worker.handle}: not collected, {blocker}")
                 continue
             if worker.session_id and not self._stop_session(worker):
                 report.warnings.append(
-                    f"{worker.item}: not collected, its session is still working"
+                    f"{worker.handle}: not collected, its session is still working"
                 )
                 continue
             self._remove_session(worker)
             try:
                 branches_removed = self._remove_worktree(worker, force=False)
             except GitError as exc:
-                report.warnings.append(f"{worker.item}: could not collect: {exc}")
+                report.warnings.append(f"{worker.handle}: could not collect: {exc}")
                 continue
             if not branches_removed:
-                report.warnings.append(f"{worker.item}: collected, but {KEPT_BRANCH}")
+                report.warnings.append(f"{worker.handle}: collected, but {KEPT_BRANCH}")
             self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
-            report.collected.append(worker.item)
+            report.collected.append(worker.handle)
         self._forget_checkout_heads()
 
     def _forget_checkout_heads(self) -> None:
@@ -2745,12 +2821,12 @@ class Runner:
                 continue
             if not self._stop_session(worker):
                 report.warnings.append(
-                    f"{worker.item}: item is closed but its session would not stop"
+                    f"{worker.handle}: item is closed but its session would not stop"
                 )
                 continue
             updated = self.ledger.update(worker, state=ledger_mod.DONE, label_state=None)
             self._sync_labels(updated, context, report)
-            report.transitions.append(f"{worker.item}: item closed -> done")
+            report.transitions.append(f"{worker.handle}: item closed -> done")
 
     def _item_closed(self, worker: Worker, context: RepositoryContext) -> bool:
         """True once the worker's own item is closed or gone; False when open or unknown.
@@ -2824,12 +2900,21 @@ class Runner:
         notification = Notification(
             item=item, state=state, url=url, repository=repository, role=role, detail=detail
         )
-        if self.notifier.send(notification) or not self.notifier.enabled:
-            report.notified.append(f"{item}: {state}")
+        outcome = self.notifier.dispatch(notification)
+        handle = f"{role}/{item}" if role else item
+        about = f"{state} ({detail})" if detail else state
+        report.notified.append(f"{handle}: {about}, {outcome.outcome}")
+        if not outcome.failed:
             return True
-        report.warnings.append(f"notification for {item} ({state}) failed; see the log")
+        report.warnings.append(f"notification for {handle} ({state}) failed; see the log")
         return False
 
+
+
+def _log_mark(who: str, item: WorkItem, source: Source | None, before: str, after: str) -> None:
+    """A label or status write that the source accepted."""
+    log.info("%s: marked %s on %s: %s -> %s", who, sanitize.scrub_identifier(item.key),
+             source.name if source is not None else "?", before, after)
 
 
 def _transition_line(item: str | None, before: str, after: str, observed: str) -> str:

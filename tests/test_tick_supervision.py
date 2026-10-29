@@ -149,7 +149,7 @@ def test_a_worker_that_ends_many_turns_sends_no_notification_until_it_needs_the_
         transitions += harness.next_tick().transitions
 
     assert harness.notifications() == []
-    assert transitions == ["ABC-1: running -> idle", "ABC-1: idle -> running"] * 3
+    assert transitions == ["implementer/ABC-1: running -> idle", "implementer/ABC-1: idle -> running"] * 3
 
     harness.claude_state.set_session_state("ABC-1", "blocked")
     harness.next_tick()
@@ -182,14 +182,14 @@ def test_a_status_file_that_completes_an_idle_worker_is_notified(harness, repo, 
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
     report = harness.next_tick()
 
-    assert "ABC-1: idle -> done" in report.transitions
+    assert "implementer/ABC-1: idle -> done" in report.transitions
     assert harness.notifications() == [("ABC-1", "done")]
 
 
 def test_a_transition_names_the_session_state_only_when_it_explains_the_change(harness):
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "blocked")
-    assert harness.next_tick().transitions == ["ABC-1: running -> blocked"]
+    assert harness.next_tick().transitions == ["implementer/ABC-1: running -> blocked"]
 
     # Still blocked: no line for a change that did not happen.
     harness.claude_state.set_session_state("ABC-1", "failed")
@@ -198,7 +198,7 @@ def test_a_transition_names_the_session_state_only_when_it_explains_the_change(h
     harness.claude_state.set_session_state("ABC-1", "working")
     harness.next_tick()
     harness.claude_state.set_session_state("ABC-1", "failed")
-    assert harness.next_tick().transitions == ["ABC-1: running -> blocked (session failed)"]
+    assert harness.next_tick().transitions == ["implementer/ABC-1: running -> blocked (session failed)"]
 
 
 def test_an_item_found_closed_is_reported_as_an_item(harness):
@@ -213,7 +213,7 @@ def test_an_item_found_closed_is_reported_as_an_item(harness):
 
     harness.fresh_runner()._close_out_finished_issues(report)
 
-    assert report.transitions == ["ABC-1: item closed -> done"]
+    assert report.transitions == ["implementer/ABC-1: item closed -> done"]
     assert harness.worker("ABC-1").state == ledger_mod.DONE
 
 
@@ -347,7 +347,7 @@ def test_a_finished_run_is_collected_once_the_issue_closes(harness, repo, tmp_pa
     harness.board.close("ABC-1")
     report = harness.next_tick()
 
-    assert "ABC-1" in report.collected
+    assert "implementer/ABC-1" in report.collected
     assert not (harness.worktree("ABC-1")).exists()
     assert harness.claude_state.sessions == []
 
@@ -383,7 +383,7 @@ def test_collection_deletes_a_branch_the_session_renamed(harness, repo, tmp_path
     harness.board.close("ABC-1")
     report = harness.next_tick()
 
-    assert "ABC-1" in report.collected
+    assert "implementer/ABC-1" in report.collected
     assert not harness.runner.git.branch_exists(repo, "abc-1-a-title-slug")
     assert not any("kept" in warning for warning in report.warnings)
 
@@ -400,7 +400,7 @@ def test_collection_reports_a_branch_it_kept(harness, repo, tmp_path):
     harness.board.close("ABC-1")
     report = harness.next_tick()
 
-    assert "ABC-1" in report.collected
+    assert "implementer/ABC-1" in report.collected
     assert harness.runner.git.branch_exists(repo, "made-by-the-session")
     assert any("branch was kept" in warning for warning in report.warnings)
     assert not any("made-by-the-session" in warning for warning in report.warnings)
@@ -458,7 +458,7 @@ def test_an_idle_run_is_closed_out_when_its_issue_closes(harness):
     harness.board.close("ABC-1")
     report = harness.next_tick()
 
-    assert "ABC-1" in report.collected
+    assert "implementer/ABC-1" in report.collected
     assert harness.worker("ABC-1").state == ledger_mod.DONE
     assert not (harness.worktree("ABC-1")).exists()
 
@@ -642,7 +642,7 @@ def test_a_status_file_from_the_run_before_an_adoption_is_ignored(harness, repo,
     harness.claude_state.set_session_state("ABC-1", "working")
     report = harness.next_tick()
     adopted = harness.worker("ABC-1")
-    assert report.adopted == ["ABC-1"] and adopted.id != first.id
+    assert report.adopted == ["implementer/ABC-1"] and adopted.id != first.id
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
 

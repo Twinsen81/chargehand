@@ -116,7 +116,7 @@ def test_a_second_worker_on_the_issue_never_writes_the_label(tmp_path, repo, cla
 
     report = harness.next_tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["helper/ABC-1"]
     helper = harness.worker("ABC-1", "helper")
     assert helper is not None and not helper.owns_label
     assert harness.worker("ABC-1", "implementer").owns_label
@@ -137,7 +137,7 @@ def test_a_waiting_queue_start_is_dropped_once_the_issue_left_the_queue(harness)
     for index in range(3):
         harness.board.add(f"ABC-{index}")
     first = harness.tick()
-    assert first.launched == ["ABC-0", "ABC-1"]
+    assert first.launched == ["implementer/ABC-0", "implementer/ABC-1"]
 
     # Taken out of the queue while it waited for a slot.
     issue = harness.board.by_identifier("ABC-2")
@@ -158,7 +158,7 @@ def test_a_waiting_queue_start_launches_when_a_slot_frees(harness):
     harness.claude_state.set_session_state("ABC-0", "blocked")
     report = harness.next_tick()
 
-    assert report.launched == ["ABC-2"]
+    assert report.launched == ["implementer/ABC-2"]
     assert harness.worker("ABC-2").owns_label
     assert harness.labels("ABC-2") == ("chargehand-running",)
 
@@ -193,7 +193,7 @@ def test_a_queued_issue_starts_once_a_broken_role_file_is_fixed(harness):
         if report.launched:
             break
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
 
 
 def test_a_queue_start_given_up_after_a_week_comes_back_from_the_queue(harness):
@@ -209,7 +209,7 @@ def test_a_queue_start_given_up_after_a_week_comes_back_from_the_queue(harness):
     report = harness.next_tick()
 
     assert any("gave up 1 start" in warning for warning in given_up.warnings)
-    assert report.launched == ["ABC-2"]
+    assert report.launched == ["implementer/ABC-2"]
 
 
 def test_a_waiting_start_is_tried_once_per_tick(harness):

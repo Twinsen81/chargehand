@@ -82,8 +82,8 @@ path to the interpreter it was installed with, so it works whether or not the en
 is on your shell's PATH. It also records the PATH of the shell you run `install` from,
 because launchd gives a job only a minimal one; `doctor` checks that `claude` and `git`
 resolve through the job's PATH, not only through yours, that the daemon answers, and that
-the token file has mode 0600. The daemon appends timestamped lines to
-`~/Library/Logs/chargehand.log`. To try the daemon without the job, run `chargehand serve`
+the token file has mode 0600. The daemon writes its log to `~/Library/Logs/chargehand.log`
+(see [The log](#the-log)). To try the daemon without the job, run `chargehand serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
 Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle and the
@@ -118,6 +118,64 @@ you want to reach the machine from elsewhere, but nothing depends on that.
 `chargehand templates` lists the bundled starter files: the two configuration
 templates, a notification hook, the deny rules passed to launched sessions, and a
 skill for driving this CLI from a Claude Code session.
+
+## The log
+
+The daemon writes `~/Library/Logs/chargehand.log` itself and rotates it at 10 MB, keeping
+five old files (`chargehand.log.1` to `.5`). The launchd job's own output goes to
+`~/Library/Logs/chargehand.launchd.log`, which only holds what the interpreter prints
+before the log is set up, such as a crash at start. A job installed by an older release
+writes the log through launchd and nothing rotates it; `doctor` warns, and
+`chargehand install --load` fixes it.
+
+The level is `log_level` in `[serve]`: `debug`, `info` (the default) or `warning`. The
+daemon reads it again on every tick, so a change needs no restart; `-v` and `-vv` override
+it for a `chargehand serve` in a terminal. Every line has the same format, a timestamp, the
+level and the part of chargehand that wrote it, and every line about a worker starts with
+its handle, `role/item`, so `grep implementer/ABC-1` finds all of them.
+
+At `info` the log holds:
+
+- what each tick changed: launches, transitions, wakes, notifications with their outcome
+  (`sent`, `exit 2`, `no command configured`), label writes with the status before and
+  after, collected workers, warnings and errors. A tick that changed nothing writes nothing;
+- each poll that found new events, with the cursor before and after and how long it took.
+  A source reads back over its previous poll, so most polls return only events seen
+  before; those, and empty polls, are written as one line per source at most every 15
+  minutes, when a poll fails, and when the daemon stops;
+- each event that passed the dedupe filter: its source, kind, item, its dedupe id, and
+  what routing did with it: the workers it went to, the worker it
+  started, or why the start waits;
+- each hook a session posted, with the first characters of the session id and the worker
+  it moved, or why no worker matched; a hook refused for a stale token shows too;
+- a warning for a tick that took longer than the interval, or that began more than two
+  intervals after the previous one ended.
+
+`debug` adds the HTTP access log, a line for every tick, and the waits for the tick lock.
+`warning` keeps only warnings and errors.
+
+The log never holds what a worker said or did in its session: no last answer, waiting
+text, permission tool input, status file text, comment body or transcript path. It never
+holds a comment author either, which on Linear is an email address. Those stay in the
+ledger and on the board. Text from outside chargehand that may appear, such as a setup
+script's error or a command's stderr, is capped and cut to one line.
+
+When the log is not enough, the ledger keeps every routed event for 30 days. Look up an
+event by the dedupe id in brackets on its log line, then the inbox rows it made:
+
+```bash
+sqlite3 ~/Library/Application\ Support/chargehand/ledger.sqlite \
+  "SELECT source, kind, item, datetime(occurred_at,'unixepoch'), datetime(seen_at,'unixepoch'),
+          start_pending FROM events WHERE dedupe_id = 'tracker:comment:1234';"
+sqlite3 ~/Library/Application\ Support/chargehand/ledger.sqlite \
+  "SELECT w.role || '/' || w.item, datetime(i.queued_at,'unixepoch'),
+          datetime(i.delivered_at,'unixepoch')
+   FROM inbox i JOIN workers w ON w.id = i.worker_id WHERE i.dedupe_id = 'tracker:comment:1234';"
+```
+
+No row in `events` means no poll returned the event. A row with no inbox row means no live
+worker subscribed to its kind on that item when it arrived. An inbox row with no
+`delivered_at` means the event still waits for a wake.
 
 ## Driving it from Claude Code
 
