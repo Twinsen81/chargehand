@@ -59,7 +59,7 @@ on = "labeled"
 
     report = harness.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     argv = harness.claude_state.launches[0]["argv"]
     assert argv[argv.index("-n") + 1] == "implementer/ABC-1"
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
@@ -107,7 +107,7 @@ on = "labeled"
 
     report = harness.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     order = (harness.worktree("ABC-1") / "order.txt").read_text().split()
     assert order == ["repo", "role"]
 
@@ -148,7 +148,7 @@ def test_roles_that_share_the_queue_do_not_both_take_an_item(tmp_path, repo, cla
 
     report = harness.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     assert harness.worker("ABC-1").role == "implementer"
     assert harness.worker("ABC-1", "second") is None
     harness.ledger.close()
@@ -193,7 +193,7 @@ max_workers = 1
 
     report = harness.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     assert any("role implementer is at its limit" in note for note in report.skipped)
 
 

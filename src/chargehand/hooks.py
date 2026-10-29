@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 
 PREFIX = "/hooks"
 
+# How much of a session id a hook's log line carries.
+SESSION_PREFIX = 8
+
 # The answer to every hook. Anything else could reach the session's turn or its model.
 NO_DECISION = Response.json({})
 
@@ -62,13 +65,16 @@ def receive(request: Request) -> Response:
         if hook is not None:
             break
     else:
+        log.info("hook %s: the payload is not one a runtime reads", event)
         return NO_DECISION
     ledger = request.ledger()
     worker = find_worker(ledger, hook, runtime.name)
+    session = session_prefix(hook)
     if worker is None:
-        log.debug("hook %s: no live worker has this session", event)
+        log.info("hook %s from session %s: no live worker has this session (cwd %s)",
+                 event, session, sanitize.one_line(hook.cwd or "-", limit=300))
         return NO_DECISION
-    log.debug("hook %s for %s", event, worker.handle)
+    log.info("%s: hook %s from session %s", worker.handle, event, session)
     report = TickReport()
     try:
         request.daemon.runner(ledger).apply_hook(worker, hook, report)
@@ -80,6 +86,11 @@ def receive(request: Request) -> Response:
     # change it made. A report with nothing in it prints nothing.
     request.daemon.report(report)
     return NO_DECISION
+
+
+def session_prefix(hook: Hook) -> str:
+    """The first characters of the session id, enough to tell sessions apart in the log."""
+    return sanitize.one_line(hook.session_uuid or "", limit=40)[:SESSION_PREFIX] or "-"
 
 
 def find_worker(ledger: Ledger, hook: Hook, runtime: str) -> Worker | None:

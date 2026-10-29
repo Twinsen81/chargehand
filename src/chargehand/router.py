@@ -29,21 +29,47 @@ rules again on the next tick, so the dedupe filter cannot lose it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from chargehand import roles as roles_mod
+from chargehand import sanitize
 from chargehand.ledger import Ledger, Worker
 from chargehand.roles import StartRule
 from chargehand.sources.base import Event, WorkItem
+
+log = logging.getLogger(__name__)
+
+# The longest dedupe id an event's log line carries. The id finds the event's row in the
+# ledger's `events` table; a source builds it, and it names no actor.
+DEDUPE_ID_LIMIT = 80
 
 # An event that occurred up to this long before a worker started still reaches it: the
 # source's clock and this machine's clock can differ. A minute is enough for that.
 START_ALLOWANCE_SECS = 60.0
 
-# Called with an event that passed the filters; returns True when a start rule wanted a
-# worker for it and the launch had to wait.
-Starter = Callable[[Event], bool]
+
+
+@dataclass(frozen=True)
+class StartResult:
+    """What the start rules did with an event. True when a launch has to wait.
+
+    *outcome* is chargehand's own phrase for the log, such as the worker it launched or
+    why the start waits; None when no rule wanted a worker, and empty when the start step
+    has nothing to say about the event.
+    """
+
+    deferred: bool = False
+    outcome: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.deferred
+
+
+# Called with an event that passed the filters; true when a start rule wanted a worker for
+# it and the launch had to wait. A StartResult also says what happened, for the log.
+Starter = Callable[[Event], "bool | StartResult"]
 # Called with an event that passed the filters; ends the workers whose primary item it
 # closes and returns how many ended.
 Closer = Callable[[Event], int]
@@ -156,15 +182,20 @@ class Router:
             if event.marked and event.actor == signed_in:
                 self.ledger.record_event(event)
                 result.own += 1
+                log.info("%s: dropped, a marked comment by the signed-in account",
+                         event_name(event))
                 continue
-            delivered, skipped = self.deliver(event)
-            result.delivered += delivered
-            result.skipped_before_start += skipped
-            if self._close is not None:
-                result.closed += self._close(event)
-            deferred = self._start(event)
+            delivered, skipped = self._deliver(event)
+            result.delivered += len(delivered)
+            result.skipped_before_start += len(skipped)
+            closed = self._close(event) if self._close is not None else 0
+            result.closed += closed
+            started = self._start(event)
+            deferred = bool(started)
             self.ledger.record_event(event, start_pending=deferred)
             result.deferred += int(deferred)
+            log.info("%s: %s", event_name(event),
+                     decision(delivered, skipped, closed, started, event))
         return result
 
     def deliver(self, event: Event) -> tuple[int, int]:
@@ -172,25 +203,82 @@ class Router:
 
         Returns the rows added and the matching subscribers skipped by ``before_start``.
         """
-        delivered = skipped = 0
+        delivered, skipped = self._deliver(event)
+        return len(delivered), len(skipped)
+
+    def _deliver(self, event: Event) -> tuple[list[str], list[str]]:
+        """The handles of the workers that got *event*, and of those it predates."""
+        delivered: list[str] = []
+        skipped: list[str] = []
         for subscription, worker in self.ledger.live_subscriptions(event.source, event.item.key):
             if not kind_matches(subscription.kinds, event.kind, event.source):
                 continue
             if before_start(event, worker_start(self.ledger, worker)):
-                skipped += 1
+                skipped.append(worker.handle)
                 continue
-            delivered += int(self.ledger.enqueue(subscription.worker_id, event))
+            if self.ledger.enqueue(subscription.worker_id, event):
+                delivered.append(worker.handle)
         return delivered, skipped
 
     def retry_pending_starts(self) -> RouteResult:
-        """Offer the starts that the caps deferred on an earlier tick to the rules again."""
+        """Offer the starts that the caps deferred on an earlier tick to the rules again.
+
+        A start that still waits says why on every tick in the report, and an event that no
+        rule wanted is not news, so their log lines are DEBUG; a launch or a dropped start
+        is INFO, once.
+        """
         result = RouteResult()
         for event in self.ledger.pending_start_events():
-            if self._start(event):
+            started = self._start(event)
+            outcome = getattr(started, "outcome", None)
+            if started:
                 result.deferred += 1
+                log.debug("%s: waiting start: %s", event_name(event), outcome or "still deferred")
             else:
                 self.ledger.settle_start(event)
+                log.log(logging.INFO if outcome else logging.DEBUG, "%s: waiting start: %s",
+                        event_name(event), outcome or "no rule starts on it")
         return result
+
+
+def event_name(event: Event) -> str:
+    """How an event is named in the log: its source, kind, item and dedupe id.
+
+    Never its actor: on Linear the actor is an email address.
+    """
+    kind = event.kind if sanitize.is_event_kind(event.kind) else sanitize.one_line(event.kind, limit=40)
+    dedupe = sanitize.one_line(event.dedupe_id, limit=DEDUPE_ID_LIMIT)
+    return (
+        f"event {event.source} {kind} {sanitize.scrub_identifier(event.item.key)} [{dedupe}]"
+    )
+
+
+def decision(
+    delivered: list[str],
+    skipped: list[str],
+    closed: int,
+    started: "bool | StartResult",
+    event: Event,
+) -> str:
+    """What routing did with one event, as one phrase for its log line."""
+    parts = []
+    if delivered:
+        parts.append(f"delivered to {', '.join(delivered)}")
+    if skipped:
+        parts.append(f"not delivered to {', '.join(skipped)}, it predates their start")
+    if closed:
+        parts.append(f"closed {closed} worker(s)")
+    outcome = getattr(started, "outcome", None)
+    if outcome:
+        parts.append(outcome)
+    elif started and outcome is None:
+        parts.append("start deferred")
+    if not parts:
+        parts.append("no subscriber and no start")
+    pointer = sanitize.safe_url(event.pointer)
+    if pointer:
+        parts.append(pointer)
+    return "; ".join(parts)
 
 
 __all__ = [
@@ -198,9 +286,12 @@ __all__ = [
     "RouteResult",
     "Router",
     "START_ALLOWANCE_SECS",
+    "StartResult",
     "Starter",
     "before_start",
+    "decision",
     "deliver_to_holders",
+    "event_name",
     "kind_matches",
     "suitable_worker_exists",
     "worker_start",

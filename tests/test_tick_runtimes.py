@@ -60,7 +60,7 @@ def apply_request(harness, kind, target=None, **args):
 def test_a_queued_item_starts_a_worker_on_the_roles_runtime(harness, runtime_name, driver):
     report, worker = launch(harness)
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["implementer/ABC-1"]
     assert report.errors == []
     assert worker.state == ledger_mod.RUNNING
     assert worker.runtime == runtime_name
@@ -127,7 +127,7 @@ def test_an_interrupted_launch_adopts_the_session_it_started(harness, runtime_na
 
     report = harness.next_tick()
 
-    assert report.adopted == ["ABC-1"]
+    assert report.adopted == ["implementer/ABC-1"]
     assert len(driver.launches) == 1
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
@@ -186,7 +186,7 @@ def test_a_source_event_starts_a_worker_on_the_roles_runtime(routed):
 
     report = routed.tick()
 
-    assert report.launched == ["ABC-1"]
+    assert report.launched == ["reviewer/ABC-1"]
     assert report.errors == []
     reviewer = routed.worker("ABC-1", "reviewer")
     assert reviewer.runtime == routed.runtime_name
@@ -221,7 +221,7 @@ def test_one_tick_supervises_a_claude_role_and_a_fake_runtime_role(mixed):
 
     report = mixed.tick()
 
-    assert sorted(report.launched) == ["ABC-1", "ABC-2"]
+    assert sorted(report.launched) == ["implementer/ABC-1", "reviewer/ABC-2"]
     assert report.errors == []
     on_claude = mixed.worker("ABC-1")
     on_fake = mixed.worker("ABC-2")

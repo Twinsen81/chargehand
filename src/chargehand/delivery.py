@@ -25,6 +25,7 @@ blocked worker has an open question or permission prompt, which a stop would dis
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -36,6 +37,8 @@ from chargehand.errors import AgentRuntimeError, ConfigError, DeliveryAborted
 from chargehand.ledger import InboxEntry, Ledger, Worker
 from chargehand.roles import Policy
 from chargehand.runtime import Runtime
+
+log = logging.getLogger(__name__)
 
 WAKE_STATES = (ledger_mod.IDLE, ledger_mod.QUEUED)
 WORKING_STATES = (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
@@ -261,6 +264,9 @@ class Delivery:
                 watchdog_notified=0,
                 last_error=None,
             )
+        # The message holds only kinds and pointers that passed the checks above.
+        log.info("%s: woke session %s with %s", worker.handle, worker.session_id,
+                 "; ".join(message.splitlines()[1:]))
         result.woken.append(worker)
 
     def _refuse_faulted(self, worker: Worker, result: DeliveryResult) -> bool:

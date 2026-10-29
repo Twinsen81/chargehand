@@ -312,7 +312,7 @@ def test_a_cancelled_run_whose_session_kept_working_is_supervised_again(harness)
 
     report = harness.next_tick()
 
-    assert "ABC-1" in report.adopted
+    assert "implementer/ABC-1" in report.adopted
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 

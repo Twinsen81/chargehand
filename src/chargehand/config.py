@@ -73,6 +73,9 @@ DEFAULT_DENY_RULES = (
     "Bash(*bypassPermissions*)",
 )
 
+# The levels `[serve] log_level` accepts.
+LOG_LEVELS = ("debug", "info", "warning")
+
 # The daemon's port, which `[serve]` can change.
 DEFAULT_SERVE_PORT = 7878
 TOKEN_FILE_NAME = "board.token"
@@ -284,6 +287,8 @@ class ServeConfig:
     tick_interval_secs: int = 60
     # Where the status line wrapper writes the usage windows and the daemon reads them.
     usage_file: Path = field(default_factory=lambda: paths.usage_file())
+    # The daemon's log level: debug, info or warning. `-v` overrides it.
+    log_level: str = "info"
 
     @classmethod
     def parse(cls, table: Mapping[str, object] | None) -> "ServeConfig":
@@ -292,12 +297,17 @@ class ServeConfig:
         where = "serve"
         if not isinstance(table, Mapping):
             raise ConfigError(f"{where}: expected a table")
-        _unknown_keys(table, ("port", "token_file", "tick_interval_secs", "usage_file"), where)
+        _unknown_keys(
+            table, ("port", "token_file", "tick_interval_secs", "usage_file", "log_level"), where
+        )
         port = _as_int(table.get("port", DEFAULT_SERVE_PORT), f"{where}.port", minimum=1)
         if port > 65535:
             raise ConfigError(f"{where}.port: must be <= 65535")
         token = table.get("token_file")
         usage = table.get("usage_file")
+        log_level = _as_str(table.get("log_level", "info"), f"{where}.log_level").lower()
+        if log_level not in LOG_LEVELS:
+            raise ConfigError(f"{where}.log_level: expected one of {', '.join(LOG_LEVELS)}")
         return cls(
             port=port,
             token_file=(
@@ -313,6 +323,7 @@ class ServeConfig:
                 if usage is not None
                 else paths.usage_file()
             ),
+            log_level=log_level,
         )
 
 

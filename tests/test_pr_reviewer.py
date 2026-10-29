@@ -110,7 +110,7 @@ def start_reviewer(harness, gh, **pull) -> ledger_mod.Worker:
     gh.add_pull(PR, **pull)
     gh.notify("review_requested", PR)
     report = harness.next_tick()
-    assert report.errors == [] and report.launched == [PR_KEY], report
+    assert report.errors == [] and report.launched == [f"pr-reviewer/{PR_KEY}"], report
     return harness.worker(PR_KEY, "pr-reviewer")
 
 
@@ -302,7 +302,7 @@ def test_an_unmarked_comment_of_the_account_wakes_once_and_the_daily_cap_stops_a
 
     assert report.woken == []
     assert any("daily cap" in line for line in report.skipped)
-    assert f"{PR_KEY}: wake held -> queued" in report.transitions
+    assert f"pr-reviewer/{PR_KEY}: wake held -> queued" in report.transitions
     assert reviewing.worker(PR_KEY, "pr-reviewer").state == ledger_mod.QUEUED
 
 
@@ -354,7 +354,7 @@ def test_a_second_subscriber_of_the_pull_request_gets_the_same_events(reviewing,
 
     report = reviewing.next_tick()
 
-    assert report.errors == [] and report.launched == ["octo_app_9"]
+    assert report.errors == [] and report.launched == ["pr-reviewer/octo_app_9"]
     reviewer = reviewing.worker("octo_app_9", "pr-reviewer")
     # The reviewer sits on the implementer's pushed head.
     assert run_git("rev-parse", "HEAD", cwd=item_checkout_path(reviewer)) == run_git(
@@ -406,8 +406,8 @@ def test_a_closed_pull_request_ends_the_reviewer_and_collection_removes_it(
     report = reviewing.next_tick()
 
     assert report.errors == []
-    assert f"{PR_KEY}: item closed -> done" in report.transitions
-    assert report.collected == [PR_KEY]
+    assert f"pr-reviewer/{PR_KEY}: item closed -> done" in report.transitions
+    assert report.collected == [f"pr-reviewer/{PR_KEY}"]
     finished = reviewing.ledger.get(reviewer.id)
     assert (finished.state, finished.gc_done, finished.session_id) == (ledger_mod.DONE, 1, None)
     assert not worktree.exists() and not checkout.exists()
@@ -430,7 +430,7 @@ def test_a_newer_head_checked_out_again_does_not_block_collection(reviewing, gh,
 
     report = reviewing.next_tick()
 
-    assert report.collected == [PR_KEY]
+    assert report.collected == [f"pr-reviewer/{PR_KEY}"]
 
 
 @pytest.mark.parametrize("where", ["worktree", "item checkout"])
@@ -448,7 +448,7 @@ def test_unpushed_commits_block_collection(reviewing, gh, tmp_path, where):
 
     assert reviewing.ledger.get(reviewer.id).state == ledger_mod.DONE
     assert report.collected == []
-    assert f"{PR_KEY}: not collected, its {where} holds 1 unpushed commit(s)" in report.warnings
+    assert f"pr-reviewer/{PR_KEY}: not collected, its {where} holds 1 unpushed commit(s)" in report.warnings
     assert path.exists()
 
 
@@ -465,7 +465,7 @@ def test_a_reviewer_that_works_when_its_pull_request_closes_ends_after_the_turn(
     report = reviewing.next_tick()
 
     assert reviewing.ledger.get(reviewer.id).state == ledger_mod.DONE
-    assert report.collected == [PR_KEY]
+    assert report.collected == [f"pr-reviewer/{PR_KEY}"]
 
 
 def test_a_review_request_for_a_repository_not_configured_is_logged_once(reviewing, gh):
@@ -793,7 +793,7 @@ def test_a_wake_waits_while_the_item_checkout_cannot_be_refreshed(reviewing, gh,
 
     assert report.woken == [] and "resumes" not in reviewing.claude_state.read()
     assert f"{HANDLE}: wake held, its item checkout could not be refreshed" in report.skipped
-    assert f"{PR_KEY}: wake held -> queued" in report.transitions
+    assert f"pr-reviewer/{PR_KEY}: wake held -> queued" in report.transitions
     queued = reviewing.ledger.get(reviewer.id)
     assert queued.state == ledger_mod.QUEUED
     assert queued.last_error.startswith("item checkout not refreshed: ")
@@ -992,7 +992,7 @@ def test_a_reviewer_whose_item_checkout_is_gone_is_not_woken(reviewing, gh, tmp_
               last_modified="Mon, 26 Oct 2026 11:00:00 GMT")
     ask_notifications_again(reviewing)
     report = reviewing.next_tick()
-    assert report.errors == [] and report.launched == [PR_KEY]
+    assert report.errors == [] and report.launched == [f"pr-reviewer/{PR_KEY}"]
     assert item_checkout_path(reviewing.worker(PR_KEY, "pr-reviewer")).exists()
 
 

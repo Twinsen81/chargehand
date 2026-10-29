@@ -900,6 +900,53 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
   next tick parks any run whose session is gone, so a restart costs progress but never
   consistency.
 
+### The daemon's log
+
+The log is for investigating a missed event, a missed hook, a wrong notification, a
+stale worker or a daemon that stopped ticking, without reading the ledger by hand. It is
+not a record of what workers did: nothing a session wrote reaches it.
+
+- **One writer, one format.** The daemon writes `~/Library/Logs/chargehand.log` through
+  a rotating handler (10 MB, five old files); `install` passes the path as
+  `serve --log-file`. The launchd job's stdout and stderr go to `chargehand.launchd.log`,
+  because a rotation renames the log file and launchd would go on writing into the renamed
+  one. The tick report goes through the same handler, under `chargehand.tick`; a tick run
+  by hand still prints its report to stdout, and `tick --json` is unchanged. A formatter
+  cuts every message to one line and strips control sequences, so a message that quotes a
+  script or a tracker cannot break a line or reach a terminal that tails the file. A
+  `newsyslog.d` entry was the other option; it needs root, and `install` runs as the user.
+- **Levels.** `log_level` in `[serve]`, read on every tick; `-v` overrides it. `info` is
+  the default. Report lines are INFO, except `failed` and `warnings` (WARNING) and `errors`
+  (ERROR), so `warning` still shows what went wrong. `debug` adds the HTTP access log, a
+  heartbeat per tick and the tick lock waits.
+- **What `info` records.** The report fields, `notified` and `routed` included; a
+  notification names its detail and the notify command's outcome. One line per poll that
+  found new events, with the cursor before and after and the duration. A source reads
+  back over its previous poll, so a poll that returned only events the dedupe filter has
+  seen counts as finding nothing new, and the `routed` summary leaves it out too. Polls
+  that found nothing new are held back per source and written as one line, when a poll
+  finds new events or fails, after 15 minutes, and when the daemon stops: an idle daemon writes about four
+  lines an hour per source instead of sixty, and still shows that it polls. One line per
+  event that passed the dedupe filter: source, kind, item, the dedupe id (up to 80
+  characters), the decision (dropped as the account's own marked comment, delivered to
+  which workers, not delivered because it predates their start, closed, launched, or why
+  the start waits) and the pointer when it is a plain URL. One line per hook post: event,
+  the first eight characters of the session id, and the worker, or "no live worker" with
+  the cwd; a refused post names its status. One line per accepted label or status write,
+  with the status before and after. One line per wake, with the `kind: pointer` lines of
+  its message. A WARNING heartbeat for a tick longer than the interval, or one that began
+  more than two intervals after the previous one ended. An idle tick writes no report line.
+- **One key.** Every line about a worker starts with its handle, `role/item`.
+- **What never appears.** A last answer, a waiting text, a permission prompt's tool
+  input, a status file's stop reason, a transcript path, a comment body, and the actor of
+  an event, which on Linear is an email address. A test feeds each of them a marker and
+  checks that it reaches neither the log nor the output.
+- **When the log is not enough.** `events` keeps each routed event with its dedupe id,
+  `seen_at` and `start_pending` for 30 days; `inbox` keeps `queued_at` and `delivered_at`
+  per worker and event. No `events` row means no poll returned the event; a row without an
+  inbox row means no live subscriber matched; an inbox row without `delivered_at` waits for
+  a wake.
+
 ## 10. Failure modes
 
 | Failure | Behavior |

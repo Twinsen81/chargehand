@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import parse_qs, urlsplit
 
-from chargehand import __version__, paths, sanitize
+from chargehand import __version__, daemonlog, paths, sanitize
 from chargehand.config import MachineConfig
 from chargehand.errors import ChargehandError, TickBusy
 from chargehand.ledger import Ledger
@@ -321,6 +321,7 @@ class Daemon:
         status: StatusBuilder | None = None,
         sessions: Callable[[Runner], Sessions] | None = None,
         report: Callable[[TickReport], None] | None = None,
+        on_config: Callable[[MachineConfig], None] | None = None,
         ledger_path: Path | None = None,
         lock_path: Path | None = None,
         port: int | None = None,
@@ -336,6 +337,11 @@ class Daemon:
         self._status = status
         self._list_sessions = sessions
         self._report = report or (lambda report: None)
+        # Called with each configuration the loop reads, so a changed log level applies
+        # without a restart.
+        self._on_config = on_config or (lambda config: None)
+        # Holds back the polls that found nothing, across ticks.
+        self.polls = daemonlog.PollLog()
         # The tick and the hook threads print reports into the same log.
         self._report_lock = threading.Lock()
         self.ledger_path = ledger_path or paths.ledger_file()
@@ -398,6 +404,10 @@ class Daemon:
         try:
             return self._dispatch(method.upper(), target, headers, body)
         except HTTPError as exc:
+            if method.upper() not in SAFE_METHODS:
+                # A hook with a stale token or a wrong port shows here, not as silence.
+                log.info("%s %s refused: %s %s", method.upper(),
+                         sanitize.one_line(urlsplit(target).path, limit=100), exc.status, exc)
             return Response.error(exc.status, str(exc))
 
     def _dispatch(
@@ -498,6 +508,7 @@ class Daemon:
                         next_tick = self._clock() + self.interval_secs
                 self.stopping.wait(self._poll_secs)
         finally:
+            self.polls.flush()
             ledger.close()
             self.close()
         return 0
@@ -535,14 +546,17 @@ class Daemon:
             self._failed(f"configuration: {exc}")
             return True
         self.config = config
+        self._on_config(config)
         try:
             with tick_lock(self._lock_path):
                 self._mark_requests_seen(ledger)
                 data = self.health_data
+                previous_end = data.last_tick_finished_at
                 data.ticking = True
                 data.last_tick_started_at = time.time()
                 try:
                     runner = self._runner_factory(config, ledger)
+                    runner.polls = self.polls
                     report = runner.tick(stop=self.stop_requested)
                     if self._list_sessions is not None:
                         self._sessions = self._list_sessions(runner)
@@ -558,8 +572,33 @@ class Daemon:
             return True
         self.health_data.ticks += 1
         self.health_data.last_tick_error = _error_line(report.errors[0]) if report.errors else None
+        self._heartbeat(report, previous_end)
         self.report(report)
         return True
+
+    def _heartbeat(self, report: TickReport, previous_end: float | None) -> None:
+        """One line per tick at DEBUG; a WARNING when the tick was slow or late.
+
+        Late means the previous tick ended more than two intervals before this one began:
+        the loop was stuck, or the machine slept.
+        """
+        data = self.health_data
+        started, finished = data.last_tick_started_at or 0.0, data.last_tick_finished_at or 0.0
+        took = finished - started
+        counts = ", ".join(
+            f"{len(entries)} {name}" for name, entries in report.as_dict().items()
+            if isinstance(entries, list) and entries
+        ) or "nothing to do"
+        line = f"tick {data.ticks} took {took:.1f}s: {counts}"
+        problems = []
+        if took > self.interval_secs:
+            problems.append(f"longer than the {self.interval_secs:g}s interval")
+        if previous_end is not None and started - previous_end > 2 * self.interval_secs:
+            problems.append(f"the previous tick ended {started - previous_end:.0f}s before it")
+        if problems:
+            log.warning("%s; %s", line, "; ".join(problems))
+        else:
+            log.debug("%s", line)
 
     def _mark_requests_seen(self, ledger: Ledger) -> None:
         pending = ledger.pending_requests()

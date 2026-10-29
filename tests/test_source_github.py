@@ -886,7 +886,7 @@ def test_a_review_request_starts_a_reviewer_and_a_comment_reaches_its_inbox(tick
     report = ticking.tick()
 
     assert report.errors == []
-    assert report.launched == [PR_KEY]
+    assert report.launched == [f"pr-reviewer/{PR_KEY}"]
     reviewer = ticking.worker(PR_KEY, "pr-reviewer")
     assert (reviewer.item_id, reviewer.url, reviewer.repository) == (
         PR, "https://github.com/octo/app/pull/7", "test",
@@ -913,7 +913,7 @@ def test_a_comment_from_before_the_reviewer_started_does_not_wake_it(ticking, gh
     """The first read of a followed pull request reaches five minutes back; the router does not."""
     gh.add_pull(PR)
     gh.notify("review_requested", PR)
-    assert ticking.tick().launched == [PR_KEY]
+    assert ticking.tick().launched == [f"pr-reviewer/{PR_KEY}"]
     reviewer = ticking.worker(PR_KEY, "pr-reviewer")
     for comment_id, offset in ((51, -240), (52, 10)):
         gh.add("issue_comments", PR, {"id": comment_id, "user": {"login": "alice"}, "body": "hm",

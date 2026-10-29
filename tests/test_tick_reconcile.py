@@ -60,7 +60,7 @@ def test_a_session_started_before_the_crash_is_adopted_not_duplicated(harness):
 
     report = harness.next_tick()
 
-    assert "ABC-1" in report.adopted
+    assert "implementer/ABC-1" in report.adopted
     attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.session_id == "pre-existing"
