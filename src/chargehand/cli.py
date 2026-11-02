@@ -868,7 +868,11 @@ def build_parser() -> argparse.ArgumentParser:
             help="the work item, such as an issue identifier, or a worker's handle from "
                  "`status --json`, such as implementer/ABC-1 or implementer/ABC-1#7, or '#7' quoted",
         )
-        sub.add_argument("--role", help="the worker's role, when several roles hold the item")
+        sub.add_argument(
+            "--role",
+            help="the worker's role; with an item it means the role/item handle, which names "
+                 "that role's start-rule worker, live or finished, before workers started by hand",
+        )
 
     tick = add("tick", cmd_tick, "run one tick now")
     tick.add_argument("--json", action="store_true")

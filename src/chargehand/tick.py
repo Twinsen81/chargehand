@@ -1067,6 +1067,15 @@ class Runner:
             return self._do_reply(worker, args)
         return False, f"unknown request '{kind}'"
 
+    def _twins(self, worker: Worker) -> str:
+        """For a refusal: the other live workers on *worker*'s item, which a handle names."""
+        others = [w for w in self.ledger.live_workers_for(worker.item) if w.id != worker.id] if (
+            worker.item
+        ) else []
+        if not others:
+            return ""
+        return f"; live workers on {worker.item}: {', '.join(w.id_handle for w in others)}"
+
     def _do_new_worker(self, target: str, args: dict, report: TickReport) -> tuple[bool, str]:
         """Start a worker by hand, in repository *target*: a role, an optional item, the
         event kinds it follows on that item.
@@ -1077,7 +1086,7 @@ class Runner:
         """
         repository = self.config.repository_by_name(target)
         if repository is None:
-            return False, f"no repository named {sanitize.scrub_identifier(target)}"
+            return False, f"no repository named {sanitize.one_line(target, limit=100)}"
         role_name = args.get("role")
         if not isinstance(role_name, str) or role_name not in repository.roles:
             return False, (
@@ -1105,7 +1114,7 @@ class Runner:
             if item is None:
                 return False, (
                     f"the tracker of repository {repository.name} has no item "
-                    f"{sanitize.scrub_identifier(typed)}"
+                    f"{sanitize.one_line(typed, limit=100)}"
                 )
             if not sanitize.is_safe_identifier(item.key):
                 return False, (
@@ -1149,7 +1158,7 @@ class Runner:
         same usage reserve; a worker that delivery does not wake keeps it until it may.
         """
         if worker.is_terminal:
-            return False, f"{worker.name} is already {worker.state}"
+            return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
         text = sanitize.one_line(str(args.get("text") or ""), limit=ledger_mod.REPLY_LIMIT)
         if not text:
             return False, "the reply is empty"
@@ -1178,7 +1187,7 @@ class Runner:
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
         if worker.is_terminal:
-            return False, f"{worker.name} is already {worker.state}"
+            return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
         if not self._stop_session(worker):
             return False, (
                 f"{worker.name}: the session did not stop; it is still working. "
@@ -1188,13 +1197,13 @@ class Runner:
         self._sync_labels(worker, context, report)
         self._notify(report, worker.name, "cancelled", worker.url, worker.repository, role=worker.role,
                      detail="cancelled by operator")
-        return True, "session stopped, worktree kept"
+        return True, f"cancelled {worker.id_handle}: session stopped, worktree kept"
 
     def _do_stop(
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
         if worker.is_terminal:
-            return False, f"{worker.name} is already {worker.state}"
+            return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
         if not worker.session_id:
             return False, f"{worker.name} has no session to stop"
         if not self._stop_session(worker):
@@ -1210,7 +1219,9 @@ class Runner:
         if not worker.session_id:
             return False, f"{worker.name} has no session to respawn"
         if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED, ledger_mod.PARKED):
-            return False, f"{worker.name} is {worker.state}, not paused, blocked or parked"
+            return False, (
+                f"{worker.name} is {worker.state}, not paused, blocked or parked{self._twins(worker)}"
+            )
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
             return False, self._refusal_message(worker, check)
@@ -1356,10 +1367,10 @@ class Runner:
         kept = "" if branches_removed else f"; {KEPT_BRANCH}"
         if not removed:
             return True, (
-                "worktree and branch deleted, but the session could not be removed; "
-                f"remove session {worker.session_id} by hand{kept}"
+                f"discarded {worker.id_handle}: worktree and branch deleted, but the session "
+                f"could not be removed; remove session {worker.session_id} by hand{kept}"
             )
-        return True, f"session removed, worktree and branch deleted{kept}"
+        return True, f"discarded {worker.id_handle}: session removed, worktree and branch deleted{kept}"
 
     def _worktree_holds_work(self, worker: Worker) -> str | None:
         found = self._checkout_holds_work(worker.worktree_path, (), "its worktree")

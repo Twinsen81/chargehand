@@ -166,7 +166,7 @@ def test_an_older_worker_of_the_same_role_and_item_is_named_by_its_id(daemon, ha
         repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="chargehand/implementer/ABC-1",
     )
 
-    assert board.target_of(harness.ledger, first) == f"implementer/ABC-1#{first.id}"
+    assert board.target_of(first) == f"implementer/ABC-1#{first.id}"
 
 
 def test_the_outcome_of_a_request_is_readable_without_the_token(daemon, harness):
@@ -596,6 +596,80 @@ def test_a_failed_osascript_says_how_to_allow_it():
 # ----- the card ----------------------------------------------------------------------------
 
 
+def test_a_bare_item_does_not_reach_a_board_worker_after_its_start_rule_worker_ended(
+    capsys, config_file, harness
+):
+    harness.board.add("ABC-1")
+    harness.tick()
+    assert run(["cancel", "ABC-1"], config_file) == EXIT_OK
+    assert "cancelled implementer/ABC-1#" in capsys.readouterr().out
+    source = harness.worker("ABC-1")
+    live = board_worker(harness)
+
+    run(["discard", "ABC-1", "--yes"], config_file)
+    err = capsys.readouterr().err
+
+    assert source.id_handle in err and live.id_handle in err
+    assert harness.ledger.get(live.id).worktree_path.exists()
+    assert harness.ledger.get(source.id).gc_done == 0
+
+    assert run(["discard", source.id_handle, "--yes"], config_file) == EXIT_OK
+    assert f"discarded {source.id_handle}: session removed" in capsys.readouterr().out
+    assert harness.ledger.get(live.id).state == ledger_mod.RUNNING
+
+
+def test_a_refusal_about_a_finished_worker_lists_the_live_workers_on_its_item(
+    capsys, config_file, harness
+):
+    harness.board.add("ABC-1")
+    harness.tick()
+    run(["cancel", "ABC-1"], config_file)
+    live = board_worker(harness)
+    capsys.readouterr()
+
+    run(["stop", "ABC-1", "--role", "implementer"], config_file)
+
+    err = capsys.readouterr().err
+    assert "is already cancelled" in err and live.id_handle in err
+
+
+def test_an_unknown_item_is_shown_as_typed(daemon, harness):
+    _, answer = post(daemon, "/api/workers",
+                     {"repository": "test", "role": "implementer", "item": "local/scratch#999"})
+    harness.next_tick()
+
+    message = harness.ledger.get_request(answer["id"])["message"]
+    assert message.endswith("has no item local/scratch#999")
+    assert "�" not in message
+
+
+@pytest.mark.parametrize("length, status", [(500, 202), (501, 400), (2000, 400), (5000, 400)])
+def test_a_reply_over_the_limit_is_refused_not_cut(daemon, harness, length, status):
+    unqueued(harness)
+    worker = board_worker(harness)
+
+    code, answer = post(daemon, f"/api/workers/{worker.id}/reply", {"text": "x" * length})
+
+    assert code == status
+    if status == 400:
+        assert answer["error"] == "a reply is one line of at most 500 characters"
+        assert harness.ledger.pending_requests() == []
+
+
+def test_twin_cards_on_one_item_show_their_handles(harness):
+    unqueued(harness)
+    first, second = board_worker(harness), board_worker(harness)
+
+    page = board.build(harness.config, harness.ledger, health={})
+
+    shown = {c["id"]: c["handle"] for column in page["columns"] for c in column["cards"]}
+    assert shown == {first.id: first.target, second.id: second.target}
+    assert first.target != second.target
+    # The page renders the handle in the card's title, as text.
+    script = (board.asset_dir() / "board.js").read_text()
+    assert "title.append(el('span', 'handle', c.handle))" in script
+
+
 def test_a_card_offers_the_actions_its_state_can_take(harness):
     unqueued(harness)
     worker = board_worker(harness)
@@ -660,7 +734,7 @@ def test_a_finished_worker_is_named_by_its_id_even_as_the_newest_of_its_item(har
     harness.tick()
     worker = harness.ledger.update(harness.worker("ABC-1"), state=ledger_mod.CANCELLED)
 
-    assert board.target_of(harness.ledger, worker) == f"implementer/ABC-1#{worker.id}"
+    assert board.target_of(worker) == f"implementer/ABC-1#{worker.id}"
 
 
 def test_a_working_session_of_a_finished_board_worker_is_reported_not_adopted(harness):

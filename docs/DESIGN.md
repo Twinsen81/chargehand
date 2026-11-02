@@ -805,8 +805,11 @@ roles hold the item. `--route` stays accepted for `--repository`.
   `--role`, is a handle, and when a worker has exactly that handle it wins, the live one
   first, then the newest; (3) otherwise the item decides: its one live worker (in the
   role, when known), or among several the one start-rule worker that the bare item
-  names, or with none live the newest recorded; anything else is refused with each
-  candidate as `role/item#id`. Every handle chargehand prints resolves back to its
+  names, or with none live the newest recorded. A bare item whose one live worker was
+  started by hand, while a start-rule worker on the item has ended, is refused, because a
+  notification about that worker carried the bare item. Anything else is refused with
+  each candidate as `role/item#id`, and a refusal about a finished worker lists the live
+  workers on its item. `cancel` and `discard` name the worker they acted on. Every handle chargehand prints resolves back to its
   worker under this rule: `status --json` and the board show `role/item` for a live
   start-rule worker and the id handle for every other worker, finished ones included,
   and a hint in a refusal uses the bare item only when the rule resolves it to that

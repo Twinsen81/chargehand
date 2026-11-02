@@ -747,6 +747,22 @@ def test_every_handle_chargehand_prints_resolves_back_to_its_worker(
         )
 
 
+def test_a_bare_item_is_refused_when_it_could_mean_a_finished_start_rule_worker(ledger):
+    """A notification about the start-rule worker carried the bare item; a live board
+    worker on the item must not take a command meant for the finished one."""
+    source = ledger.update(make(ledger), state=ledger_mod.CANCELLED)
+    board = ledger.update(by_hand(ledger, index=1), state=ledger_mod.IDLE)
+
+    worker, problem = ledger.find_worker("ABC-1")
+
+    assert worker is None
+    assert source.id_handle in problem and board.id_handle in problem
+    # The handles still resolve, each to its own worker.
+    assert ledger.find_worker(source.id_handle)[0].id == source.id
+    assert ledger.find_worker(board.id_handle)[0].id == board.id
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+
 def test_errors_show_a_handle_as_typed(ledger):
     _, problem = ledger.find_worker("implementer/NOPE-1")
     assert problem == "no worker recorded for implementer/NOPE-1 in role implementer"

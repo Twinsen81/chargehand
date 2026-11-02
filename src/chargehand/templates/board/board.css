@@ -70,6 +70,7 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .chip.state.paused, .chip.state.parked { color: var(--amber); border-color: var(--amber); }
 .card .age { margin-left: auto; color: var(--faint); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
 .card .title { font-weight: 600; font-size: 13.5px; margin-bottom: 5px; line-height: 1.35; }
+.card .title .handle { margin-left: 8px; font-weight: 400; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .card a { color: var(--accent); text-decoration: none; }
 .card a:hover { text-decoration: underline; }
 .card .meta { color: var(--muted); font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; font-family: var(--mono); }

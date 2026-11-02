@@ -713,8 +713,10 @@ class Ledger:
            the newest one with it. Only a start-rule worker has a handle without an id.
         3. Otherwise, by the item (in *role* when known): the one live worker on it; with
            several, the one start-rule worker among them that the bare item names; with
-           none live, the newest recorded. Anything else is refused, with each candidate
-           as its id handle.
+           none live, the newest recorded. A bare item whose one live worker was started
+           by hand, while a start-rule worker on the item has ended, is refused: a
+           notification about that worker carried the bare item. Anything else is refused,
+           with each candidate as its id handle.
 
         Every handle chargehand prints (:attr:`Worker.target`, :meth:`target_for`)
         resolves back to its worker under this rule.
@@ -764,7 +766,19 @@ class Ledger:
                 )
             return None, f"{shown} has several live workers; name one of them: {handles}"
         if live:
-            return live[0], ""
+            only = live[0]
+            finished = (
+                self.latest_worker_for(item, origin=ORIGIN_SOURCE)
+                if role is None and only.origin != ORIGIN_SOURCE else None
+            )
+            if finished is not None:
+                # A notification about that start-rule worker carried the bare item; the
+                # one live worker started by hand is not the worker it named.
+                return None, (
+                    f"{shown} names a start-rule worker that has ended and a worker started "
+                    f"by hand; name one of them: {finished.id_handle}, {only.id_handle}"
+                )
+            return only, ""
         latest = self.latest_worker_for(item, role, origin=ORIGIN_SOURCE) or self.latest_worker_for(
             item, role
         )

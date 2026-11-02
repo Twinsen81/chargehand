@@ -222,7 +222,7 @@ def request_outcome(request: Request) -> Response:
     return Response.json(outcome(row))
 
 
-def target_of(ledger: Ledger, worker: Worker) -> str:
+def target_of(worker: Worker) -> str:
     """What a board request names the worker by: the handle the card shows.
 
     It is :attr:`Worker.target`, which the resolution rule in :meth:`Ledger.find_worker`
@@ -245,7 +245,7 @@ def worker_action(request: Request) -> Response:
     worker = ledger.get(int(parts[0]))
     if worker is None:
         raise HTTPError(404, f"no worker {parts[0]}")
-    target = target_of(ledger, worker)
+    target = target_of(worker)
     if action == ATTACH:
         return _attach(request, ledger, worker, target, body)
     kind, takes_force = WORKER_ACTIONS[action]
@@ -261,9 +261,12 @@ def _reply_text(body: dict[str, object]) -> str:
     text = body.get("text")
     if not isinstance(text, str):
         raise HTTPError(400, "a reply needs text")
+    too_long = f"a reply is one line of at most {ledger_mod.REPLY_LIMIT} characters"
     if len(text) > REPLY_BODY_LIMIT:
-        raise HTTPError(400, f"a reply is one line of at most {ledger_mod.REPLY_LIMIT} characters")
-    line = sanitize.one_line(text, limit=ledger_mod.REPLY_LIMIT)
+        raise HTTPError(400, too_long)
+    line = sanitize.one_line(text, limit=REPLY_BODY_LIMIT)
+    if len(line) > ledger_mod.REPLY_LIMIT:
+        raise HTTPError(400, too_long)
     if not line:
         raise HTTPError(400, "the reply is empty")
     return line

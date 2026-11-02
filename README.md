@@ -141,7 +141,9 @@ The level is `log_level` in `[serve]`: `debug`, `info` (the default) or `warning
 daemon reads it again on every tick, so a change needs no restart; `-v` and `-vv` override
 it for a `chargehand serve` in a terminal. Every line has the same format, a timestamp, the
 level and the part of chargehand that wrote it, and every line about a worker starts with
-its handle, `role/item`, so `grep implementer/ABC-1` finds all of them.
+its handle, `role/item`, so `grep implementer/ABC-1` finds all of them. A worker started on
+the board has `role/item#id` there. A start-rule worker keeps `role/item` in the log also
+after it ends, while `status --json` then shows it as `role/item#id`, which a command takes.
 
 At `info` the log holds:
 

@@ -189,6 +189,8 @@ function cardChildren(c, now) {
 
   const title = el('div', 'title');
   title.append(link(c.item_url, c.item));
+  // Workers on one item share the title; the handle tells them apart.
+  if (c.handle) title.append(el('span', 'handle', c.handle));
   nodes.push(title);
 
   const meta = el('div', 'meta');
