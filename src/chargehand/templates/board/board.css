@@ -32,6 +32,7 @@ header.top h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2
 .throttle { color: var(--muted); font-size: 12px; display: flex; gap: 10px; }
 .throttle b { color: var(--text); font-weight: 600; }
 .throttle .paused { color: var(--amber); font-weight: 600; }
+.hidden-count { color: var(--amber); font-size: 12px; display: flex; align-items: center; gap: 4px; }
 .health { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-family: var(--mono); flex: 1 1 0; min-width: 120px; max-width: 420px; }
 .health .dot { flex: none; }
 .health .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -109,4 +110,15 @@ input[type=checkbox] { padding: 0; }
 .card .actions { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 .card .actions .force { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 3px; margin-right: 4px; }
 .card .actions button { font-size: 11px; padding: 1px 7px; }
+.group { display: flex; align-items: center; gap: 6px; padding: 4px 2px 0; color: var(--muted); font-size: 11.5px; font-weight: 600; }
+.group .toggle { border: none; background: none; padding: 0 2px; color: var(--muted); font-size: 11px; }
+.group .label { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group .configured, .group .folded { color: var(--faint); font-weight: 400; font-family: var(--mono); font-size: 10.5px; }
+.group .edit { margin-left: auto; font-size: 10.5px; padding: 0 6px; }
+.group.hidden-repository, .card.hidden-repository { opacity: .55; }
+.chip.pin { color: var(--accent); border-color: var(--accent); }
+.chip.flag { color: var(--amber); border-color: var(--amber); }
+.card .title .icon, .group .icon { margin-right: 4px; }
+.card .actions .board { margin-left: auto; display: flex; gap: 5px; }
+.panel .field input.icon { min-width: 120px; }
 [hidden] { display: none !important; }
