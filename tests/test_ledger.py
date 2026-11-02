@@ -341,7 +341,7 @@ def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
         worker = ledger.get(12)
         assert (worker.role, worker.item, worker.state) == ("implementer", "ABC-1", "running")
         # Every worker before version 3 was started by the queue label, so it keeps it.
@@ -517,7 +517,7 @@ def test_a_version_three_ledger_gains_the_hook_columns_and_the_prompts_in_place(
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
         worker = ledger.get(7)
         assert (worker.role, worker.item, worker.state, worker.owns_label) == ("reviewer", "PR-1", "idle", 2)
         assert (worker.reset_at, worker.last_hook, worker.last_answer) == (None, None, None)
@@ -566,3 +566,115 @@ def test_a_live_worker_is_found_by_its_session_uuid(ledger):
     assert ledger.live_worker_by_session_uuid("u-1").id == worker.id
     ledger.update(worker, state=ledger_mod.DONE)
     assert ledger.live_worker_by_session_uuid("u-1") is None
+
+
+# ----- version 5: where a control request came from, handles --------------------------
+
+# A version 4 ledger: version 3 plus the hook columns and the permission prompts.
+V4_SCHEMA = V3_SCHEMA.replace("PRAGMA user_version = 3;", "") + """
+ALTER TABLE workers ADD COLUMN reset_at REAL;
+ALTER TABLE workers ADD COLUMN last_hook TEXT;
+ALTER TABLE workers ADD COLUMN last_hook_at REAL;
+ALTER TABLE workers ADD COLUMN last_answer TEXT;
+ALTER TABLE workers ADD COLUMN transcript_path TEXT;
+CREATE TABLE permission_prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    tool_name TEXT NOT NULL, tool_input TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+    resolved_at REAL
+);
+PRAGMA user_version = 4;
+"""
+
+
+def test_a_version_four_ledger_records_the_origin_of_requests(tmp_path):
+    path = tmp_path / "v4.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V4_SCHEMA)
+    conn.execute(
+        "INSERT INTO requests (id, kind, target, args, created_at) "
+        "VALUES (3, 'cancel', 'ABC-1', '{}', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        (old,) = ledger.pending_requests()
+        assert (old["id"], old["kind"], old["origin"]) == (3, "cancel", ledger_mod.REQUEST_CLI)
+        new = ledger.record_request("stop", "x/#1", origin=ledger_mod.REQUEST_BOARD)
+        assert ledger.get_request(new)["origin"] == ledger_mod.REQUEST_BOARD
+
+
+@pytest.mark.parametrize("version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA"])
+def test_every_older_ledger_gains_the_request_origin(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        request_id = ledger.record_request("pause", origin=ledger_mod.REQUEST_BOARD)
+        assert ledger.get_request(request_id)["origin"] == "board"
+
+
+def test_a_request_origin_must_be_known(ledger):
+    with pytest.raises(ValueError, match="origin"):
+        ledger.record_request("pause", origin="elsewhere")
+
+
+def test_an_applied_request_is_recorded_complete(ledger):
+    request_id = ledger.record_applied_request(
+        "attach", "implementer/ABC-1", origin=ledger_mod.REQUEST_BOARD, ok=True, message="opened",
+        terminal="iterm2",
+    )
+
+    assert ledger.pending_requests() == []
+    request = ledger.get_request(request_id)
+    assert (request["ok"], request["message"], request["args"]) == (1, "opened", {"terminal": "iterm2"})
+
+
+def by_hand(ledger, item="ABC-1", role="implementer", index=0):
+    return ledger.create_worker(
+        role=role, item=item, item_id=f"id-{item}" if item else None, url=None, repository="test",
+        repo=Path("/repo"), worktree=Path(f"/w/{item}-{index}"), branch=f"b{index}",
+        origin=ledger_mod.ORIGIN_BOARD,
+    )
+
+
+def test_a_worker_started_by_hand_has_a_handle_with_its_id(ledger):
+    source = make(ledger)
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+
+    assert source.handle == "implementer/ABC-1" and source.name == "ABC-1"
+    assert first.handle == f"implementer/ABC-1#{first.id}" == first.name
+    assert second.handle == f"implementer/ABC-1#{second.id}"
+
+
+def test_find_worker_takes_an_item_a_handle_or_a_handle_with_an_id(ledger):
+    source = make(ledger)
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+    reviewer = make(ledger, item="ABC-2", worktree="/w/r", role="reviewer")
+
+    assert ledger.find_worker("ABC-2")[0].id == reviewer.id
+    assert ledger.find_worker(f"implementer/ABC-1#{first.id}")[0].id == first.id
+    assert ledger.find_worker(f"#{second.id}")[0].id == second.id
+    assert ledger.find_worker("reviewer/ABC-2")[0].id == reviewer.id
+    ledger.update(first, state=ledger_mod.CANCELLED)
+    ledger.update(second, state=ledger_mod.CANCELLED)
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+    worker, problem = ledger.find_worker(f"reviewer/ABC-1#{first.id}")
+    assert worker is None and first.handle in problem
+    worker, problem = ledger.find_worker("#999")
+    assert worker is None and problem == "no worker #999"
+    worker, problem = ledger.find_worker("reviewer/ABC-2", "implementer")
+    assert worker is None and "role reviewer" in problem
+
+
+def test_find_worker_asks_for_a_handle_when_one_role_has_several_live_workers(ledger):
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+
+    worker, problem = ledger.find_worker("ABC-1")
+
+    assert worker is None
+    assert first.handle in problem and second.handle in problem
