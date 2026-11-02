@@ -11,6 +11,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -374,10 +375,15 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
         checks.append(Check("disk", WARN, str(exc)))
 
     if config.notify.command:
-        program = Path(os.path.expanduser(config.notify.command.split()[0]))
-        runnable = program.exists() and os.access(program, os.X_OK)
+        # Split and resolved as the notifier runs it: a bare name through PATH.
+        try:
+            words = shlex.split(os.path.expanduser(config.notify.command))
+        except ValueError:
+            words = []
+        program = os.path.expanduser(words[0]) if words else config.notify.command
+        found = shutil.which(program) if words else None
         checks.append(
-            Check("notify", OK if runnable else FAIL, f"{program}{'' if runnable else ' is not executable'}")
+            Check("notify", OK if found else FAIL, found or f"{program} is not executable")
         )
     else:
         checks.append(Check("notify", WARN, "no notify.command configured; nothing will reach you"))
