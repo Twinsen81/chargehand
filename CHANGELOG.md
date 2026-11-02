@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Board actions. Every control command has a button on the board, and each one records
+  the same request as the command, with origin `board` (the CLI records `cli`; the ledger
+  moves to schema version 5). The API: `POST /api/workers` to start a worker from a role,
+  an optional work item and the event kinds it follows on it; `POST
+  /api/workers/<id>/pause` (the CLI's `stop`), `continue`, `retry`, `cancel`, `discard`,
+  `reply` and `attach`; `POST /api/repositories/<name>/pause` and `/resume`, and
+  `/api/pause` and `/api/resume` for all repositories; `GET /api/requests/<id>` for an
+  outcome. Each `POST` needs the token, which the page asks for once and keeps in the
+  browser. A worker started on the board is not held to one per role and item, but the
+  pause and the caps apply; its worktree and branch end in its id. Reply puts one line
+  into the worker's inbox as an event from the board. Attach opens iTerm2 or
+  Terminal.app with `claude attach` on the worker's session. `status --json` shows each
+  worker's `id`, `origin` and `handle`, and the origin of each pending request.
+- Workers that share a role and an item are named by a handle with the worker's id,
+  `role/item#id`, and every command that takes an item accepts it, `role/item`, and `#id`.
 - An investigation log for the daemon. `serve --log-file` writes
   `~/Library/Logs/chargehand.log` through a rotating handler (10 MB, five old files), and
   `install` sets it up; the launchd job's own output moves to `chargehand.launchd.log`.
