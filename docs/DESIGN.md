@@ -1028,9 +1028,11 @@ settings through the board's cleaning rules, and writes a new token. It does not
 
 What is left to do by hand goes to `imported-steps.json` next to the configuration:
 each credential key that was left out, the tracker's key or sign-in, the status line entry,
-`install --load`, and the notification method. `doctor` lists each step; a step it can
-check (a key that is set again, the status line entry, a loaded job) shows as done once
-it is.
+`install --load`, the notification method, and each program that the configuration names
+by path and the archive does not carry: the notify program, and `claude_bin` and `git_bin`
+when they are paths. Export prints one line for each such program. `doctor` lists each
+step; a step it can check (a key that is set again, the status line entry, a loaded job,
+an installed program) shows as done once it is.
 
 ### The daemon's log
 

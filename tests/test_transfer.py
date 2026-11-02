@@ -493,6 +493,57 @@ def test_a_notify_program_outside_home_stays_where_it_is(old, tmp_path, monkeypa
     assert not (new.config_dir / "echo").exists()
 
 
+def _program_step(capsys, program: str) -> dict:
+    return next(c for c in _doctor(capsys) if c["detail"].startswith(f"install {program},"))
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_a_program_installed_outside_home_is_a_step_until_it_is_installed(
+    old, tmp_path, monkeypatch, capsys, linked
+):
+    program = tmp_path / "opt" / "bin" / "pushnotifier"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n")
+    program.chmod(0o755)
+    named = str(program)
+    if linked:
+        # A link under the home directory to a program installed elsewhere.
+        link = old.home / ".local" / "bin" / "pushnotifier"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(program)
+        named = "~/.local/bin/pushnotifier"
+    old.config.write_text(old.config.read_text().replace(
+        'command = "~/.config/chargehand/notify.sh --quiet"', f'command = "{named} --topic x"'
+    ))
+    archive = tmp_path / "setup.zip"
+
+    assert _export(old, archive) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert f"{named} (notify.command) is not copied because it is installed outside" in out
+    assert "~/.local/bin/claude (claude_bin) is not copied" in out
+    assert not [name for name in _members(archive) if name.startswith("notify/")]
+    new = Machine(tmp_path / "new").enter(monkeypatch)
+    assert _import(new, archive, monkeypatch) == EXIT_OK
+    out = capsys.readouterr().out
+    assert f"install {named}, which notify.command names" in out
+    assert "install ~/.local/bin/claude, which claude_bin names" in out
+
+    if linked:
+        assert _program_step(capsys, named)["status"] == install.WARN
+        link = new.home / ".local" / "bin" / "pushnotifier"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(program)
+    else:
+        assert _program_step(capsys, named)["status"] == install.OK
+        program.unlink()
+        assert _program_step(capsys, named)["status"] == install.WARN
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+    assert _program_step(capsys, named)["status"] == install.OK
+    assert _program_step(capsys, "~/.local/bin/claude")["status"] == install.WARN
+
+
 def test_export_says_that_the_notify_hook_is_copied_as_it_is(old, tmp_path, capsys):
     assert _export(old, tmp_path / "setup.zip") == EXIT_OK
 
@@ -565,14 +616,15 @@ def test_a_notify_program_that_cannot_travel_is_named_and_left_as_a_step(
     assert _export(old, archive) == EXIT_OK
 
     out = capsys.readouterr().out
-    assert f"~/{where} is not copied because" in out and reason in out
+    assert f"~/{where} (notify.command) is not copied because" in out and reason in out
     members = _members(archive)
     assert not [name for name in members if name.startswith("notify/")]
     assert tomllib.loads(members["config.toml"].decode())["notify"]["command"] == f"~/{where} send"
     new = Machine(tmp_path / "new").enter(monkeypatch)
     assert _import(new, archive, monkeypatch) == EXIT_OK
-    assert f"install ~/{where}, which the notify command runs" in capsys.readouterr().out
+    assert f"install ~/{where}, which notify.command names" in capsys.readouterr().out
     assert load_machine_config().notify.command == f"~/{where} send"
-    steps = [c for c in _doctor(capsys) if c["name"] == "imported: notify"]
-    assert [c["status"] for c in steps] == [install.INFO]
+    steps = [c for c in _doctor(capsys) if f"install ~/{where}" in c["detail"]]
+    # Not on the new machine yet, so the step is open.
+    assert [(c["name"], c["status"]) for c in steps] == [("imported: program", install.WARN)]
     assert reason in steps[0]["detail"]

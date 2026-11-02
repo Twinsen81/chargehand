@@ -537,6 +537,9 @@ def _step_done(config: MachineConfig, step: Mapping[str, object]) -> bool | None
         return isinstance(settings, dict) and runs_statusline_wrapper(settings.get("statusLine"))
     if kind == "launchd":
         return is_loaded() if sys.platform == "darwin" else None
+    if kind == "program":
+        program = step.get("program")
+        return isinstance(program, str) and shutil.which(os.path.expanduser(program)) is not None
     return None
 
 

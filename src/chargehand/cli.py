@@ -867,8 +867,8 @@ def cmd_export(args: argparse.Namespace) -> int:
         # credential written into it travels too.
         _print(f"{exported.notify_member} is your notification hook as it is: check that "
                "it holds no credential, such as a private push topic, before you share the archive.")
-    if exported.notify_kept:
-        _print(sanitize.one_line(exported.notify_kept, limit=500))
+    for line in exported.kept:
+        _print(sanitize.one_line(line, limit=500))
     return EXIT_OK
 
 

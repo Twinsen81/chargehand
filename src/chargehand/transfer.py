@@ -388,8 +388,8 @@ class Exported:
     dropped: list[Dropped]
     board_rows: int
     notify_member: str | None = None
-    # Why the notify program was named in the command instead of copied.
-    notify_kept: str | None = None
+    # One line per program the configuration names and the archive does not carry.
+    kept: list[str] = field(default_factory=list)
 
 
 def _role_agent(path: Path) -> str | None:
@@ -423,31 +423,51 @@ def _inside(path: Path, roots: Iterable[Path]) -> bool:
     return any(real.is_relative_to(os.path.realpath(root)) for root in roots)
 
 
+def _kept(key: str, program: str, reason: str) -> dict[str, str]:
+    """A program the configuration names and the archive does not carry."""
+    return {"key": key, "program": _portable(program), "reason": reason}
+
+
 def _notify_script(
     config: MachineConfig, config_dirs: Iterable[Path]
-) -> tuple[Path | None, list[str]]:
-    """The notification hook's program, when it is a file to carry along, and its arguments.
+) -> tuple[Path | None, list[str], dict[str, str] | None]:
+    """The notification hook's program and its arguments when the archive carries it, or why not.
 
     Only a script of the operator's own, in the home or the configuration directory, is
     carried. A program installed elsewhere, such as a system or Homebrew binary, may need
     its install location, so the command keeps naming it there.
     """
     if not config.notify.command:
-        return None, []
+        return None, [], None
     try:
         argv = shlex.split(os.path.expanduser(config.notify.command))
     except ValueError:
-        return None, []
+        return None, [], None
     if not argv:
-        return None, []
+        return None, [], None
+    if "/" not in argv[0]:
+        return None, [], _kept("notify.command", argv[0], "it is a program on PATH")
     program = Path(os.path.expanduser(argv[0]))
-    if (
-        program.is_file()
-        and _SAFE_NAME.fullmatch(program.name)
-        and _inside(program, [_home(), *config_dirs])
-    ):
-        return program, argv[1:]
-    return None, []
+    if not program.is_file():
+        return None, [], _kept("notify.command", str(program), "it is not a file on this machine")
+    if not _SAFE_NAME.fullmatch(program.name) or not _inside(program, [_home(), *config_dirs]):
+        return None, [], _kept(
+            "notify.command", str(program),
+            "it is installed outside the home and configuration directories",
+        )
+    reason = _cannot_travel(program)
+    if reason is not None:
+        return None, [], _kept("notify.command", str(program), reason)
+    return program, argv[1:], None
+
+
+def _kept_binaries(config: MachineConfig) -> list[dict[str, str]]:
+    """`claude_bin` and `git_bin` when they name a path rather than a program on PATH."""
+    return [
+        _kept(key, value, "the archive carries no binaries")
+        for key, value in (("claude_bin", config.claude_bin), ("git_bin", config.git_bin))
+        if "/" in value
+    ]
 
 
 def _cannot_travel(program: Path) -> str | None:
@@ -544,13 +564,11 @@ def export_setup(
 
     members: dict[str, bytes] = {}
     modes: dict[str, int] = {}
-    notify_program, notify_args = _notify_script(config, [paths.config_dir(), config_path.parent])
+    notify_program, notify_args, notify_kept = _notify_script(
+        config, [paths.config_dir(), config_path.parent]
+    )
+    kept = _kept_binaries(config) + ([notify_kept] if notify_kept else [])
     notify: dict[str, object] | None = None
-    notify_kept: dict[str, str] | None = None
-    reason = _cannot_travel(notify_program) if notify_program is not None else None
-    if notify_program is not None and reason is not None:
-        notify_kept = {"program": _portable(str(notify_program)), "reason": reason}
-        notify_program, notify_args = None, []
     if notify_program is not None:
         member = f"{NOTIFY_DIR}/{notify_program.name}"
         members[member] = notify_program.read_bytes()
@@ -604,7 +622,7 @@ def export_setup(
         "created_at": created.isoformat(timespec="seconds"),
         "members": sorted(members),
         "notify": notify,
-        "notify_kept": notify_kept,
+        "programs_kept": kept,
         "dropped": [d.as_dict() for d in dropped],
     }
     archive = json.dumps(manifest, indent=2) + "\n"
@@ -624,8 +642,11 @@ def export_setup(
         raise
     return Exported(
         target, sorted(members), dropped, len(rows), str(notify["member"]) if notify else None,
-        f"{notify_kept['program']} is not copied because {notify_kept['reason']}; the command "
-        "still names it, so install it on the other machine" if notify_kept else None,
+        [
+            f"{k['program']} ({k['key']}) is not copied because {k['reason']}; the "
+            "configuration still names it, so install it on the other machine"
+            for k in kept
+        ],
     )
 
 
@@ -721,13 +742,12 @@ def _check_manifest(source: Path, manifest: Mapping[str, object], members: Mappi
             or not all(isinstance(a, str) for a in notify["args"])  # type: ignore[union-attr]
         ):
             raise Refused(f"{source}: the notify entry of its manifest is not valid")
-    kept = manifest.get("notify_kept")
-    if kept is not None and not (
-        isinstance(kept, Mapping)
-        and isinstance(kept.get("program"), str)
-        and isinstance(kept.get("reason"), str)
+    kept = manifest.get("programs_kept", [])
+    if not isinstance(kept, list) or not all(
+        isinstance(k, Mapping) and all(isinstance(k.get(f), str) for f in ("key", "program", "reason"))
+        for k in kept
     ):
-        raise Refused(f"{source}: the notify_kept entry of its manifest is not valid")
+        raise Refused(f"{source}: the programs_kept entry of its manifest is not valid")
     dropped = manifest.get("dropped", [])
     if not isinstance(dropped, list) or not all(
         isinstance(d, Mapping)
@@ -883,13 +903,13 @@ def _steps(archive: Archive, config: MachineConfig, notify_path: Path | None) ->
             "detail": f"{notify_path} came from the other machine: check that its method "
                       "reaches you here, and give it any credential it reads",
         })
-    kept = archive.manifest.get("notify_kept")
-    if isinstance(kept, Mapping):
+    for kept in archive.manifest.get("programs_kept", []):  # type: ignore[union-attr]
         steps.append({
-            "name": "imported: notify",
-            "kind": "note",
-            "detail": f"install {kept['program']}, which the notify command runs; export "
-                      f"did not copy it because {kept['reason']}",
+            "name": "imported: program",
+            "kind": "program",
+            "program": kept["program"],
+            "detail": f"install {kept['program']}, which {kept['key']} names; export did not "
+                      f"copy it because {kept['reason']}",
         })
     return steps
 
