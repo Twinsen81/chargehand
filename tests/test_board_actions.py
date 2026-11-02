@@ -423,6 +423,30 @@ def test_the_cli_accepts_a_board_workers_handle(capsys, config_file, harness):
     assert (third.origin, third.item, third.state) == (ledger_mod.ORIGIN_BOARD, "ABC-1", ledger_mod.RUNNING)
 
 
+def test_the_cli_tells_a_start_rule_worker_and_a_board_worker_on_one_item_apart(
+    capsys, config_file, harness
+):
+    harness.board.add("ABC-1")
+    harness.tick()
+    source = harness.worker("ABC-1")
+    board_one = board_worker(harness)
+    harness.claude_state.set(logs="some output\n")
+
+    run(["status", "--json", "--no-queue"], config_file)
+    handles = {w["id"]: w["handle"] for w in json.loads(capsys.readouterr().out)["workers"]}
+    assert handles == {source.id: "implementer/ABC-1", board_one.id: board_one.handle}
+
+    assert run(["logs", "implementer/ABC-1"], config_file) == EXIT_OK
+    assert run(["stop", "implementer/ABC-1"], config_file) == EXIT_OK
+    assert harness.ledger.get(source.id).state == ledger_mod.PAUSED
+    assert harness.ledger.get(board_one.id).state == ledger_mod.RUNNING
+    assert run(["continue", "ABC-1"], config_file) == EXIT_OK
+    assert harness.ledger.get(source.id).state == ledger_mod.RUNNING
+    assert run(["stop", board_one.handle], config_file) == EXIT_OK
+    assert harness.ledger.get(board_one.id).state == ledger_mod.PAUSED
+    assert harness.ledger.get(source.id).state == ledger_mod.RUNNING
+
+
 def test_a_bare_item_with_several_board_workers_asks_for_a_handle(capsys, config_file, harness):
     unqueued(harness)
     first, second = board_worker(harness), board_worker(harness)

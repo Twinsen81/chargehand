@@ -800,7 +800,9 @@ roles hold the item. `--route` stays accepted for `--repository`.
   by a handle with the worker's id, `role/item#id` (`role/#id` without an item); a
   worker that a start rule created keeps `role/item`. Every command that takes an item
   also takes a handle, and `#id` alone; a shell reads a word that starts with `#` as a
-  comment, so quote it: `chargehand stop '#7'`.
+  comment, so quote it: `chargehand stop '#7'`. An item, or `role/item`, names the worker
+  that a start rule created for it, also when workers started by hand share the item;
+  when a name fits several workers, the refusal lists each as `role/item#id`.
   A reply is one line of text, cleaned of control sequences and capped at 500
   characters. It enters the worker's inbox as an event of the source `board`, the path
   a comment on its item takes, so delivery wakes the worker with it under the same caps

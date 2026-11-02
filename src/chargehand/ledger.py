@@ -442,6 +442,11 @@ class Worker:
         """
         if self.item and self.origin == ORIGIN_SOURCE:
             return f"{self.role}/{self.item}"
+        return self.id_handle
+
+    @property
+    def id_handle(self) -> str:
+        """The handle with the worker's id, which names it alone in every case."""
         return f"{self.role}/{self.item or ''}#{self.id}"
 
     @property
@@ -689,12 +694,13 @@ class Ledger:
         """The one worker a control command means, or why it cannot tell.
 
         *target* is an item, a handle (`role/item`), or a handle with the worker's id
-        (`role/item#id`, `role/#id`, `#id`). Several workers can hold the same item, so a
-        bare item is enough only while one live worker has it, in *role* when given;
-        otherwise the command has to name the role or the handle. With no live worker, the
-        newest one recorded is meant.
+        (`role/item#id`, `role/#id`, `#id`). An item or a `role/item` handle names the
+        worker that a start rule created for it, which is called by that name. Workers
+        started by hand on the same item are named by their id. Otherwise a bare item is
+        enough only while one live worker has it, in *role* when given. With no live
+        worker, the newest one recorded is meant, a start rule's first.
         """
-        shown = sanitize.scrub_identifier(target) if target else "''"
+        shown = sanitize.one_line(target, limit=100) if target else "''"
         by_id = _ID_HANDLE.fullmatch(target)
         if by_id is not None:
             worker = self.get(int(by_id.group(3)))
@@ -704,7 +710,7 @@ class Ledger:
             if named_role is not None and (named_role, by_id.group(2) or None) != (
                 worker.role, worker.item
             ):
-                return None, f"worker #{worker.id} is {worker.handle}, not {sanitize.one_line(target)}"
+                return None, f"worker #{worker.id} is {worker.id_handle}, not {shown}"
             if role is not None and role != worker.role:
                 return None, f"worker #{worker.id} is in role {worker.role}, not {role}"
             return worker, ""
@@ -718,17 +724,31 @@ class Ledger:
         if role is not None:
             live = [w for w in live if w.role == role]
         if len(live) > 1:
-            if len({w.role for w in live}) == len(live):
-                names = ", ".join(sorted(w.role for w in live))
-                return None, f"{shown} has live workers in several roles ({names}); pass --role"
-            handles = ", ".join(w.handle for w in live)
+            # A start rule's worker is called by its item and its `role/item` handle.
+            named = [w for w in live if target in (w.handle, w.name)]
+            if len(named) == 1:
+                return named[0], ""
+            handles = ", ".join(w.id_handle for w in live)
+            roles = sorted({w.role for w in live})
+            if len(roles) > 1:
+                return None, (
+                    f"{shown} has live workers in several roles ({', '.join(roles)}); pass "
+                    f"--role, or name one of them: {handles}"
+                )
             return None, f"{shown} has several live workers; name one of them: {handles}"
         if live:
             return live[0], ""
-        latest = self.latest_worker_for(item, role)
+        latest = self.latest_worker_for(item, role, origin=ORIGIN_SOURCE) or self.latest_worker_for(
+            item, role
+        )
         if latest is None:
             return None, f"no worker recorded for {shown}" + (f" in role {role}" if role else "")
         return latest, ""
+
+    def target_for(self, worker: Worker) -> str:
+        """What a command names *worker* by: its name when that resolves to it, else its id."""
+        found, _ = self.find_worker(worker.name)
+        return worker.name if found is not None and found.id == worker.id else worker.id_handle
 
     def live_workers(self) -> list[Worker]:
         rows = self._conn.execute(

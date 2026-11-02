@@ -33,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker's `id`, `origin` and `handle`, and the origin of each pending request.
 - Workers that share a role and an item are named by a handle with the worker's id,
   `role/item#id`, and every command that takes an item accepts it, `role/item`, and `#id`
-  (quoted in a shell, as `'#7'`).
+  (quoted in a shell, as `'#7'`). A notification about such a worker carries the handle in
+  `CHARGEHAND_ITEM` and `CHARGEHAND_ISSUE`, which already holds the role.
 - An investigation log for the daemon. `serve --log-file` writes
   `~/Library/Logs/chargehand.log` through a rotating handler (10 MB, five old files), and
   `install` sets it up; the launchd job's own output moves to `chargehand.launchd.log`.

@@ -230,13 +230,12 @@ def target_of(ledger: Ledger, worker: Worker) -> str:
     with its id, because a start rule may start a new live worker on its item before
     then; so is any worker that the plain handle does not name now.
     """
-    by_id = f"{worker.role}/{worker.item or ''}#{worker.id}"
     if worker.is_terminal:
-        return by_id
+        return worker.id_handle
     found, _ = ledger.find_worker(worker.handle)
     if found is not None and found.id == worker.id:
         return worker.handle
-    return by_id
+    return worker.id_handle
 
 
 def worker_action(request: Request) -> Response:

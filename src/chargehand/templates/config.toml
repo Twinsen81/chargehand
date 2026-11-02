@@ -40,7 +40,9 @@ tick_interval_secs = 60
 [notify]
 # Receives CHARGEHAND_ITEM, CHARGEHAND_ROLE, CHARGEHAND_STATE, CHARGEHAND_URL,
 # CHARGEHAND_REPOSITORY and CHARGEHAND_DETAIL as environment variables (CHARGEHAND_ISSUE and
-# CHARGEHAND_ROUTE stay set with the same values). The payload carries no issue text and no
+# CHARGEHAND_ROUTE stay set with the same values). For a worker started on the board,
+# CHARGEHAND_ITEM is its handle with its id, such as implementer/ABC-1#7, which already
+# holds the role. The payload carries no issue text and no
 # agent output, because it usually crosses a third-party relay.
 command = "~/.config/chargehand/notify.sh"
 

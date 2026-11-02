@@ -1128,10 +1128,10 @@ class Runner:
         except ChargehandError as exc:
             # The row exists, so reconciliation resumes the launch on the next tick, as it
             # resumes any launch that stopped part way.
-            created = self.ledger.recent_workers(1)
-            if not created or created[0].origin != ledger_mod.ORIGIN_BOARD:
+            created = getattr(exc, "worker", None)
+            if created is None:
                 raise
-            worker = self.ledger.update(created[0], last_error=str(exc)[:500])
+            worker = self.ledger.update(self.ledger.get(created.id) or created, last_error=str(exc)[:500])
             report.errors.append(f"{worker.handle}: {exc}")
         if worker.state == ledger_mod.FAILED:
             return False, f"{worker.handle}: the launch failed; `chargehand status --verbose-titles` says why"
@@ -1246,14 +1246,15 @@ class Runner:
         for a worktree off its branch or an item checkout that is gone. The changed
         paths, which the session chose, are cleaned and take only the room that is left.
         """
+        target = self.ledger.target_for(worker)
         if check.acceptable:
             hint = (
-                f"Check the worktree, then `chargehand continue {worker.name} --force` "
-                f"to accept the files, or `chargehand discard {worker.name} --yes`."
+                f"Check the worktree, then `chargehand continue {target} --force` "
+                f"to accept the files, or `chargehand discard {target} --yes`."
             )
         else:
             hint = (
-                f"Check the worktree, then `chargehand discard {worker.name} --yes`; the "
+                f"Check the worktree, then `chargehand discard {target} --yes`; the "
                 f"next review request starts a fresh worker."
             )
         prefix, tail = f"{worker.name}: ", f". {hint}"
@@ -1281,7 +1282,7 @@ class Runner:
             if blocker and not force:
                 return False, (
                     f"{worker.name}: {blocker}. Push or discard it first "
-                    f"(`chargehand discard {worker.name} --yes`)."
+                    f"(`chargehand discard {self.ledger.target_for(worker)} --yes`)."
                 )
             try:
                 branches_removed = self._remove_worktree(worker, force=True)
@@ -1732,9 +1733,13 @@ class Runner:
                 continue
             stale = self._stale_worktree_for(role.name, item)
             if stale is not None:
+                previous = self.ledger.latest_worker_for(
+                    item, role.name, origin=ledger_mod.ORIGIN_SOURCE
+                )
+                target = self.ledger.target_for(previous) if previous else item
                 hint = (
-                    f"; `chargehand retry {item}` reuses it safely, "
-                    f"`chargehand discard {item} --yes` removes it"
+                    f"; `chargehand retry {target}` reuses it safely, "
+                    f"`chargehand discard {target} --yes` removes it"
                     if queue else ""
                 )
                 report.skipped.append(
@@ -2636,7 +2641,12 @@ class Runner:
                 self.ledger.subscribe(worker, item, followed, primary=True)
         log.info("%s: launching in %s", worker.handle, worker.worktree)
         self._check_crash(0, crash_after_step)
-        return self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step)
+        try:
+            return self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step)
+        except ChargehandError as exc:
+            # The caller may answer for the row that now exists; reconciliation resumes it.
+            exc.worker = worker  # type: ignore[attr-defined]
+            raise
 
     def _run_launch_steps(
         self,

@@ -678,3 +678,43 @@ def test_find_worker_asks_for_a_handle_when_one_role_has_several_live_workers(le
 
     assert worker is None
     assert first.handle in problem and second.handle in problem
+
+
+def test_a_start_rule_worker_keeps_its_name_beside_workers_started_by_hand(ledger):
+    source = make(ledger)
+    board = by_hand(ledger, index=1)
+    reviewer = make(ledger, worktree="/w/r", role="reviewer")
+
+    for target, role in (("implementer/ABC-1", None), ("ABC-1", "implementer")):
+        assert ledger.find_worker(target, role)[0].id == source.id
+    assert ledger.find_worker(board.handle)[0].id == board.id
+    # Two roles still need --role; the message names each worker by its id.
+    worker, problem = ledger.find_worker("ABC-1")
+    assert worker is None and "several roles" in problem
+    by_hand(ledger, index=2)
+    worker, problem = ledger.find_worker("ABC-1", "implementer")
+    assert worker.id == source.id
+
+    # The bare item names two roles' workers, so the hint names each by its id.
+    assert ledger.target_for(source) == source.id_handle
+    assert ledger.target_for(reviewer) == reviewer.id_handle
+    ledger.update(reviewer, state=ledger_mod.DONE)
+    assert ledger.target_for(source) == "ABC-1"
+    assert ledger.target_for(board) == board.handle
+
+
+def test_a_finished_start_rule_worker_is_named_by_id_while_a_board_worker_lives(ledger):
+    source = ledger.update(make(ledger), state=ledger_mod.CANCELLED)
+    board = by_hand(ledger, index=1)
+
+    assert ledger.find_worker("ABC-1")[0].id == board.id
+    assert ledger.target_for(source) == source.id_handle
+    assert ledger.find_worker(ledger.target_for(source))[0].id == source.id
+    ledger.update(board, state=ledger_mod.CANCELLED)
+    # With no live worker, the item names the start rule's worker, not the newer board one.
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+
+def test_errors_show_a_handle_as_typed(ledger):
+    _, problem = ledger.find_worker("implementer/NOPE-1")
+    assert problem == "no worker recorded for implementer/NOPE-1 in role implementer"
