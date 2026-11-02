@@ -99,6 +99,15 @@ token field once, and the browser keeps it for the page. Workers started on the 
 are named by a handle with their id, such as `implementer/ABC-1#7`, which every command
 that takes an item also accepts.
 
+The cards of each column are grouped by repository. With Edit you can rename a repository
+or a worker on the board, give it an icon (one emoji or a name such as `rocket` or `bug`)
+and pin it, and collapse or hide a repository. A board pin only sorts: pinned first, then
+by last activity, and a collapsed repository still shows its pinned cards. It does not keep
+a session running, which Claude Code's own pin does. A hidden repository's workers still run
+and notify; the top bar shows how many repositories are hidden, and "show" brings them back.
+These settings are kept in the ledger, so they survive a restart, and the CLI does not use
+them: commands take the configured names and handles.
+
 To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
 status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
 the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then
