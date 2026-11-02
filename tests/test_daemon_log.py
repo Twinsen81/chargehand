@@ -10,11 +10,13 @@ import json
 import logging
 import logging.handlers
 import sys
+import threading
+from pathlib import Path
 
 import pytest
 
 from conftest import make_config
-from chargehand import cli, daemonlog, install, ledger as ledger_mod, paths
+from chargehand import claude, cli, daemonlog, hooks, install, ledger as ledger_mod, paths
 from chargehand.config import NotifyConfig, ServeConfig, SourceConfig
 from chargehand.errors import ConfigError
 from chargehand.gitutil import Git
@@ -548,11 +550,29 @@ def test_session_text_and_actors_never_reach_either_channel(wired, tmp_path, cap
     config = support.daemon_config(wired.config, tmp_path / "board.token")
     built = support.build(config, notifier=wired.notifier, report=cli._log_report,
                           interval_secs=3600)
+    # The session waits for the board, so the prompt is held, answered and then ruled.
+    settings = {"hooks": claude.hook_settings(1, "t", Path("/t"), permission_timeout_secs=60)}
+    claude.write_settings_file(claude.settings_file_for(Path(reviewer.worktree)), settings)
+    asked = {"session_id": reviewer.session_uuid, "tool_name": "Bash",
+             "tool_input": {"command": f"echo {MARKER}"}}
     with support.running(built, loop=False):
-        post(built, "PermissionRequest", {
-            "session_id": reviewer.session_uuid, "tool_name": "Bash",
-            "tool_input": {"command": f"echo {MARKER}"},
-        })
+        held = threading.Thread(target=post, args=(built, "PermissionRequest", asked))
+        held.start()
+        ledger = Ledger(built.ledger_path)
+        try:
+            prompt = support.wait_for(lambda: next(
+                (p for p in ledger.open_permission_prompts() if hooks.is_held(built, p.id)), None
+            ))
+            assert prompt is not None
+        finally:
+            ledger.close()
+        status, _ = support.request(
+            built.port, "POST", f"/api/workers/{reviewer.id}/answer",
+            body=json.dumps({"prompt": prompt.id, "answer": "always"}).encode(), headers=AUTH,
+        )
+        assert status == 200
+        held.join(10)
+        assert post(built, "PermissionRequest", asked) == 200
         post(built, "Stop", {
             "session_id": reviewer.session_uuid, "last_assistant_message": f"done {MARKER}",
         })
