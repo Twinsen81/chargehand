@@ -223,19 +223,13 @@ def request_outcome(request: Request) -> Response:
 
 
 def target_of(ledger: Ledger, worker: Worker) -> str:
-    """What the request names the worker by: its handle, as on the command line.
+    """What a board request names the worker by: the handle the card shows.
 
-    A `role/item` handle names the live worker, or the newest one, of that role and
-    item, when the tick applies the request. A finished worker is named by the handle
-    with its id, because a start rule may start a new live worker on its item before
-    then; so is any worker that the plain handle does not name now.
+    It is :attr:`Worker.target`, which the resolution rule in :meth:`Ledger.find_worker`
+    resolves back to this worker: `role/item` for a live start-rule worker, the id
+    handle for every other one.
     """
-    if worker.is_terminal:
-        return worker.id_handle
-    found, _ = ledger.find_worker(worker.handle)
-    if found is not None and found.id == worker.id:
-        return worker.handle
-    return worker.id_handle
+    return worker.target
 
 
 def worker_action(request: Request) -> Response:
@@ -487,7 +481,7 @@ def card(
     cap = role.policy.max_wakes_per_day if role else None
     return {
         "id": worker.id,
-        "handle": worker.handle,
+        "handle": worker.target,
         "origin": worker.origin,
         "actions": actions(worker),
         "column": COLUMN_OF[worker.state],

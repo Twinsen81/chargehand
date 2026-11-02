@@ -450,6 +450,17 @@ class Worker:
         return f"{self.role}/{self.item or ''}#{self.id}"
 
     @property
+    def target(self) -> str:
+        """The handle that chargehand prints for a command to name this worker.
+
+        `role/item` for a live start-rule worker: the database keeps one live worker per
+        role and item, and the resolution rule (:meth:`Ledger.find_worker`) prefers it.
+        The id handle for every other worker, because a finished start-rule worker's
+        `role/item` names its successor once a start rule starts one.
+        """
+        return self.id_handle if self.is_terminal else self.handle
+
+    @property
     def name(self) -> str:
         """What a message to the operator calls the worker: its item, or its handle."""
         if self.item and self.origin == ORIGIN_SOURCE:
@@ -693,12 +704,20 @@ class Ledger:
     def find_worker(self, target: str, role: str | None = None) -> tuple[Worker | None, str]:
         """The one worker a control command means, or why it cannot tell.
 
-        *target* is an item, a handle (`role/item`), or a handle with the worker's id
-        (`role/item#id`, `role/#id`, `#id`). An item or a `role/item` handle names the
-        worker that a start rule created for it, which is called by that name. Workers
-        started by hand on the same item are named by their id. Otherwise a bare item is
-        enough only while one live worker has it, in *role* when given. With no live
-        worker, the newest one recorded is meant, a start rule's first.
+        One rule, applied in this order:
+
+        1. An id handle (`role/item#id`, `role/#id`, `#id`) names the worker with that id;
+           its role and item, and *role* when given, must match.
+        2. A `role/item` handle, or a bare item with *role*, is a handle. When a worker
+           has exactly that handle, the handle wins: the live worker with it first, then
+           the newest one with it. Only a start-rule worker has a handle without an id.
+        3. Otherwise, by the item (in *role* when known): the one live worker on it; with
+           several, the one start-rule worker among them that the bare item names; with
+           none live, the newest recorded. Anything else is refused, with each candidate
+           as its id handle.
+
+        Every handle chargehand prints (:attr:`Worker.target`, :meth:`target_for`)
+        resolves back to its worker under this rule.
         """
         shown = sanitize.one_line(target, limit=100) if target else "''"
         by_id = _ID_HANDLE.fullmatch(target)
@@ -720,12 +739,20 @@ class Ledger:
             if role is not None and role != named_role:
                 return None, f"{shown} is in role {named_role}, not {role}"
             role = named_role
+        if role is not None:
+            # Rule 2: an exact handle. The unique index allows one live worker with it.
+            exact = next(
+                (w for w in self.live_workers_for(item)
+                 if w.role == role and w.origin == ORIGIN_SOURCE),
+                None,
+            ) or self.latest_worker_for(item, role, origin=ORIGIN_SOURCE)
+            if exact is not None:
+                return exact, ""
         live = self.live_workers_for(item)
         if role is not None:
             live = [w for w in live if w.role == role]
         if len(live) > 1:
-            # A start rule's worker is called by its item and its `role/item` handle.
-            named = [w for w in live if target in (w.handle, w.name)]
+            named = [w for w in live if w.name == target]
             if len(named) == 1:
                 return named[0], ""
             handles = ", ".join(w.id_handle for w in live)
@@ -746,9 +773,13 @@ class Ledger:
         return latest, ""
 
     def target_for(self, worker: Worker) -> str:
-        """What a command names *worker* by: its name when that resolves to it, else its id."""
+        """The shortest name a command can give *worker* now: its item, else its target.
+
+        The item is used only when the rule resolves it to *worker*, so a hint stays as
+        short as before for a worker alone on its item.
+        """
         found, _ = self.find_worker(worker.name)
-        return worker.name if found is not None and found.id == worker.id else worker.id_handle
+        return worker.name if found is not None and found.id == worker.id else worker.target
 
     def live_workers(self) -> list[Worker]:
         rows = self._conn.execute(

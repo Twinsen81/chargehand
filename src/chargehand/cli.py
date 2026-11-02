@@ -138,7 +138,8 @@ def _worker_dict(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "id": worker.id,
-        "handle": worker.handle,
+        # The name a command takes; it resolves back to this worker.
+        "handle": worker.target,
         "origin": worker.origin,
         "item": worker.item,
         "role": worker.role,

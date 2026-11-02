@@ -680,39 +680,71 @@ def test_find_worker_asks_for_a_handle_when_one_role_has_several_live_workers(le
     assert first.handle in problem and second.handle in problem
 
 
-def test_a_start_rule_worker_keeps_its_name_beside_workers_started_by_hand(ledger):
+def test_a_handle_names_its_start_rule_worker_before_any_other_worker(ledger):
     source = make(ledger)
     board = by_hand(ledger, index=1)
-    reviewer = make(ledger, worktree="/w/r", role="reviewer")
+    reviewer_board = by_hand(ledger, role="reviewer", index=2)
 
+    # Rule 2: `role/item`, and the bare item with --role, are the start-rule worker's handle.
     for target, role in (("implementer/ABC-1", None), ("ABC-1", "implementer")):
         assert ledger.find_worker(target, role)[0].id == source.id
+    # Rule 3: the bare item alone names the one start-rule worker among the live ones,
+    # also when a board worker of another role is live on the item.
+    assert ledger.find_worker("ABC-1")[0].id == source.id
+    assert ledger.find_worker("ABC-1", "reviewer")[0].id == reviewer_board.id
     assert ledger.find_worker(board.handle)[0].id == board.id
-    # Two roles still need --role; the message names each worker by its id.
+
+    # The handle wins over a live board worker once the start-rule worker has finished.
+    ledger.update(source, state=ledger_mod.CANCELLED)
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+    # The bare item has no handle of its own: the live workers decide, here two roles.
     worker, problem = ledger.find_worker("ABC-1")
     assert worker is None and "several roles" in problem
-    by_hand(ledger, index=2)
-    worker, problem = ledger.find_worker("ABC-1", "implementer")
-    assert worker.id == source.id
-
-    # The bare item names two roles' workers, so the hint names each by its id.
-    assert ledger.target_for(source) == source.id_handle
-    assert ledger.target_for(reviewer) == reviewer.id_handle
-    ledger.update(reviewer, state=ledger_mod.DONE)
-    assert ledger.target_for(source) == "ABC-1"
-    assert ledger.target_for(board) == board.handle
+    assert board.id_handle in problem and reviewer_board.id_handle in problem
 
 
-def test_a_finished_start_rule_worker_is_named_by_id_while_a_board_worker_lives(ledger):
-    source = ledger.update(make(ledger), state=ledger_mod.CANCELLED)
-    board = by_hand(ledger, index=1)
+LIVE, FINISHED = "live", "finished"
 
-    assert ledger.find_worker("ABC-1")[0].id == board.id
-    assert ledger.target_for(source) == source.id_handle
-    assert ledger.find_worker(ledger.target_for(source))[0].id == source.id
-    ledger.update(board, state=ledger_mod.CANCELLED)
-    # With no live worker, the item names the start rule's worker, not the newer board one.
-    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+@pytest.mark.parametrize("earlier", [False, True], ids=["first", "after-a-finished-one"])
+@pytest.mark.parametrize("source_state", [None, LIVE, FINISHED])
+@pytest.mark.parametrize("board_state", [None, LIVE, FINISHED])
+@pytest.mark.parametrize("board_role", ["implementer", "reviewer"])
+@pytest.mark.parametrize("second_board", [False, True])
+def test_every_handle_chargehand_prints_resolves_back_to_its_worker(
+    ledger, earlier, source_state, board_state, board_role, second_board
+):
+    """Start-rule and board workers, live or finished, in one or two roles, on one item."""
+    workers = []
+
+    def add(worker, state):
+        if state == FINISHED:
+            worker = ledger.update(worker, state=ledger_mod.CANCELLED)
+        else:
+            worker = ledger.update(worker, state=ledger_mod.RUNNING)
+        workers.append(worker)
+
+    if earlier:
+        add(make(ledger, worktree="/w/old"), FINISHED)
+    if source_state:
+        add(make(ledger), source_state)
+    if board_state:
+        add(by_hand(ledger, role=board_role, index=1), board_state)
+        if second_board:
+            add(by_hand(ledger, role=board_role, index=2), LIVE)
+    if not workers:
+        pytest.skip("no worker in this combination")
+
+    for worker in workers:
+        printed = {worker.target, ledger.target_for(worker), worker.id_handle}
+        if not worker.is_terminal:
+            printed.add(worker.handle)
+        for name in printed:
+            found, problem = ledger.find_worker(name)
+            assert found is not None and found.id == worker.id, (name, problem)
+        assert worker.target == (
+            worker.handle if not worker.is_terminal else worker.id_handle
+        )
 
 
 def test_errors_show_a_handle_as_typed(ledger):

@@ -160,7 +160,7 @@ def test_an_older_worker_of_the_same_role_and_item_is_named_by_its_id(daemon, ha
         role="implementer", item="ABC-1", item_id="id-1", url=None, repository="test",
         repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="chargehand/implementer/ABC-1",
     )
-    harness.ledger.update(first, state=ledger_mod.CANCELLED)
+    first = harness.ledger.update(first, state=ledger_mod.CANCELLED)
     harness.ledger.create_worker(
         role="implementer", item="ABC-1", item_id="id-1", url=None, repository="test",
         repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="chargehand/implementer/ABC-1",
@@ -445,6 +445,34 @@ def test_the_cli_tells_a_start_rule_worker_and_a_board_worker_on_one_item_apart(
     assert run(["stop", board_one.handle], config_file) == EXIT_OK
     assert harness.ledger.get(board_one.id).state == ledger_mod.PAUSED
     assert harness.ledger.get(source.id).state == ledger_mod.RUNNING
+
+
+def test_discard_with_the_handle_status_shows_for_a_finished_worker_leaves_a_live_twin_alone(
+    capsys, config_file, harness
+):
+    harness.board.add("ABC-1")
+    harness.tick()
+    assert run(["cancel", "ABC-1"], config_file) == EXIT_OK
+    source = harness.worker("ABC-1")
+    assert source.state == ledger_mod.CANCELLED
+    live = board_worker(harness)
+    capsys.readouterr()
+
+    run(["status", "--json", "--no-queue"], config_file)
+    status = json.loads(capsys.readouterr().out)
+    (shown,) = [w["handle"] for w in status["recent"] if w["id"] == source.id]
+    assert shown == source.id_handle
+
+    for name in (shown, "implementer/ABC-1"):
+        assert harness.ledger.find_worker(name)[0].id == source.id
+    assert run(["discard", shown, "--yes"], config_file) == EXIT_OK
+
+    assert harness.ledger.get(source.id).gc_done == 1
+    assert not harness.ledger.get(source.id).worktree_path.exists()
+    after = harness.ledger.get(live.id)
+    assert (after.state, after.gc_done) == (ledger_mod.RUNNING, 0)
+    assert after.worktree_path.exists()
+    assert ["stop", live.session_id] not in harness.claude_state.commands
 
 
 def test_a_bare_item_with_several_board_workers_asks_for_a_handle(capsys, config_file, harness):

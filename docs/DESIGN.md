@@ -800,9 +800,17 @@ roles hold the item. `--route` stays accepted for `--repository`.
   by a handle with the worker's id, `role/item#id` (`role/#id` without an item); a
   worker that a start rule created keeps `role/item`. Every command that takes an item
   also takes a handle, and `#id` alone; a shell reads a word that starts with `#` as a
-  comment, so quote it: `chargehand stop '#7'`. An item, or `role/item`, names the worker
-  that a start rule created for it, also when workers started by hand share the item;
-  when a name fits several workers, the refusal lists each as `role/item#id`.
+  comment, so quote it: `chargehand stop '#7'`. One rule resolves a target, in order:
+  (1) an id handle names the worker with that id; (2) `role/item`, or an item with
+  `--role`, is a handle, and when a worker has exactly that handle it wins, the live one
+  first, then the newest; (3) otherwise the item decides: its one live worker (in the
+  role, when known), or among several the one start-rule worker that the bare item
+  names, or with none live the newest recorded; anything else is refused with each
+  candidate as `role/item#id`. Every handle chargehand prints resolves back to its
+  worker under this rule: `status --json` and the board show `role/item` for a live
+  start-rule worker and the id handle for every other worker, finished ones included,
+  and a hint in a refusal uses the bare item only when the rule resolves it to that
+  worker.
   A reply is one line of text, cleaned of control sequences and capped at 500
   characters. It enters the worker's inbox as an event of the source `board`, the path
   a comment on its item takes, so delivery wakes the worker with it under the same caps
