@@ -1003,8 +1003,11 @@ chargehand version, time, member list). It holds:
   Repository-level role files travel with their repository.
 - The notification hook, when its command runs a file in the home or the configuration
   directory, copied as it is. A program installed elsewhere, such as a system or Homebrew
-  binary, stays where it is, and the command keeps naming it. The archive holds no file
-  larger than 4 MB and at most 512 files, the limits import applies.
+  binary, stays where it is, and the command keeps naming it. So does a file in the home
+  directory that cannot travel as it is: one over 4 MB, one that is not text, or a
+  generated shim that contains the home directory's path. Export says why, and import
+  lists installing it as a manual step. The archive holds no file larger than 4 MB and at
+  most 512 files, the limits import applies.
 - The `statusLine` entry of `~/.claude/settings.json` when it runs `chargehand statusline`.
 - The board settings of the configured repositories. Worker settings are not exported: they
   are kept by worker id, and a worker id means nothing on another machine.

@@ -540,3 +540,39 @@ def test_a_refusal_quoting_the_archive_is_printed_as_one_clean_line(old, tmp_pat
     err = capsys.readouterr().err
     assert "evil" in err
     assert "\x1b" not in err
+
+
+@pytest.mark.parametrize(
+    "where, content, reason",
+    [
+        ("go/bin/ntfy", b"\x00" * (transfer.MAX_MEMBER_BYTES + 1), "larger than"),
+        (".local/bin/ntfy", None, "contains the home directory's path"),
+    ],
+)
+def test_a_notify_program_that_cannot_travel_is_named_and_left_as_a_step(
+    old, tmp_path, monkeypatch, capsys, where, content, reason
+):
+    program = old.home / where
+    program.parent.mkdir(parents=True)
+    # A tool manager's shim names the interpreter it installed under the home directory.
+    program.write_bytes(content or f"#!{old.home}/.local/share/tool/bin/python\nimport ntfy\n".encode())
+    program.chmod(0o755)
+    old.config.write_text(old.config.read_text().replace(
+        'command = "~/.config/chargehand/notify.sh --quiet"', f'command = "~/{where} send"'
+    ))
+    archive = tmp_path / "setup.zip"
+
+    assert _export(old, archive) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert f"~/{where} is not copied because" in out and reason in out
+    members = _members(archive)
+    assert not [name for name in members if name.startswith("notify/")]
+    assert tomllib.loads(members["config.toml"].decode())["notify"]["command"] == f"~/{where} send"
+    new = Machine(tmp_path / "new").enter(monkeypatch)
+    assert _import(new, archive, monkeypatch) == EXIT_OK
+    assert f"install ~/{where}, which the notify command runs" in capsys.readouterr().out
+    assert load_machine_config().notify.command == f"~/{where} send"
+    steps = [c for c in _doctor(capsys) if c["name"] == "imported: notify"]
+    assert [c["status"] for c in steps] == [install.INFO]
+    assert reason in steps[0]["detail"]

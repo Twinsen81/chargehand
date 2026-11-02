@@ -140,9 +140,11 @@ configuration with `~` for your home directory, the role files in
 name, the notification hook, your status line entry, and the board's names, icons, pins
 and hidden repositories (not those of workers, which belong to this machine's ledger). It
 holds no token, no Keychain value and no configuration key that can carry a credential,
-such as `api_key_command`. The notification hook is copied as it is, when it is a script
-in your home or configuration directory: if you wrote a credential into it, such as a
-private push topic, the archive holds it too. Import asks for the path of each repository and for the worktree root
+such as `api_key_command`. The notification hook is copied as it is, when it is a text
+script in your home or configuration directory: if you wrote a credential into it, such
+as a private push topic, the archive holds it too. A binary or a tool's generated shim is
+not copied; the command keeps naming it, and import lists it as a program to install.
+Import asks for the path of each repository and for the worktree root
 (or takes `--repository NAME=PATH` and `--worktree-root PATH`, or one line per answer on
 stdin), refuses to overwrite a file without `--force`, and writes a new token. It does
 not edit `~/.claude/settings.json` and does not install the launchd job: `chargehand

@@ -388,6 +388,8 @@ class Exported:
     dropped: list[Dropped]
     board_rows: int
     notify_member: str | None = None
+    # Why the notify program was named in the command instead of copied.
+    notify_kept: str | None = None
 
 
 def _role_agent(path: Path) -> str | None:
@@ -446,6 +448,26 @@ def _notify_script(
     ):
         return program, argv[1:]
     return None, []
+
+
+def _cannot_travel(program: Path) -> str | None:
+    """Why the notify program cannot be copied as it is, or None when it can.
+
+    A tool manager installs binaries and generated shims under the home directory too, and
+    the operator cannot edit those, so they are named in the command instead of copied.
+    """
+    if program.stat().st_size > MAX_MEMBER_BYTES:
+        return f"it is larger than {MAX_MEMBER_BYTES} bytes"
+    content = program.read_bytes()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return "it is not a text script"
+    if "\x00" in text:
+        return "it is not a text script"
+    if any(home in text for home in _homes()):
+        return "it contains the home directory's path"
+    return None
 
 
 def _check_limits(members: Mapping[str, bytes]) -> None:
@@ -524,6 +546,11 @@ def export_setup(
     modes: dict[str, int] = {}
     notify_program, notify_args = _notify_script(config, [paths.config_dir(), config_path.parent])
     notify: dict[str, object] | None = None
+    notify_kept: dict[str, str] | None = None
+    reason = _cannot_travel(notify_program) if notify_program is not None else None
+    if notify_program is not None and reason is not None:
+        notify_kept = {"program": _portable(str(notify_program)), "reason": reason}
+        notify_program, notify_args = None, []
     if notify_program is not None:
         member = f"{NOTIFY_DIR}/{notify_program.name}"
         members[member] = notify_program.read_bytes()
@@ -577,6 +604,7 @@ def export_setup(
         "created_at": created.isoformat(timespec="seconds"),
         "members": sorted(members),
         "notify": notify,
+        "notify_kept": notify_kept,
         "dropped": [d.as_dict() for d in dropped],
     }
     archive = json.dumps(manifest, indent=2) + "\n"
@@ -595,7 +623,9 @@ def export_setup(
         Path(temporary).unlink(missing_ok=True)
         raise
     return Exported(
-        target, sorted(members), dropped, len(rows), str(notify["member"]) if notify else None
+        target, sorted(members), dropped, len(rows), str(notify["member"]) if notify else None,
+        f"{notify_kept['program']} is not copied because {notify_kept['reason']}; the command "
+        "still names it, so install it on the other machine" if notify_kept else None,
     )
 
 
@@ -691,6 +721,13 @@ def _check_manifest(source: Path, manifest: Mapping[str, object], members: Mappi
             or not all(isinstance(a, str) for a in notify["args"])  # type: ignore[union-attr]
         ):
             raise Refused(f"{source}: the notify entry of its manifest is not valid")
+    kept = manifest.get("notify_kept")
+    if kept is not None and not (
+        isinstance(kept, Mapping)
+        and isinstance(kept.get("program"), str)
+        and isinstance(kept.get("reason"), str)
+    ):
+        raise Refused(f"{source}: the notify_kept entry of its manifest is not valid")
     dropped = manifest.get("dropped", [])
     if not isinstance(dropped, list) or not all(
         isinstance(d, Mapping)
@@ -845,6 +882,14 @@ def _steps(archive: Archive, config: MachineConfig, notify_path: Path | None) ->
             "kind": "note",
             "detail": f"{notify_path} came from the other machine: check that its method "
                       "reaches you here, and give it any credential it reads",
+        })
+    kept = archive.manifest.get("notify_kept")
+    if isinstance(kept, Mapping):
+        steps.append({
+            "name": "imported: notify",
+            "kind": "note",
+            "detail": f"install {kept['program']}, which the notify command runs; export "
+                      f"did not copy it because {kept['reason']}",
         })
     return steps
 
