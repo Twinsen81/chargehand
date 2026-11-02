@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a card. A prompt is now a ledger
   record that is open, resolved (with the decision and who decided) or cancelled, with a
   new `permission_rules` table (schema version 7). The first answer wins: an answer in
-  `claude attach` cancels the card, and a second click answers "already resolved". The
+  `claude attach` cancels the card, and a second click answers "already resolved". A click
+  is taken only while a fresh session listing shows the permission dialog, so a click
+  after an answer in the session is refused and cancels the card. The
   permission hook waits `permission_timeout_secs`, a new `claude` role key (600 seconds by
   default); the daemon answers with no decision a little before that, and when it stops,
   so the session shows its own dialog. `POST /api/workers/<id>/answer` takes the answer.

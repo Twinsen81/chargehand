@@ -184,7 +184,11 @@ public location.
   default), when the worker leaves `blocked` because the operator answered in the session,
   and when the daemon stops; after a restart a prompt can only be answered in the session.
   The first answer wins: the ledger row changes only while it is open and held, so a
-  second click, a late click and a click after a timeout change nothing.
+  second click, a late click and a click after a timeout change nothing. Before it takes
+  a click, the daemon checks in a fresh session listing that the session still shows a
+  permission dialog; after an answer in the session the click is refused and the card
+  is cancelled, so the ledger never records a board decision that the session did not
+  apply. Only the short time between that listing and the answer is left open.
 - **The board.** `GET /` serves one static page, its script and its style sheet,
   all from the package; nothing else is served as a file, and the page loads nothing
   from another origin. They are sent with `Content-Security-Policy: default-src 'none';
