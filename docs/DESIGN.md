@@ -583,14 +583,17 @@ call's `description`, which the model words anew for each call). The next such p
 is allowed at once, with no card and no notification, and is recorded as resolved by the
 rule. A rule never changes the role, the repository or Claude Code's settings. The hook
 answers `{}`, so the session shows its own dialog, in three cases: the worker leaves
-`blocked` (the operator answered in `claude attach`, and the next hook or the next
-listing shows it), which cancels the record; five seconds before the hook's timeout; and
+`blocked` (the operator answered in `claude attach`), which cancels the record. No hook
+comes after such an answer, and the tick may be a minute away, so while it holds hooks the
+daemon looks at the session listing every 2 seconds, one listing for all held hooks, and
+cancels a record whose session showed the dialog and no longer does; five seconds before the hook's timeout; and
 when the daemon stops. After a timeout or a restart the record is *released*: it stays
 `open`, because the session still shows the dialog, with `released_at` set, so no hook
 holds it, and the card says to answer in the session. A released record is cancelled
 like any open one when the worker leaves `blocked`. A launch that ends (`launching` to
 `running`) cancels nothing: a session can show its first dialog before the tick confirms
-its launch. The record has a `kind` and an
+its launch. Every other state write but `blocked` cancels the open records, a continue
+that respawns a paused session included. The record has a `kind` and an
 `options` list, so a question with its own options can use the same record and card.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks
 existed is followed by the diff alone.
