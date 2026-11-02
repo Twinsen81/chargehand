@@ -600,3 +600,30 @@ def test_no_branch_is_read_when_no_source_has_pull_requests(wired, monkeypatch):
     report = wired.runner.tick()
 
     assert report.errors == []
+
+
+def test_a_permission_prompt_of_the_woken_turn_stays_open(wired, monkeypatch):
+    """The new turn can ask for permission before the wake writes `running`."""
+    from chargehand import claude
+
+    reviewer = start_reviewer(wired)
+    end_turn(wired)
+    emit_three()
+    real = claude.ClaudeRuntime.wake
+
+    def wake_then_prompt(self, session_id, message, **kwargs):
+        result = real(self, session_id, message, **kwargs)
+        hook = claude.parse_hook("PermissionRequest", {
+            "session_id": reviewer.session_uuid, "tool_name": "Bash",
+            "tool_input": {"command": "date"},
+        })
+        wired.runner.apply_hook(wired.ledger.get(reviewer.id), hook)
+        return result
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "wake", wake_then_prompt)
+
+    report = wired.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    [prompt] = wired.ledger.open_permission_prompts(wired.ledger.get(reviewer.id))
+    assert prompt.tool_name == "Bash"

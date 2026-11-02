@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from chargehand import ledger as ledger_mod
@@ -497,3 +499,34 @@ def test_a_stopped_idle_session_keeps_its_worker_paused(harness):
 
     assert harness.worker("ABC-1").state == ledger_mod.PAUSED
     assert harness.worker("ABC-1").id == attempt.id
+
+
+def test_a_permission_prompt_of_the_respawned_session_stays_open(harness, monkeypatch):
+    """The respawned session can ask for permission before the continue writes `running`."""
+    from chargehand import claude
+
+    attempt = launch(harness)
+    assert apply_request(harness, "stop", "ABC-1")["ok"] == 1
+    old = harness.ledger.record_permission_prompt(
+        harness.worker("ABC-1"), tool_name="Bash", tool_input="{}"
+    )
+    harness.ledger.update(harness.worker("ABC-1"), last_hook="PermissionRequest")
+    real = claude.ClaudeRuntime.respawn
+
+    def respawn_then_prompt(self, session_id):
+        result = real(self, session_id)
+        hook = claude.parse_hook("PermissionRequest", {
+            "session_id": attempt.session_uuid, "tool_name": "Bash",
+            "tool_input": {"command": "date"},
+        })
+        harness.runner.apply_hook(harness.worker("ABC-1"), hook)
+        return result
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "respawn", respawn_then_prompt)
+
+    assert apply_request(harness, "continue", "ABC-1")["ok"] == 1
+
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    [prompt] = harness.ledger.open_permission_prompts(harness.worker("ABC-1"))
+    assert json.loads(prompt.tool_input) == {"command": "date"}
+    assert harness.ledger.get_permission_prompt(old).state == "cancelled"

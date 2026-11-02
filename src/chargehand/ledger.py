@@ -981,17 +981,22 @@ class Ledger:
         return replace(worker, **changes)
 
     def _after_state_write(self, worker: Worker, changes: Mapping[str, Any]) -> None:
-        # Every state write but `blocked` means the session no longer shows the dialog: the
-        # worker left `blocked`, its turn or session ended, or a new session started (a
-        # continue after a pause respawns the process). The one exception is the end of a
-        # launch (`launching` -> `running`): the first dialog of a session can come before
-        # the tick confirms the launch.
+        # Every state write but `blocked` means the session no longer shows the dialogs the
+        # writer knew of: the worker left `blocked`, its turn or session ended, or a new
+        # turn or session started (a wake, a continue). For a write of `running`, a prompt
+        # recorded after *worker* was read came from the new turn while the action ran, and
+        # stays open: a hook touches the row before it records a prompt, so a row read
+        # later knows of it. The end of a launch (`launching` -> `running`) cancels
+        # nothing: the first dialog of a session can come before the tick confirms it.
         if "state" not in changes:
             return
         state = changes["state"]
         if state == BLOCKED or (worker.state == LAUNCHING and state == RUNNING):
             return
-        self.resolve_permission_prompts(worker, now=changes["updated_at"])
+        self.resolve_permission_prompts(
+            worker, now=changes["updated_at"],
+            recorded_by=worker.updated_at if state == RUNNING else None,
+        )
 
     @staticmethod
     def _checked(changes: dict[str, Any]) -> dict[str, Any]:
@@ -1065,13 +1070,18 @@ class Ledger:
             ).fetchall()
         return [PermissionPrompt(**dict(row)) for row in rows]
 
-    def resolve_permission_prompts(self, worker: Worker, *, now: float | None = None) -> int:
-        """Cancel the worker's open prompts: its session no longer shows them."""
+    def resolve_permission_prompts(
+        self, worker: Worker, *, now: float | None = None, recorded_by: float | None = None
+    ) -> int:
+        """Cancel the worker's open prompts, or those recorded by *recorded_by*: its session
+        no longer shows them."""
         stamp = time.time() if now is None else now
         cursor = self._conn.execute(
             "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
-            "released_at = COALESCE(released_at, ?) WHERE worker_id = ? AND state = ?",
-            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN),
+            "released_at = COALESCE(released_at, ?) WHERE worker_id = ? AND state = ? "
+            "AND (? IS NULL OR created_at <= ?)",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN,
+             recorded_by, recorded_by),
         )
         return cursor.rowcount
 

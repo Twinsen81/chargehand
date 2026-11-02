@@ -910,14 +910,37 @@ def test_an_open_prompt_is_cancelled_when_the_worker_leaves_blocked_or_stops_not
         ledger.update(ledger.get(worker.id), state=ledger_mod.PAUSED)
         assert ledger.get_permission_prompt(other).state == "cancelled"
 
-        # A prompt recorded while paused does not survive the respawn of a continue.
-        paused = ledger.get(worker.id)
-        stale = ledger.record_permission_prompt(paused, tool_name="Bash", tool_input="{}")
-        ledger.update(paused, state=ledger_mod.RUNNING)
+        # A prompt recorded while paused does not survive the respawn of a continue, which
+        # read the row after the hook touched it.
+        stale = hook(ledger, worker)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.RUNNING)
         assert ledger.get_permission_prompt(stale).state == "cancelled"
 
         # Nor one recorded while idle when a wake starts a turn.
-        idle = ledger.update(ledger.get(worker.id), state=ledger_mod.IDLE)
-        woken = ledger.record_permission_prompt(idle, tool_name="Bash", tool_input="{}")
-        ledger.update(idle, state=ledger_mod.RUNNING)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.IDLE)
+        woken = hook(ledger, worker)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.RUNNING)
         assert ledger.get_permission_prompt(woken).state == "cancelled"
+
+
+def hook(ledger, worker, now=None):
+    """What a PermissionRequest hook writes: the row's last hook, then the prompt."""
+    stamp = time.time() if now is None else now
+    ledger.update(ledger.get(worker.id), last_hook="PermissionRequest", last_hook_at=stamp)
+    return ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}", now=stamp)
+
+
+@pytest.mark.parametrize("before", [ledger_mod.IDLE, ledger_mod.QUEUED, ledger_mod.PAUSED, ledger_mod.PARKED])
+def test_a_prompt_from_the_new_turn_survives_the_write_of_the_wake_or_continue_that_started_it(tmp_path, before):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        older = hook(ledger, ledger.update(worker, state=before))
+        # The wake or the continue reads the row, then resumes or respawns the session ...
+        snapshot = ledger.get(worker.id)
+        time.sleep(0.01)
+        # ... whose new turn asks for permission before the action writes `running`.
+        newer = hook(ledger, worker)
+        ledger.update(snapshot, state=ledger_mod.RUNNING)
+
+        assert ledger.get_permission_prompt(newer).state == "open"
+        assert ledger.get_permission_prompt(older).state == "cancelled"
