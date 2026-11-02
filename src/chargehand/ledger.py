@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -93,6 +93,16 @@ REQUEST_ORIGINS = (REQUEST_CLI, REQUEST_BOARD)
 REPLY_SOURCE = "board"
 REPLY_KIND = "reply"
 REPLY_LIMIT = 500
+
+# What the board keeps per repository and per worker: names and icons the operator chose,
+# pins, and the folded and hidden repositories. The page reads it and nothing else does, so
+# the configured names, the handles and the session names never change with it.
+BOARD_REPOSITORY = "repository"
+BOARD_WORKER = "worker"
+BOARD_FIELDS: dict[str, tuple[str, ...]] = {
+    BOARD_REPOSITORY: ("name", "icon", "pinned", "collapsed", "hidden"),
+    BOARD_WORKER: ("name", "icon", "pinned"),
+}
 
 # A worker handle that names the worker by id: `role/item#id`, or `role/#id` without an item.
 _ID_HANDLE = re.compile(r"(?:([^/#\s]+)/([^/#\s]*))?#([0-9]{1,12})")
@@ -320,6 +330,17 @@ CREATE TABLE IF NOT EXISTS cursors (
     value      TEXT,
     updated_at REAL NOT NULL
 );
+
+-- How the board shows a repository or a worker. The key is the configured repository
+-- name or the worker id; only the board reads it.
+CREATE TABLE IF NOT EXISTS board_state (
+    kind       TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (kind, key, field)
+);
 """
 
 # Version 1 kept one row per attempt at an issue. Every attempt becomes a worker in the
@@ -377,6 +398,9 @@ _MIGRATE_V4_TO_V5 = f"""
 ALTER TABLE requests ADD COLUMN origin TEXT NOT NULL DEFAULT '{REQUEST_CLI}';
 {_SCHEMA}
 """
+
+# Version 6 adds the board's own state. It only adds a table, which the schema creates.
+_MIGRATE_V5_TO_V6 = _SCHEMA
 
 
 @dataclass(frozen=True)
@@ -600,10 +624,11 @@ class Ledger:
         # A version 2 file takes every later step; the version 1 copy includes the whole
         # schema but keeps its own requests table, which gains the request origin.
         script = {
-            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5,
-            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5,
-            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5,
-            4: _MIGRATE_V4_TO_V5,
+            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            5: _MIGRATE_V5_TO_V6,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1287,6 +1312,39 @@ class Ledger:
             key.split(":", 1)[1]
             for key, value in self.all_state().items()
             if key.startswith("paused:") and value == "1"
+        )
+
+    # ----- board state --------------------------------------------------------
+
+    @staticmethod
+    def _board_field(kind: str, field: str) -> None:
+        if kind not in BOARD_FIELDS:
+            raise ValueError(f"unknown board state kind {kind!r}")
+        if field not in BOARD_FIELDS[kind]:
+            raise ValueError(f"unknown board state field {field!r} for a {kind}")
+
+    def board_state(self) -> list[dict[str, Any]]:
+        """Every board state row, as `kind`, `key`, `field`, `value` and `updated_at`."""
+        rows = self._conn.execute(
+            "SELECT kind, key, field, value, updated_at FROM board_state ORDER BY kind, key, field"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_board_state(
+        self, kind: str, key: str, field: str, value: str, *, now: float | None = None
+    ) -> None:
+        self._board_field(kind, field)
+        self._conn.execute(
+            "INSERT INTO board_state (kind, key, field, value, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(kind, key, field) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (kind, key, field, value, time.time() if now is None else now),
+        )
+
+    def delete_board_state(self, kind: str, key: str, field: str) -> None:
+        self._board_field(kind, field)
+        self._conn.execute(
+            "DELETE FROM board_state WHERE kind = ? AND key = ? AND field = ?", (kind, key, field)
         )
 
 

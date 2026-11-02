@@ -7,6 +7,10 @@
 // An action is a POST with the daemon's token, which the operator pastes once and this
 // browser keeps in localStorage for this origin. It is sent only in the Authorization
 // header, never in a URL. The board has no chat: a conversation goes through attach.
+//
+// Within a column the cards are grouped by repository. The names, icons, pins and the
+// collapsed and hidden repositories are the board's own state in the ledger; the daemon
+// sorts and filters by them, and this page only draws what it gets.
 'use strict';
 
 const POLL_MS = 1000;
@@ -16,6 +20,10 @@ const FOLLOW_MS = 15 * 60 * 1000;
 const TOKEN_KEY = 'chargehand.token';
 const TERMINAL_KEY = 'chargehand.terminal';
 const REPLY_MAX = 500;
+const SHOW_HIDDEN_KEY = 'chargehand.showHidden';
+const NAME_MAX = 60;
+const BOARD_PIN_HINT = 'Board pin: this sorts the card first and keeps it visible in a collapsed ' +
+  'repository. It does not keep the session running.';
 const ACTION_LABELS = {
   continue: 'Continue', pause: 'Pause', cancel: 'Cancel', reply: 'Reply',
   attach: 'Attach', retry: 'Retry', discard: 'Discard',
@@ -28,6 +36,8 @@ let lastOk = 0;
 let latest = null;
 // The last rendered signature of each card, by worker id.
 const signatures = new Map();
+// The repository headings of each column, by column key and repository name.
+const groupNodes = new Map();
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -130,8 +140,17 @@ function renderHealth(h, now) {
   text.title = parts.join(' · ');
 }
 
+function renderHidden(hidden) {
+  const box = $('hidden-filter');
+  const count = hidden ? hidden.count : 0;
+  box.hidden = !count && !(hidden && hidden.shown);
+  $('hidden-count').textContent = count + ' hidden';
+  box.title = count ? 'Hidden: ' + hidden.repositories.join(', ') +
+    '. Their workers still run and notify.' : 'No hidden repository';
+}
+
 function renderStats(columns) {
-  const count = (key) => (columns.find((c) => c.key === key) || { cards: [] }).cards.length;
+  const count = (key) => (columns.find((c) => c.key === key) || { count: 0 }).count;
   const nodes = [['needs_you', ' need you'], ['working', ' working'], ['queued', ' queued'], ['idle', ' idle']]
     .map(([key, label]) => {
       const span = el('span');
@@ -179,21 +198,31 @@ function cardChildren(c, now) {
   top.append(el('span', 'dot ' + c.column));
   const role = el('span', 'chip role', c.role);
   role.style.background = 'hsl(' + hue(c.role) + ' 45% 38%)';
-  top.append(role, el('span', 'chip repo', c.repository));
+  const repo = el('span', 'chip repo', c.repository_label || c.repository);
+  repo.title = 'repository ' + c.repository;
+  top.append(role, repo);
   const shown = c.session_state && c.session_state !== c.state ? c.state + ' · ' + c.session_state : c.state;
   top.append(el('span', 'chip state ' + c.state, shown));
+  if (c.pinned) {
+    // Claude Code has a pin of its own that keeps a session running; this one only sorts.
+    const pin = el('span', 'chip pin', 'board pin');
+    pin.title = BOARD_PIN_HINT;
+    top.append(pin);
+  }
   const age = el('span', 'age', ago(c.updated_at, now));
   age.dataset.ts = String(c.updated_at);
   top.append(age);
   nodes.push(top);
 
   const title = el('div', 'title');
-  title.append(link(c.item_url, c.item));
+  if (c.icon_glyph) title.append(el('span', 'icon', c.icon_glyph));
+  title.append(c.display_name ? el('span', null, c.display_name) : link(c.item_url, c.item));
   // Workers on one item share the title; the handle tells them apart.
   if (c.handle) title.append(el('span', 'handle', c.handle));
   nodes.push(title);
 
   const meta = el('div', 'meta');
+  if (c.display_name) meta.append(link(c.item_url, c.item));
   if (c.branch) {
     const branch = el('span', null, '⎇ ' + c.branch);
     branch.title = c.branch;
@@ -235,8 +264,16 @@ function cardChildren(c, now) {
     attach.title = c.attach;
     nodes.push(attach);
   }
-  if (c.actions && c.actions.length) nodes.push(cardActions(c));
+  nodes.push(cardActions(c));
   return nodes;
+}
+
+function boardButton(text, title, onClick) {
+  const button = el('button', null, text);
+  button.type = 'button';
+  button.title = title;
+  button.addEventListener('click', onClick);
+  return button;
 }
 
 function cardActions(c) {
@@ -251,13 +288,70 @@ function cardActions(c) {
     label.title = FORCE_HINT;
     row.append(label);
   }
-  for (const name of c.actions) {
+  for (const name of c.actions || []) {
     const button = el('button', 'action ' + name, ACTION_LABELS[name] || name);
     button.type = 'button';
     button.addEventListener('click', () => workerAction(c, name, Boolean(force && force.checked)));
     row.append(button);
   }
+  const own = el('span', 'board');
+  own.append(
+    boardButton(c.pinned ? 'Unpin' : 'Pin', BOARD_PIN_HINT,
+      () => personalise('worker', c.id, { pinned: !c.pinned }, (c.pinned ? 'unpin ' : 'pin ') + c.handle)),
+    boardButton('Edit', 'Name, icon and board pin of this card; the handle stays',
+      () => openPersonalise('worker', c.id, c, c.handle)),
+  );
+  row.append(own);
   return row;
+}
+
+// ----- repository groups -----------------------------------------------------
+
+function groupChildren(g) {
+  const nodes = [];
+  const toggle = boardButton(g.collapsed ? '▸' : '▾',
+    g.collapsed ? 'Show every card of this repository' : 'Show only the pinned cards of this repository',
+    () => personalise('repository', g.repository, { collapsed: !g.collapsed },
+      (g.collapsed ? 'expand ' : 'collapse ') + g.repository));
+  toggle.className = 'toggle';
+  nodes.push(toggle);
+  if (g.icon_glyph) nodes.push(el('span', 'icon', g.icon_glyph));
+  nodes.push(el('span', 'label', g.display_name || g.repository));
+  if (g.display_name) nodes.push(el('span', 'configured', g.repository));
+  if (g.pinned) {
+    const pin = el('span', 'chip pin', 'board pin');
+    pin.title = 'Pinned repositories come first in each column';
+    nodes.push(pin);
+  }
+  if (g.hidden) nodes.push(el('span', 'chip flag', 'hidden'));
+  nodes.push(el('span', 'count', String(g.count)));
+  if (g.folded) nodes.push(el('span', 'folded', g.folded + ' folded'));
+  const repository = ((latest && latest.repositories) || []).find((r) => r.name === g.repository);
+  if (repository) {
+    nodes.push(boardButton('Edit', 'Name, icon, pin, collapse and hide this repository on the board',
+      () => openPersonalise('repository', g.repository, repository, g.repository)));
+    nodes[nodes.length - 1].className = 'edit';
+  }
+  return nodes;
+}
+
+function groupNode(columnKey, g) {
+  const key = columnKey + '\n' + g.repository;
+  let entry = groupNodes.get(key);
+  if (!entry) {
+    const node = el('div', 'group');
+    node.dataset.group = g.repository;
+    entry = { node, sig: null };
+    groupNodes.set(key, entry);
+  }
+  const repository = ((latest && latest.repositories) || []).find((r) => r.name === g.repository);
+  const sig = JSON.stringify([g, repository || null]);
+  if (entry.sig !== sig) {
+    entry.node.className = 'group' + (g.hidden ? ' hidden-repository' : '');
+    entry.node.replaceChildren(...groupChildren(g));
+    entry.sig = sig;
+  }
+  return entry.node;
 }
 
 function signature(c) {
@@ -270,32 +364,41 @@ function renderColumns(columns, now) {
   ensureColumns(columns);
   for (const column of columns) {
     const container = $('cards-' + column.key);
-    $('count-' + column.key).textContent = String(column.cards.length);
-    const keep = new Set();
-    column.cards.forEach((c, i) => {
-      const id = String(c.id);
-      keep.add(id);
-      let card = document.querySelector('.card[data-id="' + CSS.escape(id) + '"]');
-      if (!card) {
-        card = el('div', 'card');
-        card.dataset.id = id;
+    $('count-' + column.key).textContent = String(column.count);
+    // A heading per repository, then its cards, in the order the daemon chose.
+    const wanted = [];
+    for (const g of column.groups || []) {
+      wanted.push(groupNode(column.key, g));
+      for (const c of column.cards) {
+        if (c.repository !== g.repository) continue;
+        const id = String(c.id);
+        let card = document.querySelector('.card[data-id="' + CSS.escape(id) + '"]');
+        if (!card) {
+          card = el('div', 'card');
+          card.dataset.id = id;
+        }
+        const sig = signature(c);
+        if (signatures.get(id) !== sig) {
+          card.className = 'card' + (c.hidden ? ' hidden-repository' : '');
+          card.replaceChildren(...cardChildren(c, now));
+          signatures.set(id, sig);
+        }
+        wanted.push(card);
       }
-      const sig = signature(c);
-      if (signatures.get(id) !== sig) {
-        card.replaceChildren(...cardChildren(c, now));
-        signatures.set(id, sig);
-      }
-      if (container.children[i] !== card) container.insertBefore(card, container.children[i] || null);
+    }
+    wanted.forEach((node, i) => {
+      if (container.children[i] !== node) container.insertBefore(node, container.children[i] || null);
     });
-    for (const card of [...container.querySelectorAll('.card')]) {
-      if (!keep.has(card.dataset.id)) {
-        card.remove();
-        signatures.delete(card.dataset.id);
-      }
+    const keep = new Set(wanted);
+    for (const node of [...container.querySelectorAll('.card, .group')]) {
+      if (keep.has(node)) continue;
+      node.remove();
+      if (node.dataset.id) signatures.delete(node.dataset.id);
+      if (node.dataset.group !== undefined) groupNodes.delete(column.key + '\n' + node.dataset.group);
     }
     const empty = $('empty-' + column.key);
     container.append(empty);
-    empty.hidden = column.cards.length > 0;
+    empty.hidden = wanted.length > 0;
   }
   for (const age of document.querySelectorAll('.card .age[data-ts]')) {
     age.textContent = ago(Number(age.dataset.ts), now);
@@ -311,6 +414,7 @@ function render(model) {
   renderGauge('five_hour', usage.known ? usage.five_hour : null);
   renderGauge('seven_day', usage.known ? usage.seven_day : null);
   renderThrottle(model.throttle);
+  renderHidden(model.hidden);
   renderHealth(model.health, now);
   renderStats(model.columns);
   renderControls(model);
@@ -415,6 +519,11 @@ async function send(path, body, what) {
     notice(what + ': ' + (payload.error || 'HTTP ' + response.status), 'bad');
     return;
   }
+  if (payload.settings) {
+    // A board setting is written at once; no request waits for the daemon.
+    notice(what + ': saved', 'ok');
+    return;
+  }
   notice(describe(payload), payload.pending ? 'pending' : payload.ok ? 'ok' : 'bad');
   if (payload.pending) follow(payload);
 }
@@ -435,6 +544,72 @@ function workerAction(c, name, force) {
         (force ? ', even with unpushed or uncommitted work.' : '.'))) return;
   if (name === 'cancel' && !window.confirm('Cancel ' + c.handle + '? Its session stops; the worktree stays.')) return;
   send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''));
+}
+
+function personalise(kind, key, body, what) {
+  const base = kind === 'worker' ? '/api/workers/' : '/api/repositories/';
+  send(base + encodeURIComponent(key) + '/board', body, what);
+}
+
+function checkbox(checked, title) {
+  const input = el('input');
+  input.type = 'checkbox';
+  input.checked = Boolean(checked);
+  if (title) input.title = title;
+  return input;
+}
+
+// The name, icon and flags of a repository or a worker. *current* is its entry in the model.
+function openPersonalise(kind, key, current, label) {
+  const panel = $('panel');
+  const name = el('input');
+  name.type = 'text';
+  name.maxLength = NAME_MAX;
+  name.value = current.display_name || '';
+  name.placeholder = kind === 'worker' ? 'shown instead of the item' : 'shown instead of ' + key;
+  const icons = (latest && latest.icons) || {};
+  const icon = el('select');
+  const none = el('option', null, 'none');
+  none.value = '';
+  icon.append(none);
+  for (const [iconName, glyph] of Object.entries(icons)) {
+    const option = el('option', null, glyph + ' ' + iconName);
+    option.value = iconName;
+    icon.append(option);
+  }
+  const emoji = el('input');
+  emoji.type = 'text';
+  emoji.className = 'icon';
+  emoji.maxLength = 16;
+  emoji.placeholder = 'or one emoji';
+  if (current.icon && current.icon in icons) icon.value = current.icon;
+  else if (current.icon) emoji.value = current.icon;
+  const flags = kind === 'worker' ? ['pinned'] : ['pinned', 'collapsed', 'hidden'];
+  const hints = {
+    pinned: kind === 'worker' ? BOARD_PIN_HINT : 'Pinned repositories come first in each column',
+    collapsed: 'Show only the pinned cards of this repository',
+    hidden: 'Leave its cards off the board; its workers still run and notify',
+  };
+  const boxes = {};
+  const fields = [field('name', name), field('icon', icon), field('emoji', emoji)];
+  for (const flag of flags) {
+    boxes[flag] = checkbox(current[flag], hints[flag]);
+    fields.push(field(flag === 'pinned' ? 'board pin' : flag, boxes[flag]));
+  }
+  const submit = () => {
+    const body = { name: name.value.trim() || null, icon: emoji.value.trim() || icon.value || null };
+    for (const flag of flags) body[flag] = boxes[flag].checked;
+    closePanel();
+    personalise(kind, key, body, 'board settings of ' + label);
+  };
+  name.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+    if (event.key === 'Escape') closePanel();
+  });
+  panel.replaceChildren(el('h3', null, (kind === 'worker' ? 'Card ' : 'Repository ') + label),
+    ...fields, panelButtons('Save', submit));
+  panel.hidden = false;
+  name.focus();
 }
 
 function closePanel() {
@@ -539,6 +714,12 @@ function setupControls() {
     input.value = '';
   });
   $('terminal').addEventListener('change', () => localStorage.setItem(TERMINAL_KEY, $('terminal').value));
+  const showHidden = $('show-hidden');
+  showHidden.checked = localStorage.getItem(SHOW_HIDDEN_KEY) === '1';
+  showHidden.addEventListener('change', () => {
+    if (showHidden.checked) localStorage.setItem(SHOW_HIDDEN_KEY, '1');
+    else localStorage.removeItem(SHOW_HIDDEN_KEY);
+  });
   $('new-worker').addEventListener('click', openNewWorker);
   $('pause-all').addEventListener('click', () => send('/api/pause', {}, 'pause all repositories'));
   $('resume-all').addEventListener('click', () => send('/api/resume', {}, 'resume all repositories'));
@@ -546,7 +727,8 @@ function setupControls() {
 
 async function poll() {
   try {
-    const response = await fetch('/api/board', { cache: 'no-store', credentials: 'omit' });
+    const filter = $('show-hidden').checked ? '?show_hidden=1' : '';
+    const response = await fetch('/api/board' + filter, { cache: 'no-store', credentials: 'omit' });
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const model = await response.json();
     render(model);

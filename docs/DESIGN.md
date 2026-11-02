@@ -827,6 +827,30 @@ roles hold the item. `--route` stays accepted for `--repository`.
   the audit trail. The command reaches the AppleScript as an argument, never as part of
   its source, and only a command of plain words is accepted. The board has no chat:
   anything that needs a conversation goes through attach.
+- **Board personalisation.** Each column groups its cards by repository, under a heading
+  with the repository's name, icon, card count and a collapse toggle. A repository can be
+  renamed, given an icon, pinned, collapsed and hidden; a worker can be renamed, given an
+  icon and pinned. This is state, not configuration: it lives in the ledger's
+  `board_state` table (schema version 6), one row per kind (`repository` or `worker`),
+  key (the configured repository name or the worker id) and field, so it survives a
+  restart of the daemon. The API: `POST /api/repositories/<name>/board` with any of
+  `name`, `icon`, `pinned`, `collapsed` and `hidden`, and `POST /api/workers/<id>/board`
+  with `name`, `icon` and `pinned`; `false`, `null` or an empty text drops a setting. It
+  needs the token like every `POST`, and it writes the table at once without a request
+  row, because it has no effect outside the ledger. A display name is one cleaned line of
+  at most 60 characters; it never changes the configured name, the handle or the session
+  name, so the CLI, the ledger and the sessions see the same names as before. An icon is
+  one emoji or a name from a small bundled set (`star`, `rocket`, `bug`, ...); nothing is
+  uploaded. A board pin only sorts: in each column the pinned repositories come first,
+  then the others by their latest card, and in each repository the pinned cards come
+  first, then the others by their last activity. A collapsed repository shows only its
+  pinned cards and the number of cards it folds. The card labels this pin "board pin":
+  Claude Code's own pin in agent view keeps a session's process alive, and this one does
+  not; the session listing does not report that pin, so the board does not show it. A
+  hidden repository's cards leave the board, and the top bar shows the hidden count and a
+  filter that shows them again (`GET /api/board?show_hidden=1`). Only the board model
+  reads the table: launches, supervision, notifications, `status` and the tick do not,
+  so a hidden repository's workers run, are supervised and notify as before.
 - **Usage readings.** Claude Code gives a status line command the subscription's
   `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
   `resets_at`. It sends them on subscription plans only, and only after the session's first

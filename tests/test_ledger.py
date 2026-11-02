@@ -766,3 +766,45 @@ def test_a_bare_item_is_refused_when_it_could_mean_a_finished_start_rule_worker(
 def test_errors_show_a_handle_as_typed(ledger):
     _, problem = ledger.find_worker("implementer/NOPE-1")
     assert problem == "no worker recorded for implementer/NOPE-1 in role implementer"
+
+
+# ----- version 6: the board's own state -------------------------------------------------
+
+# A version 5 ledger: version 4 plus the request origin.
+V5_SCHEMA = V4_SCHEMA.replace("PRAGMA user_version = 4;", "") + """
+ALTER TABLE requests ADD COLUMN origin TEXT NOT NULL DEFAULT 'cli';
+PRAGMA user_version = 5;
+"""
+
+
+def test_a_version_five_ledger_gains_the_board_state_in_place(tmp_path):
+    path = tmp_path / "v5.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V5_SCHEMA)
+    conn.execute(
+        "INSERT INTO requests (id, kind, target, args, created_at, origin) "
+        "VALUES (4, 'stop', 'x/#1', '{}', 1.0, 'board')"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        (old,) = ledger.pending_requests()
+        assert (old["id"], old["origin"]) == (4, "board")
+        assert ledger.board_state() == []
+        ledger.set_board_state(ledger_mod.BOARD_REPOSITORY, "test", "hidden", "1")
+        assert [row["value"] for row in ledger.board_state()] == ["1"]
+
+
+@pytest.mark.parametrize("version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA"])
+def test_every_older_ledger_gains_the_board_state(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        ledger.set_board_state(ledger_mod.BOARD_WORKER, "1", "pinned", "1")
+        assert [row["field"] for row in ledger.board_state()] == ["pinned"]
+        assert ledger.get_request(ledger.record_request("pause"))["origin"] == "cli"

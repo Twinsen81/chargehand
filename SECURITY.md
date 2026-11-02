@@ -199,6 +199,17 @@ public location.
   source name `board`, which no configured source may take, so no event from a source
   can pass as a reply. The request row keeps the line, so it is in the ledger like the
   other request arguments.
+- **Board settings.** Names, icons, pins and the collapsed and hidden repositories are
+  written by `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board`,
+  with the token, straight into the ledger's `board_state` table; they reach no session,
+  no prompt, no notification and no log line, and only the board model reads them. A name
+  is operator text, cleaned to one line and refused above 60 characters. An icon is
+  accepted only as one short emoji (one symbol, or symbols joined by the zero-width
+  joiner, each with an optional variation selector and skin tone; a flag of two regional
+  indicators or of tag characters; or a keycap after `#`, `*` or a digit; no letters, no
+  markup) or a name from a bundled set, so nothing is uploaded or fetched. The model cleans both again when it reads them, because an
+  import writes the same table. Hiding a repository only filters the board: its workers
+  are still supervised and still notify, so hiding cannot silence a blocked worker.
 - **Attach runs a terminal on this machine.** `POST /api/workers/<id>/attach` makes the
   daemon run `/usr/bin/osascript`, which opens an iTerm2 or Terminal.app window that runs
   the worker's attach command. The terminal is one of those two names; the session id must

@@ -685,7 +685,10 @@ def test_a_card_offers_the_actions_its_state_can_take(harness):
     assert card_actions(ledger_mod.CANCELLED, gc_done=1) == ["retry"]
 
     page = board.build(harness.config, harness.ledger, health={})
-    assert page["repositories"] == [{"name": "test", "roles": ["implementer"], "paused": False}]
+    assert page["repositories"] == [{
+        "name": "test", "roles": ["implementer"], "paused": False, "display_name": None,
+        "icon": None, "icon_glyph": None, "pinned": False, "collapsed": False, "hidden": False,
+    }]
     assert page["terminals"] == ["iterm2", "terminal"]
     card = next(c for column in page["columns"] for c in column["cards"])
     assert (card["handle"], card["origin"]) == (worker.handle, "board")

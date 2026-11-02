@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Board personalisation. Rename a repository or a worker, give it an icon (one emoji or a
+  name from a small bundled set) and pin it; collapse a repository to its pinned cards, or
+  hide it. The board groups the cards of each column by repository, pinned first, then by
+  last activity. A hidden repository's workers still run, are supervised and notify; the
+  top bar shows the hidden count and a filter that shows them again. The settings live in
+  the ledger's new `board_state` table (schema version 6), so they survive a restart.
+  `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board` write them.
+  A display name never changes the configured name, the handle or the session name, and
+  the CLI ignores the settings.
 - Board actions. Every control command has a button on the board, and each one records
   the same request as the command, with origin `board` (the CLI records `cli`; the ledger
   moves to schema version 5). The API: `POST /api/workers` to start a worker from a role,

@@ -13,6 +13,12 @@ is the exception: it opens a terminal window on this machine at once, because th
 can be busy with a launch for minutes, and records its request already applied. The
 board has no chat: a conversation with a session goes through attach.
 
+The operator can also rename, give an icon to and pin repositories and workers, and fold
+or hide repositories. That is the board's own state in the ledger: a ``POST`` with the
+token writes it at once, as it has no side effect outside the ledger, and nothing but
+the model reads it. A hidden repository's workers run, are supervised and notify as
+before; only their cards leave the page until the operator asks to see them.
+
 Everything a session, a tracker or a hook wrote is untrusted. The model passes it
 through :mod:`chargehand.sanitize`, keeps a link only when it is a plain http(s) URL, and
 escapes ``<``, ``>`` and ``&`` in the JSON; the page renders it as text and never as
@@ -23,10 +29,13 @@ lets it load only its own script, its own style sheet and this API.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import stat
 import time
-from collections.abc import Callable, Iterable
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from chargehand import config as config_mod
@@ -42,6 +51,8 @@ from chargehand.ledger import Ledger, Worker
 from chargehand.roles import Role
 from chargehand.serve import HTTPError, Request, Response, Routes
 from chargehand.tick import NEW_WORKER, REPLY, REQUEST_MESSAGE_LIMIT, template_values
+
+log = logging.getLogger(__name__)
 
 # The columns in page order: key, title, hint, and the worker states each one shows.
 COLUMNS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
@@ -109,6 +120,44 @@ SUBSCRIBE_LIMIT = 10
 # A reply is one line; a longer body is refused rather than cut without notice.
 REPLY_BODY_LIMIT = 4 * ledger_mod.REPLY_LIMIT
 
+# The action that writes the board's own state of a repository or a worker.
+PERSONALISE = "board"
+# A display name is one line of at most this many characters; a longer one is refused.
+NAME_LIMIT = 60
+# An icon is one emoji, which can take several code points (a flag, a family, a skin tone),
+# or a name from this set. Nothing is uploaded and nothing is fetched.
+ICON_CODE_POINTS = 10
+ICONS: dict[str, str] = {
+    "bell": "\U0001f514",
+    "book": "\U0001f4d8",
+    "bug": "\U0001f41b",
+    "chart": "\U0001f4c8",
+    "desktop": "\U0001f5a5\ufe0f",
+    "eyes": "\U0001f440",
+    "fire": "\U0001f525",
+    "flag": "\U0001f6a9",
+    "gear": "\u2699\ufe0f",
+    "globe": "\U0001f310",
+    "lock": "\U0001f512",
+    "note": "\U0001f4dd",
+    "package": "\U0001f4e6",
+    "phone": "\U0001f4f1",
+    "rocket": "\U0001f680",
+    "star": "\u2b50",
+    "test": "\U0001f9ea",
+    "tools": "\U0001f6e0\ufe0f",
+}
+# One emoji: a keycap, a flag of two regional indicators, a subdivision flag of tag
+# characters, or symbols joined by the zero-width joiner, each with an optional variation
+# selector and skin tone.
+_ZWJ = "\u200d"
+_KEYCAP = re.compile(r"[#*0-9]\ufe0f?\u20e3")
+_REGIONAL = re.compile(r"[\U0001f1e6-\U0001f1ff]{2}")
+_TAG_FLAG = re.compile(r"\U0001f3f4[\U000e0020-\U000e007e]+\U000e007f")
+_REGIONAL_ONE = re.compile(r"[\U0001f1e6-\U0001f1ff]")
+_MODIFIERS = re.compile(r"[\ufe0e\ufe0f]?[\U0001f3fb-\U0001f3ff]?[\ufe0e\ufe0f]?")
+_FLAGS = ("pinned", "collapsed", "hidden")
+
 
 def register_routes(routes: Routes) -> None:
     for path in ASSETS:
@@ -134,6 +183,7 @@ def asset(request: Request) -> Response:
 
 
 def state(request: Request) -> Response:
+    """``GET /api/board``; ``?show_hidden=1`` keeps the cards of the hidden repositories."""
     daemon = request.daemon
     ledger = request.ledger()
     runners = []
@@ -147,7 +197,10 @@ def state(request: Request) -> Response:
         except ChargehandError:
             return None
 
-    model = build(daemon.config, ledger, health=daemon.health(), attach=attach)
+    show_hidden = request.query.get("show_hidden", [""])[-1] == "1"
+    model = build(
+        daemon.config, ledger, health=daemon.health(), attach=attach, show_hidden=show_hidden
+    )
     return Response(body=to_json(model), headers=PAGE_HEADERS)
 
 
@@ -238,13 +291,15 @@ def worker_action(request: Request) -> Response:
     if len(parts) != 2 or not parts[0].isdigit():
         raise HTTPError(404, "not found")
     action = parts[1]
-    if action != ATTACH and action not in WORKER_ACTIONS:
+    if action not in (ATTACH, PERSONALISE) and action not in WORKER_ACTIONS:
         raise HTTPError(404, f"no worker action {sanitize.one_line(action, limit=40)}")
     body = _body(request)
     ledger = request.ledger()
     worker = ledger.get(int(parts[0]))
     if worker is None:
         raise HTTPError(404, f"no worker {parts[0]}")
+    if action == PERSONALISE:
+        return personalise(request, ledger_mod.BOARD_WORKER, str(worker.id), body, name=worker.target)
     target = target_of(worker)
     if action == ATTACH:
         return _attach(request, ledger, worker, target, body)
@@ -333,14 +388,148 @@ def new_worker(request: Request) -> Response:
 
 
 def repository_action(request: Request) -> Response:
-    """``POST /api/repositories/<name>/<pause|resume>``."""
+    """``POST /api/repositories/<name>/<pause|resume|board>``."""
     parts = _segments(request, "/api/repositories")
-    if len(parts) != 2 or parts[1] not in REPOSITORY_ACTIONS:
+    if len(parts) != 2 or (parts[1] not in REPOSITORY_ACTIONS and parts[1] != PERSONALISE):
         raise HTTPError(404, "not found")
     repository = request.daemon.config.repository_by_name(parts[0])
     if repository is None:
         raise HTTPError(404, f"no repository {sanitize.one_line(parts[0], limit=64)}")
+    if parts[1] == PERSONALISE:
+        return personalise(
+            request, ledger_mod.BOARD_REPOSITORY, repository.name, _body(request),
+            name=f"repository {repository.name}",
+        )
     return _record(request, parts[1], repository.name)
+
+
+# ----- the board's own state -------------------------------------------------------
+
+
+def is_emoji(text: str) -> bool:
+    """Whether *text* is one short emoji sequence and nothing else, so never markup."""
+    if not text or len(text) > ICON_CODE_POINTS:
+        return False
+    if any(pattern.fullmatch(text) for pattern in (_KEYCAP, _REGIONAL, _TAG_FLAG)):
+        return True
+    return all(_emoji_part(part) for part in text.split(_ZWJ))
+
+
+def _emoji_part(part: str) -> bool:
+    """One symbol, which is not a regional indicator, and its optional modifiers."""
+    if not part or unicodedata.category(part[0]) != "So" or _REGIONAL_ONE.fullmatch(part[0]):
+        return False
+    return _MODIFIERS.fullmatch(part[1:]) is not None
+
+
+def icon_glyph(value: str | None) -> str | None:
+    """What the page shows for a stored icon: the glyph of a bundled name, or the emoji."""
+    if not value:
+        return None
+    if value in ICONS:
+        return ICONS[value]
+    return value if is_emoji(value) else None
+
+
+def _name_setting(value: object) -> str | None:
+    """A display name as one cleaned line, or None to drop it. Operator text, but capped."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPError(400, "name must be text, or null to drop it")
+    too_long = f"a name is one line of at most {NAME_LIMIT} characters"
+    if len(value) > 4 * NAME_LIMIT:
+        raise HTTPError(400, too_long)
+    line = sanitize.one_line(value, limit=4 * NAME_LIMIT)
+    if len(line) > NAME_LIMIT:
+        raise HTTPError(400, too_long)
+    return line or None
+
+
+def _icon_setting(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPError(400, "icon must be text, or null to drop it")
+    icon = unicodedata.normalize("NFC", value.strip())
+    if not icon:
+        return None
+    if icon in ICONS or is_emoji(icon):
+        return icon
+    raise HTTPError(400, f"icon must be one emoji or one of: {', '.join(sorted(ICONS))}")
+
+
+def _setting(field: str, value: object) -> str | None:
+    """The stored text of *field*, or None when the field goes back to its default."""
+    if field == "name":
+        return _name_setting(value)
+    if field == "icon":
+        return _icon_setting(value)
+    if not isinstance(value, bool):
+        raise HTTPError(400, f"{field} must be true or false")
+    return "1" if value else None
+
+
+def personalise(
+    request: Request, kind: str, key: str, body: Mapping[str, object], *, name: str
+) -> Response:
+    """Set or drop each board setting in *body* for a repository or a worker.
+
+    *name* starts the log line: the worker's handle, or the repository.
+
+    It changes how the board shows the thing and nothing else, so it needs no request row
+    and no tick: the configured name, the handle and the session name stay as they are.
+    """
+    allowed = ledger_mod.BOARD_FIELDS[kind]
+    if not body:
+        raise HTTPError(400, f"send one or more of: {', '.join(allowed)}")
+    changes: dict[str, str | None] = {}
+    for field, value in body.items():
+        if field not in allowed:
+            raise HTTPError(400, f"a {kind} has no board setting "
+                                 f"{sanitize.one_line(str(field), limit=40)}; "
+                                 f"it takes {', '.join(allowed)}")
+        changes[field] = _setting(field, value)
+    ledger = request.ledger()
+    with ledger.transaction():
+        for field, value in changes.items():
+            if value is None:
+                ledger.delete_board_state(kind, key, field)
+            else:
+                ledger.set_board_state(kind, key, field, value)
+    log.info("%s: board settings set: %s", name, ", ".join(changes))
+    settings = BoardState(ledger.board_state()).of(kind, key)
+    return Response.json({"kind": kind, "key": key, "settings": settings})
+
+
+class BoardState:
+    """The board state rows, by kind and key."""
+
+    def __init__(self, rows: Iterable[Mapping[str, object]]) -> None:
+        self._values: dict[tuple[str, str], dict[str, str]] = {}
+        for row in rows:
+            entry = self._values.setdefault((str(row["kind"]), str(row["key"])), {})
+            entry[str(row["field"])] = str(row["value"])
+
+    def of(self, kind: str, key: str) -> dict[str, str]:
+        return dict(self._values.get((kind, key), {}))
+
+    def shown(self, kind: str, key: str) -> dict[str, object]:
+        """How the page shows *key*: its name, its icon and its flags.
+
+        The values are cleaned again here, because an import can write them too.
+        """
+        values = self._values.get((kind, key), {})
+        name = sanitize.one_line(values.get("name", ""), limit=NAME_LIMIT) or None
+        icon = values.get("icon")
+        glyph = icon_glyph(icon)
+        shown: dict[str, object] = {
+            "display_name": name, "icon": icon if glyph else None, "icon_glyph": glyph,
+        }
+        for flag in _FLAGS:
+            if flag in ledger_mod.BOARD_FIELDS[kind]:
+                shown[flag] = values.get(flag) == "1"
+        return shown
 
 
 def pause_all(request: Request) -> Response:
@@ -369,8 +558,14 @@ def build(
     health: dict[str, object],
     attach: Callable[[Worker], str | None] = lambda worker: None,
     now: float | None = None,
+    show_hidden: bool = False,
 ) -> dict[str, object]:
-    """The page model: the top bar and the cards of every column."""
+    """The page model: the top bar, and the cards of every column in repository groups.
+
+    In a group the pinned cards come first, then the others by their last activity; the
+    groups are ordered the same way by the repository's pin. A collapsed repository shows
+    only its pinned cards. A hidden repository's cards are left out unless *show_hidden*.
+    """
     current = time.time() if now is None else now
     live = ledger.live_workers()
     closed = sorted(
@@ -380,16 +575,28 @@ def build(
     )[:CLOSED_LIMIT]
     roles = _Roles(config)
     prompts = ledger.open_permission_prompts()
-    cards = [
-        card(worker, ledger, roles, attach=attach, prompts=prompts, now=current)
-        for worker in (*live, *closed)
+    personal = BoardState(ledger.board_state())
+    repositories = {
+        name: personal.shown(ledger_mod.BOARD_REPOSITORY, name)
+        for name in dict.fromkeys(
+            [repository.name for repository in config.repositories]
+            + [worker.repository for worker in (*live, *closed)]
+        )
+    }
+    cards = []
+    for worker in (*live, *closed):
+        entry = card(worker, ledger, roles, attach=attach, prompts=prompts, now=current)
+        entry.update(personal.shown(ledger_mod.BOARD_WORKER, str(worker.id)))
+        repository = repositories[worker.repository]
+        entry["repository_label"] = repository["display_name"] or worker.repository
+        entry["hidden"] = repository["hidden"]
+        cards.append(entry)
+    columns = [
+        _column(key, title, hint, [entry for entry in cards if entry["column"] == key],
+                repositories, show_hidden=show_hidden)
+        for key, title, hint, _ in COLUMNS
     ]
-    columns = []
-    for key, title, hint, _ in COLUMNS:
-        chosen = [entry for entry in cards if entry["column"] == key]
-        if key != "closed":
-            chosen.sort(key=lambda entry: entry["updated_at"], reverse=True)
-        columns.append({"key": key, "title": title, "hint": hint, "cards": chosen})
+    hidden = [name for name, shown in repositories.items() if shown["hidden"]]
     return {
         "generated_at": current,
         "usage": usage_mod.read_usage(config.serve.usage_file, current),
@@ -408,11 +615,70 @@ def build(
                 "name": repository.name,
                 "roles": list(repository.roles),
                 "paused": ledger.is_paused(repository.name),
+                **repositories[repository.name],
             }
             for repository in config.repositories
         ],
+        "hidden": {
+            "repositories": hidden,
+            "count": len(hidden),
+            "cards": sum(1 for entry in cards if entry["hidden"]),
+            "shown": show_hidden,
+        },
+        "icons": dict(ICONS),
         "terminals": list(terminal_mod.TERMINALS),
         "token_file": str(config.serve.token_file),
+    }
+
+
+def _activity(entry: Mapping[str, object]) -> float:
+    """When the card last changed: its finish for a closed card, its last update otherwise."""
+    value = entry["updated_at"]
+    if entry["column"] == "closed" and entry["finished_at"]:
+        value = entry["finished_at"]
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _column(
+    key: str,
+    title: str,
+    hint: str,
+    chosen: list[dict[str, object]],
+    repositories: Mapping[str, Mapping[str, object]],
+    *,
+    show_hidden: bool,
+) -> dict[str, object]:
+    """A column: a heading per repository that has cards in it, and the cards in page order."""
+    members: dict[str, list[dict[str, object]]] = {}
+    for entry in chosen:
+        if show_hidden or not entry["hidden"]:
+            members.setdefault(str(entry["repository"]), []).append(entry)
+    for group in members.values():
+        group.sort(key=lambda entry: (not entry["pinned"], -_activity(entry)))
+    order = sorted(
+        members,
+        key=lambda name: (
+            not repositories[name]["pinned"], -max(_activity(entry) for entry in members[name]), name,
+        ),
+    )
+    groups, cards = [], []
+    for name in order:
+        shown = repositories[name]
+        visible = [entry for entry in members[name] if not shown["collapsed"] or entry["pinned"]]
+        cards += visible
+        groups.append({
+            "repository": name,
+            **shown,
+            "count": len(members[name]),
+            "folded": len(members[name]) - len(visible),
+        })
+    return {
+        "key": key,
+        "title": title,
+        "hint": hint,
+        "count": sum(len(group) for group in members.values()),
+        "groups": groups,
+        "cards": cards,
     }
 
 
@@ -589,6 +855,11 @@ def tokens_estimate(transcript_path: str | None) -> int | None:
 
 __all__ = [
     "ASSETS",
+    "ICONS",
+    "BoardState",
+    "icon_glyph",
+    "is_emoji",
+    "personalise",
     "WORKER_ACTIONS",
     "actions",
     "outcome",
