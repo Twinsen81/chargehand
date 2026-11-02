@@ -508,6 +508,9 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
                 error: str | None = None) -> dict[str, object]:
         created = now - age_secs
         payload: dict[str, object] = {
+            "id": sum(map(ord, issue)),
+            "handle": f"implementer/{issue}",
+            "origin": "source",
             "item": issue,
             "role": "implementer",
             "runtime": "claude",

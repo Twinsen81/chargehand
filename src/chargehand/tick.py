@@ -148,6 +148,11 @@ EXPLAINED_SESSION_STATES = (runtime_mod.WORKING, runtime_mod.BLOCKED, runtime_mo
 # hint keeps within it.
 REQUEST_MESSAGE_LIMIT = 300
 
+# The request kinds that only the board records, besides the CLI's control commands: a
+# worker started by hand, and a line of text for a worker.
+NEW_WORKER = "new_worker"
+REPLY = "reply"
+
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
 PENDING_NOTIFICATION_PREFIX = "notify-pending:"
@@ -201,7 +206,8 @@ def template_values(worker: Worker) -> dict[str, str]:
     """The values a role's prompt, setup and status file templates are filled with."""
     checkout = item_checkout_path(worker)
     values = {
-        "item": worker.item,
+        # A worker started by hand may have no item.
+        "item": worker.item or "",
         "item_url": worker.url or "",
         "item_checkout": str(checkout if checkout.exists() else worker.worktree_path),
         "worktree": str(worker.worktree_path),
@@ -557,6 +563,13 @@ class Runner:
         if name not in self._sources:
             config = self.config.source_by_name(name)
             try:
+                if config is not None and config.name == ledger_mod.REPLY_SOURCE:
+                    # Its events would share an inbox source with the operator's replies,
+                    # whose text delivery passes on as written.
+                    raise ConfigError(
+                        f"source {config.name}: the name {config.name!r} is reserved for "
+                        f"replies from the board; give the [[source]] another `name`"
+                    )
                 built = self._source_factory(config) if config else None
                 if built is not None:
                     built.use_repositories(self.config.repositories)
@@ -986,7 +999,10 @@ class Runner:
         for request in self.ledger.pending_requests():
             kind = request["kind"]
             target = request["target"]
-            args = request["args"]
+            args = dict(request["args"])
+            # A reply is answered by the request id, so a second reply with the same line
+            # is a second event.
+            args["request_id"] = request["id"]
             try:
                 ok, message = self._apply_request(kind, target, args, report)
             except ChargehandError as exc:
@@ -996,7 +1012,8 @@ class Runner:
                 ok, message = False, f"internal error: {exc}"
             self.ledger.complete_request(request["id"], ok=ok, message=message)
             report.requests.append(
-                f"{kind}{f' {target}' if target else ''}: {'ok' if ok else 'refused'} — {message}"
+                f"{kind}{f' {target}' if target else ''} from {request.get('origin') or 'cli'}: "
+                f"{'ok' if ok else 'refused'} — {message}"
             )
 
     def _apply_request(
@@ -1010,9 +1027,11 @@ class Runner:
             return True, f"{scope} {'paused' if kind == 'pause' else 'resumed'}"
         if target is None:
             return False, f"{kind} needs a work item"
+        if kind == NEW_WORKER:
+            return self._do_new_worker(target, args, report)
 
         role = args.get("role") or None
-        found, problem = self._resolve_target(target, role)
+        found, problem = self.ledger.find_worker(target, role)
         if found is None:
             return False, problem or f"no worker recorded for {target}"
         worker = found
@@ -1028,40 +1047,114 @@ class Runner:
             return self._do_retry(worker, context, bool(args.get("force")), report)
         if kind == "discard":
             return self._do_discard(worker, context, bool(args.get("force")), report)
+        if kind == REPLY:
+            return self._do_reply(worker, args)
         return False, f"unknown request '{kind}'"
 
-    def _resolve_target(self, item: str, role: str | None) -> tuple[Worker | None, str | None]:
-        """The one worker a control command means, or why it cannot tell.
+    def _do_new_worker(self, target: str, args: dict, report: TickReport) -> tuple[bool, str]:
+        """Start a worker by hand, in repository *target*: a role, an optional item, the
+        event kinds it follows on that item.
 
-        Several roles can hold the same item, so a bare item is enough only while one
-        live worker has it; otherwise the command has to name the role.
+        It has origin ``board``: the one-worker-per-role-and-item rule of the start rules
+        does not hold it, but the pause and the caps do. Its worktree and branch carry its
+        id, so several such workers can work on one item.
         """
-        live = self.ledger.live_workers_for(item)
-        if role is not None:
-            live = [w for w in live if w.role == role]
-        if len(live) > 1:
-            names = ", ".join(sorted(w.role for w in live))
-            return None, f"{item} has live workers in several roles ({names}); pass --role"
-        if live:
-            return live[0], None
-        latest = self.ledger.latest_worker_for(item, role)
-        if latest is None:
-            return None, f"no worker recorded for {item}" + (f" in role {role}" if role else "")
-        return latest, None
+        repository = self.config.repository_by_name(target)
+        if repository is None:
+            return False, f"no repository named {sanitize.scrub_identifier(target)}"
+        role_name = args.get("role")
+        if not isinstance(role_name, str) or role_name not in repository.roles:
+            return False, (
+                f"repository {repository.name} has no role "
+                f"{sanitize.scrub_identifier(str(role_name or ''))}"
+            )
+        context = self.context(repository)
+        if not context.usable:
+            return False, f"repository {repository.name} is unavailable: {context.error or 'no tracker'}"
+        role = context.role(role_name)
+        if self.ledger.is_paused(repository.name):
+            return False, f"repository {repository.name} is paused"
+        kinds = args.get("subscribe") or []
+        if not isinstance(kinds, list) or not all(
+            isinstance(kind, str) and sanitize.is_event_kind(kind) for kind in kinds
+        ):
+            return False, "subscribe takes a list of event kinds, such as comment"
+        item: WorkItem | None = None
+        typed = args.get("item")
+        if typed:
+            if not isinstance(typed, str):
+                return False, "the work item is not text"
+            # Only the repository's tracker knows the format of its items.
+            item = context.source.find(typed.strip())  # type: ignore[union-attr]
+            if item is None:
+                return False, (
+                    f"the tracker of repository {repository.name} has no item "
+                    f"{sanitize.scrub_identifier(typed)}"
+                )
+            if not sanitize.is_safe_identifier(item.key):
+                return False, (
+                    f"the item's identifier is not usable as a path or branch name: "
+                    f"{sanitize.scrub_identifier(item.key)}"
+                )
+        label = item.key if item else f"new {role.name} worker"
+        refusal = self._launch_refusal(repository, role, label)
+        if refusal is not None:
+            return False, refusal
+        worker = self._launch(
+            context, role, None, item, report, origin=ledger_mod.ORIGIN_BOARD,
+            kinds=tuple(dict.fromkeys(kinds)),
+        )
+        if worker.state == ledger_mod.FAILED:
+            return False, f"{worker.handle}: the launch failed; `chargehand status --verbose-titles` says why"
+        if worker.state == ledger_mod.LAUNCHING:
+            return False, f"{worker.handle}: the launch did not complete; the next tick resumes it"
+        return True, f"started {worker.handle}"
+
+    def _do_reply(self, worker: Worker, args: dict) -> tuple[bool, str]:
+        """Put the operator's line into the worker's inbox, as an event from the board.
+
+        Delivery wakes the worker with it as with any event, under the same caps and the
+        same usage reserve; a worker that delivery does not wake keeps it until it may.
+        """
+        if worker.is_terminal:
+            return False, f"{worker.name} is already {worker.state}"
+        text = sanitize.one_line(str(args.get("text") or ""), limit=ledger_mod.REPLY_LIMIT)
+        if not text:
+            return False, "the reply is empty"
+        now = time.time()
+        key = worker.item or worker.handle
+        self.ledger.enqueue(worker.id, Event(
+            source=ledger_mod.REPLY_SOURCE,
+            kind=ledger_mod.REPLY_KIND,
+            item=WorkItem(source=ledger_mod.REPLY_SOURCE, key=key, ref=worker.item_id or key),
+            actor=ledger_mod.REPLY_SOURCE,
+            occurred_at=now,
+            dedupe_id=f"reply:{args.get('request_id') or now}",
+            pointer=text,
+        ), now=now)
+        log.info("%s: a reply from the board waits in its inbox", worker.handle)
+        if worker.state in delivery_mod.WAKE_STATES:
+            return True, "reply queued; delivery wakes the worker with it"
+        if worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING):
+            return True, "reply queued; it is delivered when the current turn ends"
+        return True, (
+            f"reply kept in the inbox; {worker.name} is {worker.state}, so it is delivered "
+            f"once the worker is idle again"
+        )
 
     def _do_cancel(
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
         if worker.is_terminal:
-            return False, f"{worker.item} is already {worker.state}"
+            return False, f"{worker.name} is already {worker.state}"
         if not self._stop_session(worker):
             return False, (
-                f"{worker.item}: the session did not stop; it is still working. "
+                f"{worker.name}: the session did not stop; it is still working. "
                 f"Check it with `{self._attach_command(worker)}`."
             )
         worker = self.ledger.update(worker, state=ledger_mod.CANCELLED, session_state=None)
         self._sync_labels(worker, context, report)
-        self._notify(report, worker.item, "cancelled", worker.url, worker.repository, role=worker.role,
+        self._notify(report, worker.name, "cancelled", worker.url, worker.repository, role=worker.role,
                      detail="cancelled by operator")
         return True, "session stopped, worktree kept"
 
@@ -1069,11 +1162,11 @@ class Runner:
         self, worker: Worker, context: RepositoryContext | None, report: TickReport
     ) -> tuple[bool, str]:
         if worker.is_terminal:
-            return False, f"{worker.item} is already {worker.state}"
+            return False, f"{worker.name} is already {worker.state}"
         if not worker.session_id:
-            return False, f"{worker.item} has no session to stop"
+            return False, f"{worker.name} has no session to stop"
         if not self._stop_session(worker):
-            return False, f"{worker.item}: the session did not stop; it is still working"
+            return False, f"{worker.name}: the session did not stop; it is still working"
         worker = self.ledger.update(worker, state=ledger_mod.PAUSED)
         self._sync_labels(worker, context, report)
         return True, "session stopped; `chargehand continue` respawns it"
@@ -1083,9 +1176,9 @@ class Runner:
     ) -> tuple[bool, str]:
         """Respawn the session. *force* accepts the agent's files in the worktree as they are."""
         if not worker.session_id:
-            return False, f"{worker.item} has no session to respawn"
+            return False, f"{worker.name} has no session to respawn"
         if worker.state not in (ledger_mod.PAUSED, ledger_mod.BLOCKED, ledger_mod.PARKED):
-            return False, f"{worker.item} is {worker.state}, not paused, blocked or parked"
+            return False, f"{worker.name} is {worker.state}, not paused, blocked or parked"
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
             return False, self._refusal_message(worker, check)
@@ -1099,12 +1192,12 @@ class Runner:
             None,
         )
         if session is None:
-            return False, f"{worker.item}: respawn reported success but the session is gone"
+            return False, f"{worker.name}: respawn reported success but the session is gone"
         if self.runtime(worker.runtime).is_stopped(session):
             # A stopped session keeps the state of its last turn, often `done`, which says
             # nothing about why the respawn did not take.
             return False, (
-                f"{worker.item}: respawn reported success but no process is running "
+                f"{worker.name}: respawn reported success but no process is running "
                 f"(the session lists as {session.state})"
             )
         worker = self.ledger.update(
@@ -1123,15 +1216,15 @@ class Runner:
         """
         if check.acceptable:
             hint = (
-                f"Check the worktree, then `chargehand continue {worker.item} --force` "
-                f"to accept the files, or `chargehand discard {worker.item} --yes`."
+                f"Check the worktree, then `chargehand continue {worker.name} --force` "
+                f"to accept the files, or `chargehand discard {worker.name} --yes`."
             )
         else:
             hint = (
-                f"Check the worktree, then `chargehand discard {worker.item} --yes`; the "
+                f"Check the worktree, then `chargehand discard {worker.name} --yes`; the "
                 f"next review request starts a fresh worker."
             )
-        prefix, tail = f"{worker.item}: ", f". {hint}"
+        prefix, tail = f"{worker.name}: ", f". {hint}"
         budget = REQUEST_MESSAGE_LIMIT - len(prefix) - len(tail)
         detail = check.fault
         room = budget - len(detail) - len(" ()")
@@ -1146,7 +1239,7 @@ class Runner:
         """Re-arm the issue and let ordinary admission start a fresh worker."""
         if not worker.is_terminal:
             return False, (
-                f"{worker.item} is {worker.state}; cancel or stop it before retrying"
+                f"{worker.name} is {worker.state}; cancel or stop it before retrying"
             )
         if context is None or not context.usable:
             return False, f"repository '{worker.repository}' is unavailable"
@@ -1155,8 +1248,8 @@ class Runner:
             blocker = self._worktree_holds_work(worker)
             if blocker and not force:
                 return False, (
-                    f"{worker.item}: {blocker}. Push or discard it first "
-                    f"(`chargehand discard {worker.item} --yes`)."
+                    f"{worker.name}: {blocker}. Push or discard it first "
+                    f"(`chargehand discard {worker.name} --yes`)."
                 )
             try:
                 branches_removed = self._remove_worktree(worker, force=True)
@@ -1169,11 +1262,23 @@ class Runner:
             self._stop_session(worker)
             if not self._remove_session(worker):
                 return False, (
-                    f"{worker.item}: the previous session {worker.session_id} could not be "
+                    f"{worker.name}: the previous session {worker.session_id} could not be "
                     f"removed; a new worker would adopt it instead of starting. Remove it, "
                     f"then retry."
                 )
             worker = self.ledger.update(worker, session_id=None, session_uuid=None)
+        if worker.origin == ledger_mod.ORIGIN_BOARD:
+            # No start event would start it again: a worker started by hand is started
+            # again the same way, with the same role, item and followed kinds.
+            self.ledger.update(worker, gc_done=1)
+            primary = self.ledger.primary_subscription(worker)
+            again: dict[str, object] = {"role": worker.role}
+            if worker.item:
+                again["item"] = worker.item_id or worker.item
+                again["subscribe"] = list(primary.kinds) if primary else []
+            ok, outcome = self._do_new_worker(worker.repository, again, report)
+            outcome = f"cleared; {outcome}" if ok else f"cleared, but no new worker started: {outcome}"
+            return ok, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
         if not self._drives_label(worker):
             # The queue label would start the queue's role, not this one. A new start
             # event for the item starts a new worker of this role.
@@ -1183,9 +1288,9 @@ class Runner:
         try:
             context.source.mark(context.item_of(worker), Status.QUEUED)  # type: ignore[union-attr]
         except ItemGone:
-            return False, f"{worker.item} no longer exists on the tracker"
+            return False, f"{worker.name} no longer exists on the tracker"
         except TRACKER_FAILURES as exc:
-            return False, f"could not re-queue {worker.item}: {exc}"
+            return False, f"could not re-queue {worker.name}: {exc}"
         _log_mark(worker.handle, context.item_of(worker), context.source, worker.label_state or "none",
                   Status.QUEUED.value)
         self.ledger.update(worker, gc_done=1)
@@ -1197,12 +1302,12 @@ class Runner:
     ) -> tuple[bool, str]:
         blocker = self._worktree_holds_work(worker)
         if blocker and not force:
-            return False, f"{worker.item}: {blocker}. Re-run with --force to discard anyway."
+            return False, f"{worker.name}: {blocker}. Re-run with --force to discard anyway."
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
         if not self._stop_session(worker) and not force:
             return False, (
-                f"{worker.item}: the session did not stop, so its worktree is still "
+                f"{worker.name}: the session did not stop, so its worktree is still "
                 f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
             )
@@ -2429,9 +2534,10 @@ class Runner:
 
         Reusing it would start a run that is supposed to be fresh on top of the previous
         worker's changes, and, if that launch were interrupted, leave its session as the
-        obvious thing for reconciliation to adopt.
+        obvious thing for reconciliation to adopt. A worker started by hand has a worktree
+        of its own, so only the previous worker a start rule created counts.
         """
-        previous = self.ledger.latest_worker_for(item, role)
+        previous = self.ledger.latest_worker_for(item, role, origin=ledger_mod.ORIGIN_SOURCE)
         if previous is None or not previous.is_terminal:
             return None
         return previous.worktree_path if previous.worktree_path.exists() else None
@@ -2440,19 +2546,30 @@ class Runner:
         self,
         context: RepositoryContext,
         role: Role,
-        rule: StartRule,
-        item: WorkItem,
+        rule: StartRule | None,
+        item: WorkItem | None,
         report: TickReport,
         *,
         owns_label: int = ledger_mod.LABEL_NONE,
         crash_after_step: int | None = None,
-    ) -> None:
-        """Start a worker of *role* on *item*; *owns_label* says what it marks its state on."""
+        origin: str = ledger_mod.ORIGIN_SOURCE,
+        kinds: Sequence[str] = (),
+    ) -> Worker:
+        """Start a worker of *role* on *item*; *owns_label* says what it marks its state on.
+
+        A start rule's worker works in `<root>/<role>/<item>` on `<prefix><role>/<item>`.
+        Any other worker may share its role and item with others, so its worktree and
+        branch end in its id: `<item>-<id>`, or `worker-<id>` without an item. It follows
+        *kinds* on its item instead of the rule's.
+        """
         repository = context.repository
         repo_config = context.repo_config
         assert repo_config is not None
-        worktree = self.config.worktree_root / role.name / item.key
-        branch = self._branch_for(repo_config, role.name, item.key)
+        by_rule = origin == ledger_mod.ORIGIN_SOURCE
+        assert not by_rule or (rule is not None and item is not None)
+        name = item.key if item is not None else "worker"
+        worktree = self.config.worktree_root / role.name / name
+        branch = self._branch_for(repo_config, role.name, name)
 
         # Step 0: the row, and the subscription to its own item, exist before any
         # external side effect. The url reaches the prompt as {item_url} and comes from the
@@ -2461,21 +2578,31 @@ class Runner:
         with self.ledger.transaction():
             worker = self.ledger.create_worker(
                 role=role.name,
-                item=item.key,
-                item_id=item.ref,
-                url=sanitize.safe_url(item.url),
+                item=item.key if item is not None else None,
+                item_id=item.ref if item is not None else None,
+                url=sanitize.safe_url(item.url) if item is not None else None,
                 owns_label=owns_label,
                 repository=repository.name,
                 repo=repository.path,
                 worktree=worktree,
                 branch=branch,
-                start_rule=rule.name,
+                origin=origin,
+                start_rule=rule.name if rule is not None else None,
                 runtime=role.runtime,
             )
-            self.ledger.subscribe(worker, item, rule.subscribe, primary=True)
-        log.info("%s: launching in %s", worker.handle, worktree)
+            if not by_rule:
+                unique = f"{name}-{worker.id}"
+                worker = self.ledger.update(
+                    worker,
+                    worktree=str(worktree.parent / unique),
+                    branch=self._branch_for(repo_config, role.name, unique),
+                )
+            if item is not None:
+                followed = rule.subscribe if rule is not None else tuple(kinds)
+                self.ledger.subscribe(worker, item, followed, primary=True)
+        log.info("%s: launching in %s", worker.handle, worker.worktree)
         self._check_crash(0, crash_after_step)
-        self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step)
+        return self._run_launch_steps(context, worker, report, crash_after_step=crash_after_step)
 
     def _run_launch_steps(
         self,
@@ -2708,7 +2835,7 @@ class Runner:
         found = runtime.find_session(
             sessions, name=worker.handle, cwd=worker.worktree_path, exclude=exclude
         )
-        if found is None:
+        if found is None and worker.item and worker.origin == ledger_mod.ORIGIN_SOURCE:
             found = runtime.find_session(sessions, name=worker.item, exclude=exclude)
         return found
 
