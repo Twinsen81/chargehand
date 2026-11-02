@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -103,6 +103,25 @@ BOARD_FIELDS: dict[str, tuple[str, ...]] = {
     BOARD_REPOSITORY: ("name", "icon", "pinned", "collapsed", "hidden"),
     BOARD_WORKER: ("name", "icon", "pinned"),
 }
+
+# A prompt a session shows the operator. A permission prompt is answered allow or deny; the
+# record also holds a question with its own options, so that both use one card. A prompt is
+# `open` until it is answered (`resolved`, with the decision and who decided) or the
+# session stops showing it (`cancelled`). `released_at` is set when no hook waits for the
+# board's answer any more, after a timeout or a restart: the dialog in the session takes it.
+PROMPT_PERMISSION = "permission"
+PROMPT_QUESTION = "question"
+PROMPT_OPEN = "open"
+PROMPT_RESOLVED = "resolved"
+PROMPT_CANCELLED = "cancelled"
+PROMPT_STATES = (PROMPT_OPEN, PROMPT_RESOLVED, PROMPT_CANCELLED)
+ALLOW = "allow"
+DENY = "deny"
+# Who resolved or cancelled a prompt: a click on the board, a rule the operator recorded
+# from the board, or the session itself (answered in the terminal, superseded, or stopped).
+RESOLVED_BY_BOARD = "board"
+RESOLVED_BY_RULE = "rule"
+RESOLVED_BY_SESSION = "session"
 
 # A worker handle that names the worker by id: `role/item#id`, or `role/#id` without an item.
 _ID_HANDLE = re.compile(r"(?:([^/#\s]+)/([^/#\s]*))?#([0-9]{1,12})")
@@ -311,18 +330,38 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_pending ON events (start_pending);
 
--- A permission prompt a session reported. The session keeps its own dialog; the row is
--- resolved when the worker leaves `blocked`. The tool input is untrusted text.
+-- A prompt a session reported: a permission prompt, or a question with its options (a
+-- JSON list). It is open until the board, a rule or the session resolves it, or the worker
+-- leaves `blocked` and cancels it. The tool input is untrusted text; `input_digest` is a
+-- hash of the whole input, which a rule matches.
 CREATE TABLE IF NOT EXISTS permission_prompts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    worker_id   INTEGER NOT NULL REFERENCES workers (id),
-    tool_name   TEXT    NOT NULL,
-    tool_input  TEXT    NOT NULL DEFAULT '',
-    created_at  REAL    NOT NULL,
-    resolved_at REAL
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    tool_name    TEXT    NOT NULL,
+    tool_input   TEXT    NOT NULL DEFAULT '',
+    created_at   REAL    NOT NULL,
+    resolved_at  REAL,
+    kind         TEXT    NOT NULL DEFAULT 'permission',
+    options      TEXT,
+    input_digest TEXT,
+    state        TEXT    NOT NULL DEFAULT 'open',
+    decision     TEXT,
+    resolved_by  TEXT,
+    released_at  REAL
 );
 
 CREATE INDEX IF NOT EXISTS permission_prompts_open ON permission_prompts (worker_id, resolved_at);
+
+-- "Always allow" for one worker: the daemon allows the same tool with the same input for
+-- that worker by itself. Never a role's, a repository's or Claude Code's settings.
+CREATE TABLE IF NOT EXISTS permission_rules (
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    tool_name    TEXT    NOT NULL,
+    input_digest TEXT    NOT NULL,
+    prompt_id    INTEGER REFERENCES permission_prompts (id),
+    created_at   REAL    NOT NULL,
+    PRIMARY KEY (worker_id, tool_name, input_digest)
+);
 
 -- Where each source's last poll stopped.
 CREATE TABLE IF NOT EXISTS cursors (
@@ -401,6 +440,24 @@ ALTER TABLE requests ADD COLUMN origin TEXT NOT NULL DEFAULT '{REQUEST_CLI}';
 
 # Version 6 adds the board's own state. It only adds a table, which the schema creates.
 _MIGRATE_V5_TO_V6 = _SCHEMA
+
+# Version 7 makes a prompt a record with a state, a decision and who decided, and adds the
+# per-worker rules. Only a version 4, 5 or 6 file has the old prompts table; an older one
+# gets the table from the schema with every column. A prompt resolved before this version
+# was never answered by chargehand, so its session cancelled it.
+_MIGRATE_V6_TO_V7 = f"""
+ALTER TABLE permission_prompts ADD COLUMN kind TEXT NOT NULL DEFAULT '{PROMPT_PERMISSION}';
+ALTER TABLE permission_prompts ADD COLUMN options TEXT;
+ALTER TABLE permission_prompts ADD COLUMN input_digest TEXT;
+ALTER TABLE permission_prompts ADD COLUMN state TEXT NOT NULL DEFAULT '{PROMPT_OPEN}';
+ALTER TABLE permission_prompts ADD COLUMN decision TEXT;
+ALTER TABLE permission_prompts ADD COLUMN resolved_by TEXT;
+ALTER TABLE permission_prompts ADD COLUMN released_at REAL;
+UPDATE permission_prompts
+SET state = '{PROMPT_CANCELLED}', resolved_by = '{RESOLVED_BY_SESSION}', released_at = resolved_at
+WHERE resolved_at IS NOT NULL;
+{_SCHEMA}
+"""
 
 
 @dataclass(frozen=True)
@@ -511,6 +568,13 @@ class PermissionPrompt:
     tool_input: str
     created_at: float
     resolved_at: float | None
+    kind: str = PROMPT_PERMISSION
+    options: str | None = None
+    input_digest: str | None = None
+    state: str = PROMPT_OPEN
+    decision: str | None = None
+    resolved_by: str | None = None
+    released_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -622,13 +686,15 @@ class Ledger:
         # Every statement of the schema is idempotent: the version 1 copy includes the
         # whole schema, and a version 2 ledger only gains the tables it lacks.
         # A version 2 file takes every later step; the version 1 copy includes the whole
-        # schema but keeps its own requests table, which gains the request origin.
+        # schema but keeps its own requests table, which gains the request origin. Up to
+        # version 3 the schema creates the prompts table whole, so only 4 to 6 alter it.
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
-            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
-            5: _MIGRATE_V5_TO_V6,
+            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7,
+            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7,
+            6: _MIGRATE_V6_TO_V7,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -941,39 +1007,128 @@ class Ledger:
     # ----- permission prompts -----------------------------------------------
 
     def record_permission_prompt(
-        self, worker: Worker, *, tool_name: str, tool_input: str, now: float | None = None
+        self,
+        worker: Worker,
+        *,
+        tool_name: str,
+        tool_input: str,
+        now: float | None = None,
+        input_digest: str | None = None,
+        resolved_by: str | None = None,
     ) -> int:
-        cursor = self._conn.execute(
-            "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (worker.id, tool_name, tool_input, time.time() if now is None else now),
-        )
+        """Record an open prompt, or with *resolved_by* one that is already allowed."""
+        stamp = time.time() if now is None else now
+        if resolved_by is None:
+            cursor = self._conn.execute(
+                "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
+                "input_digest) VALUES (?, ?, ?, ?, ?)",
+                (worker.id, tool_name, tool_input, stamp, input_digest),
+            )
+        else:
+            cursor = self._conn.execute(
+                "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
+                "input_digest, state, decision, resolved_by, resolved_at, released_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (worker.id, tool_name, tool_input, stamp, input_digest, PROMPT_RESOLVED, ALLOW,
+                 resolved_by, stamp, stamp),
+            )
         return int(cursor.lastrowid)
 
+    def get_permission_prompt(self, prompt_id: int) -> PermissionPrompt | None:
+        row = self._conn.execute(
+            "SELECT * FROM permission_prompts WHERE id = ?", (prompt_id,)
+        ).fetchone()
+        return PermissionPrompt(**dict(row)) if row else None
+
     def open_permission_prompts(self, worker: Worker | None = None) -> list[PermissionPrompt]:
-        """The prompts not yet resolved, of *worker* or of every live worker."""
+        """The open prompts, of *worker* or of every live worker."""
         if worker is not None:
             rows = self._conn.execute(
-                "SELECT * FROM permission_prompts WHERE worker_id = ? AND resolved_at IS NULL "
-                "ORDER BY id",
-                (worker.id,),
+                "SELECT * FROM permission_prompts WHERE worker_id = ? AND state = ? ORDER BY id",
+                (worker.id, PROMPT_OPEN),
             ).fetchall()
         else:
             rows = self._conn.execute(
                 f"SELECT p.* FROM permission_prompts p JOIN workers w ON w.id = p.worker_id "
-                f"WHERE p.resolved_at IS NULL AND w.state IN "
+                f"WHERE p.state = ? AND w.state IN "
                 f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY p.id",
-                NON_TERMINAL,
+                (PROMPT_OPEN, *NON_TERMINAL),
             ).fetchall()
         return [PermissionPrompt(**dict(row)) for row in rows]
 
     def resolve_permission_prompts(self, worker: Worker, *, now: float | None = None) -> int:
+        """Cancel the worker's open prompts: its session no longer shows them."""
+        stamp = time.time() if now is None else now
         cursor = self._conn.execute(
-            "UPDATE permission_prompts SET resolved_at = ? "
-            "WHERE worker_id = ? AND resolved_at IS NULL",
-            (time.time() if now is None else now, worker.id),
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
+            "released_at = COALESCE(released_at, ?) WHERE worker_id = ? AND state = ?",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN),
         )
         return cursor.rowcount
+
+    def set_prompt_digest(self, prompt_id: int, input_digest: str) -> None:
+        self._conn.execute(
+            "UPDATE permission_prompts SET input_digest = ? WHERE id = ?", (input_digest, prompt_id)
+        )
+
+    def answer_permission_prompt(
+        self,
+        prompt_id: int,
+        decision: str,
+        *,
+        by: str,
+        rule: bool = False,
+        now: float | None = None,
+    ) -> bool:
+        """Resolve an open prompt that a hook still holds. False when another answer came first.
+
+        The first writer wins: the prompt must be open and not released, so a second click,
+        an answer after a timeout and an answer after the session moved on change nothing.
+        With *rule*, the same tool with the same input is allowed for this worker from now on.
+        """
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            cursor = self._conn.execute(
+                "UPDATE permission_prompts SET state = ?, decision = ?, resolved_by = ?, "
+                "resolved_at = ? WHERE id = ? AND state = ? AND released_at IS NULL",
+                (PROMPT_RESOLVED, decision, by, stamp, prompt_id, PROMPT_OPEN),
+            )
+            if cursor.rowcount != 1:
+                return False
+            if rule:
+                prompt = self.get_permission_prompt(prompt_id)
+                if prompt is None or not prompt.input_digest:
+                    raise ValueError(f"prompt {prompt_id} has no input digest for a rule")
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO permission_rules (worker_id, tool_name, input_digest, "
+                    "prompt_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (prompt.worker_id, prompt.tool_name, prompt.input_digest, prompt_id, stamp),
+                )
+        return True
+
+    def release_permission_prompt(self, prompt_id: int, *, now: float | None = None) -> bool:
+        """Mark an open prompt as held by no hook. False when an answer came first."""
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET released_at = ? "
+            "WHERE id = ? AND state = ? AND released_at IS NULL",
+            (time.time() if now is None else now, prompt_id, PROMPT_OPEN),
+        )
+        return cursor.rowcount == 1
+
+    def has_permission_rule(self, worker: Worker, tool_name: str, input_digest: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM permission_rules WHERE worker_id = ? AND tool_name = ? "
+            "AND input_digest = ?",
+            (worker.id, tool_name, input_digest),
+        ).fetchone()
+        return row is not None
+
+    def permission_rules(self, worker: Worker) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            "SELECT * FROM permission_rules WHERE worker_id = ? ORDER BY created_at",
+            (worker.id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ----- sessions ---------------------------------------------------------
 
