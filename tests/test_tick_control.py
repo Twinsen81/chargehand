@@ -523,10 +523,14 @@ def test_a_permission_prompt_of_the_respawned_session_stays_open(harness, monkey
         return result
 
     monkeypatch.setattr(claude.ClaudeRuntime, "respawn", respawn_then_prompt)
+    # The respawned session shows the dialog, so the listing says blocked too.
+    harness.claude_state.set(respawn_state="blocked")
 
     assert apply_request(harness, "continue", "ABC-1")["ok"] == 1
 
-    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    # A hook does not move a paused worker, so the continue writes the state the new
+    # session asked for: the card is answerable, not in Working.
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     [prompt] = harness.ledger.open_permission_prompts(harness.worker("ABC-1"))
     assert json.loads(prompt.tool_input) == {"command": "date"}
     assert harness.ledger.get_permission_prompt(old).state == "cancelled"

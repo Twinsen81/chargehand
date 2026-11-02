@@ -197,6 +197,9 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
     if state == WORKING and str(node.get("status") or "").strip().lower() == "idle":
         state = DONE
     waiting = _first(node, _WAITING_KEYS)
+    limited, reset_at, model_limit = (
+        session_failure(node) if state == FAILED else (False, None, None)
+    )
     return Session(
         id=str(identifier if identifier is not None else uuid),
         uuid=str(uuid) if uuid is not None else None,
@@ -210,6 +213,9 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
         # default, so it has to be a URL and nothing else.
         pr_url=sanitize.safe_url(_first(node, _PR_KEYS)),
         kind=(lambda v: str(v) if v is not None else None)(_first(node, _KIND_KEYS)),
+        usage_limit=limited,
+        reset_at=reset_at,
+        model_limit=model_limit,
         raw=dict(node),
     )
 
@@ -255,6 +261,11 @@ def parse_sessions(payload: str) -> list[Session]:
             if session is not None:
                 sessions.append(session)
     return sessions
+
+
+# The provider whose usage windows the status line reports, and whose windows the sessions
+# of this runtime draw on: the Claude subscription.
+USAGE_PROVIDER = "claude"
 
 
 def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
@@ -713,6 +724,11 @@ _USAGE_LIMIT_TEXT = re.compile(
     r"|limit (?:will )?resets?",
     re.IGNORECASE,
 )
+# A limit of one model family, such as "Opus weekly limit reached". The usage windows have
+# no per-model window, so this text is the only sign of one. Only the family name is kept.
+_MODEL_LIMIT_TEXT = re.compile(
+    r"\b(opus|sonnet|haiku|fable)\b(?:[ \t]+[\w.-]+){0,3}?[ \t]+limit\b", re.IGNORECASE
+)
 
 
 def hook_settings(
@@ -823,6 +839,57 @@ def _usage_limit(category: str, texts: Sequence[str]) -> bool:
     if normal not in _UNNAMED_ERRORS:
         return False
     return any(_USAGE_LIMIT_TEXT.search(text) for text in texts)
+
+
+def _model_limit(texts: Sequence[str]) -> str | None:
+    """The model family whose own limit the failure names, in lower case, or None."""
+    for text in texts:
+        match = _MODEL_LIMIT_TEXT.search(text)
+        if match:
+            return match.group(1).lower()
+    return None
+
+
+# Where a listed session may carry the error of its failed turn. Not documented; read
+# defensively, like the StopFailure hook.
+_ERROR_KEYS = ("error", "errorType", "error_type", "lastError", "last_error")
+_ERROR_TEXT_KEYS = ("errorMessage", "error_message", "errorDetails", "error_details")
+_ERROR_TEXT_LIMIT = 1000
+_CATEGORY = re.compile(r"[A-Za-z0-9_.-]{1,60}")
+
+
+def session_failure(
+    node: Mapping[str, Any], now: float | None = None
+) -> tuple[bool, float | None, str | None]:
+    """Whether a failed session's listing says a usage limit ended its turn.
+
+    Returns the usage-limit flag, the reset time and the model family of a per-model
+    limit. A short word in an error key is the category, as in the StopFailure hook;
+    longer text, and the text keys and the waiting text, are the message.
+    """
+    category = ""
+    texts: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            texts.append(sanitize.clean(value)[:_ERROR_TEXT_LIMIT])
+
+    for key in _ERROR_KEYS:
+        value = node.get(key)
+        if isinstance(value, Mapping):
+            kind = value.get("type") or value.get("code")
+            if isinstance(kind, str) and _CATEGORY.fullmatch(kind) and not category:
+                category = kind
+            add(value.get("message"))
+        elif isinstance(value, str) and _CATEGORY.fullmatch(value.strip()) and not category:
+            category = value.strip()
+        else:
+            add(value)
+    for key in (*_ERROR_TEXT_KEYS, *_WAITING_KEYS):
+        add(node.get(key))
+    if not _usage_limit(category, texts):
+        return False, None, None
+    return True, reset_time(texts, now), _model_limit(texts)
 
 
 _EPOCH = re.compile(r"(?<![\d.])(1[6-9]\d{8}|2\d{9})(?![\d.])")
@@ -938,6 +1005,7 @@ def parse_hook(event: str, payload: Mapping[str, Any], now: float | None = None)
             kind=HOOK_TURN_FAILED, observed=FAILED, last_answer=answer,
             error=sanitize.one_line(category, limit=80) or None,
             usage_limit=limited, reset_at=reset_time(texts, now) if limited else None,
+            model_limit=_model_limit(texts) if limited else None,
             **common,
         )
     if event == "Notification":
@@ -999,6 +1067,7 @@ class ClaudeRuntime(Runtime):
     )
     role_keys = ("agent", "permission_mode", "allow", "permission_timeout_secs")
     hook_events = HOOK_EVENTS
+    usage_provider = USAGE_PROVIDER
     # Project settings, hooks, agents, skills and commands; MCP servers; instructions,
     # which Claude Code also reads from subdirectories. The `.claude` entry itself is
     # named too: a symlink there is a file, and it would hand the directory to its target.
@@ -1419,6 +1488,7 @@ __all__ = [
     "STOPPED",
     "Session",
     "UNKNOWN",
+    "USAGE_PROVIDER",
     "WORKING",
     "agent_file_candidates",
     "copy_started_by",
@@ -1430,6 +1500,7 @@ __all__ = [
     "reset_time",
     "parse_session",
     "parse_sessions",
+    "session_failure",
     "status_line_windows",
     "worker_from_session",
 ]

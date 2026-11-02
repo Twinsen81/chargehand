@@ -73,7 +73,7 @@ EXPECTED_COLUMN = {
     ledger_mod.LAUNCHING: "working",
     ledger_mod.RUNNING: "working",
     ledger_mod.QUEUED: "queued",
-    ledger_mod.PARKED: "queued",
+    ledger_mod.PARKED: "parked",
     ledger_mod.IDLE: "idle",
     ledger_mod.PAUSED: "idle",
     ledger_mod.DONE: "closed",
@@ -85,7 +85,9 @@ EXPECTED_COLUMN = {
 def test_every_worker_state_has_one_column():
     assert set(board.COLUMN_OF) == set(ledger_mod.WORKER_STATES)
     assert board.COLUMN_OF == EXPECTED_COLUMN
-    assert [key for key, *_ in board.COLUMNS] == ["needs_you", "working", "queued", "idle", "closed"]
+    assert [key for key, *_ in board.COLUMNS] == [
+        "needs_you", "working", "queued", "parked", "idle", "closed",
+    ]
 
 
 def test_each_worker_is_in_the_column_of_its_state(harness):
@@ -220,13 +222,13 @@ def test_an_open_permission_prompt_is_on_the_card(harness):
     assert shown["answers"] == []
 
 
-def test_a_parked_worker_is_queued_with_its_reset_time(harness):
+def test_a_parked_worker_is_in_the_parked_view_with_its_reset_time(harness):
     reset = time.time() + 3600
     seed(harness, "ABC-1", ledger_mod.PARKED, reset_at=reset)
 
     card = card_of(model(harness), "ABC-1")
 
-    assert card["column"] == "queued"
+    assert card["column"] == "parked"
     assert card["reset_at"] == reset
 
 

@@ -54,6 +54,11 @@ class Session:
     started_at: float | None = None
     pr_url: str | None = None
     kind: str | None = None
+    # A failed session whose error says the provider's usage limit ended its turn, when
+    # the limit resets, and the model family when the limit is the model's own.
+    usage_limit: bool = False
+    reset_at: float | None = None
+    model_limit: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -137,6 +142,8 @@ class Hook:
     error: str | None = None
     usage_limit: bool = False
     reset_at: float | None = None
+    # The model family, such as "opus", when the usage limit is that model's own.
+    model_limit: str | None = None
     notification_type: str | None = None
     tool_name: str | None = None
     tool_input: str | None = None
@@ -214,6 +221,9 @@ class Runtime(ABC):
     # from when a session starts or resumes in a directory. A wake checks that a worker
     # whose item is checked out separately has not changed them.
     workspace_files: ClassVar[tuple[str, ...]] = ()
+    # Whose usage windows this runtime's sessions draw on, for the usage reserve; None
+    # when chargehand has no reading for it.
+    usage_provider: ClassVar[str | None] = None
 
     # ----- configuration ----------------------------------------------------
 

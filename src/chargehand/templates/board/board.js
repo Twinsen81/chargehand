@@ -115,7 +115,7 @@ function renderGauge(name, window) {
   gauge.querySelector('.reset').textContent = reset ? 'resets ' + reset : '';
 }
 
-function renderThrottle(t) {
+function renderThrottle(t, limit) {
   const box = $('throttle');
   const parts = [
     [t.working + '/' + t.max_concurrent, ' working'],
@@ -129,6 +129,12 @@ function renderThrottle(t) {
   if (t.paused) nodes.push(el('span', 'paused', 'launches paused'));
   if (t.paused_repositories && t.paused_repositories.length) {
     nodes.push(el('span', 'paused', 'paused: ' + t.paused_repositories.join(', ')));
+  }
+  if (limit && limit.model) {
+    const badge = el('span', 'model-limit', limit.model + ' limit' +
+      (typeof limit.reset_at === 'number' ? ' until ' + clock(limit.reset_at, true) : ''));
+    badge.title = 'A turn failed on the ' + limit.model + ' model limit; the usage windows do not show it';
+    nodes.push(badge);
   }
   box.replaceChildren(...nodes);
 }
@@ -162,7 +168,7 @@ function renderHidden(hidden) {
 
 function renderStats(columns) {
   const count = (key) => (columns.find((c) => c.key === key) || { count: 0 }).count;
-  const nodes = [['needs_you', ' need you'], ['working', ' working'], ['queued', ' queued'], ['idle', ' idle']]
+  const nodes = [['needs_you', ' need you'], ['working', ' working'], ['queued', ' queued'], ['parked', ' parked'], ['idle', ' idle']]
     .map(([key, label]) => {
       const span = el('span');
       span.append(el('b', null, count(key)), label);
@@ -254,9 +260,12 @@ function cardChildren(c, now) {
     nodes.push(el('div', 'alert', c.waiting_for));
   }
   if (c.problem) nodes.push(el('div', 'note', c.problem));
-  if (c.state === 'parked' && typeof c.reset_at === 'number') {
-    nodes.push(el('div', 'note', 'parked until ' + clock(c.reset_at, true)));
+  if (c.state === 'parked') {
+    nodes.push(el('div', 'note', typeof c.reset_at === 'number'
+      ? 'parked until ' + clock(c.reset_at, true)
+      : 'parked; no reset time given, continue resumes it'));
   }
+  if (c.queue_reason) nodes.push(el('div', 'note', c.queue_reason));
 
   if (c.last_prompt) nodes.push(snippet('prompt', 'prompt', c.last_prompt));
   if (c.last_answer) nodes.push(snippet('answer', 'answer', c.last_answer));
@@ -449,7 +458,7 @@ function render(model) {
   const usage = model.usage || {};
   renderGauge('five_hour', usage.known ? usage.five_hour : null);
   renderGauge('seven_day', usage.known ? usage.seven_day : null);
-  renderThrottle(model.throttle);
+  renderThrottle(model.throttle, model.model_limit);
   renderHidden(model.hidden);
   renderHealth(model.health, now);
   renderStats(model.columns);
