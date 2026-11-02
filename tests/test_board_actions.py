@@ -11,11 +11,13 @@ import dataclasses
 import functools
 import json
 import subprocess
+import time
 
 import pytest
 
 from chargehand import board, ledger as ledger_mod, terminal
 from chargehand.cli import EXIT_OK, main
+from chargehand.config import NotifyConfig
 from conftest import run_git
 from support import daemon as support
 
@@ -561,3 +563,135 @@ def test_a_card_offers_the_actions_its_state_can_take(harness):
     assert page["terminals"] == ["iterm2", "terminal"]
     card = next(c for column in page["columns"] for c in column["cards"])
     assert (card["handle"], card["origin"]) == (worker.handle, "board")
+
+
+# ----- supervision of workers started by hand ------------------------------------------------
+
+
+def item_less_worker(harness):
+    request_id = harness.ledger.record_request(
+        "new_worker", "test", origin=ledger_mod.REQUEST_BOARD, role="implementer"
+    )
+    harness.next_tick()
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    (worker,) = harness.ledger.live_workers()
+    return worker
+
+
+def test_an_item_less_worker_is_notified_through_a_notify_command(harness, tmp_path):
+    seen = tmp_path / "notified.txt"
+    hook = tmp_path / "notify.sh"
+    hook.write_text(f'#!/bin/sh\necho "$CHARGEHAND_ITEM $CHARGEHAND_STATE" >> "{seen}"\n')
+    hook.chmod(0o755)
+    harness.notifier.config = NotifyConfig(command=str(hook))
+    worker = item_less_worker(harness)
+
+    harness.ledger.update(worker, working_since=time.time() - 7 * 3600)
+    long_run = harness.next_tick()
+    harness.claude_state.set_session_state(worker.session_id, "blocked")
+    blocked = harness.next_tick()
+    harness.ledger.update(harness.ledger.get(worker.id), state=ledger_mod.LAUNCHING, step=0,
+                          launch_attempts=harness.config.max_launch_attempts, session_id=None)
+    harness.claude_state.drop_sessions()
+    failed = harness.next_tick()
+
+    for report in (long_run, blocked, failed):
+        assert not [e for e in report.errors if "phase" in e], report.errors
+    assert seen.read_text().splitlines() == [
+        f"{worker.handle} long-running", f"{worker.handle} blocked", f"{worker.handle} failed",
+    ]
+    assert harness.ledger.get(worker.id).state == ledger_mod.FAILED
+
+
+def test_a_finished_worker_is_named_by_its_id_even_as_the_newest_of_its_item(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    worker = harness.ledger.update(harness.worker("ABC-1"), state=ledger_mod.CANCELLED)
+
+    assert board.target_of(harness.ledger, worker) == f"implementer/ABC-1#{worker.id}"
+
+
+def test_a_working_session_of_a_finished_board_worker_is_reported_not_adopted(harness):
+    unqueued(harness)
+    worker = board_worker(harness)
+    harness.ledger.update(worker, state=ledger_mod.CANCELLED)
+
+    first = harness.next_tick()
+    second = harness.next_tick()
+
+    assert harness.ledger.live_workers() == []
+    assert any(f"of {worker.handle}, which is cancelled, is still working" in w for w in first.warnings)
+    assert not any(worker.handle in w for w in second.warnings)
+
+
+def test_a_start_event_of_a_kind_a_board_worker_did_not_choose_starts_a_worker(harness):
+    from chargehand import router
+    from chargehand.roles import StartRule
+    from chargehand.sources import Event, WorkItem
+
+    unqueued(harness)
+    worker = board_worker(harness, subscribe=["comment"])
+    item = WorkItem("fake", "ABC-1", "id-ABC-1")
+    rule = StartRule(on="review_requested")
+    review = Event(source="fake", kind="review_requested", item=item, actor="a",
+                   occurred_at=time.time() + 60, dedupe_id="r1", pointer="ABC-1")
+
+    assert not router.suitable_worker_exists(harness.ledger, rule, "implementer", item, "review_requested")
+    assert router.suitable_worker_exists(harness.ledger, rule, "implementer", item, "comment")
+    assert router.deliver_to_holders(harness.ledger, "implementer", review) == (0, 0)
+    assert harness.ledger.inbox(worker) == []
+
+
+def test_holds_for_counts_a_board_worker_only_for_its_kinds(harness):
+    from chargehand import router
+
+    unqueued(harness)
+    worker = board_worker(harness, subscribe=["comment"])
+    (subscription,) = harness.ledger.subscriptions_of(worker)
+
+    assert router.holds_for(subscription, worker, "comment")
+    assert not router.holds_for(subscription, worker, "review_requested")
+    assert router.holds_for(subscription, worker, None)
+
+
+def test_an_item_less_worker_of_a_role_that_checks_out_its_item_is_refused(harness):
+    roles = harness.repo / ".chargehand" / "roles"
+    roles.mkdir(parents=True)
+    (roles / "implementer.toml").write_text(
+        'prompt = "review {item}"\ncheckout = "item"\npermission_mode = "auto"\n'
+    )
+    request_id = harness.ledger.record_request(
+        "new_worker", "test", origin=ledger_mod.REQUEST_BOARD, role="implementer"
+    )
+    harness.next_tick()
+
+    refused = harness.ledger.get_request(request_id)
+    assert refused["ok"] == 0 and "needs a work item" in refused["message"]
+    assert harness.ledger.live_workers() == []
+
+
+def test_a_launch_that_stops_part_way_answers_created_and_resumes(harness, monkeypatch):
+    from chargehand.errors import GitError
+    from chargehand.gitutil import Git
+
+    calls = []
+    real_fetch = Git.fetch
+
+    def fetch_once_failing(self, *args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise GitError("fetch failed")
+        return real_fetch(self, *args, **kwargs)
+
+    monkeypatch.setattr(Git, "fetch", fetch_once_failing)
+    request_id = harness.ledger.record_request(
+        "new_worker", "test", origin=ledger_mod.REQUEST_BOARD, role="implementer"
+    )
+    harness.next_tick()
+
+    answer = harness.ledger.get_request(request_id)
+    (worker,) = harness.ledger.live_workers()
+    assert answer["ok"] == 1
+    assert answer["message"].startswith(f"created {worker.handle}; its launch did not complete")
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING

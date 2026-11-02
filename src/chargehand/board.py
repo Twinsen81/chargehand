@@ -226,12 +226,17 @@ def target_of(ledger: Ledger, worker: Worker) -> str:
     """What the request names the worker by: its handle, as on the command line.
 
     A `role/item` handle names the live worker, or the newest one, of that role and
-    item; for an older one the handle with its id is used.
+    item, when the tick applies the request. A finished worker is named by the handle
+    with its id, because a start rule may start a new live worker on its item before
+    then; so is any worker that the plain handle does not name now.
     """
+    by_id = f"{worker.role}/{worker.item or ''}#{worker.id}"
+    if worker.is_terminal:
+        return by_id
     found, _ = ledger.find_worker(worker.handle)
     if found is not None and found.id == worker.id:
         return worker.handle
-    return f"{worker.role}/{worker.item or ''}#{worker.id}"
+    return by_id
 
 
 def worker_action(request: Request) -> Response:

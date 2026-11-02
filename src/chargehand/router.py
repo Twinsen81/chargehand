@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from chargehand import roles as roles_mod
 from chargehand import sanitize
-from chargehand.ledger import Ledger, Worker
+from chargehand.ledger import ORIGIN_SOURCE, Ledger, Subscription, Worker
 from chargehand.roles import StartRule
 from chargehand.sources.base import Event, WorkItem
 
@@ -105,17 +105,45 @@ def before_start(event: Event, started: float) -> bool:
     return event.occurred_at < started - START_ALLOWANCE_SECS
 
 
-def suitable_worker_exists(ledger: Ledger, rule: StartRule, role: str, item: WorkItem) -> bool:
+def holds_for(subscription: Subscription, worker: Worker, kind: str | None) -> bool:
+    """Whether *worker* has the subscribed item for an event of *kind*.
+
+    A worker that a start rule created has its items for every kind. A worker started by
+    hand chose the kinds it follows, so it has the item only for those; None asks about
+    any kind.
+    """
+    return (
+        kind is None
+        or worker.origin == ORIGIN_SOURCE
+        or kind_matches(subscription.kinds, kind, subscription.source)
+    )
+
+
+def _own_worker(ledger: Ledger, item: str, role: str | None) -> Worker | None:
+    """The live worker that a start rule created on *item*, in *role* when given."""
+    return next(
+        (
+            worker for worker in ledger.live_workers_for(item)
+            if worker.origin == ORIGIN_SOURCE and (role is None or worker.role == role)
+        ),
+        None,
+    )
+
+
+def suitable_worker_exists(
+    ledger: Ledger, rule: StartRule, role: str, item: WorkItem, kind: str | None = None
+) -> bool:
     """The rule's ``unless_subscribed`` check: does a live worker already have *item*?
 
     ``role`` asks about workers of the rule's own role, ``any`` about workers of every
-    role. A worker has the item when it subscribes to it, or when the item is its own.
+    role. A worker has the item when it subscribes to it (a worker started by hand, for
+    the event *kind* only), or when a start rule created it for the item.
     """
     any_role = rule.unless_subscribed == roles_mod.UNLESS_ANY
-    for _, worker in ledger.live_subscriptions(item.source, item.key):
-        if any_role or worker.role == role:
+    for subscription, worker in ledger.live_subscriptions(item.source, item.key):
+        if (any_role or worker.role == role) and holds_for(subscription, worker, kind):
             return True
-    return ledger.live_worker_for(item.key, None if any_role else role) is not None
+    return _own_worker(ledger, item.key, None if any_role else role) is not None
 
 
 def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> tuple[int, int]:
@@ -129,10 +157,10 @@ def deliver_to_holders(ledger: Ledger, role: str, event: Event) -> tuple[int, in
     """
     holders = {
         worker.id: worker
-        for _, worker in ledger.live_subscriptions(event.item.source, event.item.key)
-        if worker.role == role
+        for subscription, worker in ledger.live_subscriptions(event.item.source, event.item.key)
+        if worker.role == role and holds_for(subscription, worker, event.kind)
     }
-    own = ledger.live_worker_for(event.item.key, role)
+    own = _own_worker(ledger, event.item.key, role)
     if own is not None:
         holders[own.id] = own
     delivered = skipped = 0
@@ -293,6 +321,7 @@ __all__ = [
     "deliver_to_holders",
     "event_name",
     "kind_matches",
+    "holds_for",
     "suitable_worker_exists",
     "worker_start",
 ]

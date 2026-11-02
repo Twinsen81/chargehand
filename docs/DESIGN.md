@@ -789,13 +789,18 @@ roles hold the item. `--route` stays accepted for `--repository`.
   rule of the start rules does not hold it, but a paused repository and every cap do.
   Its item, when given, becomes a work item through the repository's tracker, which
   knows the item's format; it follows the event kinds you chose on that item, and it
-  never writes the queue label. Its worktree and branch end in its id
+  never writes the queue label. For a start rule it holds its item for those kinds only:
+  a start event of another kind is not delivered to it and starts a worker as if it were
+  not there. The queue label is the exception, as for any live worker on the item: the
+  queue start waits until it ends. The session of a finished one is reported, never
+  adopted as a start rule's worker. A role that checks out its item needs an item. Its worktree and branch end in its id
   (`<root>/<role>/<item>-<id>`, `<prefix><role>/<item>-<id>`, or `worker-<id>` without
   an item), so several such workers can work on one item. A `retry` of such a worker
   starts a new one the same way. Workers that share a role and an item are told apart
   by a handle with the worker's id, `role/item#id` (`role/#id` without an item); a
   worker that a start rule created keeps `role/item`. Every command that takes an item
-  also takes a handle, and `#id` alone.
+  also takes a handle, and `#id` alone; a shell reads a word that starts with `#` as a
+  comment, so quote it: `chargehand stop '#7'`.
   A reply is one line of text, cleaned of control sequences and capped at 500
   characters. It enters the worker's inbox as an event of the source `board`, the path
   a comment on its item takes, so delivery wakes the worker with it under the same caps

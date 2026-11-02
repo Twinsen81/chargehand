@@ -763,6 +763,22 @@ class Runner:
             by_id = self.ledger.worker_by_session_id(session.id)
             if by_id is not None and by_id.runtime != runtime:
                 by_id = None
+            # A worker started by hand has a worktree of its own and a handle with its id,
+            # which name no `role/item` to adopt the session as. Its session is reported,
+            # never adopted as a start rule's worker.
+            by_hand = by_id or (
+                self.ledger.worker_by_worktree(str(Path(session.cwd))) if session.cwd else None
+            )
+            if by_hand is not None and by_hand.origin != ledger_mod.ORIGIN_SOURCE:
+                key = f"orphan-notified:{session.id}"
+                working = by_hand.is_terminal and session.state == runtime_mod.WORKING
+                if working and not self.ledger.get_state(key):
+                    self.ledger.set_state(key, "1")
+                    report.warnings.append(
+                        f"session {session.id} of {by_hand.handle}, which is {by_hand.state}, "
+                        f"is still working; attach to it or stop it"
+                    )
+                continue
             previous = by_id or (
                 self.ledger.latest_worker_for(derived[1], derived[0]) if derived else None
             )
@@ -1096,18 +1112,34 @@ class Runner:
                     f"the item's identifier is not usable as a path or branch name: "
                     f"{sanitize.scrub_identifier(item.key)}"
                 )
+        if item is None and role.checkout == roles_mod.CHECKOUT_ITEM:
+            return False, f"role {role.name} checks out its item, so it needs a work item"
         label = item.key if item else f"new {role.name} worker"
         refusal = self._launch_refusal(repository, role, label)
         if refusal is not None:
             return False, refusal
-        worker = self._launch(
-            context, role, None, item, report, origin=ledger_mod.ORIGIN_BOARD,
-            kinds=tuple(dict.fromkeys(kinds)),
-        )
+        try:
+            worker = self._launch(
+                context, role, None, item, report, origin=ledger_mod.ORIGIN_BOARD,
+                kinds=tuple(dict.fromkeys(kinds)),
+            )
+        except LaunchAborted:
+            raise
+        except ChargehandError as exc:
+            # The row exists, so reconciliation resumes the launch on the next tick, as it
+            # resumes any launch that stopped part way.
+            created = self.ledger.recent_workers(1)
+            if not created or created[0].origin != ledger_mod.ORIGIN_BOARD:
+                raise
+            worker = self.ledger.update(created[0], last_error=str(exc)[:500])
+            report.errors.append(f"{worker.handle}: {exc}")
         if worker.state == ledger_mod.FAILED:
             return False, f"{worker.handle}: the launch failed; `chargehand status --verbose-titles` says why"
         if worker.state == ledger_mod.LAUNCHING:
-            return False, f"{worker.handle}: the launch did not complete; the next tick resumes it"
+            return True, (
+                f"created {worker.handle}; its launch did not complete, and the next tick "
+                f"resumes it"
+            )
         return True, f"started {worker.handle}"
 
     def _do_reply(self, worker: Worker, args: dict) -> tuple[bool, str]:
@@ -1399,7 +1431,7 @@ class Runner:
                     )
                     if worker.watchdog_notified != WATCHDOG_STOP_FAILED:
                         self.ledger.update(worker, watchdog_notified=WATCHDOG_STOP_FAILED)
-                        self._notify(report, worker.item, "watchdog-stop-failed",
+                        self._notify(report, worker.name, "watchdog-stop-failed",
                                      worker.url, worker.repository,
                                      detail=f"running for {elapsed / 3600:.1f}h")
                     continue
@@ -1409,11 +1441,11 @@ class Runner:
                     last_error=f"watchdog hard stop after {elapsed / 3600:.1f}h",
                 )
                 self._sync_labels(updated, self.context_for_worker(updated), report)
-                self._notify(report, worker.item, "watchdog-stopped", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
+                self._notify(report, worker.name, "watchdog-stopped", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
                 report.warnings.append(f"{worker.handle}: watchdog stopped the session")
             elif max_run and elapsed > max_run and not worker.watchdog_notified:
                 self.ledger.update(worker, watchdog_notified=WATCHDOG_LONG_RUN)
-                self._notify(report, worker.item, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
+                self._notify(report, worker.name, "long-running", worker.url, worker.repository, role=worker.role, detail=f"running for {elapsed / 3600:.1f}h")
 
     # ----- 4. pull requests of the workers' branches ------------------------
 
@@ -1670,7 +1702,9 @@ class Runner:
                     notes.append(f"start waits, {holder.handle} holds the item")
                     deferred = True
                     continue
-            elif router_mod.suitable_worker_exists(self.ledger, rule, role.name, event.item):
+            elif router_mod.suitable_worker_exists(
+                self.ledger, rule, role.name, event.item, event.kind
+            ):
                 delivered, skipped = router_mod.deliver_to_holders(self.ledger, role.name, event)
                 if delivered:
                     report.routed.append(f"{handle}: {rule.on} goes to the worker that has it")
@@ -2032,7 +2066,7 @@ class Runner:
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
-            if self._notify(report, worker.item, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
+            if self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
                 worker = self.ledger.update(worker, notified_state=observed)
             elif worker.is_terminal:
                 # A finished worker leaves the live loop, so nothing would visit it again.
@@ -2056,7 +2090,7 @@ class Runner:
                     f"gave up on the notification for {worker.handle} ({worker.state})"
                 )
                 continue
-            if self._notify(report, worker.item, worker.state, worker.url, worker.repository, role=worker.role, detail=detail or None):
+            if self._notify(report, worker.name, worker.state, worker.url, worker.repository, role=worker.role, detail=detail or None):
                 self.ledger.delete_state(key)
 
     def _resolve_done(
@@ -2135,7 +2169,7 @@ class Runner:
                 report.transitions.append(f"{worker.handle}: wake held -> queued")
         for worker, detail in result.faults:
             self._sync_labels(worker, self.context_for_worker(worker), report)
-            self._notify(report, worker.item or worker.handle, "wake-fault", worker.url,
+            self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
 
     def _workspace_check(self, worker: Worker, *, accept_files: bool = False) -> WorkspaceCheck:
@@ -2883,7 +2917,7 @@ class Runner:
         self._sync_labels(worker, context, report)
         report.failed.append(f"{worker.handle}: {reason}")
         log.error("%s failed: %s", worker.handle, sanitize.one_line(reason, limit=400))
-        self._notify(report, worker.item, "failed", worker.url, worker.repository, role=worker.role,
+        self._notify(report, worker.name, "failed", worker.url, worker.repository, role=worker.role,
                      detail=notify_detail)
         return worker
 
@@ -3028,7 +3062,8 @@ class Runner:
             item=item, state=state, url=url, repository=repository, role=role, detail=detail
         )
         outcome = self.notifier.dispatch(notification)
-        handle = f"{role}/{item}" if role else item
+        # A worker started by hand is named by its handle, which already holds the role.
+        handle = f"{role}/{item}" if role and "/" not in item else item
         about = f"{state} ({detail})" if detail else state
         report.notified.append(f"{handle}: {about}, {outcome.outcome}")
         if not outcome.failed:
