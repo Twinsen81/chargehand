@@ -162,13 +162,29 @@ public location.
   0700 under the state directory, and the `SessionStart` command hook names the token
   file, not the token, and runs its script with `python -I`, so nothing in the worktree
   is imported. The settings file is deleted when its session is removed. A post moves
-  only the live worker whose session posted it. The daemon answers every post with an
-  empty object, so it never makes a permission decision for a session, never keeps a
-  turn running and never adds text to the model's context. The payload is untrusted: the
+  only the live worker whose session posted it. The daemon answers every post but a
+  permission prompt with an empty object, so it never keeps a turn running and never
+  adds text to the model's context. The payload is untrusted: the
   last answer, the tool input and the other fields are cleaned of terminal control
   sequences and capped when stored, never reach a notification or a prompt, and
   `GET /api/state` returns them as JSON data for the page to escape. `status --json`
   names the last hook event and the reset time, but no payload text.
+- **Permission decisions come from the operator only.** The daemon holds a session's
+  permission hook open and answers it with allow or deny only after the operator clicks
+  Allow, Deny or Always allow on the board, which is a `POST` with the token. Nothing in a
+  hook payload, a tracker or a session's output can answer a prompt. Always allow records
+  a rule for that one worker in the ledger: the same tool with the same input, matched by
+  a SHA-256 hash of the whole input as the session sent it, so an input that differs
+  after the display cap or in a control character does not match. The one key left out
+  is the `description` of a Bash call, which the model words anew for each call and which
+  changes nothing the command does. The rule never changes
+  a role, a repository or Claude Code's settings, and it ends with the worker. A hook the
+  daemon holds is answered with no decision, so the session shows its own dialog, when
+  the hook's timeout comes near (the role's `permission_timeout_secs`, 600 seconds by
+  default), when the worker leaves `blocked` because the operator answered in the session,
+  and when the daemon stops; after a restart a prompt can only be answered in the session.
+  The first answer wins: the ledger row changes only while it is open and held, so a
+  second click, a late click and a click after a timeout change nothing.
 - **The board.** `GET /` serves one static page, its script and its style sheet,
   all from the package; nothing else is served as a file, and the page loads nothing
   from another origin. They are sent with `Content-Security-Policy: default-src 'none';
@@ -180,7 +196,7 @@ public location.
   the server, `<`, `>` and `&` are escaped in its JSON, and the page sets text with
   `textContent` only, never as markup. A link is made only from a plain http(s) URL, and
   opens with `rel="noopener noreferrer"`. The board shows session text (the last prompt,
-  the last answer, a permission prompt's tool input) that `status` leaves out, so it is
+  the last answer, a permission prompt's tool name and input) that `status` leaves out, so it is
   for the operator's own browser on the machine.
 - **Board actions hold the token.** Each action is a `POST` with the bearer token, like
   any other mutating call, and records the same control request as the CLI, which the

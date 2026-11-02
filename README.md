@@ -108,6 +108,15 @@ and notify; the top bar shows how many repositories are hidden, and "show" bring
 These settings are kept in the ledger, so they survive a restart, and the CLI does not use
 them: commands take the configured names and handles.
 
+When a worker's session asks for permission to run a tool, its card in Needs you shows the
+tool and its input with Allow, Deny and Always allow, and the session waits for your
+answer. Always allow also allows the same tool with the same input for that worker from
+then on, without a card; it never changes the role, the repository or Claude Code's
+settings. You can still answer in `claude attach`, and the card goes away. The session
+waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and then shows
+its own dialog, which only `claude attach` can answer; so does a prompt that was open
+when the daemon stopped.
+
 To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
 status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
 the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then

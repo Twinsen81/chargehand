@@ -324,6 +324,7 @@ effort = "high"                     # optional, passed as --effort
 prompt = "/work-issue {item}"       # or just "{item}"
 permission_mode = "auto"            # auto | manual | acceptEdits | dontAsk | plan | bypassPermissions
 allow = ["Bash(gh pr *)"]           # optional allow rules for this role's sessions
+permission_timeout_secs = 600       # optional: how long a permission prompt waits for the board
 setup = "scripts/prepare.sh {worktree}"   # optional, runs after the repository's setup
 status_file = "/tmp/chargehand/{item}/status.json"   # optional, see "Supervision"
 
@@ -437,7 +438,8 @@ runtime's name, and the board will show what a worker's runtime cannot do.
 
 Role files stay flat. The common keys (`runtime`, `prompt`, `model`, `effort`, `checkout`,
 `setup`, `status_file`, `[[start]]`, `[policy]`) sit next to the keys of the role's runtime,
-and the runtime checks its own: `agent`, `permission_mode` and `allow` belong to `claude`.
+and the runtime checks its own: `agent`, `permission_mode`, `allow` and
+`permission_timeout_secs` belong to `claude`.
 A key that neither the common set nor the runtime knows is an error, so a role written for
 one runtime does not start silently on another.
 
@@ -552,11 +554,34 @@ hook carries in its `Authorization` header and the `SessionStart` command reads 
 reads `session_id`, `cwd`, `transcript_path`, `last_assistant_message`, `error`,
 `notification_type`, `tool_name`, `tool_input` and `source`), and the post maps to the
 live worker with that session id, else to the live worker without a session id yet whose
-worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer is
-`{}`: a `Stop` gets no decision that would keep the turn running, a `SessionStart` gets no
-context for the model, and a `PermissionRequest` gets no decision, so the session keeps its
-own dialog. A hook that times out, or finds no daemon, is an error that Claude Code reports
-and goes past; the session runs on, and the next tick reads its state from the listing.
+worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer
+but a held permission prompt's is `{}`: a `Stop` gets no decision that would keep the turn
+running, and a `SessionStart` gets no context for the model. A hook that times out, or
+finds no daemon, is an error that Claude Code reports and goes past; the session runs on,
+and the next tick reads its state from the listing.
+
+**Permission prompts on the board.** For a runtime with board permissions, the daemon
+holds a `PermissionRequest` post open, and the worker's card in Needs you shows the tool
+and its input with Allow, Deny and Always allow. The `PermissionRequest` hook waits
+`permission_timeout_secs` (a `claude` role key, 600 seconds by default, 20 to 3600); the
+other hooks keep their 10 seconds. A session keeps the timeout of its launch, and the
+daemon reads it from the session's settings file: a session launched with the old
+10 seconds is not held. A prompt is a ledger record: `open`, then `resolved` (with the
+decision and who decided: `board` or `rule`) or `cancelled` (by the `session`). The board's
+answer, `POST /api/workers/<id>/answer` with `prompt` and `answer` (`allow`, `deny` or
+`always`), resolves the row only while it is open and a hook still holds it, so the first
+answer wins and a second click answers 409, "already resolved"; the held hook then
+returns Claude Code's decision. Always allow also records a rule for that worker: the
+same tool with the same input, matched by a hash of the whole input (except a Bash
+call's `description`, which the model words anew for each call). The next such post
+is allowed at once, with no card and no notification, and is recorded as resolved by the
+rule. A rule never changes the role, the repository or Claude Code's settings. The hook
+answers `{}`, so the session shows its own dialog, in three cases: the worker leaves
+`blocked` (the operator answered in `claude attach`, and the next hook or the next
+listing shows it), which cancels the record; five seconds before the hook's timeout; and
+when the daemon stops. After a timeout or a restart the record stays open but held by no
+hook, and the card says to answer in the session. The record has a `kind` and an
+`options` list, so a question with its own options can use the same record and card.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks
 existed is followed by the diff alone.
 
@@ -566,7 +591,7 @@ existed is followed by the diff alone.
 | `Stop` | as a `done` session: the status file, then `idle` (or what the file says) |
 | `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one |
 | `StopFailure`, any other error | the worker is `blocked`, "session failed" |
-| `PermissionRequest` | the worker is `blocked`, and the prompt is recorded with its tool and input |
+| `PermissionRequest` | the worker is `blocked`, the prompt is recorded with its tool and input, and the post waits for the board's answer; with a matching Always allow rule, it is allowed at once and nothing else changes |
 | `Notification` `permission_prompt` | the worker is `blocked` |
 | `Notification`, other types | no change |
 
@@ -578,8 +603,8 @@ for before a hook arrived is older than that hook, and the diff leaves that work
 the next tick. The last answer, the tool input and the other payload text are untrusted:
 they are cleaned of control sequences and capped when stored, kept out of notifications,
 and escaped when the page renders them. `/api/state` shows each worker's last hook, its
-last answer, its reset time and its open permission prompts. A prompt is resolved when the
-worker leaves `blocked` by any path, a `stop` or a `cancel` included.
+last answer, its reset time and its open permission prompts. An open prompt is cancelled
+when the worker leaves `blocked` by any path, a `stop` or a `cancel` included.
 
 The usage-limit category has not been observed yet (a missing model gives
 `model_not_found`), so it is matched defensively: a category such as `rate_limit` or
@@ -768,7 +793,8 @@ roles hold the item. `--route` stays accepted for `--repository`.
   role, the item with its link, the branch, the worktree, the model and effort of the
   role, the last prompt (the role's first prompt before any wake, else the wake message
   of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open
-  permission prompt, the wakes in the window of the daily wake cap, an approximate token
+  permission prompt with Allow, Deny and Always allow while its hook waits (section 6),
+  the wakes in the window of the daily wake cap, an approximate token
   count (the transcript's size over four) and the attach command.
 - **Board actions.** Every control command has a button, and each button records the
   same request as the command, with `origin` `board` where the CLI records `cli`; the
@@ -778,7 +804,8 @@ roles hold the item. `--route` stays accepted for `--repository`.
   `POST /api/workers` starts a worker (`repository`, `role`, an optional `item`, and
   `subscribe`, the event kinds on the item that wake it); `POST /api/workers/<id>/<action>`
   with `pause` (the CLI's `stop`), `continue` and `retry` (each with `force`), `cancel`,
-  `discard` (with `force`), `reply` (`text`) and `attach` (`terminal`);
+  `discard` (with `force`), `reply` (`text`), `attach` (`terminal`) and `answer`
+  (`prompt` and `answer`, for a permission prompt; it answers at once, see section 6);
   `POST /api/repositories/<name>/pause` and `/resume`; `POST /api/pause` and
   `/api/resume` for all repositories. An action waits up to three seconds for the tick
   and answers with the request's outcome, or with the request pending;
