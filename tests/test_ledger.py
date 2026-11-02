@@ -891,3 +891,21 @@ def test_first_writer_wins_between_an_answer_a_release_and_a_cancel(tmp_path):
         assert ledger.resolve_permission_prompts(worker) == 1
         assert ledger.get_permission_prompt(released).state == "cancelled"
         assert ledger.get_permission_prompt(answered).state == "resolved"
+
+
+def test_an_open_prompt_is_cancelled_when_the_worker_leaves_blocked_or_stops_not_when_its_launch_ends(tmp_path):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        launching = ledger.update(worker, state=ledger_mod.LAUNCHING)
+        prompt = ledger.record_permission_prompt(launching, tool_name="Bash", tool_input="{}")
+
+        running = ledger.update(launching, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(prompt).state == "open"
+        blocked = ledger.update(running, state=ledger_mod.BLOCKED)
+        assert ledger.get_permission_prompt(prompt).state == "open"
+        ledger.update(blocked, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(prompt).state == "cancelled"
+
+        other = ledger.record_permission_prompt(running, tool_name="Bash", tool_input="{}")
+        ledger.update(ledger.get(worker.id), state=ledger_mod.PAUSED)
+        assert ledger.get_permission_prompt(other).state == "cancelled"

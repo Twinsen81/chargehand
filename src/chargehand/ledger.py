@@ -107,8 +107,10 @@ BOARD_FIELDS: dict[str, tuple[str, ...]] = {
 # A prompt a session shows the operator. A permission prompt is answered allow or deny; the
 # record also holds a question with its own options, so that both use one card. A prompt is
 # `open` until it is answered (`resolved`, with the decision and who decided) or the
-# session stops showing it (`cancelled`). `released_at` is set when no hook waits for the
-# board's answer any more, after a timeout or a restart: the dialog in the session takes it.
+# session stops showing it (`cancelled`). An open prompt is "released" when `released_at` is
+# set: no hook waits for the board's answer any more (after the hook's timeout or a stop of
+# the daemon), so only the dialog in the session can answer it. It stays `open` because the
+# session still shows that dialog, and it is cancelled when the worker leaves `blocked`.
 PROMPT_PERMISSION = "permission"
 PROMPT_QUESTION = "question"
 PROMPT_OPEN = "open"
@@ -979,9 +981,16 @@ class Ledger:
         return replace(worker, **changes)
 
     def _after_state_write(self, worker: Worker, changes: Mapping[str, Any]) -> None:
-        # A worker that leaves `blocked` by any path, a stop or a cancel included, no
-        # longer shows a permission dialog.
-        if "state" in changes and changes["state"] != BLOCKED:
+        # A worker that leaves `blocked` by any path, or whose turn or session ends (a stop
+        # or a cancel included), no longer shows a permission dialog. A launch that ends
+        # (`launching` -> `running`) keeps it: the first dialog of a session can come
+        # before the tick confirms the launch.
+        if "state" not in changes:
+            return
+        state = changes["state"]
+        if state == BLOCKED:
+            return
+        if worker.state == BLOCKED or state not in (LAUNCHING, RUNNING):
             self.resolve_permission_prompts(worker, now=changes["updated_at"])
 
     @staticmethod
@@ -1065,6 +1074,16 @@ class Ledger:
             (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN),
         )
         return cursor.rowcount
+
+    def cancel_permission_prompt(self, prompt_id: int, *, now: float | None = None) -> bool:
+        """Cancel one open prompt that its session no longer shows. False when it was not open."""
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
+            "released_at = COALESCE(released_at, ?) WHERE id = ? AND state = ?",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, prompt_id, PROMPT_OPEN),
+        )
+        return cursor.rowcount == 1
 
     def set_prompt_digest(self, prompt_id: int, input_digest: str) -> None:
         self._conn.execute(
