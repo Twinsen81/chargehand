@@ -1,14 +1,31 @@
-// The read-only board. It polls /api/board and patches the page in place.
+// The board. It polls /api/board and patches the page in place, and sends actions.
 //
 // Every value from the API is untrusted text: it is set with textContent only, and a link
 // is made only from a plain http(s) URL. Columns and cards are kept between polls and
 // updated in place, keyed by worker id, so the scroll position of each lane stays.
+//
+// An action is a POST with the daemon's token, which the operator pastes once and this
+// browser keeps in localStorage for this origin. It is sent only in the Authorization
+// header, never in a URL. The board has no chat: a conversation goes through attach.
 'use strict';
 
 const POLL_MS = 1000;
 const STALE_AFTER_MS = 5000;
+// How long the page follows a request that the daemon has not applied yet.
+const FOLLOW_MS = 15 * 60 * 1000;
+const TOKEN_KEY = 'chargehand.token';
+const TERMINAL_KEY = 'chargehand.terminal';
+const REPLY_MAX = 500;
+const ACTION_LABELS = {
+  continue: 'Continue', pause: 'Pause', cancel: 'Cancel', reply: 'Reply',
+  attach: 'Attach', retry: 'Retry', discard: 'Discard',
+};
+const FORCED = new Set(['continue', 'retry', 'discard']);
+const FORCE_HINT = 'continue: accept the files in the worktree as they are now; ' +
+  'retry and discard: throw away unpushed or uncommitted work';
 const $ = (id) => document.getElementById(id);
 let lastOk = 0;
+let latest = null;
 // The last rendered signature of each card, by worker id.
 const signatures = new Map();
 
@@ -172,6 +189,8 @@ function cardChildren(c, now) {
 
   const title = el('div', 'title');
   title.append(link(c.item_url, c.item));
+  // Workers on one item share the title; the handle tells them apart.
+  if (c.handle) title.append(el('span', 'handle', c.handle));
   nodes.push(title);
 
   const meta = el('div', 'meta');
@@ -216,7 +235,29 @@ function cardChildren(c, now) {
     attach.title = c.attach;
     nodes.push(attach);
   }
+  if (c.actions && c.actions.length) nodes.push(cardActions(c));
   return nodes;
+}
+
+function cardActions(c) {
+  const row = el('div', 'actions');
+  let force = null;
+  if (c.actions.some((name) => FORCED.has(name))) {
+    const label = el('label', 'force');
+    force = el('input');
+    force.type = 'checkbox';
+    force.title = FORCE_HINT;
+    label.append(force, ' force');
+    label.title = FORCE_HINT;
+    row.append(label);
+  }
+  for (const name of c.actions) {
+    const button = el('button', 'action ' + name, ACTION_LABELS[name] || name);
+    button.type = 'button';
+    button.addEventListener('click', () => workerAction(c, name, Boolean(force && force.checked)));
+    row.append(button);
+  }
+  return row;
 }
 
 function signature(c) {
@@ -264,6 +305,7 @@ function renderColumns(columns, now) {
 // ----- polling ---------------------------------------------------------------
 
 function render(model) {
+  latest = model;
   const now = model.generated_at;
   const usage = model.usage || {};
   renderGauge('five_hour', usage.known ? usage.five_hour : null);
@@ -271,7 +313,235 @@ function render(model) {
   renderThrottle(model.throttle);
   renderHealth(model.health, now);
   renderStats(model.columns);
+  renderControls(model);
   renderColumns(model.columns, now);
+}
+
+// ----- controls and actions --------------------------------------------------
+
+let controlsSignature = null;
+
+function renderControls(model) {
+  const sig = JSON.stringify([model.repositories, model.terminals]);
+  if (sig === controlsSignature) return;
+  controlsSignature = sig;
+  const nodes = (model.repositories || []).map((repository) => {
+    const verb = repository.paused ? 'resume' : 'pause';
+    const button = el('button', 'repository ' + verb,
+      (repository.paused ? 'Resume ' : 'Pause ') + repository.name);
+    button.type = 'button';
+    button.title = repository.paused ? 'Admit launches in this repository again'
+      : 'Stop admitting launches in this repository';
+    button.addEventListener('click', () => send(
+      '/api/repositories/' + encodeURIComponent(repository.name) + '/' + verb, {},
+      verb + ' ' + repository.name));
+    return button;
+  });
+  $('repositories').replaceChildren(...nodes);
+  const select = $('terminal');
+  const chosen = localStorage.getItem(TERMINAL_KEY);
+  select.replaceChildren(...(model.terminals || []).map((name) => {
+    const option = el('option', null, name === 'iterm2' ? 'iTerm2' : name === 'terminal' ? 'Terminal' : name);
+    option.value = name;
+    option.selected = name === chosen;
+    return option;
+  }));
+}
+
+function token() {
+  return localStorage.getItem(TOKEN_KEY) || '';
+}
+
+function notice(text, kind) {
+  const box = $('notice');
+  box.className = 'notice ' + (kind || '');
+  box.textContent = text;
+  box.hidden = !text;
+}
+
+function describe(outcome) {
+  const what = outcome.kind + (outcome.target ? ' ' + outcome.target : '');
+  if (outcome.pending) return what + ': recorded, waiting for the daemon to apply it';
+  return what + ': ' + (outcome.ok ? 'ok' : 'refused') + (outcome.message ? ' · ' + outcome.message : '');
+}
+
+async function follow(outcome) {
+  const deadline = Date.now() + FOLLOW_MS;
+  let current = outcome;
+  while (current.pending && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    try {
+      const response = await fetch('/api/requests/' + encodeURIComponent(current.id),
+        { cache: 'no-store', credentials: 'omit' });
+      if (response.ok) current = await response.json();
+    } catch (error) {
+      // The daemon may be restarting; keep asking until the deadline.
+    }
+    notice(describe(current), current.pending ? 'pending' : current.ok ? 'ok' : 'bad');
+  }
+}
+
+async function send(path, body, what) {
+  if (!token()) {
+    notice('Paste the token first: the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    $('token').focus();
+    return;
+  }
+  notice(what + ': sending', 'pending');
+  let response;
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'omit',
+      headers: { 'Authorization': 'Bearer ' + token(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+  } catch (error) {
+    notice(what + ': the daemon is unreachable', 'bad');
+    return;
+  }
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = {};
+  }
+  if (response.status === 401) {
+    notice('The token is not valid. Paste the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    return;
+  }
+  if (!response.ok) {
+    notice(what + ': ' + (payload.error || 'HTTP ' + response.status), 'bad');
+    return;
+  }
+  notice(describe(payload), payload.pending ? 'pending' : payload.ok ? 'ok' : 'bad');
+  if (payload.pending) follow(payload);
+}
+
+function workerAction(c, name, force) {
+  const path = '/api/workers/' + encodeURIComponent(c.id) + '/' + name;
+  const what = name + ' ' + c.handle;
+  if (name === 'reply') {
+    openReply(c);
+    return;
+  }
+  if (name === 'attach') {
+    send(path, { terminal: $('terminal').value || 'iterm2' }, what);
+    return;
+  }
+  if (name === 'discard' &&
+      !window.confirm('Discard ' + c.handle + '? This removes its session, its worktree and its local branch' +
+        (force ? ', even with unpushed or uncommitted work.' : '.'))) return;
+  if (name === 'cancel' && !window.confirm('Cancel ' + c.handle + '? Its session stops; the worktree stays.')) return;
+  send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''));
+}
+
+function closePanel() {
+  const panel = $('panel');
+  panel.replaceChildren();
+  panel.hidden = true;
+}
+
+function field(labelText, input) {
+  const label = el('label', 'field');
+  label.append(el('span', null, labelText), input);
+  return label;
+}
+
+function panelButtons(primaryText, onPrimary) {
+  const row = el('div', 'buttons');
+  const primary = el('button', 'primary', primaryText);
+  primary.type = 'button';
+  primary.addEventListener('click', onPrimary);
+  const close = el('button', null, 'Close');
+  close.type = 'button';
+  close.addEventListener('click', closePanel);
+  row.append(primary, close);
+  return row;
+}
+
+function openReply(c) {
+  const panel = $('panel');
+  const input = el('input');
+  input.type = 'text';
+  input.maxLength = REPLY_MAX;
+  input.placeholder = 'One line; it reaches the session as an event from the board';
+  const submit = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    closePanel();
+    send('/api/workers/' + encodeURIComponent(c.id) + '/reply', { text }, 'reply ' + c.handle);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+    if (event.key === 'Escape') closePanel();
+  });
+  panel.replaceChildren(el('h3', null, 'Reply to ' + c.handle), field('line', input),
+    panelButtons('Send', submit));
+  panel.hidden = false;
+  input.focus();
+}
+
+function openNewWorker() {
+  const repositories = (latest && latest.repositories) || [];
+  const panel = $('panel');
+  const repository = el('select');
+  for (const entry of repositories) {
+    const option = el('option', null, entry.name);
+    option.value = entry.name;
+    repository.append(option);
+  }
+  const role = el('select');
+  const fillRoles = () => {
+    const entry = repositories.find((r) => r.name === repository.value) || { roles: [] };
+    role.replaceChildren(...entry.roles.map((name) => {
+      const option = el('option', null, name);
+      option.value = name;
+      return option;
+    }));
+  };
+  repository.addEventListener('change', fillRoles);
+  fillRoles();
+  const item = el('input');
+  item.type = 'text';
+  item.placeholder = 'optional, as the tracker names it';
+  const kinds = el('input');
+  kinds.type = 'text';
+  kinds.value = 'comment';
+  kinds.title = 'The event kinds on the item that wake the worker, separated by commas';
+  const submit = () => {
+    const body = { repository: repository.value, role: role.value };
+    if (item.value.trim()) {
+      body.item = item.value.trim();
+      const chosen = kinds.value.split(',').map((k) => k.trim()).filter(Boolean);
+      if (chosen.length) body.subscribe = chosen;
+    }
+    closePanel();
+    send('/api/workers', body, 'new worker ' + body.role + (body.item ? ' on ' + body.item : ''));
+  };
+  panel.replaceChildren(el('h3', null, 'New worker'), field('repository', repository),
+    field('role', role), field('work item', item), field('wakes on', kinds),
+    panelButtons('Start', submit));
+  panel.hidden = false;
+}
+
+function setupControls() {
+  const input = $('token');
+  input.value = token();
+  input.addEventListener('change', () => {
+    const value = input.value.trim();
+    if (value) localStorage.setItem(TOKEN_KEY, value);
+    else localStorage.removeItem(TOKEN_KEY);
+  });
+  $('token-forget').addEventListener('click', () => {
+    localStorage.removeItem(TOKEN_KEY);
+    input.value = '';
+  });
+  $('terminal').addEventListener('change', () => localStorage.setItem(TERMINAL_KEY, $('terminal').value));
+  $('new-worker').addEventListener('click', openNewWorker);
+  $('pause-all').addEventListener('click', () => send('/api/pause', {}, 'pause all repositories'));
+  $('resume-all').addEventListener('click', () => send('/api/resume', {}, 'resume all repositories'));
 }
 
 async function poll() {
@@ -297,4 +567,5 @@ async function poll() {
   }
 }
 
+setupControls();
 poll();

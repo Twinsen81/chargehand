@@ -29,7 +29,7 @@ from chargehand import runtime as runtime_mod
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError, TickBusy
 from chargehand.gitutil import Git
-from chargehand.ledger import Ledger, Worker, open_ledger
+from chargehand.ledger import ORIGIN_SOURCE, Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
 from chargehand.tick import REQUEST_MESSAGE_LIMIT, Runner, TickReport, tick_lock
 from chargehand.trackers import Status
@@ -127,14 +127,20 @@ def _span(secs: float) -> str:
 def _branch_is_ours(worker: Worker) -> bool:
     # A session can rename its branch after the tracker's convention, which puts a slug of
     # the issue title into the name, and an adopted session is recorded under the branch
-    # it is on. The runner's own placeholder ends in the item.
-    return worker.branch.endswith(worker.item)
+    # it is on. The runner's own placeholder ends in the item, or for a worker started by
+    # hand in the name of its worktree, which carries its id.
+    tail = worker.item if worker.origin == ORIGIN_SOURCE else worker.worktree_path.name
+    return bool(tail) and worker.branch.endswith(tail)
 
 
 def _worker_dict(
     worker: Worker, *, verbose: bool, runner: Runner | None = None
 ) -> dict[str, object]:
     payload: dict[str, object] = {
+        "id": worker.id,
+        # The name a command takes; it resolves back to this worker.
+        "handle": worker.target,
+        "origin": worker.origin,
         "item": worker.item,
         "role": worker.role,
         "runtime": worker.runtime,
@@ -309,7 +315,8 @@ def build_status(
             "working": sum(1 for w in workers if w.state in ("launching", "running")),
             "open": len(workers),
             "pending_requests": [
-                {"kind": r["kind"], "target": r["target"], "created_at": r["created_at"]}
+                {"id": r["id"], "kind": r["kind"], "target": r["target"],
+                 "origin": r["origin"], "created_at": r["created_at"]}
                 for r in ledger.pending_requests()
             ],
         },
@@ -373,8 +380,14 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
             )
             if worker.get("attach"):
                 detail = f"{detail} · {worker['attach']}".strip(" ·")
+            # A worker started by hand may share its item with others: its handle has its id.
+            shown = (
+                sanitize.scrub_identifier(str(worker["item"]))
+                if worker.get("origin", ORIGIN_SOURCE) == ORIGIN_SOURCE and worker["item"]
+                else sanitize.one_line(str(worker["handle"]), limit=40)
+            )
             lines.append(
-                f"  {sanitize.scrub_identifier(str(worker['item'])):<14} "
+                f"  {shown:<14} "
                 f"{sanitize.scrub_identifier(str(worker['role'])):<12} {worker['state']:<10} "
                 f"{str(worker['session_state'] or '-'):<9} "
                 f"{_elapsed(worker['created_at']):>6} {worker['step']:>4}  "
@@ -387,7 +400,8 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append("")
         lines.append("pending control requests")
         for request in runner["pending_requests"]:
-            lines.append(f"  {request['kind']} {request['target'] or ''}".rstrip())
+            target = f" {request['target']}" if request["target"] else ""
+            lines.append(f"  {request['kind']}{target} (from {request['origin']})")
     return "\n".join(lines)
 
 
@@ -547,23 +561,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
-def _find_worker(ledger: Ledger, item: str, role: str | None) -> tuple[Worker | None, str]:
-    live = ledger.live_workers_for(item)
-    if role is not None:
-        live = [w for w in live if w.role == role]
-    if len(live) > 1:
-        names = ", ".join(sorted(w.role for w in live))
-        return None, f"{sanitize.scrub_identifier(item)} has live workers in several roles ({names}); pass --role"
-    worker = live[0] if live else ledger.latest_worker_for(item, role)
-    if worker is None:
-        return None, f"no worker recorded for {sanitize.scrub_identifier(item)}"
-    return worker, ""
-
-
 def cmd_logs(args: argparse.Namespace) -> int:
     config = _load_config(args)
     with open_ledger() as ledger:
-        worker, problem = _find_worker(ledger, args.item, args.role)
+        worker, problem = ledger.find_worker(args.item, args.role)
     if worker is None:
         print(problem, file=sys.stderr)
         return EXIT_ERROR
@@ -862,8 +863,16 @@ def build_parser() -> argparse.ArgumentParser:
         return sub
 
     def add_item(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("item", help="the work item, such as an issue identifier")
-        sub.add_argument("--role", help="the worker's role, when several roles hold the item")
+        sub.add_argument(
+            "item",
+            help="the work item, such as an issue identifier, or a worker's handle from "
+                 "`status --json`, such as implementer/ABC-1 or implementer/ABC-1#7, or '#7' quoted",
+        )
+        sub.add_argument(
+            "--role",
+            help="the worker's role; with an item it means the role/item handle, which names "
+                 "that role's start-rule worker, live or finished, before workers started by hand",
+        )
 
     tick = add("tick", cmd_tick, "run one tick now")
     tick.add_argument("--json", action="store_true")

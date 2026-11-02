@@ -169,20 +169,44 @@ public location.
   sequences and capped when stored, never reach a notification or a prompt, and
   `GET /api/state` returns them as JSON data for the page to escape. `status --json`
   names the last hook event and the reset time, but no payload text.
-- **A read-only board.** `GET /` serves one static page, its script and its style sheet,
+- **The board.** `GET /` serves one static page, its script and its style sheet,
   all from the package; nothing else is served as a file, and the page loads nothing
   from another origin. They are sent with `Content-Security-Policy: default-src 'none';
   script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri
   'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
   `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, so no inline script or
-  style runs and no other site can frame the page. The page reads `GET /api/board` and
-  has no action: it sends no request other than that read, and it holds no token. Every
+  style runs and no other site can frame the page. The page reads `GET /api/board`. Every
   text field in that answer is cleaned of control sequences and direction overrides on
   the server, `<`, `>` and `&` are escaped in its JSON, and the page sets text with
   `textContent` only, never as markup. A link is made only from a plain http(s) URL, and
   opens with `rel="noopener noreferrer"`. The board shows session text (the last prompt,
   the last answer, a permission prompt's tool input) that `status` leaves out, so it is
   for the operator's own browser on the machine.
+- **Board actions hold the token.** Each action is a `POST` with the bearer token, like
+  any other mutating call, and records the same control request as the CLI, which the
+  tick applies; no action handler calls `claude`, git or a tracker, except attach (below).
+  The operator pastes the token into the page once; the page keeps it in the browser's
+  `localStorage` for `http://127.0.0.1:<port>` and sends it only in the `Authorization`
+  header. It is never in a URL, in `GET /`, or in any answer. Anything that can run
+  script in that origin, or read that browser profile, can therefore read the token, so
+  use the board in your own browser profile; "Forget token" removes it. Another origin
+  cannot read it, and the `Host` check and the missing CORS headers still apply. The
+  token is the same one every client uses: a board action can do what any CLI command can,
+  and no more.
+- **Operator text from the board.** A reply is trusted operator text: it reaches the
+  session's next turn as written. It is one line, cleaned of control sequences and
+  direction overrides, capped at 500 characters, and carried in the inbox under the
+  source name `board`, which no configured source may take, so no event from a source
+  can pass as a reply. The request row keeps the line, so it is in the ledger like the
+  other request arguments.
+- **Attach runs a terminal on this machine.** `POST /api/workers/<id>/attach` makes the
+  daemon run `/usr/bin/osascript`, which opens an iTerm2 or Terminal.app window that runs
+  the worker's attach command. The terminal is one of those two names; the session id must
+  be a plain identifier; the command must be plain words, and it reaches the AppleScript as
+  an argument, never inside the script's source, so no text in it can change the script.
+  macOS asks once whether the daemon's process may control the terminal (Privacy &
+  Security, Automation). The board embeds no chat: a conversation with a session happens
+  in that terminal.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is

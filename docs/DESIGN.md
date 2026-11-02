@@ -637,7 +637,9 @@ line per event with its kind, a colon and its pointer, for example
 `review_requested: https://github.com/o/r/pull/1`, and nothing else. Two events of one kind
 on one pointer give one line; one pointer with two kinds gives two lines. A pointer that is
 not a plain http(s) URL or identifier is left out, and a kind that is not a plain lower-case
-name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. The role
+name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. A reply
+typed on the board (section 7) is the one line that carries text:
+`reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
@@ -767,8 +769,64 @@ roles hold the item. `--route` stays accepted for `--repository`.
   role, the last prompt (the role's first prompt before any wake, else the wake message
   of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open
   permission prompt, the wakes in the window of the daily wake cap, an approximate token
-  count (the transcript's size over four) and the attach command. The board is
-  read-only: actions on workers are not built yet.
+  count (the transcript's size over four) and the attach command.
+- **Board actions.** Every control command has a button, and each button records the
+  same request as the command, with `origin` `board` where the CLI records `cli`; the
+  tick applies both alike, so the daemon stays the one writer. `status --json` shows the
+  origin of each pending request, and the tick's log line for a request names it. The
+  API, every call a `POST` with the token and a JSON body:
+  `POST /api/workers` starts a worker (`repository`, `role`, an optional `item`, and
+  `subscribe`, the event kinds on the item that wake it); `POST /api/workers/<id>/<action>`
+  with `pause` (the CLI's `stop`), `continue` and `retry` (each with `force`), `cancel`,
+  `discard` (with `force`), `reply` (`text`) and `attach` (`terminal`);
+  `POST /api/repositories/<name>/pause` and `/resume`; `POST /api/pause` and
+  `/api/resume` for all repositories. An action waits up to three seconds for the tick
+  and answers with the request's outcome, or with the request pending;
+  `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
+  The page asks for the token once, keeps it in the browser's `localStorage` for this
+  origin, and sends it only in the `Authorization` header, never in a URL.
+  A worker started from the board has origin `board`. The one-worker-per-role-and-item
+  rule of the start rules does not hold it, but a paused repository and every cap do.
+  Its item, when given, becomes a work item through the repository's tracker, which
+  knows the item's format; it follows the event kinds you chose on that item, and it
+  never writes the queue label. For a start rule it holds its item for those kinds only:
+  a start event of another kind is not delivered to it and starts a worker as if it were
+  not there. The queue label is the exception, as for any live worker on the item: the
+  queue start waits until it ends. The session of a finished one is reported, never
+  adopted as a start rule's worker. A role that checks out its item needs an item. Its worktree and branch end in its id
+  (`<root>/<role>/<item>-<id>`, `<prefix><role>/<item>-<id>`, or `worker-<id>` without
+  an item), so several such workers can work on one item. A `retry` of such a worker
+  starts a new one the same way. Workers that share a role and an item are told apart
+  by a handle with the worker's id, `role/item#id` (`role/#id` without an item); a
+  worker that a start rule created keeps `role/item`. Every command that takes an item
+  also takes a handle, and `#id` alone; a shell reads a word that starts with `#` as a
+  comment, so quote it: `chargehand stop '#7'`. One rule resolves a target, in order:
+  (1) an id handle names the worker with that id; (2) `role/item`, or an item with
+  `--role`, is a handle, and when a worker has exactly that handle it wins, the live one
+  first, then the newest; (3) otherwise the item decides: its one live worker (in the
+  role, when known), or among several the one start-rule worker that the bare item
+  names, or with none live the newest recorded. A bare item whose one live worker was
+  started by hand, while a start-rule worker on the item has ended, is refused, because a
+  notification about that worker carried the bare item. Anything else is refused with
+  each candidate as `role/item#id`, and a refusal about a finished worker lists the live
+  workers on its item. `cancel` and `discard` name the worker they acted on. Every handle chargehand prints resolves back to its
+  worker under this rule: `status --json` and the board show `role/item` for a live
+  start-rule worker and the id handle for every other worker, finished ones included,
+  and a hint in a refusal uses the bare item only when the rule resolves it to that
+  worker.
+  A reply is one line of text, cleaned of control sequences and capped at 500
+  characters. It enters the worker's inbox as an event of the source `board`, the path
+  a comment on its item takes, so delivery wakes the worker with it under the same caps
+  and the same usage reserve. No configured source may be named `board`. A worker that
+  is blocked, paused or parked keeps the reply in its inbox until it is idle again, and
+  the answer says so.
+  Attach opens a terminal window that runs the card's attach command (`claude attach
+  <session id>`): iTerm2 or Terminal.app, chosen on the page, through `osascript`, on
+  macOS only. The daemon's request thread runs it at once, because the tick can be busy
+  with a launch for minutes, and records an `attach` request that is already applied, for
+  the audit trail. The command reaches the AppleScript as an argument, never as part of
+  its source, and only a command of plain words is accepted. The board has no chat:
+  anything that needs a conversation goes through attach.
 - **Usage readings.** Claude Code gives a status line command the subscription's
   `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
   `resets_at`. It sends them on subscription plans only, and only after the session's first
@@ -934,7 +992,8 @@ not a record of what workers did: nothing a session wrote reaches it.
   the first eight characters of the session id, and the worker, or "no live worker" with
   the cwd; a refused post names its status. One line per accepted label or status write,
   with the status before and after. One line per wake, with the `kind: pointer` lines of
-  its message. A WARNING heartbeat for a tick longer than the interval, or one that began
+  its message, and the line of a reply from the board, which is the operator's own text.
+  A WARNING heartbeat for a tick longer than the interval, or one that began
   more than two intervals after the previous one ended. An idle tick writes no report line.
 - **One key.** Every line about a worker starts with its handle, `role/item`.
 - **What never appears.** A last answer, a waiting text, a permission prompt's tool

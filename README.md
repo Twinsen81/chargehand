@@ -88,7 +88,16 @@ in a terminal; ctrl-c stops it after the tick phase in progress.
 
 Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle and the
 daemon's health in the top bar, and a card per worker in the columns Needs you, Working,
-Queued, Idle and Closed. It refreshes every second and is read-only.
+Queued, Idle and Closed. It refreshes every second. Its buttons do what the control
+commands do: start a worker from a role, with an optional work item and the event kinds on
+it that wake the worker; pause, continue, cancel, retry or discard a worker; reply to a
+worker with one line of text, which reaches it as an event, the way a comment would;
+attach, which opens an iTerm2 or Terminal.app window (chosen on the page) running
+`claude attach` on the worker's session; and pause or resume a repository or all of
+them. The buttons need the daemon's token: paste the content of the token file into the
+token field once, and the browser keeps it for the page. Workers started on the board
+are named by a handle with their id, such as `implementer/ABC-1#7`, which every command
+that takes an item also accepts.
 
 To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
 status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
@@ -132,7 +141,9 @@ The level is `log_level` in `[serve]`: `debug`, `info` (the default) or `warning
 daemon reads it again on every tick, so a change needs no restart; `-v` and `-vv` override
 it for a `chargehand serve` in a terminal. Every line has the same format, a timestamp, the
 level and the part of chargehand that wrote it, and every line about a worker starts with
-its handle, `role/item`, so `grep implementer/ABC-1` finds all of them.
+its handle, `role/item`, so `grep implementer/ABC-1` finds all of them. A worker started on
+the board has `role/item#id` there. A start-rule worker keeps `role/item` in the log also
+after it ends, while `status --json` then shows it as `role/item#id`, which a command takes.
 
 At `info` the log holds:
 

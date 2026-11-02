@@ -70,6 +70,7 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .chip.state.paused, .chip.state.parked { color: var(--amber); border-color: var(--amber); }
 .card .age { margin-left: auto; color: var(--faint); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
 .card .title { font-weight: 600; font-size: 13.5px; margin-bottom: 5px; line-height: 1.35; }
+.card .title .handle { margin-left: 8px; font-weight: 400; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .card a { color: var(--accent); text-decoration: none; }
 .card a:hover { text-decoration: underline; }
 .card .meta { color: var(--muted); font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; font-family: var(--mono); }
@@ -84,3 +85,28 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .card .attach { margin-top: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
 
 footer { padding: 6px 16px; color: var(--faint); font-size: 11px; border-top: 1px solid var(--border); font-family: var(--mono); }
+
+nav.controls { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+nav.controls .repositories { display: flex; gap: 6px; flex-wrap: wrap; }
+nav.controls .setting { display: flex; align-items: center; gap: 4px; }
+nav.controls .setting:first-of-type { margin-left: auto; }
+button { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 2px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+button:hover { background: var(--card-hover); border-color: #3a4150; }
+button.primary { border-color: var(--accent); color: var(--accent); }
+button.repository.resume, button.action.continue { border-color: var(--green); }
+button.action.cancel, button.action.discard { border-color: var(--red); color: var(--red); }
+input, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; font: inherit; font-size: 12px; }
+input[type=checkbox] { padding: 0; }
+.notice { padding: 6px 16px; font-size: 12px; font-family: var(--mono); border-bottom: 1px solid var(--border); color: var(--muted); overflow-wrap: anywhere; }
+.notice.ok { color: var(--green); }
+.notice.bad { color: var(--red); }
+.notice.pending { color: var(--amber); }
+.panel { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.panel h3 { margin: 0 8px 4px 0; font-size: 13px; font-weight: 600; }
+.panel .field { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+.panel .field input[type=text] { min-width: 260px; }
+.panel .buttons { display: flex; gap: 6px; }
+.card .actions { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.card .actions .force { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 3px; margin-right: 4px; }
+.card .actions button { font-size: 11px; padding: 1px 7px; }
+[hidden] { display: none !important; }

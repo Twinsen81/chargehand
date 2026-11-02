@@ -341,7 +341,7 @@ def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
         worker = ledger.get(12)
         assert (worker.role, worker.item, worker.state) == ("implementer", "ABC-1", "running")
         # Every worker before version 3 was started by the queue label, so it keeps it.
@@ -517,7 +517,7 @@ def test_a_version_three_ledger_gains_the_hook_columns_and_the_prompts_in_place(
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
         worker = ledger.get(7)
         assert (worker.role, worker.item, worker.state, worker.owns_label) == ("reviewer", "PR-1", "idle", 2)
         assert (worker.reset_at, worker.last_hook, worker.last_answer) == (None, None, None)
@@ -566,3 +566,203 @@ def test_a_live_worker_is_found_by_its_session_uuid(ledger):
     assert ledger.live_worker_by_session_uuid("u-1").id == worker.id
     ledger.update(worker, state=ledger_mod.DONE)
     assert ledger.live_worker_by_session_uuid("u-1") is None
+
+
+# ----- version 5: where a control request came from, handles --------------------------
+
+# A version 4 ledger: version 3 plus the hook columns and the permission prompts.
+V4_SCHEMA = V3_SCHEMA.replace("PRAGMA user_version = 3;", "") + """
+ALTER TABLE workers ADD COLUMN reset_at REAL;
+ALTER TABLE workers ADD COLUMN last_hook TEXT;
+ALTER TABLE workers ADD COLUMN last_hook_at REAL;
+ALTER TABLE workers ADD COLUMN last_answer TEXT;
+ALTER TABLE workers ADD COLUMN transcript_path TEXT;
+CREATE TABLE permission_prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    tool_name TEXT NOT NULL, tool_input TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+    resolved_at REAL
+);
+PRAGMA user_version = 4;
+"""
+
+
+def test_a_version_four_ledger_records_the_origin_of_requests(tmp_path):
+    path = tmp_path / "v4.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V4_SCHEMA)
+    conn.execute(
+        "INSERT INTO requests (id, kind, target, args, created_at) "
+        "VALUES (3, 'cancel', 'ABC-1', '{}', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        (old,) = ledger.pending_requests()
+        assert (old["id"], old["kind"], old["origin"]) == (3, "cancel", ledger_mod.REQUEST_CLI)
+        new = ledger.record_request("stop", "x/#1", origin=ledger_mod.REQUEST_BOARD)
+        assert ledger.get_request(new)["origin"] == ledger_mod.REQUEST_BOARD
+
+
+@pytest.mark.parametrize("version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA"])
+def test_every_older_ledger_gains_the_request_origin(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        request_id = ledger.record_request("pause", origin=ledger_mod.REQUEST_BOARD)
+        assert ledger.get_request(request_id)["origin"] == "board"
+
+
+def test_a_request_origin_must_be_known(ledger):
+    with pytest.raises(ValueError, match="origin"):
+        ledger.record_request("pause", origin="elsewhere")
+
+
+def test_an_applied_request_is_recorded_complete(ledger):
+    request_id = ledger.record_applied_request(
+        "attach", "implementer/ABC-1", origin=ledger_mod.REQUEST_BOARD, ok=True, message="opened",
+        terminal="iterm2",
+    )
+
+    assert ledger.pending_requests() == []
+    request = ledger.get_request(request_id)
+    assert (request["ok"], request["message"], request["args"]) == (1, "opened", {"terminal": "iterm2"})
+
+
+def by_hand(ledger, item="ABC-1", role="implementer", index=0):
+    return ledger.create_worker(
+        role=role, item=item, item_id=f"id-{item}" if item else None, url=None, repository="test",
+        repo=Path("/repo"), worktree=Path(f"/w/{item}-{index}"), branch=f"b{index}",
+        origin=ledger_mod.ORIGIN_BOARD,
+    )
+
+
+def test_a_worker_started_by_hand_has_a_handle_with_its_id(ledger):
+    source = make(ledger)
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+
+    assert source.handle == "implementer/ABC-1" and source.name == "ABC-1"
+    assert first.handle == f"implementer/ABC-1#{first.id}" == first.name
+    assert second.handle == f"implementer/ABC-1#{second.id}"
+
+
+def test_find_worker_takes_an_item_a_handle_or_a_handle_with_an_id(ledger):
+    source = make(ledger)
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+    reviewer = make(ledger, item="ABC-2", worktree="/w/r", role="reviewer")
+
+    assert ledger.find_worker("ABC-2")[0].id == reviewer.id
+    assert ledger.find_worker(f"implementer/ABC-1#{first.id}")[0].id == first.id
+    assert ledger.find_worker(f"#{second.id}")[0].id == second.id
+    assert ledger.find_worker("reviewer/ABC-2")[0].id == reviewer.id
+    ledger.update(first, state=ledger_mod.CANCELLED)
+    ledger.update(second, state=ledger_mod.CANCELLED)
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+    worker, problem = ledger.find_worker(f"reviewer/ABC-1#{first.id}")
+    assert worker is None and first.handle in problem
+    worker, problem = ledger.find_worker("#999")
+    assert worker is None and problem == "no worker #999"
+    worker, problem = ledger.find_worker("reviewer/ABC-2", "implementer")
+    assert worker is None and "role reviewer" in problem
+
+
+def test_find_worker_asks_for_a_handle_when_one_role_has_several_live_workers(ledger):
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+
+    worker, problem = ledger.find_worker("ABC-1")
+
+    assert worker is None
+    assert first.handle in problem and second.handle in problem
+
+
+def test_a_handle_names_its_start_rule_worker_before_any_other_worker(ledger):
+    source = make(ledger)
+    board = by_hand(ledger, index=1)
+    reviewer_board = by_hand(ledger, role="reviewer", index=2)
+
+    # Rule 2: `role/item`, and the bare item with --role, are the start-rule worker's handle.
+    for target, role in (("implementer/ABC-1", None), ("ABC-1", "implementer")):
+        assert ledger.find_worker(target, role)[0].id == source.id
+    # Rule 3: the bare item alone names the one start-rule worker among the live ones,
+    # also when a board worker of another role is live on the item.
+    assert ledger.find_worker("ABC-1")[0].id == source.id
+    assert ledger.find_worker("ABC-1", "reviewer")[0].id == reviewer_board.id
+    assert ledger.find_worker(board.handle)[0].id == board.id
+
+    # The handle wins over a live board worker once the start-rule worker has finished.
+    ledger.update(source, state=ledger_mod.CANCELLED)
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+    # The bare item has no handle of its own: the live workers decide, here two roles.
+    worker, problem = ledger.find_worker("ABC-1")
+    assert worker is None and "several roles" in problem
+    assert board.id_handle in problem and reviewer_board.id_handle in problem
+
+
+LIVE, FINISHED = "live", "finished"
+
+
+@pytest.mark.parametrize("earlier", [False, True], ids=["first", "after-a-finished-one"])
+@pytest.mark.parametrize("source_state", [None, LIVE, FINISHED])
+@pytest.mark.parametrize("board_state", [None, LIVE, FINISHED])
+@pytest.mark.parametrize("board_role", ["implementer", "reviewer"])
+@pytest.mark.parametrize("second_board", [False, True])
+def test_every_handle_chargehand_prints_resolves_back_to_its_worker(
+    ledger, earlier, source_state, board_state, board_role, second_board
+):
+    """Start-rule and board workers, live or finished, in one or two roles, on one item."""
+    workers = []
+
+    def add(worker, state):
+        if state == FINISHED:
+            worker = ledger.update(worker, state=ledger_mod.CANCELLED)
+        else:
+            worker = ledger.update(worker, state=ledger_mod.RUNNING)
+        workers.append(worker)
+
+    if earlier:
+        add(make(ledger, worktree="/w/old"), FINISHED)
+    if source_state:
+        add(make(ledger), source_state)
+    if board_state:
+        add(by_hand(ledger, role=board_role, index=1), board_state)
+        if second_board:
+            add(by_hand(ledger, role=board_role, index=2), LIVE)
+    if not workers:
+        pytest.skip("no worker in this combination")
+
+    for worker in workers:
+        printed = {worker.target, ledger.target_for(worker), worker.id_handle}
+        if not worker.is_terminal:
+            printed.add(worker.handle)
+        for name in printed:
+            found, problem = ledger.find_worker(name)
+            assert found is not None and found.id == worker.id, (name, problem)
+        assert worker.target == (
+            worker.handle if not worker.is_terminal else worker.id_handle
+        )
+
+
+def test_a_bare_item_is_refused_when_it_could_mean_a_finished_start_rule_worker(ledger):
+    """A notification about the start-rule worker carried the bare item; a live board
+    worker on the item must not take a command meant for the finished one."""
+    source = ledger.update(make(ledger), state=ledger_mod.CANCELLED)
+    board = ledger.update(by_hand(ledger, index=1), state=ledger_mod.IDLE)
+
+    worker, problem = ledger.find_worker("ABC-1")
+
+    assert worker is None
+    assert source.id_handle in problem and board.id_handle in problem
+    # The handles still resolve, each to its own worker.
+    assert ledger.find_worker(source.id_handle)[0].id == source.id
+    assert ledger.find_worker(board.id_handle)[0].id == board.id
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+
+def test_errors_show_a_handle_as_typed(ledger):
+    _, problem = ledger.find_worker("implementer/NOPE-1")
+    assert problem == "no worker recorded for implementer/NOPE-1 in role implementer"

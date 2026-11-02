@@ -123,6 +123,24 @@ def entry(pointer: str, number: int = 1, kind: str = "comment") -> InboxEntry:
     )
 
 
+def test_a_reply_from_the_board_reaches_the_message_as_one_clean_line():
+    reply = dataclasses.replace(
+        entry("say \x1b[2JPONG\n‮now " + "x" * 600, 2, kind=ledger_mod.REPLY_KIND),
+        source=ledger_mod.REPLY_SOURCE,
+    )
+    # The same text from any other source is a pointer like any other, and is left out.
+    impostor = entry("say PONG now", 3, kind=ledger_mod.REPLY_KIND)
+
+    message, left_out = wake_message([entry("https://example.invalid/a", 1), reply, impostor])
+
+    lines = message.splitlines()
+    assert lines[:2] == [delivery_mod.MESSAGE_HEADER, "comment: https://example.invalid/a"]
+    assert lines[2].startswith(delivery_mod.REPLY_PREFIX + "say PONG now xxx")
+    assert len(lines[2]) == len(delivery_mod.REPLY_PREFIX) + ledger_mod.REPLY_LIMIT
+    assert "\x1b" not in message and "‮" not in message
+    assert len(lines) == 3 and left_out == 1
+
+
 def test_the_message_lists_each_usable_pointer_once_and_nothing_else():
     message, left_out = wake_message([
         entry("https://example.invalid/a", 1),

@@ -26,7 +26,18 @@
   <div class="health" id="health"><span class="dot"></span><span class="text">-</span></div>
   <div class="refresh" id="refresh">loading</div>
 </header>
+<nav class="controls">
+  <button type="button" id="new-worker">New worker</button>
+  <button type="button" id="pause-all">Pause all</button>
+  <button type="button" id="resume-all">Resume all</button>
+  <span class="repositories" id="repositories"></span>
+  <label class="setting">terminal <select id="terminal"></select></label>
+  <label class="setting">token <input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="from the token file"></label>
+  <button type="button" id="token-forget">Forget token</button>
+</nav>
+<div class="notice" id="notice" hidden></div>
+<div class="panel" id="panel" hidden></div>
 <main id="board"></main>
-<footer id="foot">read-only · polling every second</footer>
+<footer id="foot">polling every second · actions need the token</footer>
 </body>
 </html>

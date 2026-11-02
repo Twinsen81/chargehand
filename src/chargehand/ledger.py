@@ -18,6 +18,7 @@ SQLite under the state directory, not /tmp, because it has to survive a reboot.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -26,10 +27,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from chargehand import paths
+from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -78,6 +79,23 @@ ORIGIN_SOURCE = "source"
 ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
+
+# Where a control request came from: the command line or the board. Both record the same
+# kinds and arguments; the tick applies them alike.
+REQUEST_CLI = "cli"
+REQUEST_BOARD = "board"
+REQUEST_ORIGINS = (REQUEST_CLI, REQUEST_BOARD)
+
+# A reply that the operator typed on the board waits in the worker's inbox as an event of
+# this source and kind, with the line as its pointer. No configured source may have this
+# name, so only the tick writes such a row; the line is trusted operator text, cleaned to
+# one line of at most REPLY_LIMIT characters.
+REPLY_SOURCE = "board"
+REPLY_KIND = "reply"
+REPLY_LIMIT = 500
+
+# A worker handle that names the worker by id: `role/item#id`, or `role/#id` without an item.
+_ID_HANDLE = re.compile(r"(?:([^/#\s]+)/([^/#\s]*))?#([0-9]{1,12})")
 
 # What a worker's `owns_label` says it shows its state on. One worker per item does it,
 # so two workers cannot write the same label in turn. QUEUE: the queue label of its
@@ -212,7 +230,8 @@ CREATE TABLE IF NOT EXISTS requests (
     created_at  REAL    NOT NULL,
     applied_at  REAL,
     ok          INTEGER,
-    message     TEXT
+    message     TEXT,
+    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}'
 );
 
 CREATE INDEX IF NOT EXISTS requests_pending ON requests (applied_at);
@@ -352,6 +371,13 @@ DROP INDEX IF EXISTS workers_one_live_per_role_item;
 {_SCHEMA}
 """
 
+# Version 5 records where each control request came from. Every earlier version has the
+# requests table, so each one takes this step; the rows recorded before it came from the CLI.
+_MIGRATE_V4_TO_V5 = f"""
+ALTER TABLE requests ADD COLUMN origin TEXT NOT NULL DEFAULT '{REQUEST_CLI}';
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -407,8 +433,39 @@ class Worker:
 
     @property
     def handle(self) -> str:
-        """How a worker is named in logs, in reports, and as its session's display name."""
-        return f"{self.role}/{self.item}" if self.item else f"{self.role}/#{self.id}"
+        """How a worker is named in logs, in reports, and as its session's display name.
+
+        A start rule keeps one live worker per role and item, so `role/item` names it. A
+        worker created by hand may share its role and item with others, so its handle
+        carries its id: `role/item#id`, or `role/#id` without an item. The CLI and the
+        tick accept every handle as a target.
+        """
+        if self.item and self.origin == ORIGIN_SOURCE:
+            return f"{self.role}/{self.item}"
+        return self.id_handle
+
+    @property
+    def id_handle(self) -> str:
+        """The handle with the worker's id, which names it alone in every case."""
+        return f"{self.role}/{self.item or ''}#{self.id}"
+
+    @property
+    def target(self) -> str:
+        """The handle that chargehand prints for a command to name this worker.
+
+        `role/item` for a live start-rule worker: the database keeps one live worker per
+        role and item, and the resolution rule (:meth:`Ledger.find_worker`) prefers it.
+        The id handle for every other worker, because a finished start-rule worker's
+        `role/item` names its successor once a start rule starts one.
+        """
+        return self.id_handle if self.is_terminal else self.handle
+
+    @property
+    def name(self) -> str:
+        """What a message to the operator calls the worker: its item, or its handle."""
+        if self.item and self.origin == ORIGIN_SOURCE:
+            return self.item
+        return self.handle
 
 
 @dataclass(frozen=True)
@@ -540,11 +597,13 @@ class Ledger:
         # old ledger as it was, instead of a renamed table that the next open cannot rename.
         # Every statement of the schema is idempotent: the version 1 copy includes the
         # whole schema, and a version 2 ledger only gains the tables it lacks.
-        # A version 2 file takes both later steps; the version 1 copy includes the whole schema.
+        # A version 2 file takes every later step; the version 1 copy includes the whole
+        # schema but keeps its own requests table, which gains the request origin.
         script = {
-            1: _MIGRATE_V1_TO_V2,
-            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4,
-            3: _MIGRATE_V3_TO_V4,
+            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5,
+            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5,
+            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5,
+            4: _MIGRATE_V4_TO_V5,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -631,17 +690,110 @@ class Ledger:
         ).fetchone()
         return _row_to_worker(row) if row else None
 
-    def latest_worker_for(self, item: str, role: str | None = None) -> Worker | None:
-        if role is None:
-            row = self._conn.execute(
-                "SELECT * FROM workers WHERE item = ? ORDER BY id DESC LIMIT 1", (item,)
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT * FROM workers WHERE item = ? AND role = ? ORDER BY id DESC LIMIT 1",
-                (item, role),
-            ).fetchone()
+    def latest_worker_for(
+        self, item: str, role: str | None = None, *, origin: str | None = None
+    ) -> Worker | None:
+        query, values = "SELECT * FROM workers WHERE item = ?", [item]
+        if role is not None:
+            query, values = query + " AND role = ?", [*values, role]
+        if origin is not None:
+            query, values = query + " AND origin = ?", [*values, origin]
+        row = self._conn.execute(query + " ORDER BY id DESC LIMIT 1", values).fetchone()
         return _row_to_worker(row) if row else None
+
+    def find_worker(self, target: str, role: str | None = None) -> tuple[Worker | None, str]:
+        """The one worker a control command means, or why it cannot tell.
+
+        One rule, applied in this order:
+
+        1. An id handle (`role/item#id`, `role/#id`, `#id`) names the worker with that id;
+           its role and item, and *role* when given, must match.
+        2. A `role/item` handle, or a bare item with *role*, is a handle. When a worker
+           has exactly that handle, the handle wins: the live worker with it first, then
+           the newest one with it. Only a start-rule worker has a handle without an id.
+        3. Otherwise, by the item (in *role* when known): the one live worker on it; with
+           several, the one start-rule worker among them that the bare item names; with
+           none live, the newest recorded. A bare item whose one live worker was started
+           by hand, while a start-rule worker on the item has ended, is refused: a
+           notification about that worker carried the bare item. Anything else is refused,
+           with each candidate as its id handle.
+
+        Every handle chargehand prints (:attr:`Worker.target`, :meth:`target_for`)
+        resolves back to its worker under this rule.
+        """
+        shown = sanitize.one_line(target, limit=100) if target else "''"
+        by_id = _ID_HANDLE.fullmatch(target)
+        if by_id is not None:
+            worker = self.get(int(by_id.group(3)))
+            if worker is None:
+                return None, f"no worker #{by_id.group(3)}"
+            named_role = by_id.group(1)
+            if named_role is not None and (named_role, by_id.group(2) or None) != (
+                worker.role, worker.item
+            ):
+                return None, f"worker #{worker.id} is {worker.id_handle}, not {shown}"
+            if role is not None and role != worker.role:
+                return None, f"worker #{worker.id} is in role {worker.role}, not {role}"
+            return worker, ""
+        item = target
+        if "/" in target:
+            named_role, _, item = target.partition("/")
+            if role is not None and role != named_role:
+                return None, f"{shown} is in role {named_role}, not {role}"
+            role = named_role
+        if role is not None:
+            # Rule 2: an exact handle. The unique index allows one live worker with it.
+            exact = next(
+                (w for w in self.live_workers_for(item)
+                 if w.role == role and w.origin == ORIGIN_SOURCE),
+                None,
+            ) or self.latest_worker_for(item, role, origin=ORIGIN_SOURCE)
+            if exact is not None:
+                return exact, ""
+        live = self.live_workers_for(item)
+        if role is not None:
+            live = [w for w in live if w.role == role]
+        if len(live) > 1:
+            named = [w for w in live if w.name == target]
+            if len(named) == 1:
+                return named[0], ""
+            handles = ", ".join(w.id_handle for w in live)
+            roles = sorted({w.role for w in live})
+            if len(roles) > 1:
+                return None, (
+                    f"{shown} has live workers in several roles ({', '.join(roles)}); pass "
+                    f"--role, or name one of them: {handles}"
+                )
+            return None, f"{shown} has several live workers; name one of them: {handles}"
+        if live:
+            only = live[0]
+            finished = (
+                self.latest_worker_for(item, origin=ORIGIN_SOURCE)
+                if role is None and only.origin != ORIGIN_SOURCE else None
+            )
+            if finished is not None:
+                # A notification about that start-rule worker carried the bare item; the
+                # one live worker started by hand is not the worker it named.
+                return None, (
+                    f"{shown} names a start-rule worker that has ended and a worker started "
+                    f"by hand; name one of them: {finished.id_handle}, {only.id_handle}"
+                )
+            return only, ""
+        latest = self.latest_worker_for(item, role, origin=ORIGIN_SOURCE) or self.latest_worker_for(
+            item, role
+        )
+        if latest is None:
+            return None, f"no worker recorded for {shown}" + (f" in role {role}" if role else "")
+        return latest, ""
+
+    def target_for(self, worker: Worker) -> str:
+        """The shortest name a command can give *worker* now: its item, else its target.
+
+        The item is used only when the rule resolves it to *worker*, so a hint stays as
+        short as before for a worker alone on its item.
+        """
+        found, _ = self.find_worker(worker.name)
+        return worker.name if found is not None and found.id == worker.id else worker.target
 
     def live_workers(self) -> list[Worker]:
         rows = self._conn.execute(
@@ -1036,12 +1188,29 @@ class Ledger:
 
     # ----- control requests -------------------------------------------------
 
-    def record_request(self, kind: str, target: str | None = None, **args: Any) -> int:
+    def record_request(
+        self, kind: str, target: str | None = None, *, origin: str = REQUEST_CLI, **args: Any
+    ) -> int:
+        if origin not in REQUEST_ORIGINS:
+            raise ValueError(f"unknown request origin {origin!r}")
         cursor = self._conn.execute(
-            "INSERT INTO requests (kind, target, args, created_at) VALUES (?, ?, ?, ?)",
-            (kind, target, json.dumps(args, sort_keys=True), time.time()),
+            "INSERT INTO requests (kind, target, args, created_at, origin) VALUES (?, ?, ?, ?, ?)",
+            (kind, target, json.dumps(args, sort_keys=True), time.time(), origin),
         )
         return int(cursor.lastrowid)
+
+    def record_applied_request(
+        self, kind: str, target: str | None = None, *, origin: str, ok: bool, message: str,
+        **args: Any,
+    ) -> int:
+        """A request that its caller applied itself, recorded for the audit trail only.
+
+        It is complete from the start, so no tick applies it again.
+        """
+        with self.transaction():
+            request_id = self.record_request(kind, target, origin=origin, **args)
+            self.complete_request(request_id, ok=ok, message=message)
+        return request_id
 
     def pending_requests(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -1133,6 +1302,7 @@ def summarize(workers: Iterable[Worker]) -> Mapping[str, int]:
 
 
 __all__ = [
+    "REQUEST_ORIGINS",
     "Worker",
     "SessionRecord",
     "Subscription",
