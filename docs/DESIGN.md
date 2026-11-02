@@ -291,7 +291,7 @@ type = "github"
 
 `[[route]]` with `repo` and `max_open_attempts` are the older spellings and stay accepted.
 
-The daemon reads one more table. Every key is optional; these are the defaults:
+The daemon reads two more tables. Every key is optional; these are the defaults:
 
 ```toml
 [serve]
@@ -299,7 +299,14 @@ port = 7878                         # on 127.0.0.1; no key binds another address
 token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
 tick_interval_secs = 60             # how often the daemon ticks
 usage_file = "~/.cache/chargehand/usage.json"     # the status line wrapper writes it
+
+[usage]
+wake_reserve_percent = 20           # no wake while a window is above 80 %
+new_worker_reserve_percent = 30     # no new worker while the week is above 70 %
 ```
+
+The reserves keep a part of the subscription's usage windows for your own sessions (see
+"Admission" in section 5 and "Delivery" in section 6).
 
 `poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
 interval of `watch`, capped at 30 seconds.
@@ -457,8 +464,16 @@ is run through a shell, so a value containing spaces or shell metacharacters sta
 ### Admission
 
 A new launch needs `working < max_concurrent`, `working + blocked < max_open_workers`, the
-repository's own `max_concurrent` when it has one, and the role's `max_workers` when it has
-one.
+repository's own `max_concurrent` when it has one, the role's `max_workers` when it has
+one, and the usage reserve for new workers: the weekly window of the role's provider at or
+below 100 minus `new_worker_reserve_percent` (70 % by default). The usage readings are kept
+per provider (window kind, percent used, reset time), and each runtime names the provider
+its sessions draw on; only `claude` has readings, from the status line wrapper's usage
+file. No usage file is no reading, and no reading means no reserve. A file older than 30
+minutes is a reading of unknown value, and an unknown week holds new workers back, because
+a new worker can run for hours. The check covers the start rules, the board's new workers
+and every later way to start one. A start that the reserve holds waits as one that a cap
+holds; a board request is refused with the reason.
 
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
@@ -605,7 +620,7 @@ existed is followed by the diff alone.
 |---|---|
 | `SessionStart` | the worker is `running` |
 | `Stop` | as a `done` session: the status file, then `idle` (or what the file says) |
-| `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one |
+| `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one; a limit of one model family also sets the board's model-limit badge |
 | `StopFailure`, any other error | the worker is `blocked`, "session failed" |
 | `PermissionRequest` | the worker is `blocked`, the prompt is recorded with its tool and input, and the post waits for the board's answer; with a matching Always allow rule, it is allowed at once and nothing else changes |
 | `Notification` `permission_prompt` | the worker is `blocked` |
@@ -627,7 +642,12 @@ The usage-limit category has not been observed yet (a missing model gives
 `model_not_found`), so it is matched defensively: a category such as `rate_limit` or
 `usage_limit`, or an unnamed one whose message says so. The raw category is kept in
 `last_error`. The reset time is read from an epoch, an ISO 8601 time, or a clock time such
-as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown.
+as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown. The same
+check reads a `failed` session in the listing: a category or a message in its error
+fields that names a usage limit parks the worker as the hook does, for a session whose
+hook did not arrive. A message that names a model family's own limit, such as "Opus
+weekly limit reached", also records that family for the board's top bar, because the usage
+windows have no per-model window.
 
 | Session state | Meaning | Action |
 |---|---|---|
@@ -641,8 +661,12 @@ question and the worker waits for events), `queued` (events wait in its inbox fo
 that admission held back), `blocked` (it needs you), `paused` (stopped by `stop`) or
 `parked` (a usage limit ended its turn; it waits for the reset). On the tracker, `idle`,
 `queued` and `parked` keep the blocked label, as a finished turn did before: the operator
-may want to look at what the turn left. Delivery, the watchdog and the session diff never
-move a `parked` worker; `continue` respawns it.
+may want to look at what the turn left. The watchdog and the session diff never move a
+`parked` worker. Parking is not a failure: it uses no launch attempt and no retry, and it
+is notified once. Once its reset time has passed, delivery resumes the worker in the same
+session with a short continue message, oldest reset first, through the same admission as
+a wake, so a long list of parked workers does not use the new window at once. A worker
+parked without a reset time waits for `continue`, which respawns it.
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -684,13 +708,19 @@ typed on the board (section 7) is the one line that carries text:
 `reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
-`max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
-no reserve). A worker that is not admitted becomes `queued` and keeps its events. The
+`max_wakes_per_day` over the last 24 hours, and the usage reserve: every window of the
+worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
+reading means no reserve, and a reading older than 30 minutes holds no wake back, because
+a wake continues work that already runs. A worker that is not admitted becomes `queued` and
+keeps its events, and the reason it waits is kept for the board. The
 runtime then wakes the same session: `claude` stops a live idle process, confirms that it
 stopped, and resumes it by the full session id. It reads the listing again first: a session
 that started a turn or opened a prompt since the tick's listing is left alone, and its
 events wait. After the wake, one ledger transaction marks
 the events delivered and records the wake on the worker and as a `wake` row in `sessions`.
+The worker becomes `running` only while no hook came in since delivery read it: a hook
+of the new turn, such as a permission prompt, wrote the state the session shows, and the
+wake then adds only its own record. `continue` writes its state the same way.
 A crash between the two leaves the events in the inbox, and a later tick wakes the worker
 with them again, which costs one turn. A resume that starts a copy is a fault: the worker
 is paused with the reason, keeps its session and its events, and you are notified. A
@@ -805,10 +835,14 @@ roles hold the item. `--route` stays accepted for `--repository`.
   role files and the usage file only: no tracker call and no session listing per
   request. The top bar shows the two usage windows with their reset times and levels
   (grey when unknown), the launch throttle (working against `max_concurrent`, open
-  against `max_open_workers`, pauses) and the daemon's health (last tick, its duration,
-  errors, uptime, version). The columns are Needs you (`blocked`), Working (`launching`,
-  `running`), Queued (`queued`, and `parked` with its reset time), Idle (`idle`,
-  `paused`) and Closed (workers that finished in the last 24 hours). A card shows the
+  against `max_open_workers`, pauses), a model-limit badge while a turn that failed on
+  one model family's own limit waits for its reset (or for five hours when the failure
+  gave no reset time), and the daemon's health (last tick, its duration, errors, uptime,
+  version). The columns are Needs you (`blocked`), Working (`launching`, `running`),
+  Queued (`queued`, with the reason each worker waits: a cap or the usage reserve),
+  Parked (`parked`, with its reset time, and the reason a resume waits once the reset has
+  passed), Idle (`idle`, `paused`) and Closed (workers that finished in the last 24
+  hours). A card shows the
   role, the item with its link, the branch, the worktree, the model and effort of the
   role, the last prompt (the role's first prompt before any wake, else the wake message
   of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open

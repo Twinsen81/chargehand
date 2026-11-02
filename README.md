@@ -86,9 +86,10 @@ the token file has mode 0600. The daemon writes its log to `~/Library/Logs/charg
 (see [The log](#the-log)). To try the daemon without the job, run `chargehand serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
-Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle and the
-daemon's health in the top bar, and a card per worker in the columns Needs you, Working,
-Queued, Idle and Closed. It refreshes every second. Its buttons do what the control
+Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle, a
+badge when a turn hit one model's own limit, and the daemon's health in the top bar, and a
+card per worker in the columns Needs you, Working, Queued (with the reason each worker
+waits), Parked (with the reset time), Idle and Closed. It refreshes every second. Its buttons do what the control
 commands do: start a worker from a role, with an optional work item and the event kinds on
 it that wake the worker; pause, continue, cancel, retry or discard a worker; reply to a
 worker with one line of text, which reaches it as an event, the way a comment would;
@@ -132,6 +133,21 @@ does not edit the settings file for you:
 
 `/api/state` then shows each window's percentage and reset time; a reading older than
 30 minutes counts as unknown.
+
+The readings also keep a part of the windows for your own sessions. No wake starts while a
+window is above 80 %, and no new worker starts while the weekly window is above 70 %; set
+other values in `[usage]`:
+
+```toml
+[usage]
+wake_reserve_percent = 20        # no wake above 100 minus this
+new_worker_reserve_percent = 30  # no new worker while the week is above 100 minus this
+```
+
+Without a usage file there is no reserve. A reading older than 30 minutes holds new
+workers back and lets wakes through. A turn that ends on a usage limit parks its worker
+instead of failing it: you are notified once, and after the reset the worker continues in
+the same session by itself, one at a time within `max_concurrent`.
 
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).

@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The usage policy. `[usage]` in the machine configuration keeps a part of the
+  subscription's usage windows for interactive work: no wake while a window is above 100
+  minus `wake_reserve_percent` (20 by default), and no new worker, from a start rule or the
+  board, while the weekly window is above 100 minus `new_worker_reserve_percent` (30 by
+  default). The daemon now reads the status line wrapper's usage file for these reserves;
+  before, no reading reached the wake reserve. No usage file means no reserve; a reading
+  older than 30 minutes lets wakes through and holds new workers. Readings are kept per
+  provider, and each runtime names the provider it draws on. A failed session whose
+  listing names a usage limit is now parked as the StopFailure hook parks it. Once the
+  reset time has passed, delivery resumes parked workers in the same session with a short
+  continue message, oldest reset first and within the wake admission; a worker parked
+  without a reset time still waits for `continue`. Parking uses no launch attempt and is
+  notified once. The board has a Parked column with the reset time, shows on a queued or
+  parked card why it waits, and shows a model-limit badge in the top bar when a turn fails
+  on one model family's own limit.
 - `chargehand export <file>` and `chargehand import <file>`. Export writes one zip archive
   with a versioned manifest: the machine configuration with home paths written as `~` and
   credential-bearing keys (such as `api_key_command`) left out, the machine-level role
@@ -91,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker (role, item, branch, worktree, model and effort, last prompt and last answer,
   wakes today, estimated tokens, attach command) in the columns Needs you, Working,
   Queued, Idle and Closed. One static page under a strict content security policy.
+
+### Fixed
+
+- A wake or a `continue` no longer puts a worker back to `running` when a hook of the new
+  turn, such as a permission prompt, came in while it ran. The card stays in Needs you and
+  answerable, and the next session diff sends no second notification.
 
 ### Changed
 
