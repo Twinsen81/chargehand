@@ -39,6 +39,8 @@ def launch(harness, identifier="ABC-1", *, timeout=120):
     assert worker.state == ledger_mod.RUNNING
     settings = {"hooks": claude.hook_settings(1, "t", Path("/t"), permission_timeout_secs=timeout)}
     claude.write_settings_file(claude.settings_file_for(Path(worker.worktree)), settings)
+    # How `claude agents` lists a session while its permission hook waits.
+    harness.claude_state.set_session_state(identifier, "blocked", waitingFor="permission prompt")
     return worker
 
 
@@ -248,6 +250,76 @@ def test_an_answer_in_the_session_cancels_the_card_and_releases_the_hook(daemon,
     assert card_prompt(daemon) is None
     status, payload = answer(daemon, worker, prompt.id, "allow")
     assert (status, payload["error"]) == (409, hooks.ALREADY_RESOLVED)
+
+
+def test_a_click_after_an_answer_in_the_session_is_refused_and_cancels_the_card(daemon, harness):
+    worker = launch(harness)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+    # The operator chose No in `claude attach`: the session lists as working at once, while
+    # its hook connection stays open and no other hook comes for a while.
+    harness.claude_state.set_session_state("ABC-1", "working", waitingFor=None)
+
+    status, payload = answer(daemon, worker, prompt.id, "allow")
+
+    assert (status, payload["error"]) == (409, hooks.ANSWERED_IN_SESSION)
+    row = harness.ledger.get_permission_prompt(prompt.id)
+    assert (row.state, row.decision, row.resolved_by) == ("cancelled", None, "session")
+    assert hook.answered() == (200, {})
+    assert card_prompt(daemon) is None
+    assert harness.ledger.permission_rules(worker) == []
+
+
+@pytest.mark.parametrize("listed", [
+    {"session_state": "blocked", "waitingFor": "question"},
+    {"session_state": "idle", "waitingFor": None},
+])
+def test_a_click_is_refused_unless_the_session_shows_a_permission_dialog(daemon, harness, listed):
+    worker = launch(harness)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+    harness.claude_state.set_session_state("ABC-1", listed["session_state"], waitingFor=listed["waitingFor"])
+
+    assert answer(daemon, worker, prompt.id, "deny")[0] == 409
+
+    assert harness.ledger.get_permission_prompt(prompt.id).state == "cancelled"
+    assert hook.answered() == (200, {})
+
+
+def test_a_click_is_refused_while_the_session_cannot_be_read(daemon, harness, monkeypatch):
+    worker = launch(harness)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+    real = ClaudeRuntime.waits_for_permission
+    unreadable = [True]
+    monkeypatch.setattr(
+        ClaudeRuntime, "waits_for_permission",
+        lambda self, session_id: None if unreadable[0] else real(self, session_id),
+    )
+
+    status, payload = answer(daemon, worker, prompt.id, "allow")
+
+    assert (status, payload["error"]) == (409, hooks.NOT_CONFIRMED)
+    assert harness.ledger.get_permission_prompt(prompt.id).state == "open"
+    assert hook.answered(timeout=0.3) is None
+    unreadable[0] = False
+    assert answer(daemon, worker, prompt.id, "allow")[0] == 200
+    assert hook.answered() == (200, ALLOWED)
+
+
+def test_a_prompt_that_comes_during_the_launch_survives_the_end_of_the_launch(daemon, harness):
+    worker = launch(harness)
+    harness.ledger.update(harness.ledger.get(worker.id), state=ledger_mod.LAUNCHING)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+
+    # The tick confirms the launch after the session showed its first dialog.
+    harness.ledger.update(harness.ledger.get(worker.id), state=ledger_mod.RUNNING)
+
+    assert hook.answered(timeout=0.6) is None
+    assert harness.ledger.get_permission_prompt(prompt.id).state == "open"
+    assert answer(daemon, worker, prompt.id, "allow")[0] == 200
+    assert hook.answered() == (200, ALLOWED)
 
 
 def test_the_listing_diff_also_cancels_a_held_prompt(daemon, harness):

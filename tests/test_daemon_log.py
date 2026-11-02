@@ -566,6 +566,7 @@ def test_session_text_and_actors_never_reach_either_channel(wired, tmp_path, cap
             assert prompt is not None
         finally:
             ledger.close()
+        wired.claude_state.set_session_state("PR-7", "blocked", waitingFor="permission prompt")
         status, _ = support.request(
             built.port, "POST", f"/api/workers/{reviewer.id}/answer",
             body=json.dumps({"prompt": prompt.id, "answer": "always"}).encode(), headers=AUTH,

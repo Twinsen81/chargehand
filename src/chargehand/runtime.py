@@ -253,6 +253,14 @@ class Runtime(ABC):
         """The answer to a permission hook that allows or denies, in the runtime's format."""
         return {}
 
+    def waits_for_permission(self, session_id: str) -> bool | None:
+        """Whether the session shows a permission dialog now, from a fresh look; None: unknown.
+
+        The board asks this before it takes an answer: the operator may have answered in
+        the session already, and the hook that waits for the board does not show that.
+        """
+        return None
+
     # ----- sessions ---------------------------------------------------------
 
     @abstractmethod

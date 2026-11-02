@@ -1183,6 +1183,22 @@ class ClaudeRuntime(Runtime):
     def list_sessions(self) -> list[Session]:
         return self.cli.list_sessions()
 
+    def waits_for_permission(self, session_id: str) -> bool | None:
+        """From `claude agents`, which shows an answer given in `claude attach` at once.
+
+        Observed in Claude Code 2.1.316: while the hook waits, the session lists as
+        `blocked` with waitingFor "permission prompt"; within 0.1 s of an answer in the
+        terminal it lists as working. The hook's connection stays open meanwhile.
+        """
+        try:
+            sessions = self.cli.list_sessions()
+        except ClaudeError:
+            return None
+        session = next((s for s in sessions if session_id in (s.id, s.uuid)), None)
+        if session is None:
+            return False
+        return session.state == BLOCKED and "permission" in (session.waiting_for or "").lower()
+
     def launch(self, spec: LaunchSpec, *, warn: Callable[[str], None] | None = None) -> LaunchResult:
         """Record the worktree as trusted, then start its session.
 

@@ -64,6 +64,11 @@ ANSWERS: dict[str, tuple[str, bool]] = {
 }
 ALREADY_RESOLVED = "already resolved"
 NOT_HELD = "the session no longer waits for the board; attach to it and answer there"
+ANSWERED_IN_SESSION = f"{ALREADY_RESOLVED}: the session no longer shows this prompt"
+NOT_CONFIRMED = (
+    "cannot confirm that the session still shows this prompt; try again, or attach to it "
+    "and answer there"
+)
 
 
 class _Holds:
@@ -243,7 +248,8 @@ def _hold(
         while True:
             current = ledger.get_permission_prompt(prompt.id)
             if current is None or current.state == ledger_mod.PROMPT_CANCELLED:
-                log.info("%s: permission prompt %d was answered in the session",
+                log.info("%s: permission prompt %d was cancelled: the session no longer "
+                         "shows it, or the worker stopped; the hook returns no decision",
                          worker.handle, prompt.id)
                 return NO_DECISION
             if current.state == ledger_mod.PROMPT_RESOLVED and current.decision:
@@ -269,7 +275,9 @@ def answer_prompt(
     """The board's answer to an open prompt of *worker*. Raises HTTPError when refused.
 
     Only a prompt whose hook this daemon still holds can be answered: after a timeout or a
-    restart the session's own dialog is the only place left to answer.
+    restart the session's own dialog is the only place left to answer. The runtime confirms
+    that the session still shows the dialog, so a click after an answer in the session is
+    refused and cancels the card, instead of recording the opposite decision.
     """
     if not isinstance(prompt_id, int) or isinstance(prompt_id, bool):
         raise HTTPError(400, "prompt must be the id of the prompt")
@@ -285,6 +293,17 @@ def answer_prompt(
     decision, rule = ANSWERS[str(answer)]
     if rule and not prompt.input_digest:
         raise HTTPError(409, "this prompt cannot become a rule; allow it once instead")
+    waiting = _session_waits(request, ledger, worker)
+    if waiting is False:
+        # Answered in the session: the hook still waits, but the dialog is gone. The next
+        # hook or tick would cancel the record; this click does it now.
+        if ledger.cancel_permission_prompt(prompt.id):
+            _holds.wake(_key(request.daemon, prompt.id))
+            log.info("%s: permission prompt %d: the session no longer shows it; the board's "
+                     "answer is refused", worker.handle, prompt.id)
+        raise HTTPError(409, ANSWERED_IN_SESSION)
+    if waiting is None:
+        raise HTTPError(409, NOT_CONFIRMED)
     if not ledger.answer_permission_prompt(
         prompt.id, decision, by=ledger_mod.RESOLVED_BY_BOARD, rule=rule
     ):
@@ -297,6 +316,23 @@ def answer_prompt(
         ALWAYS: "allowed, and allowed again for this worker without asking",
     }[str(answer)]
     return {"prompt": prompt.id, "answer": answer, "ok": True, "message": message}
+
+
+def _session_waits(request: Request, ledger: Ledger, worker: Worker) -> bool | None:
+    """Whether the worker's session still shows a permission dialog, from a fresh look.
+
+    The held hook does not tell: Claude Code keeps its connection open after the operator
+    answers in `claude attach`. None when the runtime cannot tell, which refuses the answer.
+    """
+    if not worker.session_id:
+        return None
+    try:
+        runtime = request.daemon.runner(ledger).runtime(worker.runtime)
+        return runtime.waits_for_permission(worker.session_id)
+    except Exception:
+        log.exception("%s: cannot read whether the session waits for a permission answer",
+                      worker.handle)
+        return None
 
 
 def session_prefix(hook: Hook) -> str:
