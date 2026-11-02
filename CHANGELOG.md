@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `chargehand export <file>` and `chargehand import <file>`. Export writes one zip archive
+  with a versioned manifest: the machine configuration with home paths written as `~` and
+  credential-bearing keys (such as `api_key_command`) left out, the machine-level role
+  files, the user-level agent files the roles name, the notification hook, the status line
+  entry of Claude Code's settings, and the board settings of the configured repositories.
+  It refuses to write an archive in which a file still holds the home directory or the
+  daemon's token. Import refuses a newer format version, a file outside the archive's
+  layout, and a symlink; asks for each repository path and the worktree root (or takes
+  `--repository NAME=PATH`, `--worktree-root` or stdin); never overwrites a file or a
+  board setting without `--force`; and writes a new token. `doctor` lists what is left to
+  do by hand, and marks each step it can check as done.
+- `claude_bin` and `git_bin` accept `~` for the home directory.
 - Board personalisation. Rename a repository or a worker, give it an icon (one emoji or a
   name from a small bundled set) and pin it; collapse a repository to its pinned cards, or
   hide it. The board groups the cards of each column by repository, pinned first, then by

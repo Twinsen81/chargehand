@@ -133,6 +133,19 @@ and `discard`. Answers to a session's questions go through Claude Code's own age
 (`claude agents`), not through this CLI. It is a plain CLI, so it works over SSH too if
 you want to reach the machine from elsewhere, but nothing depends on that.
 
+To move your setup to another machine or user account, run `chargehand export setup.zip`
+there and `chargehand import setup.zip` on the new one. The archive holds the machine
+configuration with `~` for your home directory, the role files in
+`~/.config/chargehand/roles/` and the agent files in `~/.claude/agents/` that the roles
+name, the notification hook, your status line entry, and the board's names, icons, pins
+and hidden repositories (not those of workers, which belong to this machine's ledger). It
+holds no token, no Keychain value and no key that can carry a credential, such as
+`api_key_command`. Import asks for the path of each repository and for the worktree root
+(or takes `--repository NAME=PATH` and `--worktree-root PATH`, or one line per answer on
+stdin), refuses to overwrite a file without `--force`, and writes a new token. It does
+not edit `~/.claude/settings.json` and does not install the launchd job: `chargehand
+doctor` lists those steps, and the tracker key, until they are done.
+
 `chargehand templates` lists the bundled starter files: the two configuration
 templates, a notification hook, the deny rules passed to launched sessions, and a
 skill for driving this CLI from a Claude Code session.

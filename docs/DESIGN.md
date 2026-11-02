@@ -721,6 +721,8 @@ chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses 
 chargehand tick                     # run a tick now, under the tick lock
 chargehand serve                    # the daemon; `install` writes the job that runs it
 chargehand statusline -- '<command>'   # status line wrapper: records the usage windows
+chargehand export <FILE>            # this machine's setup in one archive, without secrets
+chargehand import <FILE>            # unpack it on another machine; asks for the paths
 ```
 
 Commands that take an item also take `--role`, which is needed when workers of several
@@ -982,6 +984,48 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
   next tick parks any run whose session is gone, so a restart costs progress but never
   consistency.
 
+### Moving a setup to another machine
+
+`chargehand export <file>` writes one zip archive with a `manifest.json` (format version,
+chargehand version, time, member list). It holds:
+
+- The machine configuration. Repository paths, `worktree_root`, `usage_file`, and every
+  `*_bin` key are written with `~` for the home directory; `token_file` and `usage_file` are
+  left out when they have their default value, so the default of the other machine applies.
+  The notification hook's command names the script in the archive. Each repository gets an
+  explicit `name`, because the board settings are kept by name. Keys that can carry a
+  credential (`api_key_command`, and any key whose name ends in `token`, `secret`,
+  `password` or `api_key`) are left out and listed in the manifest. Comments and the keys
+  export does not rewrite stay as they are: the standard library has no TOML writer, so the
+  file is rewritten as text and parsed again.
+- The role files in `~/.config/chargehand/roles/`, and the agent files in
+  `~/.claude/agents/` that the machine-level roles or the repositories' enabled roles name.
+  Repository-level role files travel with their repository.
+- The notification hook, when its command runs a file.
+- The `statusLine` entry of `~/.claude/settings.json` when it runs `chargehand statusline`.
+- The board settings of the configured repositories. Worker settings are not exported: they
+  are kept by worker id, and a worker id means nothing on another machine.
+
+The archive never holds the daemon's token, a Keychain value, or the rest of the ledger.
+Export refuses to write an archive in which any file still contains the home directory or
+the token, and names the file.
+
+`chargehand import <file>` checks the archive first: it refuses a format version newer
+than it knows, a file name outside the layout above, a symlink, and a member that the
+manifest does not list. It then asks for each repository's path and for the worktree root
+(the archive's values are the defaults), or takes them from `--repository NAME=PATH` and
+`--worktree-root`, or reads one line per question from stdin. It never overwrites a file or
+a board setting without `--force`, and it checks all of them before it writes anything. It
+writes the configuration, the role and agent files and the hook, restores the board
+settings through the board's cleaning rules, and writes a new token. It does not write
+`~/.claude/settings.json`, and it does not install the launchd job.
+
+What is left to do by hand goes to `imported-steps.json` next to the configuration:
+each credential key that was left out, the tracker's key or sign-in, the status line entry,
+`install --load`, and the notification method. `doctor` lists each step; a step it can
+check (a key that is set again, the status line entry, a loaded job) shows as done once
+it is.
+
 ### The daemon's log
 
 The log is for investigating a missed event, a missed hook, a wrong notification, a
@@ -1055,6 +1099,7 @@ Done:
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
 - `init`, `doctor`, `install`, and the bundled templates.
+- `export` and `import`: a machine's setup carried to another machine without its secrets.
 - Devices shared through a lease tool that chargehand never calls, with the deny rule for
   its operator commands.
 - Roles and workers: role files with an agent, model, effort and allow rules, start rules,
