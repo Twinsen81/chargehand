@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import stat
 import time
 import unicodedata
@@ -131,25 +132,30 @@ ICONS: dict[str, str] = {
     "book": "\U0001f4d8",
     "bug": "\U0001f41b",
     "chart": "\U0001f4c8",
-    "desktop": "\U0001f5a5️",
+    "desktop": "\U0001f5a5\ufe0f",
     "eyes": "\U0001f440",
     "fire": "\U0001f525",
     "flag": "\U0001f6a9",
-    "gear": "⚙️",
+    "gear": "\u2699\ufe0f",
     "globe": "\U0001f310",
     "lock": "\U0001f512",
     "note": "\U0001f4dd",
     "package": "\U0001f4e6",
     "phone": "\U0001f4f1",
     "rocket": "\U0001f680",
-    "star": "⭐",
+    "star": "\u2b50",
     "test": "\U0001f9ea",
-    "tools": "\U0001f6e0️",
+    "tools": "\U0001f6e0\ufe0f",
 }
-# What may join the symbols of one emoji: the zero-width joiner, the two variation
-# selectors and the keycap mark. Skin tones and tag characters are ranges.
-_EMOJI_JOINERS = frozenset({0x200D, 0xFE0E, 0xFE0F, 0x20E3})
-_KEYCAP = "⃣"
+# One emoji: a keycap, a flag of two regional indicators, a subdivision flag of tag
+# characters, or symbols joined by the zero-width joiner, each with an optional variation
+# selector and skin tone.
+_ZWJ = "\u200d"
+_KEYCAP = re.compile(r"[#*0-9]\ufe0f?\u20e3")
+_REGIONAL = re.compile(r"[\U0001f1e6-\U0001f1ff]{2}")
+_TAG_FLAG = re.compile(r"\U0001f3f4[\U000e0020-\U000e007e]+\U000e007f")
+_REGIONAL_ONE = re.compile(r"[\U0001f1e6-\U0001f1ff]")
+_MODIFIERS = re.compile(r"[\ufe0e\ufe0f]?[\U0001f3fb-\U0001f3ff]?[\ufe0e\ufe0f]?")
 _FLAGS = ("pinned", "collapsed", "hidden")
 
 
@@ -401,19 +407,16 @@ def is_emoji(text: str) -> bool:
     """Whether *text* is one short emoji sequence and nothing else, so never markup."""
     if not text or len(text) > ICON_CODE_POINTS:
         return False
-    keycap = _KEYCAP in text
-    symbols = 0
-    for character in text:
-        point = ord(character)
-        if unicodedata.category(character) == "So":
-            symbols += 1
-        elif point in _EMOJI_JOINERS or 0x1F3FB <= point <= 0x1F3FF or 0xE0020 <= point <= 0xE007F:
-            continue
-        elif keycap and character in "#*0123456789":
-            continue
-        else:
-            return False
-    return symbols > 0 or keycap
+    if any(pattern.fullmatch(text) for pattern in (_KEYCAP, _REGIONAL, _TAG_FLAG)):
+        return True
+    return all(_emoji_part(part) for part in text.split(_ZWJ))
+
+
+def _emoji_part(part: str) -> bool:
+    """One symbol, which is not a regional indicator, and its optional modifiers."""
+    if not part or unicodedata.category(part[0]) != "So" or _REGIONAL_ONE.fullmatch(part[0]):
+        return False
+    return _MODIFIERS.fullmatch(part[1:]) is not None
 
 
 def icon_glyph(value: str | None) -> str | None:

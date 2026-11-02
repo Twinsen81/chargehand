@@ -183,6 +183,18 @@ def test_one_field_changes_and_the_others_stay(daemon, harness):
     ("/api/workers/{id}/board", {"icon": "https://x.invalid/a.png"}, "icon must be one emoji"),
     ("/api/workers/{id}/board", {"icon": "x\U0001f525"}, "icon must be one emoji"),
     ("/api/workers/{id}/board", {"icon": "\U0001f525" * 11}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\U0001f525" * 10}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\u00a9\u00a9\u00a9"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\u2500\u2500\u2500\u2500\u2500"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "12\u20e33"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\u20e3"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\U0001f525\U0001f525"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\U0001f1fa"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\U0001f1fa\U0001f1e6\U0001f1fa"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\u200d\U0001f525"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\U0001f525\u200d"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "\U0001f3fd"}, "icon must be one emoji"),
+    ("/api/workers/{id}/board", {"icon": "a\u20e3"}, "icon must be one emoji"),
     ("/api/workers/{id}/board", {"icon": "nonsense"}, "icon must be one emoji"),
     ("/api/workers/{id}/board", {"icon": ["rocket"]}, "icon must be text"),
     # A bad field leaves the good ones in the same body unwritten.
@@ -212,11 +224,16 @@ def test_an_unknown_kind_repository_or_worker_is_not_found(daemon, harness, path
 
 @pytest.mark.parametrize("icon", [
     "\U0001f680",
-    "⭐",
+    "\u2b50",
     "\U0001f44d\U0001f3fd",
-    "\U0001f468‍\U0001f469‍\U0001f467",
+    "\U0001f468\u200d\U0001f469\u200d\U0001f467",
     "\U0001f1fa\U0001f1e6",
-    "1️⃣",
+    "1\ufe0f\u20e3",
+    "#\u20e3",
+    "\u2764\ufe0f",
+    "\U0001f3f3\ufe0f\u200d\U0001f308",
+    "\U0001f469\U0001f3fd\u200d\U0001f4bb",
+    "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
     *board.ICONS,
 ])
 def test_an_emoji_or_a_bundled_name_is_an_icon(daemon, harness, icon):
@@ -232,7 +249,7 @@ def test_every_bundled_glyph_is_an_emoji():
 
 def test_a_name_loses_its_control_sequences(daemon, harness):
     status, answer = post(daemon, "/api/repositories/test/board", {
-        "name": "\x1b[31mRed\x1b[0m‮ one\nline",
+        "name": "\x1b[31mRed\x1b[0m\u202e one\nline",
     })
     assert (status, answer["settings"]["name"]) == (200, "Red one line")
 
