@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -290,11 +291,11 @@ def test_a_click_is_refused_while_the_session_cannot_be_read(daemon, harness, mo
     worker = launch(harness)
     hook = Held(daemon, worker)
     prompt = held_prompt(daemon, harness, worker)
-    real = ClaudeRuntime.waits_for_permission
+    real = ClaudeRuntime.permission_waits
     unreadable = [True]
     monkeypatch.setattr(
-        ClaudeRuntime, "waits_for_permission",
-        lambda self, session_id: None if unreadable[0] else real(self, session_id),
+        ClaudeRuntime, "permission_waits",
+        lambda self: None if unreadable[0] else real(self),
     )
 
     status, payload = answer(daemon, worker, prompt.id, "allow")
@@ -305,6 +306,84 @@ def test_a_click_is_refused_while_the_session_cannot_be_read(daemon, harness, mo
     unreadable[0] = False
     assert answer(daemon, worker, prompt.id, "allow")[0] == 200
     assert hook.answered() == (200, ALLOWED)
+
+
+def test_an_answer_in_the_session_clears_the_card_without_a_click(daemon, harness, monkeypatch):
+    monkeypatch.setattr(hooks, "SESSION_CHECK_SECS", 0.2)
+    worker = launch(harness)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+    # The held hook sees the session show the dialog first.
+    assert hook.answered(timeout=0.6) is None
+
+    # The operator answers in `claude attach` in a long turn: no hook comes, no tick runs.
+    harness.claude_state.set_session_state("ABC-1", "working", waitingFor=None)
+
+    assert hook.answered(timeout=3) == (200, {})
+    row = harness.ledger.get_permission_prompt(prompt.id)
+    assert (row.state, row.resolved_by, row.decision) == ("cancelled", "session", None)
+    assert card_prompt(daemon) is None
+
+
+def test_a_listing_that_never_showed_the_dialog_cancels_nothing(daemon, harness, monkeypatch):
+    monkeypatch.setattr(hooks, "SESSION_CHECK_SECS", 0.2)
+    worker = launch(harness)
+    # The listing lags behind the hook: it still shows the turn running.
+    harness.claude_state.set_session_state("ABC-1", "working", waitingFor=None)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+
+    assert hook.answered(timeout=1.0) is None
+    assert harness.ledger.get_permission_prompt(prompt.id).state == "open"
+    harness.claude_state.set_session_state("ABC-1", "blocked", waitingFor="permission prompt")
+    assert answer(daemon, worker, prompt.id, "deny")[0] == 200
+    assert hook.answered() == (200, DENIED)
+
+
+def test_held_hooks_share_one_listing_per_interval(daemon, harness, monkeypatch):
+    interval = 0.3
+    monkeypatch.setattr(hooks, "SESSION_CHECK_SECS", interval)
+    calls = []
+    real = ClaudeRuntime.permission_waits
+
+    def counted(self):
+        calls.append(time.monotonic())
+        return real(self)
+
+    workers = [launch(harness, item) for item in ("ABC-1", "ABC-2", "ABC-3")]
+    held = [Held(daemon, worker) for worker in workers]
+    prompts = [held_prompt(daemon, harness, worker) for worker in workers]
+    monkeypatch.setattr(ClaudeRuntime, "permission_waits", counted)
+    began = time.monotonic()
+    time.sleep(2.0)
+    looked = len(calls)
+    elapsed = time.monotonic() - began
+
+    # About one listing per interval for all three, not one per hook.
+    assert 2 <= looked <= elapsed / interval + 2
+    for worker, hook, prompt in zip(workers, held, prompts):
+        assert answer(daemon, worker, prompt.id, "allow")[0] == 200
+        assert hook.answered() == (200, ALLOWED)
+
+
+def test_a_click_after_the_hook_let_go_says_to_answer_in_the_session(daemon, harness, monkeypatch):
+    worker = launch(harness)
+    hook = Held(daemon, worker)
+    prompt = held_prompt(daemon, harness, worker)
+    real = ledger_mod.Ledger.answer_permission_prompt
+
+    def timeout_first(self, prompt_id, *args, **kwargs):
+        # The hold reached its timeout between the checks of the click and its write.
+        self.release_permission_prompt(prompt_id)
+        return real(self, prompt_id, *args, **kwargs)
+
+    monkeypatch.setattr(ledger_mod.Ledger, "answer_permission_prompt", timeout_first)
+
+    status, payload = answer(daemon, worker, prompt.id, "allow")
+
+    assert (status, payload["error"]) == (409, hooks.NOT_HELD)
+    assert harness.ledger.get_permission_prompt(prompt.id).state == "open"
+    assert hook.answered() == (200, {})
 
 
 def test_a_prompt_that_comes_during_the_launch_survives_the_end_of_the_launch(daemon, harness):

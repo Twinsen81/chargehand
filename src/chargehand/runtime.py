@@ -253,13 +253,20 @@ class Runtime(ABC):
         """The answer to a permission hook that allows or denies, in the runtime's format."""
         return {}
 
-    def waits_for_permission(self, session_id: str) -> bool | None:
-        """Whether the session shows a permission dialog now, from a fresh look; None: unknown.
+    def permission_waits(self) -> dict[str, bool] | None:
+        """For every listed session, by its id, whether it shows a permission dialog now.
 
-        The board asks this before it takes an answer: the operator may have answered in
-        the session already, and the hook that waits for the board does not show that.
+        One fresh look for all sessions; None when the runtime cannot tell. The daemon asks
+        this while it holds a permission hook and before it takes an answer from the board:
+        the operator may have answered in the session, and the waiting hook does not show
+        that. A session missing from the result no longer shows a dialog.
         """
         return None
+
+    def waits_for_permission(self, session_id: str) -> bool | None:
+        """Whether one session shows a permission dialog now; None: unknown."""
+        waits = self.permission_waits()
+        return None if waits is None else waits.get(session_id, False)
 
     # ----- sessions ---------------------------------------------------------
 

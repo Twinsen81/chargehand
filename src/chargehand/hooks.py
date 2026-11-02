@@ -52,6 +52,9 @@ NO_DECISION = Response.json({})
 # How often a held permission hook reads its prompt again. An answer on the board wakes it
 # at once; a cancel by the tick or another hook is seen within this time.
 HOLD_POLL_SECS = 0.25
+# How often a held hook checks that its session still shows the dialog. An answer in
+# `claude attach` sends no hook, and the tick may be a minute away.
+SESSION_CHECK_SECS = 2.0
 # How long the process waits at exit for held hooks to send their answers.
 EXIT_DRAIN_SECS = 2.0
 
@@ -102,7 +105,36 @@ class _Holds:
             return len(self._events)
 
 
+class _Listings:
+    """The last look at which sessions show a permission dialog, per ledger and runtime.
+
+    Every held hook reads it every SESSION_CHECK_SECS, so a terminal answer clears its
+    card within a few seconds; with many held hooks it is still one listing per interval.
+    A click asks for a fresh one. The lock makes concurrent askers share one listing.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._looks: dict[tuple[str, str], tuple[float, dict[str, bool] | None]] = {}
+
+    def waits(
+        self, key: tuple[str, str], runtime: Runtime, session_id: str, *, max_age: float
+    ) -> bool | None:
+        with self._lock:
+            look = self._looks.get(key)
+            if look is None or time.monotonic() - look[0] > max_age:
+                try:
+                    waits = runtime.permission_waits()
+                except Exception:
+                    log.exception("cannot read whether the sessions wait for a permission answer")
+                    waits = None
+                look = self._looks[key] = (time.monotonic(), waits)
+        waits = look[1]
+        return None if waits is None else waits.get(session_id, False)
+
+
 _holds = _Holds()
+_listings = _Listings()
 _drain_registered = False
 
 
@@ -244,8 +276,13 @@ def _hold(
     deadline = time.monotonic() + hold_secs
     log.info("%s: permission prompt %d waits for the board, up to %ds",
              worker.handle, prompt.id, int(hold_secs))
+    check = _SessionCheck(request, ledger, worker)
     try:
         while True:
+            if check.answered_in_session():
+                if ledger.cancel_permission_prompt(prompt.id):
+                    log.info("%s: permission prompt %d: the session no longer shows it",
+                             worker.handle, prompt.id)
             current = ledger.get_permission_prompt(prompt.id)
             if current is None or current.state == ledger_mod.PROMPT_CANCELLED:
                 log.info("%s: permission prompt %d was cancelled: the session no longer "
@@ -267,6 +304,42 @@ def _hold(
             wake.wait(HOLD_POLL_SECS)
     finally:
         _holds.remove(key)
+
+
+class _SessionCheck:
+    """Whether a held prompt's session stopped showing the dialog, looked at now and then.
+
+    Only a session that was seen showing a permission dialog and no longer shows one
+    counts as answered there, so a listing that lags behind the hook cancels nothing.
+    """
+
+    def __init__(self, request: Request, ledger: Ledger, worker: Worker) -> None:
+        self._ledger = ledger
+        self._worker_id = worker.id
+        self._seen = False
+        self._next = time.monotonic() + SESSION_CHECK_SECS
+        try:
+            self._runtime: Runtime | None = request.daemon.runner(ledger).runtime(worker.runtime)
+        except Exception:
+            log.exception("%s: cannot check the session of a held permission prompt",
+                          worker.handle)
+            self._runtime = None
+        self._key = (os.path.realpath(request.daemon.ledger_path), worker.runtime)
+
+    def answered_in_session(self) -> bool:
+        if self._runtime is None or time.monotonic() < self._next:
+            return False
+        self._next = time.monotonic() + SESSION_CHECK_SECS
+        worker = self._ledger.get(self._worker_id)
+        session = worker and (worker.session_id or worker.session_uuid)
+        if not session:
+            return False
+        # Held hooks share one listing per interval.
+        waits = _listings.waits(self._key, self._runtime, session, max_age=SESSION_CHECK_SECS * 0.9)
+        if waits:
+            self._seen = True
+            return False
+        return waits is False and self._seen
 
 
 def answer_prompt(
@@ -307,7 +380,10 @@ def answer_prompt(
     if not ledger.answer_permission_prompt(
         prompt.id, decision, by=ledger_mod.RESOLVED_BY_BOARD, rule=rule
     ):
-        raise HTTPError(409, ALREADY_RESOLVED)
+        # Another answer won, or the hook let go of the prompt (its timeout or a stop).
+        now = ledger.get_permission_prompt(prompt.id)
+        still_open = now is not None and now.state == ledger_mod.PROMPT_OPEN
+        raise HTTPError(409, NOT_HELD if still_open else ALREADY_RESOLVED)
     _holds.wake(_key(request.daemon, prompt.id))
     log.info("%s: permission prompt %d answered %s on the board", worker.handle, prompt.id, answer)
     message = {
@@ -324,11 +400,13 @@ def _session_waits(request: Request, ledger: Ledger, worker: Worker) -> bool | N
     The held hook does not tell: Claude Code keeps its connection open after the operator
     answers in `claude attach`. None when the runtime cannot tell, which refuses the answer.
     """
-    if not worker.session_id:
+    session = worker.session_id or worker.session_uuid
+    if not session:
         return None
     try:
         runtime = request.daemon.runner(ledger).runtime(worker.runtime)
-        return runtime.waits_for_permission(worker.session_id)
+        key = (os.path.realpath(request.daemon.ledger_path), worker.runtime)
+        return _listings.waits(key, runtime, session, max_age=0.0)
     except Exception:
         log.exception("%s: cannot read whether the session waits for a permission answer",
                       worker.handle)
