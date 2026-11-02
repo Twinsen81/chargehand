@@ -450,7 +450,12 @@ def _notify_script(
     program = Path(os.path.expanduser(argv[0]))
     if not program.is_file():
         return None, [], _kept("notify.command", str(program), "it is not a file on this machine")
-    if not _SAFE_NAME.fullmatch(program.name) or not _inside(program, [_home(), *config_dirs]):
+    if not _SAFE_NAME.fullmatch(program.name):
+        return None, [], _kept(
+            "notify.command", str(program),
+            "its file name is not one an archive holds (letters, digits, dot, dash, underscore)",
+        )
+    if not _inside(program, [_home(), *config_dirs]):
         return None, [], _kept(
             "notify.command", str(program),
             "it is installed outside the home and configuration directories",

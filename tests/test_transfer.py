@@ -631,3 +631,19 @@ def test_a_notify_program_that_cannot_travel_is_named_and_left_as_a_step(
     # Not on the new machine yet, so the step is open.
     assert [(c["name"], c["status"]) for c in steps] == [("imported: program", install.WARN)]
     assert reason in steps[0]["detail"]
+
+
+def test_a_notify_script_with_a_name_an_archive_cannot_hold_says_so(old, tmp_path, capsys):
+    program = old.home / "bin" / "my notify"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n")
+    program.chmod(0o755)
+    old.config.write_text(old.config.read_text().replace(
+        'command = "~/.config/chargehand/notify.sh --quiet"', "command = \"'~/bin/my notify'\""
+    ))
+
+    assert _export(old, tmp_path / "setup.zip") == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "~/bin/my notify (notify.command) is not copied because its file name is not one" in out
+    assert "installed outside" not in out
