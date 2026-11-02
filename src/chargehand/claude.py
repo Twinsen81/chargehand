@@ -682,6 +682,19 @@ HOOK_POST_SCRIPT = Path(__file__).resolve().parent / "hook_post.py"
 # an error that Claude Code reports and goes past: the session runs on, and the next tick
 # reads its state from the listing.
 HOOK_TIMEOUT_SECS = 10
+# How long Claude Code waits for the answer to a permission hook, which the daemon holds
+# open until the operator answers on the board. Long, but finite: when it runs out the
+# daemon answers with no decision first, and the session shows its own dialog. A role sets
+# its own with `permission_timeout_secs`; a session keeps the value of its launch.
+PERMISSION_TIMEOUT_SECS = 600
+PERMISSION_TIMEOUT_RANGE = (20, 3600)
+# How much sooner than the session gives up the daemon answers a held permission hook.
+PERMISSION_ANSWER_MARGIN_SECS = 5
+# Tool input keys that only describe a call. The model writes a new `description` for each
+# Bash call, so with it the same command would never match an Always allow rule again.
+_DESCRIPTIVE_INPUT_KEYS: dict[str, tuple[str, ...]] = {"Bash": ("description",)}
+# What a denied tool call tells the model. chargehand's own text.
+DENIED_MESSAGE = "The operator denied this tool call on the board."
 # The longest last answer and tool input kept from a post.
 LAST_ANSWER_LIMIT = 4000
 TOOL_INPUT_LIMIT = 2000
@@ -709,12 +722,14 @@ def hook_settings(
     *,
     python: str = sys.executable,
     timeout_secs: int = HOOK_TIMEOUT_SECS,
+    permission_timeout_secs: int = PERMISSION_TIMEOUT_SECS,
 ) -> dict[str, object]:
     """The `hooks` settings: for each event one hook that posts to the daemon on 127.0.0.1:*port*.
 
     An http hook where Claude Code runs one, else a command hook that runs
     hook_post.py with *python* in isolated mode, so nothing in the worktree is imported.
-    That command names the token file, not the token.
+    That command names the token file, not the token. The permission hook waits
+    *permission_timeout_secs*, because the daemon holds it for the board's answer.
     """
 
     def hook(event: str) -> dict[str, object]:
@@ -731,7 +746,7 @@ def hook_settings(
             "type": "http",
             "url": f"http://127.0.0.1:{port}/hooks/{event}",
             "headers": {"Authorization": f"Bearer {token}"},
-            "timeout": timeout_secs,
+            "timeout": permission_timeout_secs if event == "PermissionRequest" else timeout_secs,
         }
 
     def group(event: str) -> dict[str, object]:
@@ -742,6 +757,16 @@ def hook_settings(
         return entry
 
     return {event: [group(event)] for event in HOOK_EVENTS}
+
+
+def permission_timeout_of(settings: Mapping[str, Any]) -> int | None:
+    """The timeout of the permission hook in a session's *settings*, or None without one."""
+    try:
+        hook = settings["hooks"]["PermissionRequest"][0]["hooks"][0]
+        timeout = hook["timeout"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return timeout if isinstance(timeout, int) and not isinstance(timeout, bool) else None
 
 
 def settings_file_for(worktree: Path) -> Path:
@@ -928,12 +953,33 @@ def parse_hook(event: str, payload: Mapping[str, Any], now: float | None = None)
         rendered = json.dumps(_cleaned(tool_input), sort_keys=True, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         rendered = ""
+    tool_name = payload.get("tool_name")
     return Hook(
         kind=HOOK_PERMISSION, observed=BLOCKED,
         tool_name=_text(payload, "tool_name", 100) or "unknown",
         tool_input=sanitize.clean(rendered)[:TOOL_INPUT_LIMIT] if tool_input is not None else "",
+        tool_input_digest=input_digest(tool_name, tool_input),
         **common,
     )
+
+
+def input_digest(tool_name: Any, tool_input: Any) -> str | None:
+    """A hash of the tool name and the whole input as the session sent them, or None.
+
+    Taken before any cleaning or cap, so two inputs that differ only in a control
+    character or after the cap never share a rule. Only the keys in
+    _DESCRIPTIVE_INPUT_KEYS are left out: they describe the call and change nothing it does.
+    """
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+    skipped = _DESCRIPTIVE_INPUT_KEYS.get(tool_name, ())
+    if skipped and isinstance(tool_input, Mapping):
+        tool_input = {key: value for key, value in tool_input.items() if key not in skipped}
+    try:
+        raw = json.dumps([tool_name, tool_input], sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 class ClaudeRuntime(Runtime):
@@ -951,7 +997,7 @@ class ClaudeRuntime(Runtime):
         external_supervisor=True,
         session_hooks=True,
     )
-    role_keys = ("agent", "permission_mode", "allow")
+    role_keys = ("agent", "permission_mode", "allow", "permission_timeout_secs")
     hook_events = HOOK_EVENTS
     # Project settings, hooks, agents, skills and commands; MCP servers; instructions,
     # which Claude Code also reads from subdirectories. The `.claude` entry itself is
@@ -999,7 +1045,37 @@ class ClaudeRuntime(Runtime):
     def parse_hook(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
         return parse_hook(event, payload)
 
-    def hooks(self) -> dict[str, object] | None:
+    @classmethod
+    def permission_hold_secs(cls, worktree: Path) -> float | None:
+        """From the permission hook timeout in the session's settings file.
+
+        A session launched before the permission hook waited longer than the other hooks
+        keeps its short timeout, and a session without the file has no known timeout:
+        neither is held.
+        """
+        try:
+            settings = json.loads(settings_file_for(worktree).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        timeout = permission_timeout_of(settings) if isinstance(settings, dict) else None
+        if timeout is None or timeout <= HOOK_TIMEOUT_SECS:
+            return None
+        return float(timeout - PERMISSION_ANSWER_MARGIN_SECS)
+
+    @classmethod
+    def permission_decision(cls, decision: str) -> dict[str, object]:
+        """Claude Code's PermissionRequest hook output for allow or deny."""
+        if decision == "allow":
+            verdict: dict[str, object] = {"behavior": "allow"}
+        elif decision == "deny":
+            verdict = {"behavior": "deny", "message": DENIED_MESSAGE}
+        else:
+            raise ValueError(f"unknown permission decision {decision!r}")
+        return {
+            "hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": verdict}
+        }
+
+    def hooks(self, permission_timeout_secs: int = PERMISSION_TIMEOUT_SECS) -> dict[str, object] | None:
         """The hook settings of a new session, or None while the daemon has no token.
 
         The daemon writes the token when it starts for the first time. A session
@@ -1013,13 +1089,19 @@ class ClaudeRuntime(Runtime):
         from chargehand.serve import read_token
 
         token = read_token(self.token_file)
-        return hook_settings(self.hook_port, token, self.token_file) if token else None
+        if not token:
+            return None
+        return hook_settings(
+            self.hook_port, token, self.token_file, permission_timeout_secs=permission_timeout_secs
+        )
 
     def _settings_for(
         self, spec: LaunchSpec, warn: Callable[[str], None] | None
     ) -> dict[str, object] | Path | None:
         """The launch settings, in a private file when they carry the hooks and their token."""
-        hooks = self.hooks()
+        hooks = self.hooks(
+            spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
+        )
         settings = launch_settings(spec.options, self.deny_rules, spec.read_paths, hooks=hooks)
         if not hooks or settings is None:
             return settings
@@ -1048,7 +1130,17 @@ class ClaudeRuntime(Runtime):
             raise ConfigError(f"{where}.allow: expected a list of strings")
         for rule in allow:
             validate_permission_rule(rule, where=f"{where}.allow")
-        return {"permission_mode": mode, "agent": agent, "allow": tuple(allow)}
+        timeout = table.get("permission_timeout_secs", PERMISSION_TIMEOUT_SECS)
+        low, high = PERMISSION_TIMEOUT_RANGE
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not low <= timeout <= high:
+            raise ConfigError(
+                f"{where}.permission_timeout_secs: expected a whole number of seconds from "
+                f"{low} to {high}"
+            )
+        return {
+            "permission_mode": mode, "agent": agent, "allow": tuple(allow),
+            "permission_timeout_secs": timeout,
+        }
 
     @classmethod
     def check_role(cls, role: "Role", repo: Path) -> None:
@@ -1312,6 +1404,8 @@ __all__ = [
     "agent_file_candidates",
     "copy_started_by",
     "hook_settings",
+    "input_digest",
+    "permission_timeout_of",
     "launch_settings",
     "parse_hook",
     "reset_time",

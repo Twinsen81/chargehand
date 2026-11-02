@@ -84,12 +84,13 @@ def test_a_claude_role_keeps_the_claude_keys():
     role = Role.parse(
         "r",
         {"prompt": "{item}", "agent": "reviewer", "permission_mode": "acceptEdits",
-         "allow": ["Bash(gh pr *)"]},
+         "allow": ["Bash(gh pr *)"], "permission_timeout_secs": 120},
     )
 
     assert role.runtime == "claude"
     assert role.options == {
-        "agent": "reviewer", "permission_mode": "acceptEdits", "allow": ("Bash(gh pr *)",)
+        "agent": "reviewer", "permission_mode": "acceptEdits", "allow": ("Bash(gh pr *)",),
+        "permission_timeout_secs": 120,
     }
     assert (role.agent, role.permission_mode, role.allow) == (
         "reviewer", "acceptEdits", ("Bash(gh pr *)",)
@@ -99,7 +100,9 @@ def test_a_claude_role_keeps_the_claude_keys():
 def test_a_claude_role_without_its_keys_gets_the_defaults():
     role = Role.parse("r", {"prompt": "{item}"})
 
-    assert role.options == {"agent": None, "permission_mode": "auto", "allow": ()}
+    assert role.options == {
+        "agent": None, "permission_mode": "auto", "allow": (), "permission_timeout_secs": 600,
+    }
 
 
 def test_the_fake_runtime_rejects_the_claude_keys():
