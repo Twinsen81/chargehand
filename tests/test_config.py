@@ -29,6 +29,15 @@ def test_a_minimal_machine_config_gets_sensible_defaults():
     assert config.ignored_keys == ()
 
 
+def test_a_binary_in_the_home_directory_can_be_written_with_a_tilde(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    config = MachineConfig.parse({**MINIMAL, "claude_bin": "~/bin/claude", "git_bin": "~/bin/git"})
+
+    assert config.claude_bin == f"{tmp_path}/bin/claude"
+    assert config.git_bin == f"{tmp_path}/bin/git"
+
+
 def test_the_lease_tools_command_is_accepted_and_ignored():
     """chargehand no longer runs a lease tool; a configuration that names one still loads."""
     assert MachineConfig.parse({**MINIMAL, "pool_bin": "/opt/bin/banksman"}).ignored_keys == (
