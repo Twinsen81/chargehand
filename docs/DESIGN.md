@@ -577,24 +577,27 @@ session still shows a permission dialog (`claude agents`: `blocked`, waiting for
 `claude attach`, and no hook may come for a long time after it, but the listing shows the
 answer within a fraction of a second. When the session no longer shows the dialog, the
 click is refused with 409, "already resolved", and the record is cancelled at once; when
-the listing cannot be read, the click is refused and the record stays open. Always allow also records a rule for that worker: the
-same tool with the same input, matched by a hash of the whole input (except a Bash
-call's `description`, which the model words anew for each call). The next such post
+the listing cannot be read, the click is refused and the record stays open. Always
+allow also records a rule for that worker: the same tool with the same input, matched by
+a hash of the whole input (except a Bash call's `description`, which the model words
+anew for each call). The next such post
 is allowed at once, with no card and no notification, and is recorded as resolved by the
-rule. A rule never changes the role, the repository or Claude Code's settings. The hook
-answers `{}`, so the session shows its own dialog, in three cases: the worker leaves
-`blocked` (the operator answered in `claude attach`), which cancels the record. No hook
-comes after such an answer, and the tick may be a minute away, so while it holds hooks the
-daemon looks at the session listing every 2 seconds, one listing for all held hooks, and
-cancels a record whose session showed the dialog and no longer does; five seconds before the hook's timeout; and
-when the daemon stops. After a timeout or a restart the record is *released*: it stays
-`open`, because the session still shows the dialog, with `released_at` set, so no hook
-holds it, and the card says to answer in the session. A released record is cancelled
-like any open one when the worker leaves `blocked`. A launch that ends (`launching` to
-`running`) cancels nothing: a session can show its first dialog before the tick confirms
-its launch. Every other state write but `blocked` cancels the open records, a continue
-that respawns a paused session included. The record has a `kind` and an
-`options` list, so a question with its own options can use the same record and card.
+rule. A rule never changes the role, the repository or Claude Code's settings.
+
+The hook answers `{}`, so the session shows its own dialog, in three cases: the record is
+cancelled because the session no longer shows the dialog; five seconds before the
+hook's timeout; and when the daemon stops. A record is cancelled when the worker leaves
+`blocked`, when its turn or session ends, and when a wake or a continue starts a new turn
+or session; a record from that new turn, recorded while the wake or the continue ran,
+stays open, and so does one recorded during a launch. An answer in `claude attach` sends
+no hook, and the tick may be a minute away, so while it holds hooks the daemon also looks
+at the session listing, half a second after a hold starts and then every 2 seconds, one
+listing for all held hooks on a thread of its own, and cancels a record whose session
+showed the dialog and no longer does. After a timeout or a restart the record is
+*released*: it stays `open`, because the session still shows the dialog, with
+`released_at` set, so no hook holds it, and the card says to answer in the session. The
+record has a `kind` and an `options` list, so a question with its own options can use
+the same record and card.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks
 existed is followed by the diff alone.
 
