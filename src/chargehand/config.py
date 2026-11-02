@@ -558,8 +558,12 @@ class MachineConfig:
             deny_rules=tuple(deny),
             pass_deny_rules_at_launch=bool(data.get("pass_deny_rules_at_launch", True)),
             trust_worktrees=bool(data.get("trust_worktrees", True)),
-            claude_bin=_as_str(data.get("claude_bin", "claude"), "config.claude_bin"),
-            git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
+            # `~` is expanded so that an exported configuration can name a binary in the
+            # home directory without the home directory's path.
+            claude_bin=os.path.expanduser(
+                _as_str(data.get("claude_bin", "claude"), "config.claude_bin")
+            ),
+            git_bin=os.path.expanduser(_as_str(data.get("git_bin", "git"), "config.git_bin")),
             ignored_keys=tuple(key for key in _IGNORED_KEYS if key in data),
             source=source,
             sources=sources,

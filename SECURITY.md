@@ -259,6 +259,17 @@ public location.
   because it usually crosses a third-party relay. Stripping terminal escapes would not
   make that text safe to forward; it is kept local instead, in the ledger, and reached
   through `status --verbose-titles` and `logs`.
+- **Export carries no secret.** `chargehand export` never puts the token in the archive
+  and never reads the Keychain. It leaves out every configuration key that can carry a
+  credential, and it refuses to write an archive in which a file still contains the home
+  directory or the token. `chargehand import` treats the archive as input it checks: it
+  refuses a newer format, a file name outside the archive's layout, a symlink and a file
+  the manifest does not list; it writes no file and no board setting that exists without
+  `--force`; it cleans board names and icons as the board does; and it writes a new token
+  rather than taking one from the archive. The archive still holds the notification hook
+  and the role files, which run as the operator: import only an archive you made. The hook
+  is copied as it is, so a credential written into it, such as a private push topic, is
+  in the archive too; export says so when it copies a hook.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 ### Known limits

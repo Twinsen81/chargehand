@@ -22,7 +22,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from chargehand import __version__, daemonlog, install, paths, sanitize, serve, trackers
+from chargehand import __version__, daemonlog, install, paths, sanitize, serve, trackers, transfer
 from chargehand import usage as usage_mod
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
@@ -841,6 +841,82 @@ def cmd_templates(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _config_path(args: argparse.Namespace) -> Path:
+    return Path(args.config).expanduser() if args.config else paths.config_file()
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    try:
+        exported = transfer.export_setup(
+            Path(args.file).expanduser(), config_path=_config_path(args), force=args.force
+        )
+    except transfer.Refused as exc:
+        print(sanitize.one_line(str(exc), limit=4000), file=sys.stderr)
+        return EXIT_REFUSED
+    _print(f"wrote {exported.path}")
+    for member in exported.members:
+        _print(f"  {member}")
+    if exported.board_rows:
+        _print(f"  {exported.board_rows} board setting(s) of the configured repositories")
+    for dropped in exported.dropped:
+        _print(f"left out {sanitize.one_line(dropped.where, limit=200)}: set it again after the import")
+    _print("The archive holds no token and no Keychain value. Import it with "
+           "`chargehand import <file>`.")
+    if exported.notify_member:
+        # The hook is the operator's own script and is copied byte for byte, so a
+        # credential written into it travels too.
+        _print(f"{exported.notify_member} is your notification hook as it is: check that "
+               "it holds no credential, such as a private push topic, before you share the archive.")
+    for line in exported.kept:
+        _print(sanitize.one_line(line, limit=500))
+    return EXIT_OK
+
+
+def _ask(question: str, default: str) -> str:
+    """One answer from stdin. The question goes to stderr, so a script can pipe the answers in."""
+    shown = sanitize.one_line(f"{question} [{default}]", limit=300)
+    print(f"{shown}: ", end="", file=sys.stderr, flush=True)
+    line = sys.stdin.readline()
+    if not sys.stdin.isatty():
+        print(file=sys.stderr)
+    return line.strip()
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    given: dict[str, str] = {}
+    for pair in args.repository:
+        name, sep, value = pair.partition("=")
+        if not sep or not name or not value:
+            print(f"--repository takes NAME=PATH, not {pair!r}", file=sys.stderr)
+            return EXIT_ERROR
+        given[name] = value
+    try:
+        imported = transfer.import_setup(
+            Path(args.file).expanduser(),
+            config_path=_config_path(args),
+            ask=_ask,
+            repository_paths=given,
+            worktree_root=args.worktree_root,
+            force=args.force,
+        )
+    except transfer.Refused as exc:
+        print(sanitize.one_line(str(exc), limit=4000), file=sys.stderr)
+        return EXIT_REFUSED
+    for path in imported.written:
+        _print(f"wrote {path}")
+    if imported.board_rows:
+        _print(f"restored {imported.board_rows} board setting(s)")
+    if imported.token_created:
+        _print(f"wrote a new token to {imported.token_file}")
+    else:
+        _print(f"kept the token in {imported.token_file}")
+    _print("")
+    _print(f"Still to do by hand; `chargehand doctor` lists these from {imported.steps_file.name}:")
+    for step in imported.steps:
+        _print(f"  - {sanitize.one_line(str(step['detail']), limit=500)}")
+    return EXIT_OK
+
+
 # ----- parser ---------------------------------------------------------------
 
 
@@ -969,6 +1045,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--role", action="append", default=[], metavar="NAME",
         help="write this starter role and its agent file instead of the implementer; "
              "repeatable (e.g. pr-reviewer)",
+    )
+
+    export = add("export", cmd_export,
+                 "write this machine's setup to one archive, without secrets")
+    export.add_argument("file", help="the archive to write, such as setup.zip")
+    export.add_argument("--force", action="store_true", help="overwrite an existing archive")
+
+    import_cmd = add("import", cmd_import, "unpack an archive from `export` on this machine")
+    import_cmd.add_argument("file", help="the archive that `export` wrote")
+    import_cmd.add_argument("--force", action="store_true", help="overwrite existing files")
+    import_cmd.add_argument(
+        "--repository", action="append", default=[], metavar="NAME=PATH",
+        help="the path of a repository on this machine; repeatable. Without it, import "
+             "asks, or reads one line per repository from stdin",
+    )
+    import_cmd.add_argument(
+        "--worktree-root", metavar="PATH",
+        help="where workers' worktrees go on this machine. Without it, import asks, or "
+             "reads it from stdin after the repository paths",
     )
 
     templates = add("templates", cmd_templates, "print a bundled template")

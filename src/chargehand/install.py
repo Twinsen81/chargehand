@@ -7,11 +7,15 @@ repairs.
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
+import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +54,8 @@ JOB_PROCESS_TYPE = "Interactive"
 # tick phase in progress first; a phase that runs longer, such as a slow setup script, is
 # killed, and the next start reconciles it as an interrupted launch.
 JOB_EXIT_TIMEOUT_SECS = 300
+# Next to the machine configuration: what an import could not do, for `doctor` to list.
+IMPORT_STEPS_FILE = "imported-steps.json"
 
 
 @dataclass(frozen=True)
@@ -326,6 +332,7 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
     checks.append(Check("config", OK, str(config.source or "(in memory)")))
     for key in config.ignored_keys:
         checks.append(Check("config", INFO, f"{key} is ignored and can be removed"))
+    checks.extend(import_checks(config))
 
     for name in _runtimes_in_use(config):
         try:
@@ -368,10 +375,15 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
         checks.append(Check("disk", WARN, str(exc)))
 
     if config.notify.command:
-        program = Path(os.path.expanduser(config.notify.command.split()[0]))
-        runnable = program.exists() and os.access(program, os.X_OK)
+        # Split and resolved as the notifier runs it: a bare name through PATH.
+        try:
+            words = shlex.split(os.path.expanduser(config.notify.command))
+        except ValueError:
+            words = []
+        program = os.path.expanduser(words[0]) if words else config.notify.command
+        found = shutil.which(program) if words else None
         checks.append(
-            Check("notify", OK if runnable else FAIL, f"{program}{'' if runnable else ' is not executable'}")
+            Check("notify", OK if found else FAIL, found or f"{program} is not executable")
         )
     else:
         checks.append(Check("notify", WARN, "no notify.command configured; nothing will reach you"))
@@ -473,6 +485,96 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
         )
     checks.extend(daemon_checks(config))
     return checks
+
+
+def runs_statusline_wrapper(entry: object) -> bool:
+    """Whether a `statusLine` entry of Claude Code's settings runs `chargehand statusline`."""
+    if not isinstance(entry, Mapping):
+        return False
+    command = entry.get("command")
+    return (
+        isinstance(command, str)
+        and "chargehand" in command
+        and re.search(r"\bstatusline\b", command) is not None
+    )
+
+
+def import_checks(config: MachineConfig) -> list[Check]:
+    """The manual steps an import left, each one marked done when this machine shows it."""
+    steps_file = (config.source.parent if config.source else paths.config_dir()) / IMPORT_STEPS_FILE
+    try:
+        record = json.loads(steps_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        return [Check("imported setup", WARN, f"{steps_file} cannot be read: {exc}")]
+    steps = record.get("steps") if isinstance(record, dict) else None
+    checks = [
+        Check("imported setup", INFO,
+              f"{steps_file} lists what an import left to do; remove it when the steps are done")
+    ]
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        done = _step_done(config, step)
+        checks.append(
+            Check(str(step.get("name", "imported")),
+                  INFO if done is None else OK if done else WARN,
+                  str(step.get("detail", "")))
+        )
+    return checks
+
+
+def _step_done(config: MachineConfig, step: Mapping[str, object]) -> bool | None:
+    """Whether an imported step is done, or None when this machine cannot show it."""
+    kind = step.get("kind")
+    if kind == "config_key":
+        path = step.get("path")
+        return isinstance(path, list) and _config_has(config, [str(p) for p in path])
+    if kind == "statusline":
+        # The import names the settings file, so this module needs no Claude Code paths.
+        settings_file = step.get("settings")
+        if not isinstance(settings_file, str):
+            return None
+        try:
+            settings = json.loads(Path(settings_file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(settings, dict) and runs_statusline_wrapper(settings.get("statusLine"))
+    if kind == "launchd":
+        return is_loaded() if sys.platform == "darwin" else None
+    if kind == "program":
+        program = step.get("program")
+        return isinstance(program, str) and shutil.which(os.path.expanduser(program)) is not None
+    return None
+
+
+def _config_has(config: MachineConfig, path: Sequence[str]) -> bool:
+    """Whether the configuration file sets the key at *path*, as an export names it."""
+    if config.source is None or not path:
+        return False
+    try:
+        with config.source.open("rb") as handle:
+            data: object = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    rest = list(path)
+    if rest[0] in ("repository", "source") and len(rest) > 2 and isinstance(data, Mapping):
+        arrays = ("repository", "route") if rest[0] == "repository" else ("source",)
+        entries = [e for a in arrays for e in (data.get(a) or []) if isinstance(e, Mapping)]
+        data = next((e for e in entries if _entry_name(rest[0], e) == rest[1]), None)
+        rest = rest[2:]
+    for key in rest:
+        if not isinstance(data, Mapping) or key not in data:
+            return False
+        data = data[key]
+    return True
+
+
+def _entry_name(kind: str, entry: Mapping[str, object]) -> object:
+    if kind == "source":
+        return entry.get("name", entry.get("type"))
+    return entry.get("name") or Path(str(entry.get("path", entry.get("repo", "")))).name
 
 
 def source_checks(config: MachineConfig) -> list[Check]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import plistlib
 import subprocess
 import sys
@@ -642,3 +643,22 @@ def test_doctor_warns_about_a_review_request_without_a_notification_thread(
     main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
     checks = [c for c in json.loads(capsys.readouterr().out) if c["name"] == "source github"]
     assert checks == [] and gh.calls == []
+
+
+def test_doctor_finds_a_notify_program_named_on_path(capsys, config_file, harness, tmp_path, monkeypatch):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ.get('PATH', '')}")
+    with config_file.open("a") as handle:
+        handle.write('\n[notify]\ncommand = "chx-notifier --title \'a b\'"\n')
+
+    checks = _doctor(capsys, config_file)
+    assert checks["notify"]["status"] == install.FAIL
+    assert "chx-notifier is not executable" in checks["notify"]["detail"]
+
+    notifier = tools / "chx-notifier"
+    notifier.write_text("#!/bin/sh\n")
+    notifier.chmod(0o755)
+    checks = _doctor(capsys, config_file)
+    assert checks["notify"]["status"] == install.OK
+    assert checks["notify"]["detail"] == str(notifier)
