@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import pytest
 
-from chargehand import board, ledger as ledger_mod
+from chargehand import board, cli, ledger as ledger_mod
 from chargehand.cli import EXIT_OK, main
 from chargehand.ledger import Ledger
 from support import daemon as support
@@ -347,8 +348,24 @@ def test_a_hidden_repository_still_launches_and_supervises(harness):
     assert ("ABC-1", "blocked") in harness.notifications()
 
 
-def test_status_json_does_not_change_with_the_board_state(capsys, config_file, harness):
+class _FrozenClock:
+    """The time module as `status` sees it, with a wall clock that does not move."""
+
+    def __init__(self, now: float) -> None:
+        self._now = now
+
+    def time(self) -> float:
+        return self._now
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
+def test_status_json_does_not_change_with_the_board_state(capsys, config_file, harness, monkeypatch):
     worker = seed(harness, "ABC-1")
+    # `status` reports times relative to now; both runs read the same now, so any change
+    # between them comes from the board state.
+    monkeypatch.setattr(cli, "time", _FrozenClock(worker.created_at + 5.0))
     run(["status", "--json", "--no-queue"], config_file)
     before = json.loads(capsys.readouterr().out)
 
@@ -362,10 +379,7 @@ def test_status_json_does_not_change_with_the_board_state(capsys, config_file, h
     assert run(["status", "--json", "--no-queue"], config_file) == EXIT_OK
     after = json.loads(capsys.readouterr().out)
 
-    assert after["workers"] == before["workers"]
-    assert {key: value for key, value in after.items() if key != "generated_at"} == {
-        key: value for key, value in before.items() if key != "generated_at"
-    }
+    assert after == before
 
 
 # ----- persistence -----------------------------------------------------------------------
