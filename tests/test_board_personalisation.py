@@ -437,3 +437,17 @@ def test_the_page_tells_the_board_pin_apart_and_writes_through_the_board_routes(
     assert re.search(r"innerHTML|outerHTML|insertAdjacentHTML", script) is None
     page_html = (board.asset_dir() / "index.html").read_text()
     assert 'id="show-hidden"' in page_html and 'id="hidden-count"' in page_html
+
+
+def test_the_log_line_names_the_worker_by_its_handle(daemon, harness, caplog):
+    worker = seed(harness, "ABC-1")
+    caplog.set_level("INFO", logger=board.__name__)
+
+    post(daemon, f"/api/workers/{worker.id}/board", {"pinned": True, "name": "Fix"})
+    post(daemon, "/api/repositories/test/board", {"hidden": True})
+
+    lines = [record.getMessage() for record in caplog.records if record.name == board.__name__]
+    assert lines == [
+        f"{worker.target}: board settings set: pinned, name",
+        "repository test: board settings set: hidden",
+    ]

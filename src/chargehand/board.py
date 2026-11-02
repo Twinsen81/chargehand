@@ -299,7 +299,7 @@ def worker_action(request: Request) -> Response:
     if worker is None:
         raise HTTPError(404, f"no worker {parts[0]}")
     if action == PERSONALISE:
-        return personalise(request, ledger_mod.BOARD_WORKER, str(worker.id), body)
+        return personalise(request, ledger_mod.BOARD_WORKER, str(worker.id), body, name=worker.target)
     target = target_of(worker)
     if action == ATTACH:
         return _attach(request, ledger, worker, target, body)
@@ -396,7 +396,10 @@ def repository_action(request: Request) -> Response:
     if repository is None:
         raise HTTPError(404, f"no repository {sanitize.one_line(parts[0], limit=64)}")
     if parts[1] == PERSONALISE:
-        return personalise(request, ledger_mod.BOARD_REPOSITORY, repository.name, _body(request))
+        return personalise(
+            request, ledger_mod.BOARD_REPOSITORY, repository.name, _body(request),
+            name=f"repository {repository.name}",
+        )
     return _record(request, parts[1], repository.name)
 
 
@@ -467,8 +470,12 @@ def _setting(field: str, value: object) -> str | None:
     return "1" if value else None
 
 
-def personalise(request: Request, kind: str, key: str, body: Mapping[str, object]) -> Response:
+def personalise(
+    request: Request, kind: str, key: str, body: Mapping[str, object], *, name: str
+) -> Response:
     """Set or drop each board setting in *body* for a repository or a worker.
+
+    *name* starts the log line: the worker's handle, or the repository.
 
     It changes how the board shows the thing and nothing else, so it needs no request row
     and no tick: the configured name, the handle and the session name stay as they are.
@@ -490,7 +497,7 @@ def personalise(request: Request, kind: str, key: str, body: Mapping[str, object
                 ledger.delete_board_state(kind, key, field)
             else:
                 ledger.set_board_state(kind, key, field, value)
-    log.info("board: %s %s: set %s", kind, key, ", ".join(changes))
+    log.info("%s: board settings set: %s", name, ", ".join(changes))
     settings = BoardState(ledger.board_state()).of(kind, key)
     return Response.json({"kind": kind, "key": key, "settings": settings})
 

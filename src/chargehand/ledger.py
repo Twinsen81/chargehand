@@ -90,6 +90,10 @@ REQUEST_ORIGINS = (REQUEST_CLI, REQUEST_BOARD)
 # this source and kind, with the line as its pointer. No configured source may have this
 # name, so only the tick writes such a row; the line is trusted operator text, cleaned to
 # one line of at most REPLY_LIMIT characters.
+REPLY_SOURCE = "board"
+REPLY_KIND = "reply"
+REPLY_LIMIT = 500
+
 # What the board keeps per repository and per worker: names and icons the operator chose,
 # pins, and the folded and hidden repositories. The page reads it and nothing else does, so
 # the configured names, the handles and the session names never change with it.
@@ -99,10 +103,6 @@ BOARD_FIELDS: dict[str, tuple[str, ...]] = {
     BOARD_REPOSITORY: ("name", "icon", "pinned", "collapsed", "hidden"),
     BOARD_WORKER: ("name", "icon", "pinned"),
 }
-
-REPLY_SOURCE = "board"
-REPLY_KIND = "reply"
-REPLY_LIMIT = 500
 
 # A worker handle that names the worker by id: `role/item#id`, or `role/#id` without an item.
 _ID_HANDLE = re.compile(r"(?:([^/#\s]+)/([^/#\s]*))?#([0-9]{1,12})")
