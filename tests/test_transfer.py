@@ -647,3 +647,17 @@ def test_a_notify_script_with_a_name_an_archive_cannot_hold_says_so(old, tmp_pat
     out = capsys.readouterr().out
     assert "~/bin/my notify (notify.command) is not copied because its file name is not one" in out
     assert "installed outside" not in out
+
+
+def test_every_bin_key_given_as_a_path_is_a_step(old, tmp_path, monkeypatch, capsys):
+    archive = tmp_path / "setup.zip"
+
+    assert _export(old, archive) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "~/.local/bin/claude (claude_bin) is not copied" in out
+    assert "~/bin/gh ([[repository]] other: tracker.gh_bin) is not copied" in out
+    new = Machine(tmp_path / "new").enter(monkeypatch)
+    assert _import(new, archive, monkeypatch) == EXIT_OK
+    assert "install ~/bin/gh, which [[repository]] other: tracker.gh_bin names" in capsys.readouterr().out
+    assert _program_step(capsys, "~/bin/gh")["status"] == install.WARN

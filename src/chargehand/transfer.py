@@ -466,13 +466,25 @@ def _notify_script(
     return program, argv[1:], None
 
 
-def _kept_binaries(config: MachineConfig) -> list[dict[str, str]]:
-    """`claude_bin` and `git_bin` when they name a path rather than a program on PATH."""
-    return [
-        _kept(key, value, "the archive carries no binaries")
-        for key, value in (("claude_bin", config.claude_bin), ("git_bin", config.git_bin))
-        if "/" in value
-    ]
+def _kept_binaries(data: Mapping[str, object]) -> list[dict[str, str]]:
+    """Every `*_bin` key that names a path rather than a program on PATH, such as `gh_bin`."""
+    kept: list[dict[str, str]] = []
+
+    def walk(value: object, label: str) -> None:
+        if not isinstance(value, Mapping):
+            return
+        for key, item in value.items():
+            where = f"{label}{key}"
+            if isinstance(item, str) and str(key).endswith("_bin") and "/" in item:
+                kept.append(_kept(where, os.path.expanduser(item), "the archive carries no binaries"))
+            walk(item, where + ".")
+
+    walk({k: v for k, v in data.items() if k not in (*_REPOSITORY_ARRAYS, "source")}, "")
+    for array in (*_REPOSITORY_ARRAYS, "source"):
+        entries = data.get(array, [])
+        for entry, name in zip(entries if isinstance(entries, list) else [], _names(data, array)):
+            walk(entry, f"[[{array}]] {name}: ")
+    return kept
 
 
 def _cannot_travel(program: Path) -> str | None:
@@ -575,7 +587,7 @@ def export_setup(
     notify_program, notify_args, notify_kept = _notify_script(
         config, [paths.config_dir(), config_path.parent]
     )
-    kept = _kept_binaries(config) + ([notify_kept] if notify_kept else [])
+    kept = _kept_binaries(data) + ([notify_kept] if notify_kept else [])
     notify: dict[str, object] | None = None
     if notify_program is not None:
         member = f"{NOTIFY_DIR}/{notify_program.name}"

@@ -144,7 +144,7 @@ such as `api_key_command`. The notification hook is copied as it is, when it is 
 script in your home or configuration directory: if you wrote a credential into it, such
 as a private push topic, the archive holds it too. A binary, a tool's generated shim or a
 program installed elsewhere is not copied; the command keeps naming it, and import lists
-it as a program to install, as it does for a `claude_bin` or `git_bin` given as a path.
+it as a program to install, as it does for any `*_bin` key given as a path.
 Import asks for the path of each repository and for the worktree root
 (or takes `--repository NAME=PATH` and `--worktree-root PATH`, or one line per answer on
 stdin), refuses to overwrite a file without `--force`, and writes a new token. It does
