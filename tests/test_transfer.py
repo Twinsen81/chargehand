@@ -597,6 +597,8 @@ def test_a_refusal_quoting_the_archive_is_printed_as_one_clean_line(old, tmp_pat
     "where, content, reason",
     [
         ("go/bin/ntfy", b"\x00" * (transfer.MAX_MEMBER_BYTES + 1), "larger than"),
+        ("bin/ntfy", b"\x7fELF\x02\x01\x01\x00", "not a text script"),
+        ("bin/ntfy-latin1", b"#!/bin/sh\necho caf\xe9\n", "not a text script"),
         (".local/bin/ntfy", None, "contains the home directory's path"),
     ],
 )
