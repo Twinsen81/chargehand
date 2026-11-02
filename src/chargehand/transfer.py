@@ -486,7 +486,10 @@ def _cannot_travel(program: Path) -> str | None:
     if "\x00" in text:
         return "it is not a text script"
     if any(home in text for home in _homes()):
-        return "it contains the home directory's path"
+        return (
+            "it contains the home directory's path (if it is your own script, write the "
+            "path as $HOME and export again)"
+        )
     return None
 
 
