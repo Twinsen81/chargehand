@@ -263,11 +263,6 @@ class Runtime(ABC):
         """
         return None
 
-    def waits_for_permission(self, session_id: str) -> bool | None:
-        """Whether one session shows a permission dialog now; None: unknown."""
-        waits = self.permission_waits()
-        return None if waits is None else waits.get(session_id, False)
-
     # ----- sessions ---------------------------------------------------------
 
     @abstractmethod

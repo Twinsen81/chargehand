@@ -55,6 +55,8 @@ HOLD_POLL_SECS = 0.25
 # How often a held hook checks that its session still shows the dialog. An answer in
 # `claude attach` sends no hook, and the tick may be a minute away.
 SESSION_CHECK_SECS = 2.0
+# The first of those checks comes sooner, to see the session show the dialog.
+FIRST_SESSION_CHECK_SECS = 0.5
 # How long the process waits at exit for held hooks to send their answers.
 EXIT_DRAIN_SECS = 2.0
 
@@ -105,32 +107,49 @@ class _Holds:
             return len(self._events)
 
 
+Look = tuple[float, "dict[str, bool] | None"]
+
+
 class _Listings:
     """The last look at which sessions show a permission dialog, per ledger and runtime.
 
-    Every held hook reads it every SESSION_CHECK_SECS, so a terminal answer clears its
-    card within a few seconds; with many held hooks it is still one listing per interval.
-    A click asks for a fresh one. The lock makes concurrent askers share one listing.
+    Held hooks ask for a look every SESSION_CHECK_SECS and read the newest one, so a
+    terminal answer clears its card within a few seconds; with many held hooks it is still
+    one listing per interval. Their listing runs on a thread of its own, so a slow
+    `claude agents` never keeps a held hook from its stop or its timeout. A click lists at
+    once and waits for it.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._looks: dict[tuple[str, str], tuple[float, dict[str, bool] | None]] = {}
+        self._looks: dict[tuple[str, str], Look] = {}
+        self._busy: set[tuple[str, str]] = set()
 
-    def waits(
-        self, key: tuple[str, str], runtime: Runtime, session_id: str, *, max_age: float
-    ) -> bool | None:
+    def latest(self, key: tuple[str, str]) -> Look | None:
+        with self._lock:
+            return self._looks.get(key)
+
+    def refresh_soon(self, key: tuple[str, str], runtime: Runtime, *, max_age: float) -> None:
         with self._lock:
             look = self._looks.get(key)
-            if look is None or time.monotonic() - look[0] > max_age:
-                try:
-                    waits = runtime.permission_waits()
-                except Exception:
-                    log.exception("cannot read whether the sessions wait for a permission answer")
-                    waits = None
-                look = self._looks[key] = (time.monotonic(), waits)
-        waits = look[1]
-        return None if waits is None else waits.get(session_id, False)
+            if key in self._busy or (look is not None and time.monotonic() - look[0] <= max_age):
+                return
+            self._busy.add(key)
+        threading.Thread(
+            target=self.refresh, args=(key, runtime), name="chargehand-permission-listing",
+            daemon=True,
+        ).start()
+
+    def refresh(self, key: tuple[str, str], runtime: Runtime) -> dict[str, bool] | None:
+        try:
+            waits = runtime.permission_waits()
+        except Exception:
+            log.exception("cannot read whether the sessions wait for a permission answer")
+            waits = None
+        with self._lock:
+            self._looks[key] = (time.monotonic(), waits)
+            self._busy.discard(key)
+        return waits
 
 
 _holds = _Holds()
@@ -310,14 +329,17 @@ class _SessionCheck:
     """Whether a held prompt's session stopped showing the dialog, looked at now and then.
 
     Only a session that was seen showing a permission dialog and no longer shows one
-    counts as answered there, so a listing that lags behind the hook cancels nothing.
+    counts as answered there, so a listing that lags behind the hook cancels nothing. The
+    first look comes soon after the hold starts, so an answer in the session within the
+    first seconds is seen too. Only looks taken after the hold started count.
     """
 
     def __init__(self, request: Request, ledger: Ledger, worker: Worker) -> None:
         self._ledger = ledger
         self._worker_id = worker.id
         self._seen = False
-        self._next = time.monotonic() + SESSION_CHECK_SECS
+        self._used = time.monotonic()
+        self._next = self._used + FIRST_SESSION_CHECK_SECS
         try:
             self._runtime: Runtime | None = request.daemon.runner(ledger).runtime(worker.runtime)
         except Exception:
@@ -327,19 +349,24 @@ class _SessionCheck:
         self._key = (os.path.realpath(request.daemon.ledger_path), worker.runtime)
 
     def answered_in_session(self) -> bool:
-        if self._runtime is None or time.monotonic() < self._next:
+        if self._runtime is None:
             return False
-        self._next = time.monotonic() + SESSION_CHECK_SECS
+        if time.monotonic() >= self._next:
+            self._next = time.monotonic() + SESSION_CHECK_SECS
+            # Held hooks share one listing per interval.
+            _listings.refresh_soon(self._key, self._runtime, max_age=SESSION_CHECK_SECS * 0.9)
+        look = _listings.latest(self._key)
+        if look is None or look[0] <= self._used or look[1] is None:
+            return False
+        self._used = look[0]
         worker = self._ledger.get(self._worker_id)
         session = worker and (worker.session_id or worker.session_uuid)
         if not session:
             return False
-        # Held hooks share one listing per interval.
-        waits = _listings.waits(self._key, self._runtime, session, max_age=SESSION_CHECK_SECS * 0.9)
-        if waits:
+        if look[1].get(session, False):
             self._seen = True
             return False
-        return waits is False and self._seen
+        return self._seen
 
 
 def answer_prompt(
@@ -406,7 +433,8 @@ def _session_waits(request: Request, ledger: Ledger, worker: Worker) -> bool | N
     try:
         runtime = request.daemon.runner(ledger).runtime(worker.runtime)
         key = (os.path.realpath(request.daemon.ledger_path), worker.runtime)
-        return _listings.waits(key, runtime, session, max_age=0.0)
+        waits = _listings.refresh(key, runtime)
+        return None if waits is None else waits.get(session, False)
     except Exception:
         log.exception("%s: cannot read whether the session waits for a permission answer",
                       worker.handle)

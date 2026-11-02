@@ -449,6 +449,30 @@ def test_a_daemon_stop_releases_every_held_hook(harness, tmp_path):
     assert not hooks.is_held(built, prompt.id)
 
 
+def test_a_slow_listing_does_not_keep_a_held_hook_from_a_stop(harness, tmp_path, monkeypatch):
+    monkeypatch.setattr(hooks, "FIRST_SESSION_CHECK_SECS", 0.05)
+    monkeypatch.setattr(hooks, "SESSION_CHECK_SECS", 0.1)
+    listing = threading.Event()
+
+    def slow(self):
+        listing.set()
+        time.sleep(5)
+        return None
+
+    monkeypatch.setattr(ClaudeRuntime, "permission_waits", slow)
+    config = support.daemon_config(harness.config, tmp_path / "board.token")
+    built = support.build(config, notifier=harness.notifier, interval_secs=3600)
+    worker = launch(harness)
+    with support.running(built, loop=False):
+        hook = Held(built, worker)
+        held_prompt(built, harness, worker)
+        assert listing.wait(3)
+
+        built.stop()
+
+        assert hook.answered(timeout=1.5) == (200, {})
+
+
 def test_a_session_with_the_old_short_timeout_is_not_held(daemon, harness):
     worker = launch(harness, timeout=claude.HOOK_TIMEOUT_SECS)
 
