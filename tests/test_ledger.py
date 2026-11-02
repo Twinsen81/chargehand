@@ -808,3 +808,139 @@ def test_every_older_ledger_gains_the_board_state(tmp_path, version_schema):
         ledger.set_board_state(ledger_mod.BOARD_WORKER, "1", "pinned", "1")
         assert [row["field"] for row in ledger.board_state()] == ["pinned"]
         assert ledger.get_request(ledger.record_request("pause"))["origin"] == "cli"
+
+
+# ----- version 7: prompts as records, and the per-worker rules ----------------------------
+
+# A version 6 ledger: version 5 plus the board's own state.
+V6_SCHEMA = V5_SCHEMA.replace("PRAGMA user_version = 5;", "") + """
+CREATE TABLE board_state (
+    kind TEXT NOT NULL, key TEXT NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL,
+    updated_at REAL NOT NULL, PRIMARY KEY (kind, key, field)
+);
+PRAGMA user_version = 6;
+"""
+
+
+def test_a_version_six_ledger_turns_its_prompts_into_records(tmp_path):
+    path = tmp_path / "v6.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V6_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at) VALUES (7, 'implementer', 'ABC-1', 'i1', "
+        "'test', '/repo', '/w/ABC-1', 'b', 'blocked', 4, 1.0, 2.0)"
+    )
+    conn.execute(
+        "INSERT INTO permission_prompts (id, worker_id, tool_name, tool_input, created_at, "
+        "resolved_at) VALUES (1, 7, 'Bash', '{}', 1.0, 2.0), (2, 7, 'Edit', '{}', 3.0, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO board_state (kind, key, field, value, updated_at) "
+        "VALUES ('worker', '7', 'pinned', '1', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        old, current = ledger.get_permission_prompt(1), ledger.get_permission_prompt(2)
+        assert (old.state, old.resolved_by, old.released_at, old.kind) == ("cancelled", "session", 2.0, "permission")
+        assert (current.state, current.decision, current.released_at) == ("open", None, None)
+        assert [p.id for p in ledger.open_permission_prompts()] == [2]
+        assert [row["value"] for row in ledger.board_state()] == ["1"]
+        worker = ledger.get(7)
+        ledger.set_prompt_digest(2, "d" * 64)
+        assert ledger.answer_permission_prompt(2, "allow", by="board", rule=True)
+        assert ledger.has_permission_rule(worker, "Edit", "d" * 64)
+        assert not ledger.answer_permission_prompt(2, "deny", by="board")
+
+
+@pytest.mark.parametrize(
+    "version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA"]
+)
+def test_every_older_ledger_gains_the_prompt_records_and_the_rules(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        prompt_id = ledger.record_permission_prompt(
+            worker, tool_name="Bash", tool_input="{}", input_digest="e" * 64
+        )
+        assert ledger.get_permission_prompt(prompt_id).state == "open"
+        assert ledger.answer_permission_prompt(prompt_id, "allow", by="board", rule=True)
+        assert ledger.has_permission_rule(worker, "Bash", "e" * 64)
+
+
+def test_first_writer_wins_between_an_answer_a_release_and_a_cancel(tmp_path):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        released = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}")
+        assert ledger.release_permission_prompt(released)
+        assert not ledger.answer_permission_prompt(released, "allow", by="board")
+        assert not ledger.release_permission_prompt(released)
+
+        answered = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}")
+        assert ledger.answer_permission_prompt(answered, "deny", by="board")
+        assert not ledger.release_permission_prompt(answered)
+
+        # Leaving `blocked` cancels the open prompts, the released one included.
+        assert ledger.resolve_permission_prompts(worker) == 1
+        assert ledger.get_permission_prompt(released).state == "cancelled"
+        assert ledger.get_permission_prompt(answered).state == "resolved"
+
+
+def test_an_open_prompt_is_cancelled_when_the_worker_leaves_blocked_or_stops_not_when_its_launch_ends(tmp_path):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        launching = ledger.update(worker, state=ledger_mod.LAUNCHING)
+        prompt = ledger.record_permission_prompt(launching, tool_name="Bash", tool_input="{}")
+
+        running = ledger.update(launching, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(prompt).state == "open"
+        blocked = ledger.update(running, state=ledger_mod.BLOCKED)
+        assert ledger.get_permission_prompt(prompt).state == "open"
+        ledger.update(blocked, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(prompt).state == "cancelled"
+
+        other = ledger.record_permission_prompt(running, tool_name="Bash", tool_input="{}")
+        ledger.update(ledger.get(worker.id), state=ledger_mod.PAUSED)
+        assert ledger.get_permission_prompt(other).state == "cancelled"
+
+        # A prompt recorded while paused does not survive the respawn of a continue, which
+        # read the row after the hook touched it.
+        stale = hook(ledger, worker)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(stale).state == "cancelled"
+
+        # Nor one recorded while idle when a wake starts a turn.
+        ledger.update(ledger.get(worker.id), state=ledger_mod.IDLE)
+        woken = hook(ledger, worker)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(woken).state == "cancelled"
+
+
+def hook(ledger, worker, now=None):
+    """What a PermissionRequest hook writes: the row's last hook, then the prompt."""
+    stamp = time.time() if now is None else now
+    ledger.update(ledger.get(worker.id), last_hook="PermissionRequest", last_hook_at=stamp)
+    return ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}", now=stamp)
+
+
+@pytest.mark.parametrize("before", [ledger_mod.IDLE, ledger_mod.QUEUED, ledger_mod.PAUSED, ledger_mod.PARKED])
+def test_a_prompt_from_the_new_turn_survives_the_write_of_the_wake_or_continue_that_started_it(tmp_path, before):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        older = hook(ledger, ledger.update(worker, state=before))
+        # The wake or the continue reads the row, then resumes or respawns the session ...
+        snapshot = ledger.get(worker.id)
+        time.sleep(0.01)
+        # ... whose new turn asks for permission before the action writes `running`.
+        newer = hook(ledger, worker)
+        ledger.update(snapshot, state=ledger_mod.RUNNING)
+
+        assert ledger.get_permission_prompt(newer).state == "open"
+        assert ledger.get_permission_prompt(older).state == "cancelled"

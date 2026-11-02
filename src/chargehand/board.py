@@ -13,6 +13,11 @@ is the exception: it opens a terminal window on this machine at once, because th
 can be busy with a launch for minutes, and records its request already applied. The
 board has no chat: a conversation with a session goes through attach.
 
+A permission prompt is answered on its card, also at once: the session's hook waits in
+the daemon for the answer (see :mod:`chargehand.hooks`), so a request for the tick would
+come too late. The answer writes only the prompt's ledger row; the waiting hook is the
+one that tells the session.
+
 The operator can also rename, give an icon to and pin repositories and workers, and fold
 or hide repositories. That is the board's own state in the ledger: a ``POST`` with the
 token writes it at once, as it has no side effect outside the ledger, and nothing but
@@ -39,6 +44,7 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from chargehand import config as config_mod
+from chargehand import hooks as hooks_mod
 from chargehand import ledger as ledger_mod
 from chargehand import paths, sanitize
 from chargehand import roles as roles_mod
@@ -72,6 +78,8 @@ CLOSED_WINDOW_SECS = 24 * 3600
 CLOSED_LIMIT = 30
 
 PROMPT_LIMIT = 2000
+# How much of a permission prompt's tool input a card shows.
+PROMPT_INPUT_LIMIT = 1000
 ANSWER_LIMIT = 2000
 LINE_LIMIT = 200
 # A transcript holds about this many bytes per token. The estimate is approximate.
@@ -111,6 +119,8 @@ WORKER_ACTIONS: dict[str, tuple[str, bool]] = {
     "reply": (REPLY, False),
 }
 ATTACH = "attach"
+# The answer to an open prompt: `{"prompt": <id>, "answer": "allow" | "deny" | "always"}`.
+ANSWER = "answer"
 REPOSITORY_ACTIONS = ("pause", "resume")
 
 # What a new worker request may carry: an item as its tracker names it, and the event
@@ -199,7 +209,8 @@ def state(request: Request) -> Response:
 
     show_hidden = request.query.get("show_hidden", [""])[-1] == "1"
     model = build(
-        daemon.config, ledger, health=daemon.health(), attach=attach, show_hidden=show_hidden
+        daemon.config, ledger, health=daemon.health(), attach=attach, show_hidden=show_hidden,
+        held=lambda prompt_id: hooks_mod.is_held(daemon, prompt_id),
     )
     return Response(body=to_json(model), headers=PAGE_HEADERS)
 
@@ -291,7 +302,7 @@ def worker_action(request: Request) -> Response:
     if len(parts) != 2 or not parts[0].isdigit():
         raise HTTPError(404, "not found")
     action = parts[1]
-    if action not in (ATTACH, PERSONALISE) and action not in WORKER_ACTIONS:
+    if action not in (ATTACH, PERSONALISE, ANSWER) and action not in WORKER_ACTIONS:
         raise HTTPError(404, f"no worker action {sanitize.one_line(action, limit=40)}")
     body = _body(request)
     ledger = request.ledger()
@@ -300,6 +311,10 @@ def worker_action(request: Request) -> Response:
         raise HTTPError(404, f"no worker {parts[0]}")
     if action == PERSONALISE:
         return personalise(request, ledger_mod.BOARD_WORKER, str(worker.id), body, name=worker.target)
+    if action == ANSWER:
+        return Response.json(
+            hooks_mod.answer_prompt(request, ledger, worker, body.get("prompt"), body.get("answer"))
+        )
     target = target_of(worker)
     if action == ATTACH:
         return _attach(request, ledger, worker, target, body)
@@ -559,8 +574,11 @@ def build(
     attach: Callable[[Worker], str | None] = lambda worker: None,
     now: float | None = None,
     show_hidden: bool = False,
+    held: Callable[[int], bool] = lambda prompt_id: False,
 ) -> dict[str, object]:
     """The page model: the top bar, and the cards of every column in repository groups.
+
+    *held* tells whether a hook still waits for the board's answer to a prompt.
 
     In a group the pinned cards come first, then the others by their last activity; the
     groups are ordered the same way by the repository's pin. A collapsed repository shows
@@ -585,7 +603,9 @@ def build(
     }
     cards = []
     for worker in (*live, *closed):
-        entry = card(worker, ledger, roles, attach=attach, prompts=prompts, now=current)
+        entry = card(
+            worker, ledger, roles, attach=attach, prompts=prompts, now=current, held=held
+        )
         entry.update(personal.shown(ledger_mod.BOARD_WORKER, str(worker.id)))
         repository = repositories[worker.repository]
         entry["repository_label"] = repository["display_name"] or worker.repository
@@ -743,10 +763,15 @@ def card(
     attach: Callable[[Worker], str | None],
     prompts: Iterable[ledger_mod.PermissionPrompt] = (),
     now: float,
+    held: Callable[[int], bool] = lambda prompt_id: False,
 ) -> dict[str, object]:
     role = roles.of(worker)
     live = not worker.is_terminal
-    prompt = next((p for p in prompts if p.worker_id == worker.id), None) if live else None
+    # The newest: a session shows one dialog at a time.
+    prompt = (
+        next((p for p in reversed(list(prompts)) if p.worker_id == worker.id), None)
+        if live else None
+    )
     cap = role.policy.max_wakes_per_day if role else None
     return {
         "id": worker.id,
@@ -771,13 +796,7 @@ def card(
             sanitize.one_line(worker.waiting_for, limit=LINE_LIMIT)
             if live and worker.waiting_for else None
         ),
-        "permission_prompt": (
-            {
-                "tool_name": sanitize.one_line(prompt.tool_name, limit=100),
-                "tool_input": sanitize.one_line(prompt.tool_input, limit=LINE_LIMIT),
-            }
-            if prompt else None
-        ),
+        "permission_prompt": permission_prompt(prompt, held) if prompt else None,
         "problem": (
             sanitize.one_line(worker.last_error, limit=300)
             if worker.last_error and worker.state in (ledger_mod.PAUSED, ledger_mod.FAILED)
@@ -792,6 +811,21 @@ def card(
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
         "finished_at": worker.finished_at,
+    }
+
+
+def permission_prompt(
+    prompt: ledger_mod.PermissionPrompt, held: Callable[[int], bool]
+) -> dict[str, object]:
+    """A prompt as its card shows it. *answers* is empty when only the session can answer."""
+    answerable = prompt.kind == ledger_mod.PROMPT_PERMISSION and held(prompt.id)
+    return {
+        "id": prompt.id,
+        "kind": prompt.kind,
+        "tool_name": sanitize.one_line(prompt.tool_name, limit=100),
+        "tool_input": sanitize.one_line(prompt.tool_input, limit=PROMPT_INPUT_LIMIT),
+        "created_at": prompt.created_at,
+        "answers": list(hooks_mod.ANSWERS) if answerable else [],
     }
 
 
@@ -863,6 +897,7 @@ __all__ = [
     "WORKER_ACTIONS",
     "actions",
     "outcome",
+    "permission_prompt",
     "target_of",
     "COLUMNS",
     "COLUMN_OF",

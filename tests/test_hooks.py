@@ -92,7 +92,11 @@ def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_token(harness, 
     for event, groups in hooks_settings.items():
         [group] = groups
         [hook] = group["hooks"]
-        assert 0 < hook["timeout"] <= 30
+        if event == "PermissionRequest":
+            # Held for the board's answer: long, but finite.
+            assert hook["timeout"] == claude.PERMISSION_TIMEOUT_SECS
+        else:
+            assert 0 < hook["timeout"] <= 30
         if event == "SessionStart":
             continue
         assert hook["type"] == "http"

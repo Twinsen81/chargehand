@@ -8,6 +8,9 @@
 // browser keeps in localStorage for this origin. It is sent only in the Authorization
 // header, never in a URL. The board has no chat: a conversation goes through attach.
 //
+// A permission prompt shows on its card with Allow, Deny and Always allow while the
+// session's hook waits in the daemon; after that only the session can answer it.
+//
 // Within a column the cards are grouped by repository. The names, icons, pins and the
 // collapsed and hidden repositories are the board's own state in the ledger; the daemon
 // sorts and filters by them, and this page only draws what it gets.
@@ -29,6 +32,14 @@ const ACTION_LABELS = {
   attach: 'Attach', retry: 'Retry', discard: 'Discard',
 };
 const FORCED = new Set(['continue', 'retry', 'discard']);
+const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
+const ANSWER_HINTS = {
+  allow: 'Allow this tool call once',
+  deny: 'Deny this tool call; the session goes on without it',
+  always: 'Allow it, and allow the same tool with the same input for this worker without asking. ' +
+    'The role, the repository and the Claude Code settings do not change.',
+};
+const NOT_HELD_NOTE = 'The session no longer waits for the board: attach to it and answer there.';
 const FORCE_HINT = 'continue: accept the files in the worktree as they are now; ' +
   'retry and discard: throw away unpushed or uncommitted work';
 const $ = (id) => document.getElementById(id);
@@ -238,8 +249,7 @@ function cardChildren(c, now) {
   }
 
   if (c.permission_prompt) {
-    const p = c.permission_prompt;
-    nodes.push(el('div', 'alert', 'permission: ' + p.tool_name + (p.tool_input ? ' ' + p.tool_input : '')));
+    nodes.push(promptNode(c));
   } else if (c.waiting_for) {
     nodes.push(el('div', 'alert', c.waiting_for));
   }
@@ -266,6 +276,32 @@ function cardChildren(c, now) {
   }
   nodes.push(cardActions(c));
   return nodes;
+}
+
+function promptNode(c) {
+  const p = c.permission_prompt;
+  const box = el('div', 'prompt');
+  box.append(el('div', 'alert', 'permission: ' + p.tool_name));
+  if (p.tool_input) {
+    const input = el('pre', 'input', p.tool_input);
+    input.title = p.tool_input;
+    box.append(input);
+  }
+  if (!p.answers || !p.answers.length) {
+    box.append(el('div', 'note', NOT_HELD_NOTE));
+    return box;
+  }
+  const row = el('div', 'answers');
+  for (const answer of p.answers) {
+    const label = ANSWER_LABELS[answer] || answer;
+    const button = boardButton(label, ANSWER_HINTS[answer] || '', () => send(
+      '/api/workers/' + encodeURIComponent(c.id) + '/answer', { prompt: p.id, answer },
+      label.toLowerCase() + ' ' + p.tool_name + ' for ' + c.handle));
+    button.className = 'answer ' + answer;
+    row.append(button);
+  }
+  box.append(row);
+  return box;
 }
 
 function boardButton(text, title, onClick) {
@@ -517,6 +553,11 @@ async function send(path, body, what) {
   }
   if (!response.ok) {
     notice(what + ': ' + (payload.error || 'HTTP ' + response.status), 'bad');
+    return;
+  }
+  if (payload.prompt !== undefined) {
+    // The waiting hook got the answer at once; no request waits for the daemon.
+    notice(what + ': ' + (payload.message || 'ok'), 'ok');
     return;
   }
   if (payload.settings) {

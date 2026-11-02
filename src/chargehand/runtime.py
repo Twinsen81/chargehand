@@ -82,7 +82,8 @@ class Capabilities:
     brings its own call when it is built. In particular ``wake()`` is always the
     stop-and-resume path; a wake into a live session, for a runtime with
     ``in_place_wake``, goes through the in-session channel, which is a separate path.
-    Usage readings and board permissions have no call here yet for the same reason.
+    Usage readings have no call here yet for the same reason; board permissions use
+    :meth:`Runtime.permission_hold_secs` and :meth:`Runtime.permission_decision`.
 
     ``live_attach``: an operator can open the running session without stopping it.
     ``in_place_wake``: a message reaches a live session without a restart.
@@ -122,6 +123,8 @@ class Hook:
     *observed* is the session state the post shows, one of SESSION_STATES, or None when
     the post changes no state. *usage_limit* marks a failure caused by the provider's
     usage limit, and *reset_at* is when that limit resets, when the failure said.
+    *tool_input* is cleaned and capped for display; *tool_input_digest* is a hash of the
+    whole input as the session sent it, so a rule never matches on a shortened input.
     """
 
     kind: str
@@ -137,6 +140,7 @@ class Hook:
     notification_type: str | None = None
     tool_name: str | None = None
     tool_input: str | None = None
+    tool_input_digest: str | None = None
     source: str | None = None
 
 
@@ -233,6 +237,30 @@ class Runtime(ABC):
     @classmethod
     def parse_hook(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
         """The post *payload* to `/hooks/<event>`, or None when it is not this runtime's."""
+        return None
+
+    @classmethod
+    def permission_hold_secs(cls, worktree: Path) -> float | None:
+        """How long the daemon may hold the permission hook of the session in *worktree*.
+
+        A little less than the session waits for the hook, so the daemon answers with no
+        decision before the session gives up on it. None: the hook is not held.
+        """
+        return None
+
+    @classmethod
+    def permission_decision(cls, decision: str) -> dict[str, object]:
+        """The answer to a permission hook that allows or denies, in the runtime's format."""
+        return {}
+
+    def permission_waits(self) -> dict[str, bool] | None:
+        """For every listed session, by its id, whether it shows a permission dialog now.
+
+        One fresh look for all sessions; None when the runtime cannot tell. The daemon asks
+        this while it holds a permission hook and before it takes an answer from the board:
+        the operator may have answered in the session, and the waiting hook does not show
+        that. A session missing from the result no longer shows a dialog.
+        """
         return None
 
     # ----- sessions ---------------------------------------------------------

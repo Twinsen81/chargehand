@@ -212,7 +212,12 @@ def test_an_open_permission_prompt_is_on_the_card(harness):
     card = card_of(model(harness), "ABC-1")
 
     assert card["column"] == "needs_you"
-    assert card["permission_prompt"] == {"tool_name": "Bash", "tool_input": '{"command": "ls"}'}
+    shown = card["permission_prompt"]
+    assert (shown["tool_name"], shown["tool_input"], shown["kind"]) == (
+        "Bash", '{"command": "ls"}', "permission",
+    )
+    # No hook of this daemon waits for it, so only the session can answer.
+    assert shown["answers"] == []
 
 
 def test_a_parked_worker_is_queued_with_its_reset_time(harness):

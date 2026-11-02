@@ -30,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   board setting without `--force`; and writes a new token. `doctor` lists what is left to
   do by hand, and marks each step it can check as done.
 - `claude_bin` and `git_bin` accept `~` for the home directory.
+- Permission prompts on the board. The daemon holds a session's `PermissionRequest` hook
+  open, and the worker's card in Needs you shows the tool and its input with Allow, Deny
+  and Always allow; the hook then returns the decision. Always allow records a rule for
+  that worker alone (the same tool with the same input, matched by a hash of the whole
+  input, a Bash call's description excepted), and the next such prompt is allowed without
+  a card. A prompt is now a ledger
+  record that is open, resolved (with the decision and who decided) or cancelled, with a
+  new `permission_rules` table (schema version 7). The first answer wins: an answer in
+  `claude attach` cancels the card, and a second click answers "already resolved". A click
+  is taken only while a fresh session listing shows the permission dialog, so a click
+  after an answer in the session is refused and cancels the card; while a hook waits, the
+  daemon also checks the listing every 2 seconds, so such an answer clears the card. The
+  permission hook waits `permission_timeout_secs`, a new `claude` role key (600 seconds by
+  default); the daemon answers with no decision a little before that, and when it stops,
+  so the session shows its own dialog. `POST /api/workers/<id>/answer` takes the answer.
 - Board personalisation. Rename a repository or a worker, give it an icon (one emoji or a
   name from a small bundled set) and pin it; collapse a repository to its pinned cards, or
   hide it. The board groups the cards of each column by repository, pinned first, then by

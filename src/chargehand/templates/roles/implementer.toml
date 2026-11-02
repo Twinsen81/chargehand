@@ -6,7 +6,8 @@
 # that have no file of their own.
 
 # Optional. The coding agent the workers run on. `claude` (Claude Code) is the only
-# runtime so far; `agent`, `permission_mode` and `allow` below belong to it.
+# runtime so far; `agent`, `permission_mode`, `permission_timeout_secs` and `allow` below
+# belong to it.
 # runtime = "claude"
 
 # Optional. A Claude Code agent definition, .claude/agents/<name>.md in the repository
@@ -43,6 +44,11 @@ prompt = "Work on {item}. When you are woken later, each line names an event kin
 # permission prompt, which chargehand surfaces as "blocked". bypassPermissions is a
 # deliberate opt-in for a dedicated machine, user account, or VM.
 permission_mode = "auto"
+
+# Optional. How long a permission prompt waits for an answer on the board, in seconds
+# (600 by default, 20 to 3600). After that the session shows its own dialog, which
+# `claude attach` answers. A session keeps the value of its launch.
+# permission_timeout_secs = 600
 
 # Optional. Allow rules for this role's sessions, so the commands it needs do not
 # prompt. Same syntax as Claude Code's permission rules.
