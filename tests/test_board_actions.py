@@ -324,6 +324,26 @@ def test_a_reply_enters_the_inbox_as_an_event_from_the_board(daemon, harness):
     assert "delivered when the current turn ends" in outcome["message"]
 
 
+def test_a_reply_wakes_an_idle_worker_with_the_line_and_shows_on_its_card(daemon, harness):
+    unqueued(harness)
+    worker = board_worker(harness)
+    harness.claude_state.set_session_state(worker.session_id, "done")
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).state == ledger_mod.IDLE
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/reply", {"text": "say PONG"})
+    harness.next_tick()
+
+    woken = harness.ledger.get(worker.id)
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, 1)
+    assert "delivery wakes the worker" in harness.ledger.get_request(answer["id"])["message"]
+    (resume,) = harness.claude_state.read().get("resumes", [])
+    assert "reply from the operator: say PONG" in resume["prompt"].splitlines()
+    card = next(c for column in board.build(harness.config, harness.ledger, health={})["columns"]
+                for c in column["cards"] if c["id"] == worker.id)
+    assert "reply from the operator: say PONG" in card["last_prompt"]
+
+
 @pytest.mark.parametrize("state", [ledger_mod.BLOCKED, ledger_mod.PAUSED, ledger_mod.PARKED])
 def test_a_reply_to_a_worker_that_delivery_does_not_wake_waits_and_says_so(daemon, harness, state):
     unqueued(harness)

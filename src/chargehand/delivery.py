@@ -6,7 +6,8 @@ events in its inbox goes through these steps:
 1. Coalesce. The events become one message with a line per event kind and pointer, such
    as ``comment: https://...``, and nothing else. A pointer is untrusted, so only a plain
    http(s) URL or a plain identifier is kept; the worker fetches what a pointer names
-   itself.
+   itself. A reply that the operator typed on the board is the one exception: its line
+   carries the operator's text, cleaned to one line.
 2. Admit. The global cap on working turns, the role's daily wake cap and the usage
    reserve. A worker that is not admitted becomes ``queued`` and keeps its events.
 3. Check and prepare, through the caller: a worker whose worktree must not host its
@@ -58,6 +59,9 @@ MESSAGE_HEADER = "New events on the work you follow. Read each one yourself:"
 # trusted user turn.
 UNKNOWN_KIND = "event"
 
+# How a reply that the operator typed on the board starts its line in the message.
+REPLY_PREFIX = "reply from the operator: "
+
 
 @dataclass(frozen=True)
 class UsageReading:
@@ -103,11 +107,20 @@ def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
     pointer is usable. Two events of one kind with one pointer, such as two CI results on
     the same pull request, give one line; two kinds on one pointer give two lines. A kind
     that is not a plain name is replaced with ``UNKNOWN_KIND``, so its pointer still
-    arrives.
+    arrives. A reply from the board gives ``REPLY_PREFIX`` and its line.
     """
     lines: list[str] = []
     left_out = 0
     for entry in entries:
+        if (entry.source, entry.kind) == (ledger_mod.REPLY_SOURCE, ledger_mod.REPLY_KIND):
+            # The operator's own line from the board: trusted text, which no configured
+            # source can write, still kept to one clean line.
+            reply = sanitize.one_line(entry.pointer, limit=ledger_mod.REPLY_LIMIT)
+            if not reply:
+                left_out += 1
+            elif f"{REPLY_PREFIX}{reply}" not in lines:
+                lines.append(f"{REPLY_PREFIX}{reply}")
+            continue
         pointer = safe_pointer(entry.pointer)
         if pointer is None:
             left_out += 1

@@ -637,7 +637,9 @@ line per event with its kind, a colon and its pointer, for example
 `review_requested: https://github.com/o/r/pull/1`, and nothing else. Two events of one kind
 on one pointer give one line; one pointer with two kinds gives two lines. A pointer that is
 not a plain http(s) URL or identifier is left out, and a kind that is not a plain lower-case
-name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. The role
+name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. A reply
+typed on the board (section 7) is the one line that carries text:
+`reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
@@ -972,7 +974,8 @@ not a record of what workers did: nothing a session wrote reaches it.
   the first eight characters of the session id, and the worker, or "no live worker" with
   the cwd; a refused post names its status. One line per accepted label or status write,
   with the status before and after. One line per wake, with the `kind: pointer` lines of
-  its message. A WARNING heartbeat for a tick longer than the interval, or one that began
+  its message, and the line of a reply from the board, which is the operator's own text.
+  A WARNING heartbeat for a tick longer than the interval, or one that began
   more than two intervals after the previous one ended. An idle tick writes no report line.
 - **One key.** Every line about a worker starts with its handle, `role/item`.
 - **What never appears.** A last answer, a waiting text, a permission prompt's tool
