@@ -909,3 +909,15 @@ def test_an_open_prompt_is_cancelled_when_the_worker_leaves_blocked_or_stops_not
         other = ledger.record_permission_prompt(running, tool_name="Bash", tool_input="{}")
         ledger.update(ledger.get(worker.id), state=ledger_mod.PAUSED)
         assert ledger.get_permission_prompt(other).state == "cancelled"
+
+        # A prompt recorded while paused does not survive the respawn of a continue.
+        paused = ledger.get(worker.id)
+        stale = ledger.record_permission_prompt(paused, tool_name="Bash", tool_input="{}")
+        ledger.update(paused, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(stale).state == "cancelled"
+
+        # Nor one recorded while idle when a wake starts a turn.
+        idle = ledger.update(ledger.get(worker.id), state=ledger_mod.IDLE)
+        woken = ledger.record_permission_prompt(idle, tool_name="Bash", tool_input="{}")
+        ledger.update(idle, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(woken).state == "cancelled"

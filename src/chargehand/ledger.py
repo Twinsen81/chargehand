@@ -981,17 +981,17 @@ class Ledger:
         return replace(worker, **changes)
 
     def _after_state_write(self, worker: Worker, changes: Mapping[str, Any]) -> None:
-        # A worker that leaves `blocked` by any path, or whose turn or session ends (a stop
-        # or a cancel included), no longer shows a permission dialog. A launch that ends
-        # (`launching` -> `running`) keeps it: the first dialog of a session can come
-        # before the tick confirms the launch.
+        # Every state write but `blocked` means the session no longer shows the dialog: the
+        # worker left `blocked`, its turn or session ended, or a new session started (a
+        # continue after a pause respawns the process). The one exception is the end of a
+        # launch (`launching` -> `running`): the first dialog of a session can come before
+        # the tick confirms the launch.
         if "state" not in changes:
             return
         state = changes["state"]
-        if state == BLOCKED:
+        if state == BLOCKED or (worker.state == LAUNCHING and state == RUNNING):
             return
-        if worker.state == BLOCKED or state not in (LAUNCHING, RUNNING):
-            self.resolve_permission_prompts(worker, now=changes["updated_at"])
+        self.resolve_permission_prompts(worker, now=changes["updated_at"])
 
     @staticmethod
     def _checked(changes: dict[str, Any]) -> dict[str, Any]:
