@@ -1,4 +1,4 @@
-"""The read-only board: the page, its headers, and the model it renders.
+"""The board: the page, its headers, and the model it renders.
 
 The daemon here serves on 127.0.0.1 on a port the kernel picks, runs no loop, and is
 shut down in the test. Sessions are the fake `claude`'s; the tracker is the fake one.
@@ -335,16 +335,21 @@ def test_the_page_loads_nothing_from_the_network_and_has_no_inline_code():
     assert re.search(r"\son[a-z]+=", page) is None
 
 
-def test_the_board_is_read_only(daemon):
+def test_the_board_reads_with_get_and_acts_only_through_its_post_routes(daemon):
     board_routes = [
         (method, path) for method, path, _, handler in daemon.routes._routes
         if getattr(handler, "__module__", "") == board.__name__
     ]
-    assert board_routes and all(method == "GET" for method, _ in board_routes)
+    assert {path for method, path in board_routes if method == "GET"} == {
+        *board.ASSETS, "/api/board", "/api/requests",
+    }
+    assert {path for method, path in board_routes if method == "POST"} == {
+        "/api/workers", "/api/repositories", "/api/pause", "/api/resume",
+    }
+    assert {method for method, _ in board_routes} == {"GET", "POST"}
     script = (board.asset_dir() / "board.js").read_text()
-    assert re.findall(r"fetch\('([^']*)'", script) == ["/api/board"]
-    assert "method" not in script
-    assert "Authorization" not in script
+    assert re.findall(r"fetch\('([^']*)'", script) == ["/api/requests/", "/api/board"]
+    assert script.count("method: 'POST'") == 1
     status, _ = support.request(daemon.port, "POST", "/", body=b"{}", headers=AUTH)
     assert status == 405
 
