@@ -267,7 +267,9 @@ public location.
   the manifest does not list; it writes no file and no board setting that exists without
   `--force`; it cleans board names and icons as the board does; and it writes a new token
   rather than taking one from the archive. The archive still holds the notification hook
-  and the role files, which run as the operator: import only an archive you made.
+  and the role files, which run as the operator: import only an archive you made. The hook
+  is copied as it is, so a credential written into it, such as a private push topic, is
+  in the archive too; export says so when it copies a hook.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 ### Known limits

@@ -1001,7 +1001,10 @@ chargehand version, time, member list). It holds:
 - The role files in `~/.config/chargehand/roles/`, and the agent files in
   `~/.claude/agents/` that the machine-level roles or the repositories' enabled roles name.
   Repository-level role files travel with their repository.
-- The notification hook, when its command runs a file.
+- The notification hook, when its command runs a file in the home or the configuration
+  directory, copied as it is. A program installed elsewhere, such as a system or Homebrew
+  binary, stays where it is, and the command keeps naming it. The archive holds no file
+  larger than 4 MB and at most 512 files, the limits import applies.
 - The `statusLine` entry of `~/.claude/settings.json` when it runs `chargehand statusline`.
 - The board settings of the configured repositories. Worker settings are not exported: they
   are kept by worker id, and a worker id means nothing on another machine.

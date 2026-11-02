@@ -387,6 +387,7 @@ class Exported:
     members: list[str]
     dropped: list[Dropped]
     board_rows: int
+    notify_member: str | None = None
 
 
 def _role_agent(path: Path) -> str | None:
@@ -415,8 +416,20 @@ def _statusline_entry() -> dict[str, object] | None:
     return portable
 
 
-def _notify_script(config: MachineConfig) -> tuple[Path | None, list[str]]:
-    """The notification hook's program, when it is a file to carry along, and its arguments."""
+def _inside(path: Path, roots: Iterable[Path]) -> bool:
+    real = Path(os.path.realpath(path))
+    return any(real.is_relative_to(os.path.realpath(root)) for root in roots)
+
+
+def _notify_script(
+    config: MachineConfig, config_dirs: Iterable[Path]
+) -> tuple[Path | None, list[str]]:
+    """The notification hook's program, when it is a file to carry along, and its arguments.
+
+    Only a script of the operator's own, in the home or the configuration directory, is
+    carried. A program installed elsewhere, such as a system or Homebrew binary, may need
+    its install location, so the command keeps naming it there.
+    """
     if not config.notify.command:
         return None, []
     try:
@@ -426,9 +439,24 @@ def _notify_script(config: MachineConfig) -> tuple[Path | None, list[str]]:
     if not argv:
         return None, []
     program = Path(os.path.expanduser(argv[0]))
-    if program.is_file() and _SAFE_NAME.fullmatch(program.name):
+    if (
+        program.is_file()
+        and _SAFE_NAME.fullmatch(program.name)
+        and _inside(program, [_home(), *config_dirs])
+    ):
         return program, argv[1:]
     return None, []
+
+
+def _check_limits(members: Mapping[str, bytes]) -> None:
+    """Refuse an archive that import would refuse."""
+    if len(members) + 1 > MAX_MEMBERS:
+        raise ChargehandError(f"the archive would hold more than {MAX_MEMBERS} files")
+    for name, content in members.items():
+        if len(content) > MAX_MEMBER_BYTES:
+            raise ChargehandError(
+                f"{name} is larger than {MAX_MEMBER_BYTES} bytes, which import refuses"
+            )
 
 
 def _board_rows(names: Iterable[str], ledger_path: Path) -> list[dict[str, str]]:
@@ -494,7 +522,7 @@ def export_setup(
 
     members: dict[str, bytes] = {}
     modes: dict[str, int] = {}
-    notify_program, notify_args = _notify_script(config)
+    notify_program, notify_args = _notify_script(config, [paths.config_dir(), config_path.parent])
     notify: dict[str, object] | None = None
     if notify_program is not None:
         member = f"{NOTIFY_DIR}/{notify_program.name}"
@@ -539,6 +567,7 @@ def export_setup(
     if rows:
         members[BOARD_MEMBER] = (json.dumps({"rows": rows}, indent=2) + "\n").encode("utf-8")
 
+    _check_limits(members)
     _check_secrets(members, serve.read_token(config.serve.token_file))
 
     created = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc)
@@ -565,7 +594,9 @@ def export_setup(
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
-    return Exported(target, sorted(members), dropped, len(rows))
+    return Exported(
+        target, sorted(members), dropped, len(rows), str(notify["member"]) if notify else None
+    )
 
 
 def _zip_info(name: str, created: datetime, mode: int = 0o644) -> zipfile.ZipInfo:
@@ -688,8 +719,12 @@ Ask = Callable[[str, str], str]
 
 
 def _answer(raw: str | None, default: str) -> str:
-    value = (raw or "").strip() or default
-    path = Path(os.path.expanduser(value))
+    value = (raw or "").strip()
+    if not value:
+        # The default is the archive's own configuration text, which the configuration
+        # reads with `~` and `$VAR` expanded; it stays as it is.
+        return default
+    path = Path(os.path.expanduser(os.path.expandvars(value)))
     if not path.is_absolute():
         path = Path.cwd() / path
     return _portable(os.path.normpath(path))

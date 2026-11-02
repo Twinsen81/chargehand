@@ -851,7 +851,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             Path(args.file).expanduser(), config_path=_config_path(args), force=args.force
         )
     except transfer.Refused as exc:
-        print(str(exc), file=sys.stderr)
+        print(sanitize.one_line(str(exc), limit=4000), file=sys.stderr)
         return EXIT_REFUSED
     _print(f"wrote {exported.path}")
     for member in exported.members:
@@ -859,15 +859,21 @@ def cmd_export(args: argparse.Namespace) -> int:
     if exported.board_rows:
         _print(f"  {exported.board_rows} board setting(s) of the configured repositories")
     for dropped in exported.dropped:
-        _print(f"left out {dropped.where}: set it again after the import")
+        _print(f"left out {sanitize.one_line(dropped.where, limit=200)}: set it again after the import")
     _print("The archive holds no token and no Keychain value. Import it with "
            "`chargehand import <file>`.")
+    if exported.notify_member:
+        # The hook is the operator's own script and is copied byte for byte, so a
+        # credential written into it travels too.
+        _print(f"{exported.notify_member} is your notification hook as it is: check that "
+               "it holds no credential, such as a private push topic, before you share the archive.")
     return EXIT_OK
 
 
 def _ask(question: str, default: str) -> str:
     """One answer from stdin. The question goes to stderr, so a script can pipe the answers in."""
-    print(f"{question} [{default}]: ", end="", file=sys.stderr, flush=True)
+    shown = sanitize.one_line(f"{question} [{default}]", limit=300)
+    print(f"{shown}: ", end="", file=sys.stderr, flush=True)
     line = sys.stdin.readline()
     if not sys.stdin.isatty():
         print(file=sys.stderr)
@@ -892,7 +898,7 @@ def cmd_import(args: argparse.Namespace) -> int:
             force=args.force,
         )
     except transfer.Refused as exc:
-        print(str(exc), file=sys.stderr)
+        print(sanitize.one_line(str(exc), limit=4000), file=sys.stderr)
         return EXIT_REFUSED
     for path in imported.written:
         _print(f"wrote {path}")
@@ -905,7 +911,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     _print("")
     _print(f"Still to do by hand; `chargehand doctor` lists these from {imported.steps_file.name}:")
     for step in imported.steps:
-        _print(f"  - {step['detail']}")
+        _print(f"  - {sanitize.one_line(str(step['detail']), limit=500)}")
     return EXIT_OK
 
 

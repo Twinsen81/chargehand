@@ -473,3 +473,70 @@ def test_an_archive_that_is_not_a_zip_is_refused(tmp_path, monkeypatch, capsys):
     assert _import(new, bad, monkeypatch) == EXIT_REFUSED
     assert not new.config.exists()
     assert os.listdir(new.home) == []
+
+
+def test_a_notify_program_outside_home_stays_where_it_is(old, tmp_path, monkeypatch):
+    text = old.config.read_text().replace(
+        'command = "~/.config/chargehand/notify.sh --quiet"', 'command = "/bin/echo chargehand"'
+    )
+    old.config.write_text(text)
+    archive = tmp_path / "setup.zip"
+
+    assert _export(old, archive) == EXIT_OK
+
+    members = _members(archive)
+    assert not [name for name in members if name.startswith("notify/")]
+    assert tomllib.loads(members["config.toml"].decode())["notify"]["command"] == "/bin/echo chargehand"
+    new = Machine(tmp_path / "new").enter(monkeypatch)
+    assert _import(new, archive, monkeypatch) == EXIT_OK
+    assert load_machine_config().notify.command == "/bin/echo chargehand"
+    assert not (new.config_dir / "echo").exists()
+
+
+def test_export_says_that_the_notify_hook_is_copied_as_it_is(old, tmp_path, capsys):
+    assert _export(old, tmp_path / "setup.zip") == EXIT_OK
+
+    assert "notify/notify.sh is your notification hook as it is" in capsys.readouterr().out
+
+
+def test_export_refuses_a_file_that_import_would_refuse(old, tmp_path, capsys):
+    (old.claude / "agents" / "helper.md").write_bytes(b"x" * (transfer.MAX_MEMBER_BYTES + 1))
+
+    assert _export(old, tmp_path / "setup.zip") != EXIT_OK
+
+    assert "agents/helper.md is larger than" in capsys.readouterr().err
+    assert not (tmp_path / "setup.zip").exists()
+
+
+def test_an_empty_answer_keeps_the_default_as_the_configuration_wrote_it(old, tmp_path, monkeypatch):
+    old.config.write_text(old.config.read_text().replace(
+        f'worktree_root = "{old.home}/worktrees"', 'worktree_root = "$HOME/wt"'
+    ))
+    archive = tmp_path / "setup.zip"
+    assert _export(old, archive) == EXIT_OK
+    new = Machine(tmp_path / "new").enter(monkeypatch)
+    monkeypatch.setenv("CHECKOUTS", str(tmp_path / "checkouts"))
+
+    assert _import(new, archive, monkeypatch, "$CHECKOUTS/app\n\n\n") == EXIT_OK
+
+    config = load_machine_config()
+    assert config.worktree_root == new.home / "wt"
+    assert 'worktree_root = "$HOME/wt"' in new.config.read_text()
+    assert config.repository_by_name("app").path == tmp_path / "checkouts" / "app"
+
+
+def test_a_refusal_quoting_the_archive_is_printed_as_one_clean_line(old, tmp_path, monkeypatch, capsys):
+    archive = tmp_path / "setup.zip"
+    assert _export(old, archive) == EXIT_OK
+
+    def tamper(members):
+        members["config.toml"] = b'"\\u001b[31mevil" = 1\n' + members["config.toml"]
+
+    bad = _rezip(archive, tmp_path / "bad.zip", tamper)
+    new = Machine(tmp_path / "new").enter(monkeypatch)
+
+    assert _import(new, bad, monkeypatch) == EXIT_REFUSED
+
+    err = capsys.readouterr().err
+    assert "evil" in err
+    assert "\x1b" not in err
