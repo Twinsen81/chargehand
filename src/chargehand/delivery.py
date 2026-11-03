@@ -237,6 +237,7 @@ class Delivery:
         clock: Callable[[], float] = time.time,
         guard: Callable[[Worker], str | None] = lambda worker: None,
         prepare: Callable[[Worker], str | None] = lambda worker: None,
+        listed_at_rest: Callable[[Worker], bool] = lambda worker: True,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -252,6 +253,10 @@ class Delivery:
         # Brings what the worker reads up to date before the wake; why the wake must
         # wait, or None.
         self._prepare = prepare
+        # Whether the tick's listing shows a parked worker's session with no turn and no
+        # prompt. A cheap first look, so that a session the operator went on in costs no
+        # refresh of its item checkout; the runtime's wake looks again before its stop.
+        self._listed_at_rest = listed_at_rest
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
@@ -278,6 +283,9 @@ class Delivery:
             key=lambda worker: (worker.reset_at or 0.0, worker.id),
         )
         for worker in due:
+            if not self._listed_at_rest(worker):
+                self._hold(worker, "resume held, the session has a turn or a prompt", result)
+                continue
             if self._admitted(worker, result):
                 self._wake(worker, RESUME_MESSAGE, (), result)
 

@@ -433,7 +433,7 @@ def test_a_parked_session_that_runs_again_is_not_interrupted(harness):
 
     assert harness.claude_state.read().get("resumes", []) == []
     assert harness.worker("ABC-1").state == ledger_mod.PARKED
-    assert "implementer/ABC-1: wake held, session s1 is working, not idle" in report.skipped
+    assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
 
 
 def test_a_turn_that_starts_while_a_resume_prepares_is_not_stopped(harness, monkeypatch):
@@ -680,3 +680,38 @@ def test_a_paused_worker_that_asks_during_continue_is_blocked(harness, monkeypat
 
     assert after.state == ledger_mod.BLOCKED
     assert len(harness.ledger.open_permission_prompts(after)) == 1
+
+
+def test_a_limit_the_listing_shows_after_a_long_turn_keeps_its_reset(harness):
+    """A turn start days ago does not push an absolute reset time out of reach."""
+    launch(harness)
+    now = time.time()
+    harness.ledger.update(harness.worker("ABC-1"), working_since=now - 10 * 86400)
+    reset = int(now) + 2 * 3600
+    harness.claude_state.set_session_state(
+        "ABC-1", "failed", error="rate_limit", errorMessage=f"Usage limit reached, resets {iso(reset)}"
+    )
+
+    harness.next_tick()
+
+    parked = harness.worker("ABC-1")
+    assert parked.state == ledger_mod.PARKED
+    assert parked.reset_at == pytest.approx(reset)
+
+
+def test_a_clock_time_is_not_placed_days_before_the_failure(harness):
+    launch(harness)
+    now = time.time()
+    harness.ledger.update(harness.worker("ABC-1"), working_since=now - 3 * 86400)
+    ahead = datetime.fromtimestamp(now + 2 * 3600, tz=timezone.utc)
+    harness.claude_state.set_session_state(
+        "ABC-1", "failed", error="rate_limit",
+        errorMessage=f"Usage limit reached, resets {ahead:%H:%M} (UTC)",
+    )
+
+    harness.next_tick()
+
+    parked = harness.worker("ABC-1")
+    assert parked.state == ledger_mod.PARKED
+    assert parked.reset_at == pytest.approx(now + 2 * 3600, abs=60)
+    assert harness.claude_state.read().get("resumes", []) == []

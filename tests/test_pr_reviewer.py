@@ -1047,3 +1047,27 @@ def test_an_agent_file_that_is_not_on_the_base_branch_fails_the_launch(reviewing
     assert reviewer.state == ledger_mod.FAILED
     assert "agent 'pr-reviewer' not found" in reviewer.last_error
     assert "committed" in reviewer.last_error
+
+
+def test_a_parked_reviewer_whose_session_runs_again_gets_no_setup_step(reviewing, gh):
+    """A due resume looks at the tick's listing before it refreshes the item checkout."""
+    from chargehand import claude
+
+    reviewer = start_reviewer(reviewing, gh)
+    hook = claude.parse_hook("StopFailure", {
+        "session_id": reviewer.session_uuid, "error": "rate_limit",
+        "error_details": f"Claude usage limit reached|{int(time.time()) + 3600}",
+    })
+    reviewing.runner.apply_hook(reviewing.ledger.get(reviewer.id), hook)
+    reviewing.ledger.update(reviewing.ledger.get(reviewer.id), reset_at=time.time() - 1)
+    # The operator went on in the session in agent view.
+    reviewing.claude_state.set_session_state(PR_KEY, "working")
+    checkout = ["pr", "checkout", PR_URL, "--detach"]
+    before = gh.calls.count(checkout)
+
+    for _ in range(3):
+        reviewing.next_tick()
+
+    assert gh.calls.count(checkout) == before
+    assert reviewing.claude_state.read().get("resumes", []) == []
+    assert reviewing.ledger.get(reviewer.id).state == ledger_mod.PARKED

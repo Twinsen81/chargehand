@@ -119,6 +119,9 @@ UNCONFIGURED_PREFIX = "unconfigured:"
 # The notification detail of a worker that a usage limit parked.
 USAGE_LIMIT = "usage limit reached; waits for the reset"
 
+# How far back a usage-limit failure that the listing shows is placed: one five-hour window.
+FAILURE_LOOKBACK_SECS = 5 * 3600
+
 # The last turn that failed on the limit of one model family, for the board's top bar: a
 # JSON object with the provider, the model family, when, and the reset time when known.
 MODEL_LIMIT_KEY = "model-limit"
@@ -2144,11 +2147,22 @@ class Runner:
         return worker
 
     def _failure_reset(self, worker: Worker, session: Session) -> float | None:
-        since = worker.working_since or worker.last_wake_at or worker.created_at
+        """The reset time of a failure the listing shows, placed after the turn's start.
+
+        The start is kept no earlier than one five-hour window back: a turn that started
+        days ago, or whose start the tick never saw, would place a clock time days in the
+        past. A time that cannot be placed after it is read against now, as the listing
+        was parsed.
+        """
+        since = max(
+            worker.working_since or worker.last_wake_at or worker.created_at,
+            time.time() - FAILURE_LOOKBACK_SECS,
+        )
         try:
-            return self.runtime(worker.runtime).failure_reset(session, since)
+            reset = self.runtime(worker.runtime).failure_reset(session, since)
         except ConfigError:
-            return session.reset_at
+            reset = None
+        return reset if reset is not None else session.reset_at
 
     def _note_model_limit(self, worker: Worker, model: str, reset_at: float | None) -> None:
         """Keep the last per-model limit for the board's badge. *model* is a family name."""
@@ -2242,6 +2256,7 @@ class Runner:
             crash_after_wake=crash_after_wake,
             guard=lambda worker: self._workspace_check(worker).fault,
             prepare=self._refresh_item_checkout,
+            listed_at_rest=self._listed_at_rest,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -2261,6 +2276,19 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+
+    def _listed_at_rest(self, worker: Worker) -> bool:
+        """Whether this tick's listing shows *worker*'s session ended or stopped. No new call."""
+        try:
+            listed = self.sessions(worker.runtime)
+        except (AgentRuntimeError, ConfigError):
+            return False
+        session = next((s for s in listed if s.id == worker.session_id), None)
+        if session is None:
+            return False
+        return session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
+            worker, session
+        )
 
     def _workspace_check(self, worker: Worker, *, accept_files: bool = False) -> WorkspaceCheck:
         """Whether the session of a worker with an item checkout may start again where it is.
