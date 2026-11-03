@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -125,6 +125,22 @@ RESOLVED_BY_BOARD = "board"
 RESOLVED_BY_RULE = "rule"
 RESOLVED_BY_SESSION = "session"
 
+# Slow work that runs on a thread of the daemon, outside the tick, so that neither the tick
+# nor the board waits for it. Only an archive is such work today: its target is the worker
+# id. `waiting`: a cancel of the live worker must apply first. `queued`: the thread starts
+# it. `running`: the thread writes the archive; a restart of the daemon starts it again.
+# `written`: the archive is complete and verified, and the tick removes the worktree and
+# the session. `done` and `failed` are final.
+JOB_ARCHIVE = "archive"
+JOB_WAITING = "waiting"
+JOB_QUEUED = "queued"
+JOB_RUNNING = "running"
+JOB_WRITTEN = "written"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+JOB_ACTIVE = (JOB_WAITING, JOB_QUEUED, JOB_RUNNING, JOB_WRITTEN)
+JOB_STATES = JOB_ACTIVE + (JOB_DONE, JOB_FAILED)
+
 # A worker handle that names the worker by id: `role/item#id`, or `role/#id` without an item.
 _ID_HANDLE = re.compile(r"(?:([^/#\s]+)/([^/#\s]*))?#([0-9]{1,12})")
 
@@ -175,6 +191,7 @@ _WORKER_COLUMNS = (
     "last_hook_at",
     "last_answer",
     "transcript_path",
+    "archived_at",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -226,7 +243,9 @@ CREATE TABLE IF NOT EXISTS workers (
     last_hook        TEXT,
     last_hook_at     REAL,
     last_answer      TEXT,
-    transcript_path  TEXT
+    transcript_path  TEXT,
+    -- When an archive of the worker was written and its worktree and session removed.
+    archived_at      REAL
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -372,6 +391,26 @@ CREATE TABLE IF NOT EXISTS cursors (
     updated_at REAL NOT NULL
 );
 
+-- Slow work for the daemon's job thread; see JOB_STATES. `args` is a JSON object, and
+-- `result_path` the file the job writes.
+CREATE TABLE IF NOT EXISTS jobs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT    NOT NULL,
+    target       TEXT    NOT NULL,
+    args         TEXT    NOT NULL DEFAULT '{{}}',
+    state        TEXT    NOT NULL,
+    progress     TEXT,
+    result_path  TEXT,
+    error        TEXT,
+    created_at   REAL    NOT NULL,
+    started_at   REAL,
+    updated_at   REAL    NOT NULL,
+    finished_at  REAL
+);
+
+CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state);
+CREATE INDEX IF NOT EXISTS jobs_target ON jobs (kind, target);
+
 -- How the board shows a repository or a worker. The key is the configured repository
 -- name or the worker id; only the board reads it.
 CREATE TABLE IF NOT EXISTS board_state (
@@ -461,6 +500,13 @@ WHERE resolved_at IS NOT NULL;
 {_SCHEMA}
 """
 
+# Version 8 adds the jobs and the worker's `archived_at`. Every version from 2 on has a
+# workers table without the column; the version 1 copy creates the table with it.
+_MIGRATE_V7_TO_V8 = f"""
+ALTER TABLE workers ADD COLUMN archived_at REAL;
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -501,6 +547,7 @@ class Worker:
     last_hook_at: float | None = None
     last_answer: str | None = None
     transcript_path: str | None = None
+    archived_at: float | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -577,6 +624,40 @@ class PermissionPrompt:
     decision: str | None = None
     resolved_by: str | None = None
     released_at: float | None = None
+
+
+@dataclass(frozen=True)
+class Job:
+    id: int
+    kind: str
+    target: str
+    args: Mapping[str, Any]
+    state: str
+    progress: str | None
+    result_path: str | None
+    error: str | None
+    created_at: float
+    started_at: float | None
+    updated_at: float
+    finished_at: float | None
+
+    @property
+    def is_active(self) -> bool:
+        return self.state in JOB_ACTIVE
+
+    @property
+    def force(self) -> bool:
+        return bool(self.args.get("force"))
+
+
+def _row_to_job(row: sqlite3.Row) -> Job:
+    data = dict(row)
+    try:
+        args = json.loads(data["args"])
+    except (TypeError, ValueError):
+        args = {}
+    data["args"] = args if isinstance(args, dict) else {}
+    return Job(**data)
 
 
 @dataclass(frozen=True)
@@ -692,11 +773,13 @@ class Ledger:
         # version 3 the schema creates the prompts table whole, so only 4 to 6 alter it.
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
-            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
-            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
-            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7,
-            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7,
-            6: _MIGRATE_V6_TO_V7,
+            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
+            + _MIGRATE_V7_TO_V8,
+            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8,
+            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8,
+            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8,
+            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8,
+            7: _MIGRATE_V7_TO_V8,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -910,6 +993,16 @@ class Ledger:
             f"SELECT * FROM workers WHERE gc_done = 0 AND state IN "
             f"({', '.join('?' * len(TERMINAL))}) ORDER BY id",
             TERMINAL,
+        ).fetchall()
+        return [_row_to_worker(row) for row in rows]
+
+    def archivable_workers(self, repository: str) -> list[Worker]:
+        """The workers of *repository* that an archive would take: every live one, and each
+        finished one whose worktree and session are not removed yet, unless archived."""
+        rows = self._conn.execute(
+            f"SELECT * FROM workers WHERE repository = ? AND archived_at IS NULL AND "
+            f"(gc_done = 0 OR state IN ({', '.join('?' * len(NON_TERMINAL))})) ORDER BY id",
+            (repository, *NON_TERMINAL),
         ).fetchall()
         return [_row_to_worker(row) for row in rows]
 
@@ -1453,6 +1546,92 @@ class Ledger:
         )
         return cursor.rowcount
 
+    # ----- jobs -------------------------------------------------------------
+
+    def create_job(
+        self,
+        kind: str,
+        target: str,
+        *,
+        state: str = JOB_QUEUED,
+        result_path: str | None = None,
+        progress: str | None = None,
+        now: float | None = None,
+        **args: Any,
+    ) -> Job:
+        if state not in JOB_ACTIVE:
+            raise ValueError(f"a job starts in one of {', '.join(JOB_ACTIVE)}, not {state!r}")
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "INSERT INTO jobs (kind, target, args, state, progress, result_path, created_at, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kind, target, json.dumps(args, sort_keys=True), state, progress, result_path,
+             stamp, stamp),
+        )
+        job = self.get_job(int(cursor.lastrowid))
+        assert job is not None
+        return job
+
+    def get_job(self, job_id: int) -> Job | None:
+        row = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return _row_to_job(row) if row else None
+
+    def jobs_in_state(self, states: Sequence[str], kind: str | None = None) -> list[Job]:
+        if not states:
+            return []
+        query = f"SELECT * FROM jobs WHERE state IN ({', '.join('?' * len(states))})"
+        values: list[Any] = list(states)
+        if kind is not None:
+            query, values = query + " AND kind = ?", [*values, kind]
+        rows = self._conn.execute(query + " ORDER BY id", values).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def jobs_of(self, kind: str, target: str) -> list[Job]:
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE kind = ? AND target = ? ORDER BY id", (kind, target)
+        ).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def active_job(self, kind: str, target: str) -> Job | None:
+        return next((job for job in self.jobs_of(kind, target) if job.is_active), None)
+
+    def recent_jobs(self, since: float) -> list[Job]:
+        """Every active job, and those that ended at or after *since*."""
+        rows = self._conn.execute(
+            f"SELECT * FROM jobs WHERE state IN ({', '.join('?' * len(JOB_ACTIVE))}) "
+            f"OR finished_at >= ? ORDER BY id",
+            (*JOB_ACTIVE, since),
+        ).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def update_job(self, job: Job, *, expect: str | None = None, **changes: Any) -> Job | None:
+        """Write *changes* to the job. With *expect*, only while the job is in that state.
+
+        None when *expect* did not match: the tick and the job thread both move jobs, and
+        each move starts from a state that only one of them leaves.
+        """
+        unknown = set(changes) - {"state", "progress", "result_path", "error", "started_at",
+                                  "finished_at", "args"}
+        if unknown:
+            raise ValueError(f"unknown job column(s): {', '.join(sorted(unknown))}")
+        if "state" in changes and changes["state"] not in JOB_STATES:
+            raise ValueError(f"unknown job state: {changes['state']!r}")
+        changes.setdefault("updated_at", time.time())
+        if changes.get("state") in (JOB_DONE, JOB_FAILED):
+            changes.setdefault("finished_at", changes["updated_at"])
+        values = {
+            key: json.dumps(value, sort_keys=True) if key == "args" else value
+            for key, value in changes.items()
+        }
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        query, params = f"UPDATE jobs SET {assignments} WHERE id = ?", [*values.values(), job.id]
+        if expect is not None:
+            query, params = query + " AND state = ?", [*params, expect]
+        cursor = self._conn.execute(query, params)
+        if not cursor.rowcount:
+            return None
+        return self.get_job(job.id)
+
     # ----- runner state -----------------------------------------------------
 
     def set_state(self, key: str, value: str) -> None:
@@ -1550,6 +1729,7 @@ __all__ = [
     "Subscription",
     "InboxEntry",
     "PermissionPrompt",
+    "Job",
     "Ledger",
     "open_ledger",
     "summarize",

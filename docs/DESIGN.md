@@ -858,10 +858,11 @@ roles hold the item. `--route` stays accepted for `--repository`.
   `POST /api/workers` starts a worker (`repository`, `role`, an optional `item`, and
   `subscribe`, the event kinds on the item that wake it); `POST /api/workers/<id>/<action>`
   with `pause` (the CLI's `stop`), `continue` and `retry` (each with `force`), `cancel`,
-  `discard` (with `force`), `reply` (`text`), `attach` (`terminal`) and `answer`
-  (`prompt` and `answer`, for a permission prompt; it answers at once, see section 6);
-  `POST /api/repositories/<name>/pause` and `/resume`; `POST /api/pause` and
-  `/api/resume` for all repositories. An action waits up to three seconds for the tick
+  `discard` (with `force`), `archive` (with `force`), `reply` (`text`), `attach`
+  (`terminal`) and `answer` (`prompt` and `answer`, for a permission prompt; it answers at
+  once, see section 6); `POST /api/repositories/<name>/pause` and `/resume`, `/archive`
+  (with `force`) and `/unarchive`; `POST /api/pause` and `/api/resume` for all
+  repositories. An action waits up to three seconds for the tick
   and answers with the request's outcome, or with the request pending;
   `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
   The page asks for the token once, keeps it in the browser's `localStorage` for this
@@ -932,6 +933,40 @@ roles hold the item. `--route` stays accepted for `--repository`.
   filter that shows them again (`GET /api/board?show_hidden=1`). Only the board model
   reads the table: launches, supervision, notifications, `status` and the tick do not,
   so a hidden repository's workers run, are supervised and notify as before.
+- **Archives and jobs.** An archive is one zip of what a worker leaves: its worktree (and
+  the item checkout of a `checkout = "item"` role), the session transcript as text, its
+  ledger row and its sessions as JSON, and its handoff note when one exists. It is written
+  under the state directory as `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip`, mode
+  0600; the time and the worker id keep two archives apart. The guard runs again when the
+  cancel of a live worker has applied, before the zip. The `archive` request is applied
+  by the tick like any other: it refuses a worker that is archived, that has an archive
+  under way, or whose worktree was already removed; it applies the guard of discard
+  (unpushed commits or uncommitted changes refuse it unless forced, and a forced archive
+  keeps the files, not the commits); for a live worker it records a `cancel` request with
+  the same origin and lets the archive wait for it. The archive itself is a row of the
+  `jobs` table (schema version 8, with `workers.archived_at`): a kind, a target, its
+  arguments, a state, progress text, a result path, an error and its times. The states are
+  `waiting` (for the cancel), `queued`, `running`, `written`, `done` and `failed`. A thread
+  of the daemon, not the tick and not a request handler, runs the queued jobs one at a
+  time: it writes `<name>.zip.part` with the transcript read from the session's transcript
+  file (only a `.jsonl` file under Claude Code's `projects` directory; otherwise
+  `claude logs`), reads every member back to check its CRC, syncs the file, and renames it
+  to its final name; a file is streamed in chunks, a symbolic link is stored as a link, and
+  sockets and pipes are left out. Only then is the job `written`, and the next tick, the
+  one writer of git and of sessions, applies the guard again and removes the session, the
+  worktree and the branch through garbage collection, and sets `archived_at`. Garbage
+  collection, discard and retry leave a worker alone while an archive of it is under way.
+  A stop of the daemon during the zip, or a crash, leaves at most the `.part` file and the
+  job `running`; the next start of the job thread deletes every `.part` file and puts
+  `running` jobs back in the queue, so the job runs again from the start. `archive_repository`
+  hides the repository (the `hidden` board setting) and queues an archive of each of its
+  workers that still has a worktree; it refuses while the repository has live workers, or
+  while any worker holds work that is not pushed, unless forced, which cancels the live
+  workers first. `unarchive_repository` only shows the repository again; the zips stay. The
+  top bar shows the jobs of the last hour: a running or failed job in full, the others as
+  one count per state (waiting, queued, written, archived), so that the archive of a whole
+  repository stays readable; each card shows its worker's job and archive time. Restoring
+  a worktree from a zip is a manual step (see the README), not a button.
 - **Usage readings.** Claude Code gives a status line command the subscription's
   `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
   `resets_at`. It sends them on subscription plans only, and only after the session's first
@@ -956,8 +991,8 @@ roles hold the item. `--route` stays accepted for `--repository`.
   window whose reset time has passed are unknown, with the level `grey`. `status --json`
   carries the same object.
 - **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
-  progress finishes, the rest of that tick is skipped, the server shuts down, and the exit
-  code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL
+  progress finishes, the rest of that tick is skipped, a job in progress stops and goes
+  back to the queue, the server shuts down, and the exit code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL
   when the daemon has not exited after the job's `ExitTimeOut`, 300 seconds; a phase that
   runs longer, such as a slow setup script, is then killed and reconciled as an
   interrupted launch.
@@ -1062,6 +1097,8 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 - Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
   next tick parks any run whose session is gone, so a restart costs progress but never
   consistency.
+- Archives build up under `archive/` in the state directory; nothing deletes them. They
+  are not part of an export.
 
 ### Moving a setup to another machine
 

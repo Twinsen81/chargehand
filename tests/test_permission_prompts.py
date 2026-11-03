@@ -310,16 +310,29 @@ def test_a_click_is_refused_while_the_session_cannot_be_read(daemon, harness, mo
 
 def test_an_answer_in_the_session_clears_the_card_without_a_click(daemon, harness, monkeypatch):
     monkeypatch.setattr(hooks, "SESSION_CHECK_SECS", 0.2)
+    # The held hook must see the session show the dialog before the answer in the session.
+    # Its first look is a listing through the fake binary, which can take longer than a
+    # fixed wait on a slow machine, so the test waits for that look itself.
+    seen = threading.Event()
+    check = hooks._SessionCheck.answered_in_session
+
+    def watched(self):
+        answered = check(self)
+        if self._seen:
+            seen.set()
+        return answered
+
+    monkeypatch.setattr(hooks._SessionCheck, "answered_in_session", watched)
     worker = launch(harness)
     hook = Held(daemon, worker)
     prompt = held_prompt(daemon, harness, worker)
-    # The held hook sees the session show the dialog first.
-    assert hook.answered(timeout=0.6) is None
+    assert seen.wait(30), "the held hook never saw the session show the dialog"
+    assert hook.answered(timeout=0.3) is None
 
     # The operator answers in `claude attach` in a long turn: no hook comes, no tick runs.
     harness.claude_state.set_session_state("ABC-1", "working", waitingFor=None)
 
-    assert hook.answered(timeout=3) == (200, {})
+    assert hook.answered(timeout=30) == (200, {})
     row = harness.ledger.get_permission_prompt(prompt.id)
     assert (row.state, row.resolved_by, row.decision) == ("cancelled", "session", None)
     assert card_prompt(daemon) is None

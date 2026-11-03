@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Archive a worker or a whole repository from the board. An archive is one zip under the
+  state directory, `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600,
+  that holds the worktree, the session transcript as text, and the worker's ledger row and
+  sessions as JSON. A live worker is cancelled first, through a cancel request; unpushed
+  commits or uncommitted changes refuse the archive unless forced, as for discard. A new
+  `jobs` table (schema version 8, which also adds `workers.archived_at`) records the work,
+  and a thread of the daemon writes the zip, so a large worktree does not block the tick
+  or the board; the card and the top bar show the job and its progress. The zip is
+  written as a `.part` file, read back in full, synced and renamed; only then does the
+  tick remove the worktree, the branch and the session through garbage collection, after
+  the guard once more. A stop or a crash of the daemon during the zip leaves no archive
+  and no removed worktree, and the job runs again at the next start. Archiving a
+  repository hides it and archives each of its workers that still has a worktree; it
+  refuses while the repository has live workers, unless forced. Unarchive shows it again.
+  Restoring a worktree from an archive is a manual step, described in the README.
 - The usage policy. `[usage]` in the machine configuration keeps a part of the
   subscription's usage windows for interactive work: no wake while a window is above 100
   minus `wake_reserve_percent` (20 by default), and no new worker, from a start rule or the

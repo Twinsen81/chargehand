@@ -14,6 +14,9 @@
 // Within a column the cards are grouped by repository. The names, icons, pins and the
 // collapsed and hidden repositories are the board's own state in the ledger; the daemon
 // sorts and filters by them, and this page only draws what it gets.
+//
+// An archive runs as a job on a thread of the daemon; the top bar and the card show its
+// state and progress, and the page asks the daemon for nothing else while it runs.
 'use strict';
 
 const POLL_MS = 1000;
@@ -29,9 +32,9 @@ const BOARD_PIN_HINT = 'Board pin: this sorts the card first and keeps it visibl
   'repository. It does not keep the session running.';
 const ACTION_LABELS = {
   continue: 'Continue', pause: 'Pause', cancel: 'Cancel', reply: 'Reply',
-  attach: 'Attach', retry: 'Retry', discard: 'Discard',
+  attach: 'Attach', retry: 'Retry', discard: 'Discard', archive: 'Archive',
 };
-const FORCED = new Set(['continue', 'retry', 'discard']);
+const FORCED = new Set(['continue', 'retry', 'discard', 'archive']);
 const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
 const ANSWER_HINTS = {
   allow: 'Allow this tool call once',
@@ -41,7 +44,9 @@ const ANSWER_HINTS = {
 };
 const NOT_HELD_NOTE = 'The session no longer waits for the board: attach to it and answer there.';
 const FORCE_HINT = 'continue: accept the files in the worktree as they are now; ' +
-  'retry and discard: throw away unpushed or uncommitted work';
+  'retry, discard and archive: throw away unpushed or uncommitted work';
+const ARCHIVE_NOTE = 'Its worktree, the transcript and its records are zipped under the state ' +
+  'directory, then the worktree and the session are removed.';
 const $ = (id) => document.getElementById(id);
 let lastOk = 0;
 let latest = null;
@@ -166,6 +171,35 @@ function renderHidden(hidden) {
     '. Their workers still run and notify.' : 'No hidden repository';
 }
 
+function jobText(job) {
+  const what = job.kind + (job.handle ? ' ' + job.handle : '');
+  if (job.error) return what + ': ' + job.state + ' · ' + job.error;
+  return what + ': ' + job.state + (job.progress ? ' · ' + job.progress : '');
+}
+
+// A running or failed job in full; the others as one count per state, so that an archive
+// of a whole repository does not fill the bar. Each card shows its own job.
+const JOB_COUNT_LABELS = { waiting: ' waiting', queued: ' queued', written: ' written', done: ' archived' };
+
+function renderJobs(summary) {
+  const box = $('jobs');
+  const nodes = ((summary && summary.shown) || []).map((job) => {
+    const span = el('span', 'job ' + job.state, jobText(job));
+    span.title = jobText(job) + (job.result_path ? ' · ' + job.result_path : '');
+    return span;
+  });
+  for (const [state, label] of Object.entries(JOB_COUNT_LABELS)) {
+    const n = ((summary && summary.counts) || {})[state];
+    if (!n) continue;
+    const span = el('span', 'count ' + state);
+    span.append(el('b', null, n), label);
+    span.title = n + ' archive job(s) ' + state + '; each card shows its own';
+    nodes.push(span);
+  }
+  box.replaceChildren(...nodes);
+  box.hidden = !nodes.length;
+}
+
 function renderStats(columns) {
   const count = (key) => (columns.find((c) => c.key === key) || { count: 0 }).count;
   const nodes = [['needs_you', ' need you'], ['working', ' working'], ['queued', ' queued'], ['parked', ' parked'], ['idle', ' idle']]
@@ -266,6 +300,17 @@ function cardChildren(c, now) {
       : 'parked; no reset time given, continue resumes it'));
   }
   if (c.queue_reason) nodes.push(el('div', 'note', c.queue_reason));
+  if (c.job && (c.job.active || c.job.error)) {
+    const job = el('div', 'note job ' + c.job.state, jobText(c.job));
+    if (c.job.result_path) job.title = c.job.result_path;
+    nodes.push(job);
+  }
+  if (typeof c.archived_at === 'number') {
+    const archived = el('div', 'note', 'archived ' + ago(c.archived_at, now) + ' ago' +
+      (c.job && c.job.result_path ? ' to ' + c.job.result_path : ''));
+    if (c.job && c.job.result_path) archived.title = c.job.result_path;
+    nodes.push(archived);
+  }
 
   if (c.last_prompt) nodes.push(snippet('prompt', 'prompt', c.last_prompt));
   if (c.last_answer) nodes.push(snippet('answer', 'answer', c.last_answer));
@@ -460,6 +505,7 @@ function render(model) {
   renderGauge('seven_day', usage.known ? usage.seven_day : null);
   renderThrottle(model.throttle, model.model_limit);
   renderHidden(model.hidden);
+  renderJobs(model.job_summary);
   renderHealth(model.health, now);
   renderStats(model.columns);
   renderControls(model);
@@ -593,6 +639,9 @@ function workerAction(c, name, force) {
       !window.confirm('Discard ' + c.handle + '? This removes its session, its worktree and its local branch' +
         (force ? ', even with unpushed or uncommitted work.' : '.'))) return;
   if (name === 'cancel' && !window.confirm('Cancel ' + c.handle + '? Its session stops; the worktree stays.')) return;
+  if (name === 'archive' &&
+      !window.confirm('Archive ' + c.handle + '? ' + (c.column === 'closed' ? '' : 'It is cancelled first. ') +
+        ARCHIVE_NOTE + (force ? ' Unpushed commits and uncommitted changes are not kept as commits.' : ''))) return;
   send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''));
 }
 
@@ -656,10 +705,37 @@ function openPersonalise(kind, key, current, label) {
     if (event.key === 'Enter') submit();
     if (event.key === 'Escape') closePanel();
   });
+  const extra = kind === 'repository' ? [archiveRow(key, current)] : [];
   panel.replaceChildren(el('h3', null, (kind === 'worker' ? 'Card ' : 'Repository ') + label),
-    ...fields, panelButtons('Save', submit));
+    ...fields, panelButtons('Save', submit), ...extra);
   panel.hidden = false;
   name.focus();
+}
+
+// Archive hides the repository and archives each worker it still holds; unarchive only
+// shows it again. Restoring a worktree from a zip is a manual step.
+function archiveRow(name, current) {
+  const row = el('div', 'buttons archive');
+  const label = el('label', 'force');
+  const force = checkbox(false, 'Cancel the live workers first, and archive work that is not pushed');
+  label.append(force, ' force');
+  const path = '/api/repositories/' + encodeURIComponent(name) + '/';
+  const archive = boardButton('Archive repository',
+    'Hide it, and archive each of its workers: ' + ARCHIVE_NOTE, () => {
+      const how = force.checked ? ' Its live workers are cancelled first, and work that is not pushed is not kept as commits.' : '';
+      if (!window.confirm('Archive repository ' + name + '? It is hidden, and each of its workers is archived. ' +
+        ARCHIVE_NOTE + how)) return;
+      closePanel();
+      send(path + 'archive', { force: force.checked }, 'archive repository ' + name + (force.checked ? ' --force' : ''));
+    });
+  row.append(label, archive);
+  if (current.hidden) {
+    row.append(boardButton('Unarchive', 'Show the repository on the board again; the archives stay', () => {
+      closePanel();
+      send(path + 'unarchive', {}, 'unarchive repository ' + name);
+    }));
+  }
+  return row;
 }
 
 function closePanel() {
