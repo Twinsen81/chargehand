@@ -361,14 +361,18 @@ class Runtime(ABC):
     @abstractmethod
     def fork(
         self,
-        session_id: str,
-        prompt: str,
+        spec: LaunchSpec,
         *,
+        session_id: str,
         session_uuid: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-    ) -> CommandResult:
-        """Start a new session that continues a copy of this one's conversation."""
+        warn: Callable[[str], None] | None = None,
+    ) -> LaunchResult:
+        """Start a new session that continues a copy of *session_id*'s conversation.
+
+        The copy is a session of its own, as :meth:`launch` describes it: it works in
+        ``spec.worktree``, is named ``spec.name``, and gets the options, model and effort of
+        *spec* again, because a copy does not keep them all. ``spec.prompt`` is its next turn.
+        """
 
     def health_checks(self) -> list[HealthCheck]:
         """What `doctor` reports about this runtime. By default: whether the listing works."""

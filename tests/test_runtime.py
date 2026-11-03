@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 from pathlib import Path
 
@@ -12,8 +13,9 @@ from chargehand import claude as claude_mod
 from chargehand import runtime as runtime_mod
 from chargehand.claude import ClaudeCLI, ClaudeRuntime
 from chargehand.config import DEFAULT_DENY_RULES
-from chargehand.errors import ConfigError
+from chargehand.errors import ClaudeError, ConfigError
 from chargehand.roles import Role, load_role
+from chargehand.runtime import LaunchSpec
 from conftest import FAKE_CLAUDE, make_config
 from support import fake_runtime
 from support.fake_runtime import FakeRuntime
@@ -371,21 +373,46 @@ def test_a_wake_of_a_session_that_is_gone_is_a_fault(claude_runtime, claude_stat
     assert "not in the listing" in result.detail
 
 
-def test_a_fork_resumes_a_copy_with_the_new_model_and_effort(claude_runtime, claude_state):
+def test_a_fork_resumes_a_copy_in_its_own_worktree_with_the_new_model_and_effort(
+    claude_runtime, claude_state, tmp_path
+):
     claude_state.set(sessions=[session("done")])
-
-    result = claude_runtime.fork(
-        "s1", "carry on", session_uuid="11111111-2222-3333-4444-555555555555",
-        model="sonnet", effort="low",
+    worktree = tmp_path / "clone"
+    worktree.mkdir()
+    spec = LaunchSpec(
+        worktree=worktree, name="implementer/ABC-1#2", prompt="carry on",
+        options={"permission_mode": "manual"}, model="sonnet", effort="low",
     )
 
-    assert result.returncode == 0
-    argv = claude_state.read()["forks"][0]["argv"]
-    assert argv == [
+    claude_runtime.fork(spec, session_id="s1", session_uuid="11111111-2222-3333-4444-555555555555")
+
+    (fork,) = claude_state.read()["forks"]
+    argv = fork["argv"]
+    assert argv[:12] == [
         "--resume", "11111111-2222-3333-4444-555555555555", "--fork-session", "--bg",
-        "--model", "sonnet", "--effort", "low", "carry on",
+        "-n", "implementer/ABC-1#2", "--permission-mode", "manual",
+        "--model", "sonnet", "--effort", "low",
     ]
-    assert len(claude_runtime.list_sessions()) == 2
+    # The launch settings come again: here the deny rules, as a launch passes them.
+    assert argv[12] == "--settings" and "deny" in argv[13]
+    assert argv[14:] == ["carry on"]
+    assert fork["cwd"] == os.path.realpath(worktree)
+    assert fork["stdin"] == "devnull"
+    copy = claude_runtime.list_sessions()[-1]
+    assert (copy.name, copy.cwd) == ("implementer/ABC-1#2", os.path.realpath(worktree))
+    assert claude_runtime.cli.is_trusted(worktree)
+
+
+def test_a_fork_that_finds_no_conversation_is_an_error_without_the_prompt(
+    claude_runtime, claude_state, tmp_path
+):
+    spec = LaunchSpec(worktree=tmp_path, name="implementer/#2", prompt="secret plan")
+
+    with pytest.raises(ClaudeError) as caught:
+        claude_runtime.fork(spec, session_id="s9")
+
+    assert "the fork of session s9 exited 1" in str(caught.value)
+    assert "secret plan" not in str(caught.value)
 
 
 def test_the_attach_command_names_the_session(claude_runtime):
