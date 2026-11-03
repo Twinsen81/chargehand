@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -68,17 +68,24 @@ LAST_STEP = 4
 # Why a session row exists: the launch, an adoption, a continuation after a refresh,
 # a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`. A wake
 # continues the same session, so each wake has its own `wake` row: the daily wake cap
-# counts them.
+# counts them. A clone in full mode starts with a copy of its original's conversation,
+# which is a `fork` row.
 SESSION_INITIAL = "initial"
 SESSION_ADOPTED = "adopted"
 SESSION_MIGRATED = "migrated"
 SESSION_WAKE = "wake"
+SESSION_FORK = "fork"
 
 # How a worker came to exist. Only `source` workers are held to one per role and item.
 ORIGIN_SOURCE = "source"
 ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
+
+# How much of its original's session a clone gets: nothing, or a copy of the conversation.
+CLONE_FRESH = "fresh"
+CLONE_FULL = "full"
+CLONE_MODES = (CLONE_FRESH, CLONE_FULL)
 
 # Where a control request came from: the command line or the board. Both record the same
 # kinds and arguments; the tick applies them alike.
@@ -192,6 +199,11 @@ _WORKER_COLUMNS = (
     "last_answer",
     "transcript_path",
     "archived_at",
+    "parent_id",
+    "clone_mode",
+    "prompt",
+    "model",
+    "effort",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -245,7 +257,14 @@ CREATE TABLE IF NOT EXISTS workers (
     last_answer      TEXT,
     transcript_path  TEXT,
     -- When an archive of the worker was written and its worktree and session removed.
-    archived_at      REAL
+    archived_at      REAL,
+    -- A clone: the worker it was made from, how much of that session it got (CLONE_MODES),
+    -- and the prompt template, model and effort the operator chose. NULL is the role's.
+    parent_id        INTEGER,
+    clone_mode       TEXT,
+    prompt           TEXT,
+    model            TEXT,
+    effort           TEXT
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -507,6 +526,17 @@ ALTER TABLE workers ADD COLUMN archived_at REAL;
 {_SCHEMA}
 """
 
+# Version 9 adds what a clone keeps: its original, its mode, and the prompt, model and
+# effort chosen for it. Like version 8, the version 1 copy creates the table with them.
+_MIGRATE_V8_TO_V9 = f"""
+ALTER TABLE workers ADD COLUMN parent_id INTEGER;
+ALTER TABLE workers ADD COLUMN clone_mode TEXT;
+ALTER TABLE workers ADD COLUMN prompt TEXT;
+ALTER TABLE workers ADD COLUMN model TEXT;
+ALTER TABLE workers ADD COLUMN effort TEXT;
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -548,6 +578,11 @@ class Worker:
     last_answer: str | None = None
     transcript_path: str | None = None
     archived_at: float | None = None
+    parent_id: int | None = None
+    clone_mode: str | None = None
+    prompt: str | None = None
+    model: str | None = None
+    effort: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -774,12 +809,15 @@ class Ledger:
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
-            + _MIGRATE_V7_TO_V8,
-            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8,
-            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8,
-            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8,
-            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8,
-            7: _MIGRATE_V7_TO_V8,
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
+            + _MIGRATE_V8_TO_V9,
+            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
+            + _MIGRATE_V8_TO_V9,
+            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            8: _MIGRATE_V8_TO_V9,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
