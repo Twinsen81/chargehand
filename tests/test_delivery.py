@@ -227,11 +227,11 @@ def reading(read_at: float, **used: float) -> UsageReading:
     )
 
 
-def test_an_unknown_or_old_usage_reading_admits_a_wake():
+def test_no_usage_reading_admits_a_wake_and_an_old_one_still_counts():
     now = 10_000.0
     assert usage_admits(None, now=now)
-    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, seven_day=99.0)
-    assert usage_admits(old, now=now)
+    old = reading(now - 3 * 86400, seven_day=99.0)
+    assert not usage_admits(old, now=now)
     assert usage_admits(reading(now, seven_day=80.0), now=now)
     assert not usage_admits(reading(now, seven_day=81.0), now=now)
 

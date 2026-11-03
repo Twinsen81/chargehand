@@ -2817,8 +2817,7 @@ class Runner:
     def _usage_refusal(self, role: Role, item: str) -> str | None:
         """Why the reserve for new workers holds a launch back, or None.
 
-        No reading of the role's provider is no reserve. A reading that is too old holds
-        the launch, because nothing says how much of the week is left.
+        No reading of the role's provider is no reserve.
         """
         try:
             provider = runtime_mod.get(role.runtime).usage_provider
@@ -2826,13 +2825,10 @@ class Runner:
             return None
         if provider is None:
             return None
-        reading = self._usage(provider)
         reserve = self.config.usage.new_worker_reserve_percent
-        if reading is None or delivery_mod.new_worker_admits(reading, reserve_percent=reserve):
+        weekly = delivery_mod.window_over_reserve(self._usage(provider), reserve_percent=reserve)
+        if weekly is None:
             return None
-        weekly = reading.windows.get(delivery_mod.WEEKLY_WINDOW)
-        if reading.is_stale(time.time()) or weekly is None:
-            return f"{item}: held by the usage reserve ({provider} reading is out of date)"
         return (
             f"{item}: held by the usage reserve ({provider} {weekly.kind} at "
             f"{weekly.used_percent:.0f}%, above {100.0 - reserve:.0f}%)"

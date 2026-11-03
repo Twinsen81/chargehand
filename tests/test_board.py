@@ -379,20 +379,25 @@ def test_the_usage_gauge_takes_its_level_from_the_usage_file(harness, used, leve
     assert reading["known"] is True
     assert reading["seven_day"]["level"] == level
     assert reading["seven_day"]["resets_at"] == pytest.approx(now + 86400)
-    assert set(reading) == {"known", "written_at", "age_secs", "seven_day"}
+    assert set(reading) == {"known", "written_at", "seven_day"}
 
 
-def test_the_usage_gauge_is_grey_without_a_reading_or_with_a_stale_one(harness):
+def test_the_usage_gauge_is_grey_without_a_reading_or_after_the_reset(harness):
     page = model(harness)
     assert page["usage"]["known"] is False
     assert {page["usage"][w]["level"] for w in usage.WINDOWS} == {"grey"}
 
-    old = time.time() - delivery.USAGE_MAX_AGE_SECS - 60
+    days_ago = time.time() - 3 * 86400
     usage.write_usage(harness.config.serve.usage_file, {
-        "seven_day": {"used_percent": 90, "resets_at": time.time() + 86400},
-    }, now=old)
+        "seven_day": {"used_percent": 90, "resets_at": time.time() + 3600},
+    }, now=days_ago)
+    assert model(harness)["usage"]["seven_day"]["level"] == "red"
+
+    usage.write_usage(harness.config.serve.usage_file, {
+        "seven_day": {"used_percent": 90, "resets_at": time.time() - 1},
+    }, now=days_ago)
     page = model(harness)
-    assert page["usage"]["known"] is False
+    assert page["usage"]["known"] is True
     assert page["usage"]["seven_day"]["level"] == "grey"
 
 

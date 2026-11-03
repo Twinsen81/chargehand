@@ -41,8 +41,8 @@ tick_interval_secs = 60
 # sessions. The status line wrapper (`chargehand statusline`) writes the reading to
 # usage_file. No wake starts while the weekly window is above 100 minus
 # wake_reserve_percent, and no new worker while it is above 100 minus
-# new_worker_reserve_percent. Without a usage file there is no reserve; a reading older
-# than 30 minutes holds new workers, not wakes.
+# new_worker_reserve_percent. Without a usage file there is no reserve. The newest reading
+# counts however old it is, until the window's reset time passes.
 [usage]
 wake_reserve_percent = 20
 new_worker_reserve_percent = 30

@@ -607,7 +607,6 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
         "usage": {
             "known": True,
             "written_at": now - 120,
-            "age_secs": 120.0,
             "seven_day": {"used_percent": 63.0, "resets_at": now + 259200, "level": "amber"},
         },
         "runner": {

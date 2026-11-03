@@ -59,9 +59,6 @@ WAKE_CAP_WINDOW_SECS = 24 * 3600
 DEFAULT_WAKE_RESERVE_PERCENT = 20.0
 # No new worker while the weekly window is above 100 minus this percentage.
 DEFAULT_NEW_WORKER_RESERVE_PERCENT = 30.0
-# An older reading counts as unknown. An unknown reading holds no wake back, because a
-# wake continues work that already runs, but it holds new workers back.
-USAGE_MAX_AGE_SECS = 30 * 60
 # The window that both reserves read. A reading can carry other kinds; no reserve reads them.
 WEEKLY_WINDOW = "seven_day"
 
@@ -108,8 +105,19 @@ class UsageReading:
     windows: Mapping[str, UsageWindow]
     read_at: float
 
-    def is_stale(self, now: float) -> bool:
-        return now - self.read_at > USAGE_MAX_AGE_SECS
+
+def weekly_window(reading: UsageReading | None, now: float | None = None) -> UsageWindow | None:
+    """The weekly window of *reading*, or None when there is none or it has reset since.
+
+    The newest reading counts however old it is. Only a reset time that has passed ends
+    it: the percentage then belongs to the week before.
+    """
+    if reading is None:
+        return None
+    weekly = reading.windows.get(WEEKLY_WINDOW)
+    if weekly is None or weekly.resets_at is None:
+        return weekly
+    return weekly if weekly.resets_at > (time.time() if now is None else now) else None
 
 
 def usage_admits(
@@ -118,7 +126,7 @@ def usage_admits(
     reserve_percent: float = DEFAULT_WAKE_RESERVE_PERCENT,
     now: float | None = None,
 ) -> bool:
-    """Whether the usage reserve lets a wake through. No reading, or an old one, admits."""
+    """Whether the usage reserve lets a wake through. No reading admits."""
     return window_over_reserve(reading, reserve_percent=reserve_percent, now=now) is None
 
 
@@ -128,13 +136,8 @@ def window_over_reserve(
     reserve_percent: float = DEFAULT_WAKE_RESERVE_PERCENT,
     now: float | None = None,
 ) -> UsageWindow | None:
-    """The weekly window of a current *reading* when above 100 minus *reserve_percent*, or None."""
-    if reading is None:
-        return None
-    current = time.time() if now is None else now
-    if reading.is_stale(current):
-        return None
-    weekly = reading.windows.get(WEEKLY_WINDOW)
+    """The weekly window of *reading* when above 100 minus *reserve_percent*, or None."""
+    weekly = weekly_window(reading, now)
     return weekly if weekly is not None and weekly.used_percent > 100.0 - reserve_percent else None
 
 
@@ -144,18 +147,8 @@ def new_worker_admits(
     reserve_percent: float = DEFAULT_NEW_WORKER_RESERVE_PERCENT,
     now: float | None = None,
 ) -> bool:
-    """Whether the usage reserve lets a new worker start.
-
-    No reading at all (no usage file) is no reserve. A reading that is too old is unknown,
-    and an unknown weekly window holds new workers back: a new worker can run for hours.
-    """
-    if reading is None:
-        return True
-    current = time.time() if now is None else now
-    if reading.is_stale(current):
-        return False
-    weekly = reading.windows.get(WEEKLY_WINDOW)
-    return weekly is None or weekly.used_percent <= 100.0 - reserve_percent
+    """Whether the usage reserve lets a new worker start. No reading admits."""
+    return window_over_reserve(reading, reserve_percent=reserve_percent, now=now) is None
 
 
 def safe_pointer(pointer: str) -> str | None:
@@ -507,7 +500,6 @@ __all__ = [
     "MESSAGE_HEADER",
     "QUEUE_REASON_PREFIX",
     "RESUME_MESSAGE",
-    "USAGE_MAX_AGE_SECS",
     "UsageReading",
     "UsageWindow",
     "UNKNOWN_KIND",
@@ -518,5 +510,6 @@ __all__ = [
     "safe_pointer",
     "usage_admits",
     "wake_message",
+    "weekly_window",
     "window_over_reserve",
 ]

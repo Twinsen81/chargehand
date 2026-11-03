@@ -469,11 +469,11 @@ one, and the usage reserve for new workers: the weekly window of the role's prov
 below 100 minus `new_worker_reserve_percent` (70 % by default). The usage readings are kept
 per provider (window kind, percent used, reset time), and each runtime names the provider
 its sessions draw on; only `claude` has readings, from the status line wrapper's usage
-file. No usage file is no reading, and no reading means no reserve. A file older than 30
-minutes is a reading of unknown value, and an unknown week holds new workers back, because
-a new worker can run for hours. The status line wrapper writes the file only while an
-interactive session shows its status line, so once the file exists, new workers wait
-whenever no interactive session ran in the last 30 minutes. The check covers the start
+file. No usage file is no reading, and no reading means no reserve. The newest reading
+counts however old it is: the status line wrapper writes the file only while an
+interactive session shows its status line, and between sessions the last reading is the
+best one there is. Once the weekly window's reset time has passed, its percentage belongs
+to the week before, so the reading holds nothing. The check covers the start
 rules, the board's new workers and every later way to start one. A start that the reserve
 holds waits as one that a cap holds; a board request is refused with the reason.
 
@@ -714,8 +714,8 @@ prompts and the `pr-reviewer` agent file say what each kind asks the worker to d
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
 worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
-reading means no reserve, and a reading older than 30 minutes holds no wake back, because
-a wake continues work that already runs. A worker that is not admitted becomes `queued` and
+reading means no reserve; a reading counts however old it is, until the window's reset
+time has passed (see "Admission" in section 5). A worker that is not admitted becomes `queued` and
 keeps its events, and the reason it waits is kept for the board. The
 runtime then wakes the same session: `claude` stops a live idle process, confirms that it
 stopped, and resumes it by the full session id. It reads the listing again first: a session
@@ -990,8 +990,8 @@ roles hold the item. `--route` stays accepted for `--repository`.
   Without a status line of your own, leave out `-- '<command>'`; the status line is then
   empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for the
   `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
-  `red` from 80 %. A reading older than 30 minutes, a missing or unreadable file, and a
-  window whose reset time has passed are unknown, with the level `grey`. `status --json`
+  `red` from 80 %. A missing or unreadable file and a window whose reset time has passed
+  are unknown, with the level `grey`; the age of the file does not matter. `status --json`
   carries the same object.
 - **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
   progress finishes, the rest of that tick is skipped, a job in progress stops and goes

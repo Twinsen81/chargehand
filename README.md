@@ -151,8 +151,8 @@ ignored. chargehand does not edit the settings file for you:
 }
 ```
 
-`/api/state` then shows the window's percentage and reset time; a reading older than
-30 minutes counts as unknown.
+`/api/state` then shows the window's percentage and reset time. The newest reading counts
+however old it is, until its reset time has passed.
 
 The reading also keeps a part of the weekly window for your own sessions. No wake starts
 while the window is above 80 %, and no new worker starts while it is above 70 %; set other
@@ -164,11 +164,9 @@ wake_reserve_percent = 20        # no wake above 100 minus this
 new_worker_reserve_percent = 30  # no new worker while the week is above 100 minus this
 ```
 
-Without a usage file there is no reserve. A reading older than 30 minutes holds new
-workers back and lets wakes through. The wrapper writes the file only while a Claude Code
-session shows its status line, so once the file exists, no new worker starts (from a start
-rule or the board) when no interactive session ran in the last 30 minutes. Remove the file,
-or keep a session open, to let new workers start then.
+Without a usage file there is no reserve. The wrapper writes the file only while a Claude
+Code session shows its status line, so between your sessions the reserves use the last
+reading. Once the window's reset time has passed, that reading holds nothing.
 
 A turn that ends on a usage limit parks its worker instead of failing it: you are notified
 once, and after the reset the worker continues in the same session by itself, one at a time

@@ -35,12 +35,17 @@ def reading(read_at: float, **used: float) -> UsageReading:
     )
 
 
-def write_reading(harness, *, age_secs: float = 0.0, **used: float) -> None:
+def write_reading(
+    harness, *, age_secs: float = 0.0, resets_in: float = 3600, **used: float
+) -> None:
     """Write the usage file the production runner reads, as the status line wrapper does."""
     now = time.time()
     usage_mod.write_usage(
         harness.config.serve.usage_file,
-        {kind: {"used_percent": value, "resets_at": now + 3600} for kind, value in used.items()},
+        {
+            kind: {"used_percent": value, "resets_at": now + resets_in}
+            for kind, value in used.items()
+        },
         now=now - age_secs,
     )
 
@@ -151,15 +156,15 @@ def test_the_new_worker_reserve_reads_the_weekly_window_only():
     assert new_worker_admits(reading(now, seven_day=85.0), reserve_percent=10, now=now)
 
 
-def test_no_reading_is_no_reserve_and_an_old_one_holds_only_new_workers():
+def test_no_reading_is_no_reserve_and_an_old_one_counts_however_old():
     now = 50_000.0
-    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, seven_day=99.0)
-    recent = reading(now - delivery_mod.USAGE_MAX_AGE_SECS + 1, seven_day=10.0)
+    old_high = reading(now - 3 * 86400, seven_day=99.0)
+    old_low = reading(now - 3 * 86400, seven_day=10.0)
 
     assert new_worker_admits(None, now=now) and delivery_mod.usage_admits(None, now=now)
-    assert not new_worker_admits(old, now=now)
-    assert delivery_mod.usage_admits(old, now=now)
-    assert new_worker_admits(recent, now=now)
+    assert not new_worker_admits(old_high, now=now)
+    assert not delivery_mod.usage_admits(old_high, now=now)
+    assert new_worker_admits(old_low, now=now) and delivery_mod.usage_admits(old_low, now=now)
 
 
 def test_the_usage_file_is_a_reading_of_the_claude_provider_only(tmp_path):
@@ -173,7 +178,6 @@ def test_the_usage_file_is_a_reading_of_the_claude_provider_only(tmp_path):
 
     found = usage_mod.provider_reading(path, "claude", now=now)
     assert found.provider == "claude" and found.read_at == now - 7200
-    assert found.is_stale(now)
     assert found.windows == {"seven_day": UsageWindow("seven_day", 85.0, now + 600)}
     # A window whose reset time has passed belongs to the window before.
     assert usage_mod.provider_reading(path, "claude", now=now + 600).windows == {}
@@ -229,14 +233,18 @@ def test_the_wake_reserve_follows_the_configured_percentage(tmp_path, repo, clau
     harness.ledger.close()
 
 
-def test_an_old_reading_holds_no_wake(tmp_path, repo, claude_state, board):
+def test_an_old_reading_holds_a_wake_until_its_reset_time(tmp_path, repo, claude_state, board):
     write_role(repo, "reviewer", REVIEWER)
     harness = build(tmp_path, repo, claude_state, board)
-    start_reviewer(harness)
+    reviewer = start_reviewer(harness)
     end_turn(harness)
     emit_three()
-    write_reading(harness, age_secs=3600, seven_day=99.0)
+    write_reading(harness, age_secs=3 * 3600, seven_day=99.0)
 
+    assert harness.next_tick().woken == []
+    assert harness.ledger.get(reviewer.id).state == ledger_mod.QUEUED
+
+    write_reading(harness, age_secs=3 * 3600, resets_in=-1, seven_day=99.0)
     assert harness.next_tick().woken == ["reviewer/PR-7"]
     harness.ledger.close()
 
@@ -262,18 +270,29 @@ def test_a_start_waits_while_the_week_is_above_the_reserve(harness):
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
-def test_an_old_reading_holds_new_workers_and_no_file_holds_none(harness):
-    write_reading(harness, age_secs=3600, seven_day=99.0)
+def test_an_old_reading_holds_new_workers_until_its_reset_and_no_file_holds_none(harness):
+    write_reading(harness, age_secs=3 * 3600, seven_day=99.0)
     harness.board.add("ABC-1")
 
     report = harness.next_tick()
 
     assert harness.worker("ABC-1") is None
-    assert any("claude reading is out of date" in line for line in report.skipped), report.skipped
+    assert any(
+        "ABC-1: held by the usage reserve (claude seven_day at 99%, above 70%)" in line
+        for line in report.skipped
+    ), report.skipped
 
-    harness.config.serve.usage_file.unlink()
+    write_reading(harness, age_secs=3 * 3600, resets_in=-1, seven_day=99.0)
     harness.next_tick()
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+
+    write_reading(harness, age_secs=3 * 3600, seven_day=99.0)
+    harness.board.add("ABC-2")
+    harness.next_tick()
+    assert harness.worker("ABC-2") is None
+    harness.config.serve.usage_file.unlink()
+    harness.next_tick()
+    assert harness.worker("ABC-2").state == ledger_mod.RUNNING
 
 
 def test_a_new_worker_from_the_board_is_held_by_the_reserve(harness):

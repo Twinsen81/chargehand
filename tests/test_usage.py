@@ -18,7 +18,6 @@ import pytest
 from chargehand import claude, cli, paths, usage
 from chargehand.config import ServeConfig, load_machine_config
 from chargehand.delivery import (
-    USAGE_MAX_AGE_SECS,
     UsageReading,
     UsageWindow,
     new_worker_admits,
@@ -244,21 +243,39 @@ def test_a_fresh_reading_has_the_weekly_window_with_its_level(usage_file, used, 
     assert reading == {
         "known": True,
         "written_at": NOW,
-        "age_secs": 60.0,
         "seven_day": {"used_percent": float(used), "resets_at": NOW + 86400, "level": level},
     }
 
 
-def test_a_reading_older_than_thirty_minutes_is_unknown(usage_file):
-    usage.run_statusline(_payload(), None, usage_file, now=NOW)
+def test_an_old_reading_counts_until_its_reset_time(usage_file):
+    usage.run_statusline(_payload(99), None, usage_file, now=NOW)
+    hours_later = NOW + 3 * 3600
 
-    assert usage.read_usage(usage_file, now=NOW + USAGE_MAX_AGE_SECS)["known"] is True
-    reading = usage.read_usage(usage_file, now=NOW + 31 * 60)
+    reading = usage.read_usage(usage_file, now=hours_later)
+    assert reading["known"] is True
+    assert reading["seven_day"] == {"used_percent": 99.0, "resets_at": NOW + 86400, "level": "red"}
+    found = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=hours_later)
+    assert not usage_admits(found, now=hours_later)
+    assert not new_worker_admits(found, now=hours_later)
 
-    assert reading["known"] is False
-    assert reading["age_secs"] == 31 * 60
-    for name in usage.WINDOWS:
-        assert reading[name] == {"used_percent": None, "resets_at": None, "level": "grey"}
+    # The week has reset since: the old percentage holds nothing, and the gauge is grey.
+    after_reset = NOW + 86400
+    reading = usage.read_usage(usage_file, now=after_reset)
+    assert reading["known"] is True
+    assert reading["seven_day"] == {"used_percent": None, "resets_at": None, "level": "grey"}
+    found = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=after_reset)
+    assert usage_admits(found, now=after_reset)
+    assert new_worker_admits(found, now=after_reset)
+
+
+def test_the_reserves_drop_a_weekly_window_whose_reset_time_has_passed():
+    # A reading read before the reset and applied after it, as a longer-lived reader holds one.
+    reading = UsageReading("claude", {"seven_day": UsageWindow("seven_day", 99.0, NOW)}, NOW - 60)
+
+    assert not usage_admits(reading, now=NOW - 1)
+    assert not new_worker_admits(reading, now=NOW - 1)
+    assert usage_admits(reading, now=NOW)
+    assert new_worker_admits(reading, now=NOW)
 
 
 @pytest.mark.parametrize("content", [None, "", "not json", "[]", '{"seven_day": {}}',
@@ -340,10 +357,12 @@ def test_the_state_carries_the_reading_and_follows_the_file(harness, tmp_path, u
         reading = json.loads(body)["usage"]
         assert reading["known"] is True
         assert (reading["seven_day"]["used_percent"], reading["seven_day"]["level"]) == (62.0, "amber")
-        assert set(reading) == {"known", "written_at", "age_secs", "seven_day"}
+        assert set(reading) == {"known", "written_at", "seven_day"}
 
-        usage.write_usage(usage_file, json.loads(usage_file.read_text()), now=now - 31 * 60)
+        usage.write_usage(usage_file, {
+            "seven_day": {"used_percent": 62.0, "resets_at": now - 1},
+        }, now=now - 3 * 86400)
         status, body = support.request(daemon.port, "GET", "/api/state")
         reading = json.loads(body)["usage"]
-        assert reading["known"] is False
+        assert reading["known"] is True
         assert reading["seven_day"]["level"] == "grey"
