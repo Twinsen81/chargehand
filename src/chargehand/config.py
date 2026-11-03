@@ -285,7 +285,7 @@ class ServeConfig:
     port: int = DEFAULT_SERVE_PORT
     token_file: Path = field(default_factory=lambda: paths.config_dir() / TOKEN_FILE_NAME)
     tick_interval_secs: int = 60
-    # Where the status line wrapper writes the usage windows and the daemon reads them.
+    # Where the status line wrapper writes the weekly usage window and the daemon reads it.
     usage_file: Path = field(default_factory=lambda: paths.usage_file())
     # The daemon's log level: debug, info or warning. `-v` overrides it.
     log_level: str = "info"
@@ -325,6 +325,34 @@ class ServeConfig:
             ),
             log_level=log_level,
         )
+
+
+@dataclass(frozen=True)
+class UsageConfig:
+    """The `[usage]` table: how much of the provider's weekly usage window workers leave alone.
+
+    A wake waits while the weekly window is above 100 minus ``wake_reserve_percent``; a new
+    worker waits while it is above 100 minus ``new_worker_reserve_percent``.
+    """
+
+    wake_reserve_percent: float = 20.0
+    new_worker_reserve_percent: float = 30.0
+
+    @classmethod
+    def parse(cls, table: Mapping[str, object] | None) -> "UsageConfig":
+        if table is None:
+            return cls()
+        where = "usage"
+        if not isinstance(table, Mapping):
+            raise ConfigError(f"{where}: expected a table")
+        _unknown_keys(table, ("wake_reserve_percent", "new_worker_reserve_percent"), where)
+        values = {}
+        for key in ("wake_reserve_percent", "new_worker_reserve_percent"):
+            value = _as_number(table.get(key, getattr(cls, key)), f"{where}.{key}")
+            if value > 100:
+                raise ConfigError(f"{where}.{key}: must be <= 100")
+            values[key] = value
+        return cls(**values)
 
 
 DEFAULT_ROLES = ("implementer",)
@@ -437,6 +465,7 @@ class MachineConfig:
     source: Path | None = None
     sources: tuple[SourceConfig, ...] = ()
     serve: ServeConfig = field(default_factory=ServeConfig)
+    usage: UsageConfig = field(default_factory=UsageConfig)
 
     _TOP_LEVEL = (
         "poll_interval_secs",
@@ -460,6 +489,7 @@ class MachineConfig:
         "route",
         "source",
         "serve",
+        "usage",
     )
 
     def repository_by_name(self, name: str) -> Repository | None:
@@ -558,12 +588,17 @@ class MachineConfig:
             deny_rules=tuple(deny),
             pass_deny_rules_at_launch=bool(data.get("pass_deny_rules_at_launch", True)),
             trust_worktrees=bool(data.get("trust_worktrees", True)),
-            claude_bin=_as_str(data.get("claude_bin", "claude"), "config.claude_bin"),
-            git_bin=_as_str(data.get("git_bin", "git"), "config.git_bin"),
+            # `~` is expanded so that an exported configuration can name a binary in the
+            # home directory without the home directory's path.
+            claude_bin=os.path.expanduser(
+                _as_str(data.get("claude_bin", "claude"), "config.claude_bin")
+            ),
+            git_bin=os.path.expanduser(_as_str(data.get("git_bin", "git"), "config.git_bin")),
             ignored_keys=tuple(key for key in _IGNORED_KEYS if key in data),
             source=source,
             sources=sources,
             serve=serve,
+            usage=UsageConfig.parse(data.get("usage")),
         )
 
     def source_by_name(self, name: str) -> SourceConfig | None:

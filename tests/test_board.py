@@ -1,4 +1,4 @@
-"""The read-only board: the page, its headers, and the model it renders.
+"""The board: the page, its headers, and the model it renders.
 
 The daemon here serves on 127.0.0.1 on a port the kernel picks, runs no loop, and is
 shut down in the test. Sessions are the fake `claude`'s; the tracker is the fake one.
@@ -73,7 +73,7 @@ EXPECTED_COLUMN = {
     ledger_mod.LAUNCHING: "working",
     ledger_mod.RUNNING: "working",
     ledger_mod.QUEUED: "queued",
-    ledger_mod.PARKED: "queued",
+    ledger_mod.PARKED: "parked",
     ledger_mod.IDLE: "idle",
     ledger_mod.PAUSED: "idle",
     ledger_mod.DONE: "closed",
@@ -85,7 +85,9 @@ EXPECTED_COLUMN = {
 def test_every_worker_state_has_one_column():
     assert set(board.COLUMN_OF) == set(ledger_mod.WORKER_STATES)
     assert board.COLUMN_OF == EXPECTED_COLUMN
-    assert [key for key, *_ in board.COLUMNS] == ["needs_you", "working", "queued", "idle", "closed"]
+    assert [key for key, *_ in board.COLUMNS] == [
+        "needs_you", "working", "queued", "parked", "idle", "closed",
+    ]
 
 
 def test_each_worker_is_in_the_column_of_its_state(harness):
@@ -212,16 +214,21 @@ def test_an_open_permission_prompt_is_on_the_card(harness):
     card = card_of(model(harness), "ABC-1")
 
     assert card["column"] == "needs_you"
-    assert card["permission_prompt"] == {"tool_name": "Bash", "tool_input": '{"command": "ls"}'}
+    shown = card["permission_prompt"]
+    assert (shown["tool_name"], shown["tool_input"], shown["kind"]) == (
+        "Bash", '{"command": "ls"}', "permission",
+    )
+    # No hook of this daemon waits for it, so only the session can answer.
+    assert shown["answers"] == []
 
 
-def test_a_parked_worker_is_queued_with_its_reset_time(harness):
+def test_a_parked_worker_is_in_the_parked_view_with_its_reset_time(harness):
     reset = time.time() + 3600
     seed(harness, "ABC-1", ledger_mod.PARKED, reset_at=reset)
 
     card = card_of(model(harness), "ABC-1")
 
-    assert card["column"] == "queued"
+    assert card["column"] == "parked"
     assert card["reset_at"] == reset
 
 
@@ -335,16 +342,22 @@ def test_the_page_loads_nothing_from_the_network_and_has_no_inline_code():
     assert re.search(r"\son[a-z]+=", page) is None
 
 
-def test_the_board_is_read_only(daemon):
+def test_the_board_reads_with_get_and_acts_only_through_its_post_routes(daemon):
     board_routes = [
         (method, path) for method, path, _, handler in daemon.routes._routes
         if getattr(handler, "__module__", "") == board.__name__
     ]
-    assert board_routes and all(method == "GET" for method, _ in board_routes)
+    assert {path for method, path in board_routes if method == "GET"} == {
+        *board.ASSETS, "/api/board", "/api/requests", "/api/workers",
+    }
+    assert {path for method, path in board_routes if method == "POST"} == {
+        "/api/workers", "/api/repositories", "/api/pause", "/api/resume",
+    }
+    assert {method for method, _ in board_routes} == {"GET", "POST"}
     script = (board.asset_dir() / "board.js").read_text()
-    assert re.findall(r"fetch\('([^']*)'", script) == ["/api/board"]
-    assert "method" not in script
-    assert "Authorization" not in script
+    # The clone form reads its defaults with a GET.
+    assert re.findall(r"fetch\('([^']*)'", script) == ["/api/requests/", "/api/workers/", "/api/board"]
+    assert script.count("method: 'POST'") == 1
     status, _ = support.request(daemon.port, "POST", "/", body=b"{}", headers=AUTH)
     assert status == 405
 
@@ -356,33 +369,46 @@ def test_the_board_is_read_only(daemon):
     "used, level",
     [(0, "green"), (59.9, "green"), (60, "amber"), (79.9, "amber"), (80, "red"), (100, "red")],
 )
-def test_the_usage_gauges_take_their_level_from_the_usage_file(harness, used, level):
+def test_the_usage_gauge_takes_its_level_from_the_usage_file(harness, used, level):
     now = time.time()
     usage.write_usage(harness.config.serve.usage_file, {
-        "five_hour": {"used_percent": used, "resets_at": now + 3600},
-        "seven_day": {"used_percent": 10, "resets_at": now + 86400},
+        "seven_day": {"used_percent": used, "resets_at": now + 86400},
     }, now=now)
 
     reading = model(harness)["usage"]
 
     assert reading["known"] is True
-    assert reading["five_hour"]["level"] == level
-    assert reading["five_hour"]["resets_at"] == pytest.approx(now + 3600)
-    assert reading["seven_day"]["level"] == "green"
+    assert reading["seven_day"]["level"] == level
+    assert reading["seven_day"]["resets_at"] == pytest.approx(now + 86400)
+    assert set(reading) == {"known", "written_at", "seven_day"}
 
 
-def test_the_usage_gauges_are_grey_without_a_reading_or_with_a_stale_one(harness):
+def test_the_usage_gauge_is_grey_without_a_reading_or_after_the_reset(harness):
     page = model(harness)
     assert page["usage"]["known"] is False
     assert {page["usage"][w]["level"] for w in usage.WINDOWS} == {"grey"}
 
-    old = time.time() - delivery.USAGE_MAX_AGE_SECS - 60
+    days_ago = time.time() - 3 * 86400
     usage.write_usage(harness.config.serve.usage_file, {
-        "five_hour": {"used_percent": 90, "resets_at": time.time() + 3600},
-    }, now=old)
+        "seven_day": {"used_percent": 90, "resets_at": time.time() + 3600},
+    }, now=days_ago)
+    assert model(harness)["usage"]["seven_day"]["level"] == "red"
+
+    usage.write_usage(harness.config.serve.usage_file, {
+        "seven_day": {"used_percent": 90, "resets_at": time.time() - 1},
+    }, now=days_ago)
     page = model(harness)
-    assert page["usage"]["known"] is False
-    assert page["usage"]["five_hour"]["level"] == "grey"
+    assert page["usage"]["known"] is True
+    assert page["usage"]["seven_day"]["level"] == "grey"
+
+
+def test_the_top_bar_has_one_gauge_for_the_weekly_window():
+    page = (board.asset_dir() / "index.html").read_text()
+    script = (board.asset_dir() / "board.js").read_text()
+
+    assert re.findall(r'id="gauge-[^"]*"', page) == ['id="gauge-seven_day"']
+    assert set(re.findall(r"renderGauge\('([^']*)'", script)) == set(usage.WINDOWS)
+    assert set(re.findall(r"usage\.([a-z_]+)", script)) == {"known", *usage.WINDOWS}
 
 
 # ----- no calls per request ----------------------------------------------------------

@@ -13,20 +13,29 @@
   <h1>chargehand</h1>
   <div class="stats" id="stats"></div>
   <div class="gauges">
-    <div class="gauge grey" id="gauge-five_hour" title="Five-hour usage window">
-      <span class="name">5 h</span><span class="bar"><span class="fill"></span></span>
-      <span class="value">-</span><span class="reset"></span>
-    </div>
     <div class="gauge grey" id="gauge-seven_day" title="Weekly usage window">
       <span class="name">week</span><span class="bar"><span class="fill"></span></span>
       <span class="value">-</span><span class="reset"></span>
     </div>
   </div>
   <div class="throttle" id="throttle"></div>
+  <label class="hidden-count" id="hidden-filter" title="Repositories hidden from the board; their workers still run and notify" hidden><span id="hidden-count">0 hidden</span> <input type="checkbox" id="show-hidden"> show</label>
+  <div class="jobs" id="jobs" title="Slow work on a thread of the daemon, such as an archive" hidden></div>
   <div class="health" id="health"><span class="dot"></span><span class="text">-</span></div>
   <div class="refresh" id="refresh">loading</div>
 </header>
+<nav class="controls">
+  <button type="button" id="new-worker">New worker</button>
+  <button type="button" id="pause-all">Pause all</button>
+  <button type="button" id="resume-all">Resume all</button>
+  <span class="repositories" id="repositories"></span>
+  <label class="setting">terminal <select id="terminal"></select></label>
+  <label class="setting">token <input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="from the token file"></label>
+  <button type="button" id="token-forget">Forget token</button>
+</nav>
+<div class="notice" id="notice" hidden></div>
+<div class="panel" id="panel" hidden></div>
 <main id="board"></main>
-<footer id="foot">read-only · polling every second</footer>
+<footer id="foot">polling every second · actions need the token</footer>
 </body>
 </html>

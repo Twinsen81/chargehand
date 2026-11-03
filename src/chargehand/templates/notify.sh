@@ -5,7 +5,8 @@
 # status file, and the watchdog states. A turn end that waits for events (idle) and a
 # worker whose item closed are not notified; `status` shows them. These variables are set:
 #
-#   CHARGEHAND_ITEM    the work item (an issue identifier)
+#   CHARGEHAND_ITEM    the work item (an issue identifier); for a worker started on the
+#                      board, its handle with its id instead, such as implementer/ABC-1#7
 #   CHARGEHAND_ROLE    the worker's role
 #   CHARGEHAND_ISSUE   the same as CHARGEHAND_ITEM, kept for older hooks
 #   CHARGEHAND_STATE   blocked | parked | done | failed | cancelled | long-running |

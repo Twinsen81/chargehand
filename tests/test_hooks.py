@@ -92,7 +92,11 @@ def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_token(harness, 
     for event, groups in hooks_settings.items():
         [group] = groups
         [hook] = group["hooks"]
-        assert 0 < hook["timeout"] <= 30
+        if event == "PermissionRequest":
+            # Held for the board's answer: long, but finite.
+            assert hook["timeout"] == claude.PERMISSION_TIMEOUT_SECS
+        else:
+            assert 0 < hook["timeout"] <= 30
         if event == "SessionStart":
             continue
         assert hook["type"] == "http"
@@ -597,7 +601,7 @@ def test_the_claude_runtime_reads_each_event():
     ({"error": "usage_limit_reached"}, True),
     ({"error": "model_not_found", "last_assistant_message": "usage limit"}, False),
     ({"error": "unknown", "error_details": "Claude AI usage limit reached|1900000000"}, True),
-    ({"last_assistant_message": "5-hour limit reached · resets 9pm"}, True),
+    ({"last_assistant_message": "Weekly limit reached · resets Mon 9pm"}, True),
     ({"last_assistant_message": "the build failed"}, False),
     ({"error": 42}, False),
 ])
@@ -605,6 +609,17 @@ def test_a_usage_limit_is_matched_defensively(payload, limited):
     hook = claude.parse_hook("StopFailure", payload)
     assert hook.usage_limit is limited
     assert hook.observed == "failed"
+
+
+@pytest.mark.parametrize("payload", [
+    {"last_assistant_message": "5-hour limit reached · resets 9pm"},
+    {"error": "unknown", "error_details": "You have reached your five-hour limit."},
+])
+def test_an_old_five_hour_limit_text_still_parks(payload):
+    # Old input: the subscription had a five-hour window until 2026-11-03, and Claude Code
+    # can still name it in a failure for some time. Such a failure parks, it does not fail.
+    hook = claude.parse_hook("StopFailure", payload)
+    assert hook.usage_limit is True
 
 
 def test_the_reset_time_is_read_from_several_spellings():

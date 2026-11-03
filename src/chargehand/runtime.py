@@ -54,6 +54,11 @@ class Session:
     started_at: float | None = None
     pr_url: str | None = None
     kind: str | None = None
+    # A failed session whose error says the provider's usage limit ended its turn, when
+    # the limit resets, and the model family when the limit is the model's own.
+    usage_limit: bool = False
+    reset_at: float | None = None
+    model_limit: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -82,7 +87,8 @@ class Capabilities:
     brings its own call when it is built. In particular ``wake()`` is always the
     stop-and-resume path; a wake into a live session, for a runtime with
     ``in_place_wake``, goes through the in-session channel, which is a separate path.
-    Usage readings and board permissions have no call here yet for the same reason.
+    Usage readings have no call here yet for the same reason; board permissions use
+    :meth:`Runtime.permission_hold_secs` and :meth:`Runtime.permission_decision`.
 
     ``live_attach``: an operator can open the running session without stopping it.
     ``in_place_wake``: a message reaches a live session without a restart.
@@ -122,6 +128,8 @@ class Hook:
     *observed* is the session state the post shows, one of SESSION_STATES, or None when
     the post changes no state. *usage_limit* marks a failure caused by the provider's
     usage limit, and *reset_at* is when that limit resets, when the failure said.
+    *tool_input* is cleaned and capped for display; *tool_input_digest* is a hash of the
+    whole input as the session sent it, so a rule never matches on a shortened input.
     """
 
     kind: str
@@ -134,9 +142,12 @@ class Hook:
     error: str | None = None
     usage_limit: bool = False
     reset_at: float | None = None
+    # The model family, such as "opus", when the usage limit is that model's own.
+    model_limit: str | None = None
     notification_type: str | None = None
     tool_name: str | None = None
     tool_input: str | None = None
+    tool_input_digest: str | None = None
     source: str | None = None
 
 
@@ -163,6 +174,10 @@ class LaunchSpec:
     *read_paths* are directories outside the worktree that the session must be able to
     read without asking, such as the checkout of a pull request it reviews. They are not
     workspaces: a runtime must not load configuration or instructions from them.
+
+    *protected_paths* are directories the session must not change, such as the worktree of
+    the worker it was cloned from. A runtime denies its file-editing tools there, in every
+    permission mode, as far as its agent can.
     """
 
     worktree: Path
@@ -172,6 +187,7 @@ class LaunchSpec:
     model: str | None = None
     effort: str | None = None
     read_paths: tuple[Path, ...] = ()
+    protected_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -210,6 +226,9 @@ class Runtime(ABC):
     # from when a session starts or resumes in a directory. A wake checks that a worker
     # whose item is checked out separately has not changed them.
     workspace_files: ClassVar[tuple[str, ...]] = ()
+    # Whose usage windows this runtime's sessions draw on, for the usage reserve; None
+    # when chargehand has no reading for it.
+    usage_provider: ClassVar[str | None] = None
 
     # ----- configuration ----------------------------------------------------
 
@@ -235,6 +254,30 @@ class Runtime(ABC):
         """The post *payload* to `/hooks/<event>`, or None when it is not this runtime's."""
         return None
 
+    @classmethod
+    def permission_hold_secs(cls, worktree: Path) -> float | None:
+        """How long the daemon may hold the permission hook of the session in *worktree*.
+
+        A little less than the session waits for the hook, so the daemon answers with no
+        decision before the session gives up on it. None: the hook is not held.
+        """
+        return None
+
+    @classmethod
+    def permission_decision(cls, decision: str) -> dict[str, object]:
+        """The answer to a permission hook that allows or denies, in the runtime's format."""
+        return {}
+
+    def permission_waits(self) -> dict[str, bool] | None:
+        """For every listed session, by its id, whether it shows a permission dialog now.
+
+        One fresh look for all sessions; None when the runtime cannot tell. The daemon asks
+        this while it holds a permission hook and before it takes an answer from the board:
+        the operator may have answered in the session, and the waiting hook does not show
+        that. A session missing from the result no longer shows a dialog.
+        """
+        return None
+
     # ----- sessions ---------------------------------------------------------
 
     @abstractmethod
@@ -258,6 +301,7 @@ class Runtime(ABC):
         *,
         session_uuid: str | None = None,
         if_idle: bool = False,
+        if_ended: bool = False,
     ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
 
@@ -265,7 +309,8 @@ class Runtime(ABC):
         question or a permission prompt waits) is not interrupted, and the result has
         ``busy`` set. The runtime decides from its own fresh look, because the caller's
         view of the session can be older. Delivery asks this way; an answer to a question
-        does not.
+        does not. *if_ended* is the same, except that a turn that ended ``failed`` also
+        counts as ended: the resume of a worker that a usage limit parked asks this way.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing
@@ -273,6 +318,15 @@ class Runtime(ABC):
         known about whether the message arrived, and the caller treats it like a failed
         call to the agent, not like a refused wake.
         """
+
+    def failure_reset(self, session: Session, since: float) -> float | None:
+        """When the usage limit that failed *session*'s turn resets, or None when unknown.
+
+        *since* is a time before the failure, such as the start of the turn. A reset time
+        without a date is placed after it, not after now: a failure that the listing shows
+        late, for example after the daemon was down, keeps its own reset time.
+        """
+        return session.reset_at
 
     @abstractmethod
     def stop(self, session_id: str) -> CommandResult:
@@ -297,6 +351,14 @@ class Runtime(ABC):
     def logs(self, session_id: str, *, lines: int = 200) -> str:
         """The last *lines* of the session's output. Untrusted text."""
 
+    def transcript(self, transcript_path: str | None, session_id: str | None) -> str | None:
+        """The session's conversation as plain text, for an archive, or None. Untrusted text.
+
+        *transcript_path* is what the session's hooks reported, so it is checked before it
+        is read.
+        """
+        return None
+
     @abstractmethod
     def attach_command(self, session_id: str) -> str:
         """The command an operator runs to open the session in a terminal."""
@@ -304,14 +366,18 @@ class Runtime(ABC):
     @abstractmethod
     def fork(
         self,
-        session_id: str,
-        prompt: str,
+        spec: LaunchSpec,
         *,
+        session_id: str,
         session_uuid: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-    ) -> CommandResult:
-        """Start a new session that continues a copy of this one's conversation."""
+        warn: Callable[[str], None] | None = None,
+    ) -> LaunchResult:
+        """Start a new session that continues a copy of *session_id*'s conversation.
+
+        The copy is a session of its own, as :meth:`launch` describes it: it works in
+        ``spec.worktree``, is named ``spec.name``, and gets the options, model and effort of
+        *spec* again, because a copy does not keep them all. ``spec.prompt`` is its next turn.
+        """
 
     def health_checks(self) -> list[HealthCheck]:
         """What `doctor` reports about this runtime. By default: whether the listing works."""

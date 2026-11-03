@@ -94,8 +94,8 @@ CONTROL = "probe-control"
 DECOYS = ("chargehand", "claude", "launchctl", "sqlite3", CONTROL)
 MANUAL = "manual"
 MODES = ("auto", "bypassPermissions")
-MUTATING = ("cancel", "stop", "continue", "retry", "discard", "pause", "resume", "tick",
-            "serve", "install", "uninstall", "init")
+MUTATING = ("cancel", "stop", "continue", "retry", "discard", "clone", "pause", "resume",
+            "tick", "serve", "install", "uninstall", "init")
 #: Appears only in the untrusted fields of the fixed status, logs and session list, so a
 #: transcript shows whether any of that text reached the session.
 CANARY = "PROBE-UNTRUSTED-TEXT"
@@ -508,6 +508,10 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
                 error: str | None = None) -> dict[str, object]:
         created = now - age_secs
         payload: dict[str, object] = {
+            "id": sum(map(ord, issue)),
+            "handle": f"implementer/{issue}",
+            "origin": "source",
+            "parent": None,
             "item": issue,
             "role": "implementer",
             "runtime": "claude",
@@ -604,8 +608,6 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
         "usage": {
             "known": True,
             "written_at": now - 120,
-            "age_secs": 120.0,
-            "five_hour": {"used_percent": 41.0, "resets_at": now + 7200, "level": "green"},
             "seven_day": {"used_percent": 63.0, "resets_at": now + 259200, "level": "amber"},
         },
         "runner": {

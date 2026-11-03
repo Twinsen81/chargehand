@@ -11,6 +11,7 @@
       "Bash(*chargehand continue *)",
       "Bash(*chargehand retry *)",
       "Bash(*chargehand discard *)",
+      "Bash(*chargehand clone *)",
       "Bash(*chargehand pause*)",
       "Bash(*chargehand resume*)",
       "Bash(*chargehand tick*)",

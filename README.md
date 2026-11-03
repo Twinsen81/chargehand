@@ -86,15 +86,74 @@ the token file has mode 0600. The daemon writes its log to `~/Library/Logs/charg
 (see [The log](#the-log)). To try the daemon without the job, run `chargehand serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
-Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle and the
-daemon's health in the top bar, and a card per worker in the columns Needs you, Working,
-Queued, Idle and Closed. It refreshes every second and is read-only.
+Open <http://127.0.0.1:7878/> for the board: the weekly usage window, the launch throttle, a
+badge when a turn hit one model's own limit, and the daemon's health in the top bar, and a
+card per worker in the columns Needs you, Working, Queued (with the reason each worker
+waits), Parked (with the reset time), Idle and Closed. It refreshes every second. Its
+buttons do what the control commands do: start a worker from a role, with an optional work
+item and the event kinds on it that wake the worker; pause, continue, cancel, retry or
+discard a worker; reply to a worker with one line of text, which reaches it as an event,
+the way a comment would; attach, which opens an iTerm2 or Terminal.app window (chosen on
+the page) running `claude attach` on the worker's session; and pause or resume a
+repository or all of them. The buttons need the daemon's token: paste the content of the
+token file into the token field once, and the browser keeps it for the page. Workers
+started on the board are named by a handle with their id, such as `implementer/ABC-1#7`,
+which every command that takes an item also accepts.
 
-To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
-status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
-the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then
-runs your command with the same input, so your status line does not change. chargehand
-does not edit the settings file for you:
+Clone on a card starts a new worker from that one, in a worktree of its own branched from
+the worker's current branch, so its commits carry over and the two never write the same
+files; uncommitted changes stay with the original. The form starts with the worker's prompt
+template, model and effort, which you can change. Fresh mode starts a new session; full
+mode starts with a copy of the worker's conversation (only while the worker is not in the
+middle of a turn or a prompt). The clone follows no events on the item unless you name the
+kinds, so only your replies reach it. Its card follows the original's card and says "clone
+of" the original. From a terminal: `chargehand clone implementer/ABC-1#7 --mode full
+--model sonnet --prompt-file next.txt`, with `--effort`, `--prompt` and `--subscribe KIND`
+as further options.
+
+The cards of each column are grouped by repository. With Edit you can rename a repository
+or a worker on the board, give it an icon (one emoji or a name such as `rocket` or `bug`)
+and pin it, and collapse or hide a repository. A board pin only sorts: pinned first, then
+by last activity, and a collapsed repository still shows its pinned cards. It does not keep
+a session running, which Claude Code's own pin does. A hidden repository's workers still run
+and notify; the top bar shows how many repositories are hidden, and "show" brings them back.
+These settings are kept in the ledger, so they survive a restart, and the CLI does not use
+them: commands take the configured names and handles.
+
+Archive on a card zips what the worker leaves and then removes it: the worktree (and the
+item checkout of a `checkout = "item"` role), the session transcript as text, and the
+worker's ledger row and sessions as JSON, in
+`<state directory>/archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600. A
+live worker is cancelled first. As with discard, unpushed commits or uncommitted changes
+refuse the archive unless you tick force; a forced archive keeps the files, not the
+commits. The zip is written by the daemon in the background, so the board stays
+responsive; the card and the top bar show the job and its progress. Only once the zip is
+complete and has passed its check does the next tick remove the worktree, the branch and
+the session. A stop or a crash of the daemon during the zip leaves no archive and no
+removed worktree, and the next start of the daemon writes it again. Archive repository
+(under Edit on the repository's heading) hides the repository and archives each of its
+workers that still has a worktree; it refuses while the repository has live workers, unless
+forced, which cancels them first. Unarchive only shows the repository again.
+
+To restore a worktree from an archive, by hand: unzip it somewhere, add a worktree on the
+pushed branch (`git worktree add <path> <branch>` in the repository), and copy the files
+under `worktree/` into it. `transcript.txt`, `worker.json` and `sessions.json` are for
+reading; chargehand does not take an archived worker back.
+
+When a worker's session asks for permission to run a tool, its card in Needs you shows the
+tool and its input with Allow, Deny and Always allow, and the session waits for your
+answer. Always allow also allows the same tool with the same input for that worker from
+then on, without a card; it never changes the role, the repository or Claude Code's
+settings. You can still answer in `claude attach`, and the card goes away. The session
+waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and then shows
+its own dialog, which only `claude attach` can answer; so does a prompt that was open
+when the daemon stopped.
+
+To let the daemon see your subscription's weekly usage window, wrap your status line
+command in `~/.claude/settings.json` with `chargehand statusline`. It writes the window to
+`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then runs your command
+with the same input, so your status line does not change. Other windows in the input are
+ignored. chargehand does not edit the settings file for you:
 
 ```json
 "statusLine": {
@@ -103,8 +162,26 @@ does not edit the settings file for you:
 }
 ```
 
-`/api/state` then shows each window's percentage and reset time; a reading older than
-30 minutes counts as unknown.
+`/api/state` then shows the window's percentage and reset time. The newest reading counts
+however old it is, until its reset time has passed.
+
+The reading also keeps a part of the weekly window for your own sessions. No wake starts
+while the window is above 80 %, and no new worker starts while it is above 70 %; set other
+values in `[usage]`:
+
+```toml
+[usage]
+wake_reserve_percent = 20        # no wake above 100 minus this
+new_worker_reserve_percent = 30  # no new worker while the week is above 100 minus this
+```
+
+Without a usage file there is no reserve. The wrapper writes the file only while a Claude
+Code session shows its status line, so between your sessions the reserves use the last
+reading. Once the window's reset time has passed, that reading holds nothing.
+
+A turn that ends on a usage limit parks its worker instead of failing it: you are notified
+once, and after the reset the worker continues in the same session by itself, one at a time
+within `max_concurrent`.
 
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).
@@ -114,6 +191,24 @@ Steer it with `status`, `watch`, `logs`, `pause`, `cancel`, `stop`, `continue`, 
 and `discard`. Answers to a session's questions go through Claude Code's own agent view
 (`claude agents`), not through this CLI. It is a plain CLI, so it works over SSH too if
 you want to reach the machine from elsewhere, but nothing depends on that.
+
+To move your setup to another machine or user account, run `chargehand export setup.zip`
+there and `chargehand import setup.zip` on the new one. The archive holds the machine
+configuration with `~` for your home directory, the role files in
+`~/.config/chargehand/roles/` and the agent files in `~/.claude/agents/` that the roles
+name, the notification hook, your status line entry, and the board's names, icons, pins
+and hidden repositories (not those of workers, which belong to this machine's ledger). It
+holds no token, no Keychain value and no configuration key that can carry a credential,
+such as `api_key_command`. The notification hook is copied as it is, when it is a text
+script in your home or configuration directory: if you wrote a credential into it, such
+as a private push topic, the archive holds it too. A binary, a tool's generated shim or a
+program installed elsewhere is not copied; the command keeps naming it, and import lists
+it as a program to install, as it does for any `*_bin` key given as a path.
+Import asks for the path of each repository and for the worktree root
+(or takes `--repository NAME=PATH` and `--worktree-root PATH`, or one line per answer on
+stdin), refuses to overwrite a file without `--force`, and writes a new token. It does
+not edit `~/.claude/settings.json` and does not install the launchd job: `chargehand
+doctor` lists those steps, and the tracker key, until they are done.
 
 `chargehand templates` lists the bundled starter files: the two configuration
 templates, a notification hook, the deny rules passed to launched sessions, and a
@@ -132,7 +227,9 @@ The level is `log_level` in `[serve]`: `debug`, `info` (the default) or `warning
 daemon reads it again on every tick, so a change needs no restart; `-v` and `-vv` override
 it for a `chargehand serve` in a terminal. Every line has the same format, a timestamp, the
 level and the part of chargehand that wrote it, and every line about a worker starts with
-its handle, `role/item`, so `grep implementer/ABC-1` finds all of them.
+its handle, `role/item`, so `grep implementer/ABC-1` finds all of them. A worker started on
+the board has `role/item#id` there. A start-rule worker keeps `role/item` in the log also
+after it ends, while `status --json` then shows it as `role/item#id`, which a command takes.
 
 At `info` the log holds:
 

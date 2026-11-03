@@ -1,10 +1,11 @@
-"""Usage readings: the status line wrapper writes the windows, the daemon reads them."""
+"""Usage readings: the status line wrapper writes the weekly window, the daemon reads it."""
 
 from __future__ import annotations
 
 import dataclasses
 import io
 import json
+import logging
 import os
 import stat
 import sys
@@ -16,7 +17,13 @@ import pytest
 
 from chargehand import claude, cli, paths, usage
 from chargehand.config import ServeConfig, load_machine_config
-from chargehand.delivery import USAGE_MAX_AGE_SECS
+from chargehand.delivery import (
+    WEEKLY_WINDOW,
+    UsageReading,
+    UsageWindow,
+    new_worker_admits,
+    usage_admits,
+)
 from chargehand.errors import ConfigError
 from conftest import write_machine_config
 from support import daemon as support
@@ -27,11 +34,10 @@ REAL_USAGE_FILE = paths.usage_file
 NOW = 1_800_000_000.0
 
 
-def _payload(five: float = 62, seven: float = 81, **extra) -> bytes:
+def _payload(seven: float = 81, **extra) -> bytes:
     return json.dumps({
         "model": {"display_name": "Opus"},
         "rate_limits": {
-            "five_hour": {"used_percentage": five, "resets_at": NOW + 3600},
             "seven_day": {"used_percentage": seven, "resets_at": NOW + 86400},
         },
         **extra,
@@ -46,12 +52,11 @@ def usage_file(tmp_path) -> Path:
 # ----- the wrapper -------------------------------------------------------------
 
 
-def test_the_wrapper_writes_both_windows_with_mode_0600(usage_file):
+def test_the_wrapper_writes_the_weekly_window_with_mode_0600(usage_file):
     assert usage.run_statusline(_payload(), None, usage_file, now=NOW) == 0
 
     data = json.loads(usage_file.read_text())
     assert data == {
-        "five_hour": {"used_percent": 62.0, "resets_at": NOW + 3600},
         "seven_day": {"used_percent": 81.0, "resets_at": NOW + 86400},
         "written_at": NOW,
     }
@@ -63,17 +68,76 @@ def test_the_wrapper_writes_both_windows_with_mode_0600(usage_file):
 @pytest.mark.parametrize("stdin", [
     json.dumps({"model": {"display_name": "Opus"}}).encode(),
     json.dumps({"rate_limits": {}}).encode(),
-    json.dumps({"rate_limits": {"five_hour": {"used_percentage": "a lot"}}}).encode(),
+    json.dumps({"rate_limits": {"seven_day": {"used_percentage": "a lot"}}}).encode(),
     b"not json",
     b"",
 ])
 def test_a_payload_without_rate_limits_leaves_the_file(usage_file, stdin):
-    usage.write_usage(usage_file, {"five_hour": {"used_percent": 10.0, "resets_at": None}}, now=NOW)
+    usage.write_usage(usage_file, {"seven_day": {"used_percent": 10.0, "resets_at": None}}, now=NOW)
     before = usage_file.read_bytes()
 
     assert usage.run_statusline(stdin, None, usage_file, now=NOW + 60) == 0
 
     assert usage_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("source", ["status line payload", "usage file of the old wrapper"])
+def test_an_old_five_hour_window_is_ignored_without_a_message(
+    usage_file, caplog, capfd, source
+):
+    # Old input: until 2026-11-03 the subscription also had a five-hour window. Claude Code
+    # can still send it for some time, and the previous wrapper wrote it to the usage file.
+    old = "five_hour"
+    caplog.set_level(logging.DEBUG)
+    if source == "status line payload":
+        stdin = json.dumps({"rate_limits": {
+            old: {"used_percentage": 99, "resets_at": NOW + 3600},
+            "seven_day": {"used_percentage": 42, "resets_at": NOW + 86400},
+        }}).encode()
+        assert claude.status_line_windows(stdin) == {
+            "seven_day": {"used_percent": 42, "resets_at": NOW + 86400},
+        }
+        assert usage.run_statusline(stdin, None, usage_file, now=NOW) == 0
+        assert json.loads(usage_file.read_text()) == {
+            "seven_day": {"used_percent": 42.0, "resets_at": NOW + 86400},
+            "written_at": NOW,
+        }
+        only_old = json.dumps({"rate_limits": {
+            old: {"used_percentage": 99, "resets_at": NOW + 3600},
+        }}).encode()
+        before = usage_file.read_bytes()
+        assert claude.status_line_windows(only_old) is None
+        assert usage.run_statusline(only_old, None, usage_file, now=NOW + 30) == 0
+        assert usage_file.read_bytes() == before
+    else:
+        usage.write_usage(usage_file, {
+            old: {"used_percent": 99.0, "resets_at": NOW + 3600},
+            "seven_day": {"used_percent": 42.0, "resets_at": NOW + 86400},
+        }, now=NOW)
+
+    board_reading = usage.read_usage(usage_file, now=NOW + 60)
+    assert old not in board_reading
+    assert board_reading["seven_day"] == {
+        "used_percent": 42.0, "resets_at": NOW + 86400, "level": "green",
+    }
+    reading = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=NOW + 60)
+    assert set(reading.windows) == {"seven_day"}
+    assert usage_admits(reading, now=NOW + 60)
+    assert new_worker_admits(reading, now=NOW + 60)
+    assert capfd.readouterr().err == ""
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    # A reading that still carries the old kind, as another reader could build one: both
+    # reserves follow the weekly window only.
+    def both(old_used: float, weekly_used: float) -> UsageReading:
+        return UsageReading("claude", {
+            old: UsageWindow(old, old_used), "seven_day": UsageWindow("seven_day", weekly_used),
+        }, NOW)
+
+    assert usage_admits(both(99.0, 42.0), now=NOW)
+    assert new_worker_admits(both(99.0, 42.0), now=NOW)
+    assert not usage_admits(both(10.0, 85.0), now=NOW)
+    assert not new_worker_admits(both(10.0, 85.0), now=NOW)
 
 
 def test_the_user_command_gets_the_same_stdin_and_its_output_and_exit_code_pass_through(
@@ -99,26 +163,34 @@ def test_a_write_error_still_runs_the_command_unchanged(tmp_path, capfd):
     assert (code, out, err) == (0, "user-line\n", "")
 
 
-def test_percentages_are_clamped_and_reset_times_accept_iso_8601(usage_file):
+@pytest.mark.parametrize("used, reset, expected_used, offset", [
+    (140, "2027-01-15T10:00:00Z", 100.0, 0),
+    (-3, "2027-01-15T10:00:00+02:00", 0.0, -7200),
+])
+def test_percentages_are_clamped_and_reset_times_accept_iso_8601(
+    usage_file, used, reset, expected_used, offset
+):
     stdin = json.dumps({"rate_limits": {
-        "five_hour": {"used_percentage": 140, "resets_at": "2027-01-15T10:00:00Z"},
-        "seven_day": {"used_percentage": -3, "resets_at": "2027-01-15T10:00:00+02:00"},
+        "seven_day": {"used_percentage": used, "resets_at": reset},
     }}).encode()
 
     usage.run_statusline(stdin, None, usage_file, now=NOW)
 
     data = json.loads(usage_file.read_text())
-    expected = datetime(2027, 1, 15, 10, tzinfo=timezone.utc).timestamp()
-    assert data["five_hour"] == {"used_percent": 100.0, "resets_at": expected}
-    assert data["seven_day"] == {"used_percent": 0.0, "resets_at": expected - 7200}
+    expected = datetime(2027, 1, 15, 10, tzinfo=timezone.utc).timestamp() + offset
+    assert data["seven_day"] == {"used_percent": expected_used, "resets_at": expected}
+
+
+def test_the_parser_and_the_reserves_name_the_same_window():
+    # The wrapper keeps only the windows the reserves read; a mismatch would write nothing.
+    assert claude.STATUS_LINE_WINDOW == WEEKLY_WINDOW
 
 
 def test_the_windows_come_from_the_runtime_payload_parser():
-    assert claude.status_line_windows(_payload(5, 7)) == {
-        "five_hour": {"used_percent": 5, "resets_at": NOW + 3600},
+    assert claude.status_line_windows(_payload(7)) == {
         "seven_day": {"used_percent": 7, "resets_at": NOW + 86400},
     }
-    assert claude.status_line_windows(b'{"rate_limits": {"five_hour": 3}}') is None
+    assert claude.status_line_windows(b'{"rate_limits": {"seven_day": 3}}') is None
     assert claude.status_line_windows(b"[]") is None
 
 
@@ -151,7 +223,7 @@ def test_the_cli_wrapper_reads_the_usage_file_from_the_serve_table(
 
     assert code == 0
     assert capfd.readouterr().out == "user-line\n"
-    assert json.loads(usage_file.read_text())["five_hour"]["used_percent"] == 62.0
+    assert json.loads(usage_file.read_text())["seven_day"]["used_percent"] == 81.0
 
 
 def test_a_broken_configuration_does_not_change_the_status_line(tmp_path, monkeypatch, capfd):
@@ -168,33 +240,51 @@ def test_a_broken_configuration_does_not_change_the_status_line(tmp_path, monkey
 # ----- the reader --------------------------------------------------------------
 
 
-def test_a_fresh_reading_has_each_window_with_its_level(usage_file):
-    usage.run_statusline(_payload(62, 81), None, usage_file, now=NOW)
+@pytest.mark.parametrize("used, level", [(42, "green"), (62, "amber"), (81, "red")])
+def test_a_fresh_reading_has_the_weekly_window_with_its_level(usage_file, used, level):
+    usage.run_statusline(_payload(used), None, usage_file, now=NOW)
 
     reading = usage.read_usage(usage_file, now=NOW + 60)
 
     assert reading == {
         "known": True,
         "written_at": NOW,
-        "age_secs": 60.0,
-        "five_hour": {"used_percent": 62.0, "resets_at": NOW + 3600, "level": "amber"},
-        "seven_day": {"used_percent": 81.0, "resets_at": NOW + 86400, "level": "red"},
+        "seven_day": {"used_percent": float(used), "resets_at": NOW + 86400, "level": level},
     }
 
 
-def test_a_reading_older_than_thirty_minutes_is_unknown(usage_file):
-    usage.run_statusline(_payload(), None, usage_file, now=NOW)
+def test_an_old_reading_counts_until_its_reset_time(usage_file):
+    usage.run_statusline(_payload(99), None, usage_file, now=NOW)
+    hours_later = NOW + 3 * 3600
 
-    assert usage.read_usage(usage_file, now=NOW + USAGE_MAX_AGE_SECS)["known"] is True
-    reading = usage.read_usage(usage_file, now=NOW + 31 * 60)
+    reading = usage.read_usage(usage_file, now=hours_later)
+    assert reading["known"] is True
+    assert reading["seven_day"] == {"used_percent": 99.0, "resets_at": NOW + 86400, "level": "red"}
+    found = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=hours_later)
+    assert not usage_admits(found, now=hours_later)
+    assert not new_worker_admits(found, now=hours_later)
 
-    assert reading["known"] is False
-    assert reading["age_secs"] == 31 * 60
-    for name in usage.WINDOWS:
-        assert reading[name] == {"used_percent": None, "resets_at": None, "level": "grey"}
+    # The week has reset since: the old percentage holds nothing, and the gauge is grey.
+    after_reset = NOW + 86400
+    reading = usage.read_usage(usage_file, now=after_reset)
+    assert reading["known"] is True
+    assert reading["seven_day"] == {"used_percent": None, "resets_at": None, "level": "grey"}
+    found = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=after_reset)
+    assert usage_admits(found, now=after_reset)
+    assert new_worker_admits(found, now=after_reset)
 
 
-@pytest.mark.parametrize("content", [None, "", "not json", "[]", '{"five_hour": {}}',
+def test_the_reserves_drop_a_weekly_window_whose_reset_time_has_passed():
+    # A reading read before the reset and applied after it, as a longer-lived reader holds one.
+    reading = UsageReading("claude", {"seven_day": UsageWindow("seven_day", 99.0, NOW)}, NOW - 60)
+
+    assert not usage_admits(reading, now=NOW - 1)
+    assert not new_worker_admits(reading, now=NOW - 1)
+    assert usage_admits(reading, now=NOW)
+    assert new_worker_admits(reading, now=NOW)
+
+
+@pytest.mark.parametrize("content", [None, "", "not json", "[]", '{"seven_day": {}}',
                                      '{"written_at": "now"}'])
 def test_a_missing_or_unreadable_file_is_unknown(usage_file, content):
     if content is not None:
@@ -204,20 +294,20 @@ def test_a_missing_or_unreadable_file_is_unknown(usage_file, content):
     reading = usage.read_usage(usage_file, now=NOW)
 
     assert reading["known"] is False
-    assert reading["five_hour"]["level"] == reading["seven_day"]["level"] == "grey"
+    assert reading["seven_day"]["level"] == "grey"
 
 
 def test_a_window_whose_reset_has_passed_is_unknown(usage_file):
     usage.write_usage(usage_file, {
-        "five_hour": {"used_percent": 95.0, "resets_at": NOW + 60},
-        "seven_day": {"used_percent": 81.0, "resets_at": NOW + 86400},
+        "seven_day": {"used_percent": 95.0, "resets_at": NOW + 60},
     }, now=NOW)
 
+    assert usage.read_usage(usage_file, now=NOW + 59)["seven_day"]["level"] == "red"
     reading = usage.read_usage(usage_file, now=NOW + 60)
 
     assert reading["known"] is True
-    assert reading["five_hour"]["level"] == "grey"
-    assert reading["seven_day"]["level"] == "red"
+    assert reading["seven_day"] == {"used_percent": None, "resets_at": None, "level": "grey"}
+    assert usage.provider_reading(usage_file, "claude", now=NOW + 60).windows == {}
 
 
 @pytest.mark.parametrize("percent, level", [
@@ -267,17 +357,18 @@ def test_the_state_carries_the_reading_and_follows_the_file(harness, tmp_path, u
 
         now = time.time()
         usage.write_usage(usage_file, {
-            "five_hour": {"used_percent": 62.0, "resets_at": now + 3600},
-            "seven_day": {"used_percent": 81.0, "resets_at": now + 86400},
+            "seven_day": {"used_percent": 62.0, "resets_at": now + 86400},
         }, now=now)
         status, body = support.request(daemon.port, "GET", "/api/state")
         reading = json.loads(body)["usage"]
         assert reading["known"] is True
-        assert (reading["five_hour"]["used_percent"], reading["five_hour"]["level"]) == (62.0, "amber")
-        assert (reading["seven_day"]["used_percent"], reading["seven_day"]["level"]) == (81.0, "red")
+        assert (reading["seven_day"]["used_percent"], reading["seven_day"]["level"]) == (62.0, "amber")
+        assert set(reading) == {"known", "written_at", "seven_day"}
 
-        usage.write_usage(usage_file, json.loads(usage_file.read_text()), now=now - 31 * 60)
+        usage.write_usage(usage_file, {
+            "seven_day": {"used_percent": 62.0, "resets_at": now - 1},
+        }, now=now - 3 * 86400)
         status, body = support.request(daemon.port, "GET", "/api/state")
         reading = json.loads(body)["usage"]
-        assert reading["known"] is False
-        assert reading["five_hour"]["level"] == "grey"
+        assert reading["known"] is True
+        assert reading["seven_day"]["level"] == "grey"

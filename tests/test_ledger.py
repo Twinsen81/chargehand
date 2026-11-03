@@ -341,7 +341,7 @@ def test_a_version_two_ledger_gains_the_routing_tables_in_place(tmp_path):
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
         worker = ledger.get(12)
         assert (worker.role, worker.item, worker.state) == ("implementer", "ABC-1", "running")
         # Every worker before version 3 was started by the queue label, so it keeps it.
@@ -517,7 +517,7 @@ def test_a_version_three_ledger_gains_the_hook_columns_and_the_prompts_in_place(
     conn.close()
 
     with Ledger(path) as ledger:
-        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
         worker = ledger.get(7)
         assert (worker.role, worker.item, worker.state, worker.owns_label) == ("reviewer", "PR-1", "idle", 2)
         assert (worker.reset_at, worker.last_hook, worker.last_answer) == (None, None, None)
@@ -566,3 +566,505 @@ def test_a_live_worker_is_found_by_its_session_uuid(ledger):
     assert ledger.live_worker_by_session_uuid("u-1").id == worker.id
     ledger.update(worker, state=ledger_mod.DONE)
     assert ledger.live_worker_by_session_uuid("u-1") is None
+
+
+# ----- version 5: where a control request came from, handles --------------------------
+
+# A version 4 ledger: version 3 plus the hook columns and the permission prompts.
+V4_SCHEMA = V3_SCHEMA.replace("PRAGMA user_version = 3;", "") + """
+ALTER TABLE workers ADD COLUMN reset_at REAL;
+ALTER TABLE workers ADD COLUMN last_hook TEXT;
+ALTER TABLE workers ADD COLUMN last_hook_at REAL;
+ALTER TABLE workers ADD COLUMN last_answer TEXT;
+ALTER TABLE workers ADD COLUMN transcript_path TEXT;
+CREATE TABLE permission_prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    tool_name TEXT NOT NULL, tool_input TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+    resolved_at REAL
+);
+PRAGMA user_version = 4;
+"""
+
+
+def test_a_version_four_ledger_records_the_origin_of_requests(tmp_path):
+    path = tmp_path / "v4.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V4_SCHEMA)
+    conn.execute(
+        "INSERT INTO requests (id, kind, target, args, created_at) "
+        "VALUES (3, 'cancel', 'ABC-1', '{}', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        (old,) = ledger.pending_requests()
+        assert (old["id"], old["kind"], old["origin"]) == (3, "cancel", ledger_mod.REQUEST_CLI)
+        new = ledger.record_request("stop", "x/#1", origin=ledger_mod.REQUEST_BOARD)
+        assert ledger.get_request(new)["origin"] == ledger_mod.REQUEST_BOARD
+
+
+@pytest.mark.parametrize("version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA"])
+def test_every_older_ledger_gains_the_request_origin(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        request_id = ledger.record_request("pause", origin=ledger_mod.REQUEST_BOARD)
+        assert ledger.get_request(request_id)["origin"] == "board"
+
+
+def test_a_request_origin_must_be_known(ledger):
+    with pytest.raises(ValueError, match="origin"):
+        ledger.record_request("pause", origin="elsewhere")
+
+
+def test_an_applied_request_is_recorded_complete(ledger):
+    request_id = ledger.record_applied_request(
+        "attach", "implementer/ABC-1", origin=ledger_mod.REQUEST_BOARD, ok=True, message="opened",
+        terminal="iterm2",
+    )
+
+    assert ledger.pending_requests() == []
+    request = ledger.get_request(request_id)
+    assert (request["ok"], request["message"], request["args"]) == (1, "opened", {"terminal": "iterm2"})
+
+
+def by_hand(ledger, item="ABC-1", role="implementer", index=0):
+    return ledger.create_worker(
+        role=role, item=item, item_id=f"id-{item}" if item else None, url=None, repository="test",
+        repo=Path("/repo"), worktree=Path(f"/w/{item}-{index}"), branch=f"b{index}",
+        origin=ledger_mod.ORIGIN_BOARD,
+    )
+
+
+def test_a_worker_started_by_hand_has_a_handle_with_its_id(ledger):
+    source = make(ledger)
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+
+    assert source.handle == "implementer/ABC-1" and source.name == "ABC-1"
+    assert first.handle == f"implementer/ABC-1#{first.id}" == first.name
+    assert second.handle == f"implementer/ABC-1#{second.id}"
+
+
+def test_find_worker_takes_an_item_a_handle_or_a_handle_with_an_id(ledger):
+    source = make(ledger)
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+    reviewer = make(ledger, item="ABC-2", worktree="/w/r", role="reviewer")
+
+    assert ledger.find_worker("ABC-2")[0].id == reviewer.id
+    assert ledger.find_worker(f"implementer/ABC-1#{first.id}")[0].id == first.id
+    assert ledger.find_worker(f"#{second.id}")[0].id == second.id
+    assert ledger.find_worker("reviewer/ABC-2")[0].id == reviewer.id
+    ledger.update(first, state=ledger_mod.CANCELLED)
+    ledger.update(second, state=ledger_mod.CANCELLED)
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+    worker, problem = ledger.find_worker(f"reviewer/ABC-1#{first.id}")
+    assert worker is None and first.handle in problem
+    worker, problem = ledger.find_worker("#999")
+    assert worker is None and problem == "no worker #999"
+    worker, problem = ledger.find_worker("reviewer/ABC-2", "implementer")
+    assert worker is None and "role reviewer" in problem
+
+
+def test_find_worker_asks_for_a_handle_when_one_role_has_several_live_workers(ledger):
+    first, second = by_hand(ledger, index=1), by_hand(ledger, index=2)
+
+    worker, problem = ledger.find_worker("ABC-1")
+
+    assert worker is None
+    assert first.handle in problem and second.handle in problem
+
+
+def test_a_handle_names_its_start_rule_worker_before_any_other_worker(ledger):
+    source = make(ledger)
+    board = by_hand(ledger, index=1)
+    reviewer_board = by_hand(ledger, role="reviewer", index=2)
+
+    # Rule 2: `role/item`, and the bare item with --role, are the start-rule worker's handle.
+    for target, role in (("implementer/ABC-1", None), ("ABC-1", "implementer")):
+        assert ledger.find_worker(target, role)[0].id == source.id
+    # Rule 3: the bare item alone names the one start-rule worker among the live ones,
+    # also when a board worker of another role is live on the item.
+    assert ledger.find_worker("ABC-1")[0].id == source.id
+    assert ledger.find_worker("ABC-1", "reviewer")[0].id == reviewer_board.id
+    assert ledger.find_worker(board.handle)[0].id == board.id
+
+    # The handle wins over a live board worker once the start-rule worker has finished.
+    ledger.update(source, state=ledger_mod.CANCELLED)
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+    # The bare item has no handle of its own: the live workers decide, here two roles.
+    worker, problem = ledger.find_worker("ABC-1")
+    assert worker is None and "several roles" in problem
+    assert board.id_handle in problem and reviewer_board.id_handle in problem
+
+
+LIVE, FINISHED = "live", "finished"
+
+
+@pytest.mark.parametrize("earlier", [False, True], ids=["first", "after-a-finished-one"])
+@pytest.mark.parametrize("source_state", [None, LIVE, FINISHED])
+@pytest.mark.parametrize("board_state", [None, LIVE, FINISHED])
+@pytest.mark.parametrize("board_role", ["implementer", "reviewer"])
+@pytest.mark.parametrize("second_board", [False, True])
+def test_every_handle_chargehand_prints_resolves_back_to_its_worker(
+    ledger, earlier, source_state, board_state, board_role, second_board
+):
+    """Start-rule and board workers, live or finished, in one or two roles, on one item."""
+    workers = []
+
+    def add(worker, state):
+        if state == FINISHED:
+            worker = ledger.update(worker, state=ledger_mod.CANCELLED)
+        else:
+            worker = ledger.update(worker, state=ledger_mod.RUNNING)
+        workers.append(worker)
+
+    if earlier:
+        add(make(ledger, worktree="/w/old"), FINISHED)
+    if source_state:
+        add(make(ledger), source_state)
+    if board_state:
+        add(by_hand(ledger, role=board_role, index=1), board_state)
+        if second_board:
+            add(by_hand(ledger, role=board_role, index=2), LIVE)
+    if not workers:
+        pytest.skip("no worker in this combination")
+
+    for worker in workers:
+        printed = {worker.target, ledger.target_for(worker), worker.id_handle}
+        if not worker.is_terminal:
+            printed.add(worker.handle)
+        for name in printed:
+            found, problem = ledger.find_worker(name)
+            assert found is not None and found.id == worker.id, (name, problem)
+        assert worker.target == (
+            worker.handle if not worker.is_terminal else worker.id_handle
+        )
+
+
+def test_a_bare_item_is_refused_when_it_could_mean_a_finished_start_rule_worker(ledger):
+    """A notification about the start-rule worker carried the bare item; a live board
+    worker on the item must not take a command meant for the finished one."""
+    source = ledger.update(make(ledger), state=ledger_mod.CANCELLED)
+    board = ledger.update(by_hand(ledger, index=1), state=ledger_mod.IDLE)
+
+    worker, problem = ledger.find_worker("ABC-1")
+
+    assert worker is None
+    assert source.id_handle in problem and board.id_handle in problem
+    # The handles still resolve, each to its own worker.
+    assert ledger.find_worker(source.id_handle)[0].id == source.id
+    assert ledger.find_worker(board.id_handle)[0].id == board.id
+    assert ledger.find_worker("implementer/ABC-1")[0].id == source.id
+
+
+def test_errors_show_a_handle_as_typed(ledger):
+    _, problem = ledger.find_worker("implementer/NOPE-1")
+    assert problem == "no worker recorded for implementer/NOPE-1 in role implementer"
+
+
+# ----- version 6: the board's own state -------------------------------------------------
+
+# A version 5 ledger: version 4 plus the request origin.
+V5_SCHEMA = V4_SCHEMA.replace("PRAGMA user_version = 4;", "") + """
+ALTER TABLE requests ADD COLUMN origin TEXT NOT NULL DEFAULT 'cli';
+PRAGMA user_version = 5;
+"""
+
+
+def test_a_version_five_ledger_gains_the_board_state_in_place(tmp_path):
+    path = tmp_path / "v5.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V5_SCHEMA)
+    conn.execute(
+        "INSERT INTO requests (id, kind, target, args, created_at, origin) "
+        "VALUES (4, 'stop', 'x/#1', '{}', 1.0, 'board')"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        (old,) = ledger.pending_requests()
+        assert (old["id"], old["origin"]) == (4, "board")
+        assert ledger.board_state() == []
+        ledger.set_board_state(ledger_mod.BOARD_REPOSITORY, "test", "hidden", "1")
+        assert [row["value"] for row in ledger.board_state()] == ["1"]
+
+
+@pytest.mark.parametrize("version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA"])
+def test_every_older_ledger_gains_the_board_state(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        ledger.set_board_state(ledger_mod.BOARD_WORKER, "1", "pinned", "1")
+        assert [row["field"] for row in ledger.board_state()] == ["pinned"]
+        assert ledger.get_request(ledger.record_request("pause"))["origin"] == "cli"
+
+
+# ----- version 7: prompts as records, and the per-worker rules ----------------------------
+
+# A version 6 ledger: version 5 plus the board's own state.
+V6_SCHEMA = V5_SCHEMA.replace("PRAGMA user_version = 5;", "") + """
+CREATE TABLE board_state (
+    kind TEXT NOT NULL, key TEXT NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL,
+    updated_at REAL NOT NULL, PRIMARY KEY (kind, key, field)
+);
+PRAGMA user_version = 6;
+"""
+
+
+def test_a_version_six_ledger_turns_its_prompts_into_records(tmp_path):
+    path = tmp_path / "v6.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V6_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at) VALUES (7, 'implementer', 'ABC-1', 'i1', "
+        "'test', '/repo', '/w/ABC-1', 'b', 'blocked', 4, 1.0, 2.0)"
+    )
+    conn.execute(
+        "INSERT INTO permission_prompts (id, worker_id, tool_name, tool_input, created_at, "
+        "resolved_at) VALUES (1, 7, 'Bash', '{}', 1.0, 2.0), (2, 7, 'Edit', '{}', 3.0, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO board_state (kind, key, field, value, updated_at) "
+        "VALUES ('worker', '7', 'pinned', '1', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        old, current = ledger.get_permission_prompt(1), ledger.get_permission_prompt(2)
+        assert (old.state, old.resolved_by, old.released_at, old.kind) == ("cancelled", "session", 2.0, "permission")
+        assert (current.state, current.decision, current.released_at) == ("open", None, None)
+        assert [p.id for p in ledger.open_permission_prompts()] == [2]
+        assert [row["value"] for row in ledger.board_state()] == ["1"]
+        worker = ledger.get(7)
+        ledger.set_prompt_digest(2, "d" * 64)
+        assert ledger.answer_permission_prompt(2, "allow", by="board", rule=True)
+        assert ledger.has_permission_rule(worker, "Edit", "d" * 64)
+        assert not ledger.answer_permission_prompt(2, "deny", by="board")
+
+
+@pytest.mark.parametrize(
+    "version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA"]
+)
+def test_every_older_ledger_gains_the_prompt_records_and_the_rules(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        prompt_id = ledger.record_permission_prompt(
+            worker, tool_name="Bash", tool_input="{}", input_digest="e" * 64
+        )
+        assert ledger.get_permission_prompt(prompt_id).state == "open"
+        assert ledger.answer_permission_prompt(prompt_id, "allow", by="board", rule=True)
+        assert ledger.has_permission_rule(worker, "Bash", "e" * 64)
+
+
+def test_first_writer_wins_between_an_answer_a_release_and_a_cancel(tmp_path):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        released = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}")
+        assert ledger.release_permission_prompt(released)
+        assert not ledger.answer_permission_prompt(released, "allow", by="board")
+        assert not ledger.release_permission_prompt(released)
+
+        answered = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}")
+        assert ledger.answer_permission_prompt(answered, "deny", by="board")
+        assert not ledger.release_permission_prompt(answered)
+
+        # Leaving `blocked` cancels the open prompts, the released one included.
+        assert ledger.resolve_permission_prompts(worker) == 1
+        assert ledger.get_permission_prompt(released).state == "cancelled"
+        assert ledger.get_permission_prompt(answered).state == "resolved"
+
+
+def test_an_open_prompt_is_cancelled_when_the_worker_leaves_blocked_or_stops_not_when_its_launch_ends(tmp_path):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        launching = ledger.update(worker, state=ledger_mod.LAUNCHING)
+        prompt = ledger.record_permission_prompt(launching, tool_name="Bash", tool_input="{}")
+
+        running = ledger.update(launching, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(prompt).state == "open"
+        blocked = ledger.update(running, state=ledger_mod.BLOCKED)
+        assert ledger.get_permission_prompt(prompt).state == "open"
+        ledger.update(blocked, state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(prompt).state == "cancelled"
+
+        other = ledger.record_permission_prompt(running, tool_name="Bash", tool_input="{}")
+        ledger.update(ledger.get(worker.id), state=ledger_mod.PAUSED)
+        assert ledger.get_permission_prompt(other).state == "cancelled"
+
+        # A prompt recorded while paused does not survive the respawn of a continue, which
+        # read the row after the hook touched it.
+        stale = hook(ledger, worker)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(stale).state == "cancelled"
+
+        # Nor one recorded while idle when a wake starts a turn.
+        ledger.update(ledger.get(worker.id), state=ledger_mod.IDLE)
+        woken = hook(ledger, worker)
+        ledger.update(ledger.get(worker.id), state=ledger_mod.RUNNING)
+        assert ledger.get_permission_prompt(woken).state == "cancelled"
+
+
+def hook(ledger, worker, now=None):
+    """What a PermissionRequest hook writes: the row's last hook, then the prompt."""
+    stamp = time.time() if now is None else now
+    ledger.update(ledger.get(worker.id), last_hook="PermissionRequest", last_hook_at=stamp)
+    return ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}", now=stamp)
+
+
+@pytest.mark.parametrize("before", [ledger_mod.IDLE, ledger_mod.QUEUED, ledger_mod.PAUSED, ledger_mod.PARKED])
+def test_a_prompt_from_the_new_turn_survives_the_write_of_the_wake_or_continue_that_started_it(tmp_path, before):
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        worker = make(ledger, item="ABC-1", worktree="/w/ABC-1")
+        older = hook(ledger, ledger.update(worker, state=before))
+        # The wake or the continue reads the row, then resumes or respawns the session ...
+        snapshot = ledger.get(worker.id)
+        time.sleep(0.01)
+        # ... whose new turn asks for permission before the action writes `running`.
+        newer = hook(ledger, worker)
+        ledger.update(snapshot, state=ledger_mod.RUNNING)
+
+        assert ledger.get_permission_prompt(newer).state == "open"
+        assert ledger.get_permission_prompt(older).state == "cancelled"
+
+
+# ----- version 8: jobs, and when a worker was archived ------------------------------------
+
+# A version 7 ledger: version 6 with the prompts as records and the per-worker rules.
+V7_SCHEMA = V6_SCHEMA.replace("PRAGMA user_version = 6;", "") + """
+ALTER TABLE permission_prompts ADD COLUMN kind TEXT NOT NULL DEFAULT 'permission';
+ALTER TABLE permission_prompts ADD COLUMN options TEXT;
+ALTER TABLE permission_prompts ADD COLUMN input_digest TEXT;
+ALTER TABLE permission_prompts ADD COLUMN state TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE permission_prompts ADD COLUMN decision TEXT;
+ALTER TABLE permission_prompts ADD COLUMN resolved_by TEXT;
+ALTER TABLE permission_prompts ADD COLUMN released_at REAL;
+CREATE TABLE permission_rules (
+    worker_id INTEGER NOT NULL REFERENCES workers (id), tool_name TEXT NOT NULL,
+    input_digest TEXT NOT NULL, prompt_id INTEGER REFERENCES permission_prompts (id),
+    created_at REAL NOT NULL, PRIMARY KEY (worker_id, tool_name, input_digest)
+);
+PRAGMA user_version = 7;
+"""
+
+
+def test_a_version_seven_ledger_gains_the_jobs_and_the_archive_time(tmp_path):
+    path = tmp_path / "v7.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V7_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at) VALUES (7, 'implementer', 'ABC-1', 'i1', "
+        "'test', '/repo', '/w/ABC-1', 'b', 'cancelled', 4, 1.0, 2.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = ledger.get(7)
+        assert (worker.state, worker.archived_at) == ("cancelled", None)
+        assert [w.id for w in ledger.archivable_workers("test")] == [7]
+        job = ledger.create_job(ledger_mod.JOB_ARCHIVE, "7", result_path="/a.zip", force=True)
+        assert (job.state, job.force, job.is_active) == ("queued", True, True)
+        assert ledger.update_job(job, expect=ledger_mod.JOB_RUNNING, state=ledger_mod.JOB_DONE) is None
+        done = ledger.update_job(job, expect=ledger_mod.JOB_QUEUED, state=ledger_mod.JOB_DONE)
+        assert done.finished_at is not None and not done.is_active
+        ledger.update(worker, archived_at=3.0)
+        assert ledger.get(7).archived_at == 3.0
+        assert ledger.archivable_workers("test") == []
+
+
+@pytest.mark.parametrize(
+    "version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA"]
+)
+def test_every_older_ledger_gains_the_jobs_and_the_archive_time(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        assert ledger.update(worker, archived_at=1.0).archived_at == 1.0
+        job = ledger.create_job(ledger_mod.JOB_ARCHIVE, str(worker.id))
+        assert ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id)) == job
+
+
+# ----- version 9: what a clone keeps ---------------------------------------------------
+
+# A version 8 ledger: version 7 with the jobs and the worker's archive time.
+V8_SCHEMA = V7_SCHEMA.replace("PRAGMA user_version = 7;", "") + """
+ALTER TABLE workers ADD COLUMN archived_at REAL;
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, target TEXT NOT NULL,
+    args TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL, progress TEXT, result_path TEXT,
+    error TEXT, created_at REAL NOT NULL, started_at REAL, updated_at REAL NOT NULL,
+    finished_at REAL
+);
+PRAGMA user_version = 8;
+"""
+
+
+def test_a_version_eight_ledger_gains_the_clone_columns(tmp_path):
+    path = tmp_path / "v8.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V8_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at, archived_at) VALUES (7, 'implementer', 'ABC-1', "
+        "'i1', 'test', '/repo', '/w/ABC-1', 'b', 'idle', 4, 1.0, 2.0, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        original = ledger.get(7)
+        assert (original.parent_id, original.clone_mode, original.prompt) == (None, None, None)
+        assert (original.model, original.effort) == (None, None)
+        clone = make(ledger, item="ABC-2", worktree="/w/ABC-2-8")
+        clone = ledger.update(
+            clone, origin=ledger_mod.ORIGIN_CLONE, parent_id=7, clone_mode=ledger_mod.CLONE_FULL, prompt="go on in {worktree}",
+            model="sonnet", effort="low",
+        )
+        assert (clone.id, clone.parent_id, clone.clone_mode) == (8, 7, "full")
+        assert (clone.prompt, clone.model, clone.effort) == ("go on in {worktree}", "sonnet", "low")
+
+    with Ledger(path) as ledger:
+        assert ledger.get(8).model == "sonnet"
+
+
+@pytest.mark.parametrize(
+    "version_schema",
+    ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA", "V7_SCHEMA"],
+)
+def test_every_older_ledger_gains_the_clone_columns(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        updated = ledger.update(worker, parent_id=1, clone_mode="fresh", prompt="p", model="m", effort="low")
+        assert (updated.parent_id, updated.clone_mode, updated.prompt) == (1, "fresh", "p")

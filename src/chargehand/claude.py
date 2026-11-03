@@ -98,6 +98,9 @@ DEFAULT_PERMISSION_MODE = "auto"
 STOP_WAIT_SECS = 10.0
 STOP_POLL_SECS = 0.25
 
+# How much of a session's output an archive keeps when no transcript file is known.
+TRANSCRIPT_LOG_LINES = 100_000
+
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -197,6 +200,9 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
     if state == WORKING and str(node.get("status") or "").strip().lower() == "idle":
         state = DONE
     waiting = _first(node, _WAITING_KEYS)
+    limited, reset_at, model_limit = (
+        session_failure(node) if state == FAILED else (False, None, None)
+    )
     return Session(
         id=str(identifier if identifier is not None else uuid),
         uuid=str(uuid) if uuid is not None else None,
@@ -210,6 +216,9 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
         # default, so it has to be a URL and nothing else.
         pr_url=sanitize.safe_url(_first(node, _PR_KEYS)),
         kind=(lambda v: str(v) if v is not None else None)(_first(node, _KIND_KEYS)),
+        usage_limit=limited,
+        reset_at=reset_at,
+        model_limit=model_limit,
         raw=dict(node),
     )
 
@@ -257,14 +266,22 @@ def parse_sessions(payload: str) -> list[Session]:
     return sessions
 
 
+# The provider whose usage windows the status line reports, and whose windows the sessions
+# of this runtime draw on: the Claude subscription.
+USAGE_PROVIDER = "claude"
+# The subscription's usage window, by its name in the status line's ``rate_limits``.
+STATUS_LINE_WINDOW = "seven_day"
+
+
 def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
-    """The usage windows of a status line payload, or None when it carries none.
+    """The usage window of a status line payload, or None when it carries none.
 
     Claude Code gives a status line command ``rate_limits`` on subscription plans, after
-    the session's first API response: a ``five_hour`` and a ``seven_day`` window, each
-    with ``used_percentage`` and ``resets_at``. Each window that is a table comes back
-    as ``{"used_percent": ..., "resets_at": ...}`` with the values as given; checking
-    them is the caller's work.
+    the session's first API response: a ``seven_day`` window with ``used_percentage`` and
+    ``resets_at``. When it is a table it comes back as
+    ``{"seven_day": {"used_percent": ..., "resets_at": ...}}`` with the values as given;
+    checking them is the caller's work. Other windows in ``rate_limits`` are skipped
+    without a message, because older Claude Code versions still send them.
     """
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -273,15 +290,15 @@ def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
     limits = payload.get("rate_limits") if isinstance(payload, Mapping) else None
     if not isinstance(limits, Mapping):
         return None
-    windows = {}
-    for name in ("five_hour", "seven_day"):
-        window = limits.get(name)
-        if isinstance(window, Mapping):
-            windows[name] = {
-                "used_percent": window.get("used_percentage"),
-                "resets_at": window.get("resets_at"),
-            }
-    return windows or None
+    window = limits.get(STATUS_LINE_WINDOW)
+    if not isinstance(window, Mapping):
+        return None
+    return {
+        STATUS_LINE_WINDOW: {
+            "used_percent": window.get("used_percentage"),
+            "resets_at": window.get("resets_at"),
+        }
+    }
 
 
 # The start of the refusal Claude Code prints when a background session would start in a
@@ -443,18 +460,54 @@ class ClaudeCLI:
         session_uuid: str,
         prompt: str,
         *,
+        worktree: Path,
+        name: str,
+        permission_mode: str,
         model: str | None = None,
         effort: str | None = None,
+        settings: Mapping[str, Any] | Path | None = None,
         timeout_secs: float = 180.0,
     ) -> CommandResult:
-        """Start a new background session that continues a copy of *session_uuid*'s conversation."""
-        args = ["--resume", session_uuid, "--fork-session", "--bg"]
+        """Start a background session in *worktree* that continues a copy of *session_uuid*'s
+        conversation, with *prompt* as its next turn.
+
+        Observed in Claude Code 2.1.317: run in another worktree of the same repository,
+        the resume finds the conversation; the copy works in *worktree* under *name*, its
+        transcript is kept for that directory, and the original is left as it was. The
+        copy keeps the conversation, but falls back to the default effort and permission
+        mode, so those, the model and the settings are passed again. The job saves them,
+        and an in-place resume of the copy applies them again. stdin is /dev/null, as for
+        a resume, which reads piped text into the prompt; the copy still runs its
+        SessionStart hook.
+
+        Raises :class:`WorkspaceNotTrusted` as :meth:`launch` does. Any other failure
+        names the session and the exit, never the prompt.
+        """
+        args = [
+            "--resume", session_uuid, "--fork-session", "--bg",
+            "-n", name, "--permission-mode", permission_mode,
+        ]
         if model:
             args += ["--model", model]
         if effort:
             args += ["--effort", effort]
+        if isinstance(settings, Path):
+            args += ["--settings", str(settings)]
+        elif settings:
+            args += ["--settings", json.dumps(settings, sort_keys=True)]
         args.append(prompt)
-        return self._run(args, timeout=timeout_secs, check=False)
+        result = self._run(args, cwd=worktree, timeout=timeout_secs, check=False)
+        if result.returncode != 0 and _UNTRUSTED_WORKSPACE in result.stdout + result.stderr:
+            raise WorkspaceNotTrusted(
+                f"Claude Code refused {worktree} as an untrusted workspace: "
+                f"{sanitize.one_line(result.stderr or result.stdout, limit=200)}"
+            )
+        if result.returncode != 0:
+            raise ClaudeError(
+                f"the fork of session {session_uuid} exited {result.returncode}: "
+                f"{sanitize.one_line(result.stderr or result.stdout, limit=300)}"
+            )
+        return result
 
     def one_shot(
         self,
@@ -635,6 +688,76 @@ def user_claude_dir() -> Path:
     return Path(override).expanduser() if override else Path(os.path.expanduser("~")) / ".claude"
 
 
+def transcript_file(value: str | None) -> Path | None:
+    """*value* as a transcript to read, or None unless it is a session file of Claude Code.
+
+    The path comes from a hook payload, so only a regular `.jsonl` file under the
+    projects directory of the Claude Code configuration is read.
+    """
+    if not value or not os.path.isabs(value) or not value.endswith(".jsonl"):
+        return None
+    try:
+        path = Path(value).resolve(strict=True)
+        root = (user_claude_dir() / "projects").resolve()
+    except (OSError, RuntimeError):
+        return None
+    if root not in path.parents or not path.is_file():
+        return None
+    return path
+
+
+def transcript_text(path: Path) -> str:
+    """A session transcript (JSON lines) as plain text: each message with its role and time.
+
+    A tool call shows its name and input, a tool result its text. Lines that are not a
+    message, and parts that carry no text (thinking, images), are left out.
+    """
+    out: list[str] = []
+    with path.open(encoding="utf-8", errors="replace") as lines:
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict) or record.get("type") not in ("user", "assistant"):
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            body = _transcript_content(message.get("content"))
+            if not body:
+                continue
+            stamp = record.get("timestamp")
+            head = f"{message.get('role') or record['type']}"
+            if isinstance(stamp, str):
+                head = f"[{stamp}] {head}"
+            out.append(f"{head}:\n{body}\n")
+    return "\n".join(out)
+
+
+def _transcript_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"].strip())
+        elif kind == "tool_use":
+            try:
+                shown = json.dumps(block.get("input"), ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                shown = ""
+            parts.append(f"[tool {block.get('name')}] {shown}")
+        elif kind == "tool_result":
+            parts.append(f"[tool result] {_transcript_content(block.get('content'))}".rstrip())
+    return "\n".join(part for part in parts if part)
+
+
 def agent_file_candidates(repo: Path, name: str) -> list[Path]:
     """Where Claude Code looks for the agent definition *name*: the project, then the user."""
     return [repo / ".claude" / "agents" / f"{name}.md", user_claude_dir() / "agents" / f"{name}.md"]
@@ -645,16 +768,19 @@ def launch_settings(
     deny_rules: Sequence[str],
     read_paths: Sequence[Path] = (),
     hooks: Mapping[str, object] | None = None,
+    protected_paths: Sequence[Path] = (),
 ) -> dict[str, object] | None:
     """The per-launch settings payload: the deny rules, the allow rules and the hooks.
 
     Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
     not passed as `--add-dir`: Claude Code loads skills from an added directory, and these
-    paths hold content the operator did not write.
+    paths hold content the operator did not write. Each of *protected_paths* gets `Edit`
+    and `Write` deny rules (:func:`protected_path_rules`).
     """
     permissions: dict[str, list[str]] = {}
-    if deny_rules:
-        permissions["deny"] = list(deny_rules)
+    deny = [*deny_rules, *protected_path_rules(protected_paths)]
+    if deny:
+        permissions["deny"] = deny
     # `//` starts an absolute path in a Claude Code permission rule.
     allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
     if allow:
@@ -665,6 +791,23 @@ def launch_settings(
     if hooks:
         settings["hooks"] = dict(hooks)
     return settings or None
+
+
+def protected_path_rules(paths: Sequence[Path]) -> list[str]:
+    """Deny rules that keep the file tools out of each of *paths*.
+
+    A deny rule holds in every permission mode, `auto` and `bypassPermissions` included,
+    so a clone that continues a copy of another worker's conversation cannot edit that
+    worker's worktree with Edit, Write or another file-editing tool. The Bash tool is not
+    covered: a rule matches a command's text, not the files it changes. A path is named as
+    given and resolved, because Claude Code may compare either (`/tmp` is `/private/tmp`).
+    """
+    rules: list[str] = []
+    for path in paths:
+        for variant in dict.fromkeys((str(Path(path)), os.path.realpath(path))):
+            # `//` starts an absolute path in a Claude Code permission rule.
+            rules += [f"Edit(/{variant}/**)", f"Write(/{variant}/**)"]
+    return rules
 
 
 # ----- session hooks ---------------------------------------------------------
@@ -682,6 +825,19 @@ HOOK_POST_SCRIPT = Path(__file__).resolve().parent / "hook_post.py"
 # an error that Claude Code reports and goes past: the session runs on, and the next tick
 # reads its state from the listing.
 HOOK_TIMEOUT_SECS = 10
+# How long Claude Code waits for the answer to a permission hook, which the daemon holds
+# open until the operator answers on the board. Long, but finite: when it runs out the
+# daemon answers with no decision first, and the session shows its own dialog. A role sets
+# its own with `permission_timeout_secs`; a session keeps the value of its launch.
+PERMISSION_TIMEOUT_SECS = 600
+PERMISSION_TIMEOUT_RANGE = (20, 3600)
+# How much sooner than the session gives up the daemon answers a held permission hook.
+PERMISSION_ANSWER_MARGIN_SECS = 5
+# Tool input keys that only describe a call. The model writes a new `description` for each
+# Bash call, so with it the same command would never match an Always allow rule again.
+_DESCRIPTIVE_INPUT_KEYS: dict[str, tuple[str, ...]] = {"Bash": ("description",)}
+# What a denied tool call tells the model. chargehand's own text.
+DENIED_MESSAGE = "The operator denied this tool call on the board."
 # The longest last answer and tool input kept from a post.
 LAST_ANSWER_LIMIT = 4000
 TOOL_INPUT_LIMIT = 2000
@@ -696,9 +852,16 @@ _USAGE_LIMIT_ERRORS = frozenset({
 })
 _UNNAMED_ERRORS = frozenset({"", "unknown", "error", "api_error"})
 _USAGE_LIMIT_TEXT = re.compile(
-    r"usage limit|hit your limit|(?:5-hour|five-hour|session|weekly|opus) limit"
-    r"|limit (?:will )?resets?",
+    r"usage limit|hit your limit|(?:session|weekly|opus) limit|limit (?:will )?resets?"
+    # Old input: the subscription had a five-hour window until 2026-11-03, and Claude
+    # Code can still name it in a failure for some time. Such a failure parks too.
+    r"|(?:5-hour|five-hour) limit",
     re.IGNORECASE,
+)
+# A limit of one model family, such as "Opus weekly limit reached". The usage window has
+# no per-model part, so this text is the only sign of one. Only the family name is kept.
+_MODEL_LIMIT_TEXT = re.compile(
+    r"\b(opus|sonnet|haiku|fable)\b(?:[ \t]+[\w.-]+){0,3}?[ \t]+limit\b", re.IGNORECASE
 )
 
 
@@ -709,12 +872,14 @@ def hook_settings(
     *,
     python: str = sys.executable,
     timeout_secs: int = HOOK_TIMEOUT_SECS,
+    permission_timeout_secs: int = PERMISSION_TIMEOUT_SECS,
 ) -> dict[str, object]:
     """The `hooks` settings: for each event one hook that posts to the daemon on 127.0.0.1:*port*.
 
     An http hook where Claude Code runs one, else a command hook that runs
     hook_post.py with *python* in isolated mode, so nothing in the worktree is imported.
-    That command names the token file, not the token.
+    That command names the token file, not the token. The permission hook waits
+    *permission_timeout_secs*, because the daemon holds it for the board's answer.
     """
 
     def hook(event: str) -> dict[str, object]:
@@ -731,7 +896,7 @@ def hook_settings(
             "type": "http",
             "url": f"http://127.0.0.1:{port}/hooks/{event}",
             "headers": {"Authorization": f"Bearer {token}"},
-            "timeout": timeout_secs,
+            "timeout": permission_timeout_secs if event == "PermissionRequest" else timeout_secs,
         }
 
     def group(event: str) -> dict[str, object]:
@@ -742,6 +907,20 @@ def hook_settings(
         return entry
 
     return {event: [group(event)] for event in HOOK_EVENTS}
+
+
+def permission_timeout_of(settings: Mapping[str, Any]) -> int | None:
+    """The timeout of the permission hook in a session's *settings*, or None without one."""
+    try:
+        hook = settings["hooks"]["PermissionRequest"][0]["hooks"][0]
+        timeout = hook["timeout"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return timeout if isinstance(timeout, int) and not isinstance(timeout, bool) else None
+
+
+def _permission_mode(spec: LaunchSpec) -> str:
+    return str(spec.options.get("permission_mode") or DEFAULT_PERMISSION_MODE)
 
 
 def settings_file_for(worktree: Path) -> Path:
@@ -798,6 +977,57 @@ def _usage_limit(category: str, texts: Sequence[str]) -> bool:
     if normal not in _UNNAMED_ERRORS:
         return False
     return any(_USAGE_LIMIT_TEXT.search(text) for text in texts)
+
+
+def _model_limit(texts: Sequence[str]) -> str | None:
+    """The model family whose own limit the failure names, in lower case, or None."""
+    for text in texts:
+        match = _MODEL_LIMIT_TEXT.search(text)
+        if match:
+            return match.group(1).lower()
+    return None
+
+
+# Where a listed session may carry the error of its failed turn. Not documented; read
+# defensively, like the StopFailure hook.
+_ERROR_KEYS = ("error", "errorType", "error_type", "lastError", "last_error")
+_ERROR_TEXT_KEYS = ("errorMessage", "error_message", "errorDetails", "error_details")
+_ERROR_TEXT_LIMIT = 1000
+_CATEGORY = re.compile(r"[A-Za-z0-9_.-]{1,60}")
+
+
+def session_failure(
+    node: Mapping[str, Any], now: float | None = None
+) -> tuple[bool, float | None, str | None]:
+    """Whether a failed session's listing says a usage limit ended its turn.
+
+    Returns the usage-limit flag, the reset time and the model family of a per-model
+    limit. A short word in an error key is the category, as in the StopFailure hook;
+    longer text, and the text keys and the waiting text, are the message.
+    """
+    category = ""
+    texts: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            texts.append(sanitize.clean(value)[:_ERROR_TEXT_LIMIT])
+
+    for key in _ERROR_KEYS:
+        value = node.get(key)
+        if isinstance(value, Mapping):
+            kind = value.get("type") or value.get("code")
+            if isinstance(kind, str) and _CATEGORY.fullmatch(kind) and not category:
+                category = kind
+            add(value.get("message"))
+        elif isinstance(value, str) and _CATEGORY.fullmatch(value.strip()) and not category:
+            category = value.strip()
+        else:
+            add(value)
+    for key in (*_ERROR_TEXT_KEYS, *_WAITING_KEYS):
+        add(node.get(key))
+    if not _usage_limit(category, texts):
+        return False, None, None
+    return True, reset_time(texts, now), _model_limit(texts)
 
 
 _EPOCH = re.compile(r"(?<![\d.])(1[6-9]\d{8}|2\d{9})(?![\d.])")
@@ -913,6 +1143,7 @@ def parse_hook(event: str, payload: Mapping[str, Any], now: float | None = None)
             kind=HOOK_TURN_FAILED, observed=FAILED, last_answer=answer,
             error=sanitize.one_line(category, limit=80) or None,
             usage_limit=limited, reset_at=reset_time(texts, now) if limited else None,
+            model_limit=_model_limit(texts) if limited else None,
             **common,
         )
     if event == "Notification":
@@ -928,12 +1159,33 @@ def parse_hook(event: str, payload: Mapping[str, Any], now: float | None = None)
         rendered = json.dumps(_cleaned(tool_input), sort_keys=True, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         rendered = ""
+    tool_name = payload.get("tool_name")
     return Hook(
         kind=HOOK_PERMISSION, observed=BLOCKED,
         tool_name=_text(payload, "tool_name", 100) or "unknown",
         tool_input=sanitize.clean(rendered)[:TOOL_INPUT_LIMIT] if tool_input is not None else "",
+        tool_input_digest=input_digest(tool_name, tool_input),
         **common,
     )
+
+
+def input_digest(tool_name: Any, tool_input: Any) -> str | None:
+    """A hash of the tool name and the whole input as the session sent them, or None.
+
+    Taken before any cleaning or cap, so two inputs that differ only in a control
+    character or after the cap never share a rule. Only the keys in
+    _DESCRIPTIVE_INPUT_KEYS are left out: they describe the call and change nothing it does.
+    """
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+    skipped = _DESCRIPTIVE_INPUT_KEYS.get(tool_name, ())
+    if skipped and isinstance(tool_input, Mapping):
+        tool_input = {key: value for key, value in tool_input.items() if key not in skipped}
+    try:
+        raw = json.dumps([tool_name, tool_input], sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 class ClaudeRuntime(Runtime):
@@ -951,8 +1203,9 @@ class ClaudeRuntime(Runtime):
         external_supervisor=True,
         session_hooks=True,
     )
-    role_keys = ("agent", "permission_mode", "allow")
+    role_keys = ("agent", "permission_mode", "allow", "permission_timeout_secs")
     hook_events = HOOK_EVENTS
+    usage_provider = USAGE_PROVIDER
     # Project settings, hooks, agents, skills and commands; MCP servers; instructions,
     # which Claude Code also reads from subdirectories. The `.claude` entry itself is
     # named too: a symlink there is a file, and it would hand the directory to its target.
@@ -999,7 +1252,37 @@ class ClaudeRuntime(Runtime):
     def parse_hook(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
         return parse_hook(event, payload)
 
-    def hooks(self) -> dict[str, object] | None:
+    @classmethod
+    def permission_hold_secs(cls, worktree: Path) -> float | None:
+        """From the permission hook timeout in the session's settings file.
+
+        A session launched before the permission hook waited longer than the other hooks
+        keeps its short timeout, and a session without the file has no known timeout:
+        neither is held.
+        """
+        try:
+            settings = json.loads(settings_file_for(worktree).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        timeout = permission_timeout_of(settings) if isinstance(settings, dict) else None
+        if timeout is None or timeout <= HOOK_TIMEOUT_SECS:
+            return None
+        return float(timeout - PERMISSION_ANSWER_MARGIN_SECS)
+
+    @classmethod
+    def permission_decision(cls, decision: str) -> dict[str, object]:
+        """Claude Code's PermissionRequest hook output for allow or deny."""
+        if decision == "allow":
+            verdict: dict[str, object] = {"behavior": "allow"}
+        elif decision == "deny":
+            verdict = {"behavior": "deny", "message": DENIED_MESSAGE}
+        else:
+            raise ValueError(f"unknown permission decision {decision!r}")
+        return {
+            "hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": verdict}
+        }
+
+    def hooks(self, permission_timeout_secs: int = PERMISSION_TIMEOUT_SECS) -> dict[str, object] | None:
         """The hook settings of a new session, or None while the daemon has no token.
 
         The daemon writes the token when it starts for the first time. A session
@@ -1013,14 +1296,23 @@ class ClaudeRuntime(Runtime):
         from chargehand.serve import read_token
 
         token = read_token(self.token_file)
-        return hook_settings(self.hook_port, token, self.token_file) if token else None
+        if not token:
+            return None
+        return hook_settings(
+            self.hook_port, token, self.token_file, permission_timeout_secs=permission_timeout_secs
+        )
 
     def _settings_for(
         self, spec: LaunchSpec, warn: Callable[[str], None] | None
     ) -> dict[str, object] | Path | None:
         """The launch settings, in a private file when they carry the hooks and their token."""
-        hooks = self.hooks()
-        settings = launch_settings(spec.options, self.deny_rules, spec.read_paths, hooks=hooks)
+        hooks = self.hooks(
+            spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
+        )
+        settings = launch_settings(
+            spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
+            protected_paths=spec.protected_paths,
+        )
         if not hooks or settings is None:
             return settings
         path = settings_file_for(spec.worktree)
@@ -1030,7 +1322,10 @@ class ClaudeRuntime(Runtime):
             # The token must not go on the command line; the session diff follows it.
             if warn is not None:
                 warn(f"{spec.name}: could not write {path} ({exc}); the session posts no hooks")
-            return launch_settings(spec.options, self.deny_rules, spec.read_paths)
+            return launch_settings(
+                spec.options, self.deny_rules, spec.read_paths,
+                protected_paths=spec.protected_paths,
+            )
 
     @classmethod
     def parse_role_options(cls, table: Mapping[str, object], where: str) -> dict[str, object]:
@@ -1048,7 +1343,17 @@ class ClaudeRuntime(Runtime):
             raise ConfigError(f"{where}.allow: expected a list of strings")
         for rule in allow:
             validate_permission_rule(rule, where=f"{where}.allow")
-        return {"permission_mode": mode, "agent": agent, "allow": tuple(allow)}
+        timeout = table.get("permission_timeout_secs", PERMISSION_TIMEOUT_SECS)
+        low, high = PERMISSION_TIMEOUT_RANGE
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not low <= timeout <= high:
+            raise ConfigError(
+                f"{where}.permission_timeout_secs: expected a whole number of seconds from "
+                f"{low} to {high}"
+            )
+        return {
+            "permission_mode": mode, "agent": agent, "allow": tuple(allow),
+            "permission_timeout_secs": timeout,
+        }
 
     @classmethod
     def check_role(cls, role: "Role", repo: Path) -> None:
@@ -1091,6 +1396,25 @@ class ClaudeRuntime(Runtime):
     def list_sessions(self) -> list[Session]:
         return self.cli.list_sessions()
 
+    def permission_waits(self) -> dict[str, bool] | None:
+        """From one `claude agents`, which shows an answer given in `claude attach` at once.
+
+        Observed in Claude Code 2.1.316: while the hook waits, the session lists as
+        `blocked` with waitingFor "permission prompt"; within 0.1 s of an answer in the
+        terminal it lists as working. The hook's connection stays open meanwhile.
+        """
+        try:
+            sessions = self.cli.list_sessions()
+        except ClaudeError:
+            return None
+        waits: dict[str, bool] = {}
+        for session in sessions:
+            shown = session.state == BLOCKED and "permission" in (session.waiting_for or "").lower()
+            for key in (session.id, session.uuid):
+                if key:
+                    waits[key] = shown
+        return waits
+
     def launch(self, spec: LaunchSpec, *, warn: Callable[[str], None] | None = None) -> LaunchResult:
         """Record the worktree as trusted, then start its session.
 
@@ -1105,21 +1429,64 @@ class ClaudeRuntime(Runtime):
         helps only when the entry is gone: a refusal while the entry is still in the
         file has another cause, and is reported at once.
         """
+        return self._start(
+            spec,
+            warn,
+            lambda settings: self.cli.launch(
+                worktree=spec.worktree,
+                name=spec.name,
+                prompt=spec.prompt,
+                permission_mode=_permission_mode(spec),
+                agent=spec.options.get("agent") or None,
+                model=spec.model,
+                effort=spec.effort,
+                settings=settings,
+            ),
+        )
+
+    def fork(
+        self,
+        spec: LaunchSpec,
+        *,
+        session_id: str,
+        session_uuid: str | None = None,
+        warn: Callable[[str], None] | None = None,
+    ) -> LaunchResult:
+        """Start a copy of the session's conversation as a new session, as a launch would.
+
+        The copy gets the trust entry, its own settings file with the hooks, its name, and
+        the role's permission mode, model and effort, the same as a launch in
+        ``spec.worktree``; only the full session id finds the conversation.
+        """
+        return self._start(
+            spec,
+            warn,
+            lambda settings: self.cli.fork(
+                session_uuid or session_id,
+                spec.prompt,
+                worktree=spec.worktree,
+                name=spec.name,
+                permission_mode=_permission_mode(spec),
+                model=spec.model,
+                effort=spec.effort,
+                settings=settings,
+            ),
+        )
+
+    def _start(
+        self,
+        spec: LaunchSpec,
+        warn: Callable[[str], None] | None,
+        start: Callable[[dict[str, object] | Path | None], CommandResult],
+    ) -> LaunchResult:
+        """Write the settings, record the trust entry, and run *start* until it is not refused
+        for a trust entry that another process removed; see :meth:`launch`."""
         attempt = 1
         settings = self._settings_for(spec, warn)
         while True:
             trusted = self._trust(spec, warn)
             try:
-                result = self.cli.launch(
-                    worktree=spec.worktree,
-                    name=spec.name,
-                    prompt=spec.prompt,
-                    permission_mode=str(spec.options.get("permission_mode") or DEFAULT_PERMISSION_MODE),
-                    agent=spec.options.get("agent") or None,
-                    model=spec.model,
-                    effort=spec.effort,
-                    settings=settings,
-                )
+                result = start(settings)
             except WorkspaceNotTrusted as exc:
                 if not trusted:
                     raise
@@ -1183,11 +1550,13 @@ class ClaudeRuntime(Runtime):
         *,
         session_uuid: str | None = None,
         if_idle: bool = False,
+        if_ended: bool = False,
     ) -> WakeResult:
         """Stop the live idle process, confirm it is gone, then resume by the full session id.
 
         With *if_idle*, only a stopped session, or a live one whose last turn ended
-        ``done``, is woken.
+        ``done``, is woken. With *if_ended*, a live one whose last turn ended ``failed``
+        is woken too.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -1202,7 +1571,8 @@ class ClaudeRuntime(Runtime):
         if session is None:
             return WakeResult(False, f"session {session_id} is not in the listing")
         old_pid = _listed_pid(session)
-        if if_idle and not self.is_stopped(session) and session.state != DONE:
+        ended = (DONE, FAILED) if if_ended else (DONE,)
+        if (if_idle or if_ended) and not self.is_stopped(session) and session.state not in ended:
             # A turn runs, or a question or a permission prompt waits; a stop would
             # interrupt the turn or discard the prompt. The caller's listing may be older:
             # a leftover background shell starts a turn by itself, and the operator can
@@ -1262,6 +1632,10 @@ class ClaudeRuntime(Runtime):
     def respawn(self, session_id: str) -> CommandResult:
         return self.cli.respawn(session_id)
 
+    def failure_reset(self, session: Session, since: float) -> float | None:
+        limited, reset, _ = session_failure(session.raw, now=since)
+        return reset if limited else None
+
     def remove(self, session_id: str) -> CommandResult:
         return self.cli.remove(session_id)
 
@@ -1279,20 +1653,23 @@ class ClaudeRuntime(Runtime):
     def logs(self, session_id: str, *, lines: int = 200) -> str:
         return self.cli.logs(session_id, lines=lines)
 
+    def transcript(self, transcript_path: str | None, session_id: str | None) -> str | None:
+        path = transcript_file(transcript_path)
+        if path is not None:
+            try:
+                return transcript_text(path)
+            except OSError as exc:
+                log.warning("could not read the transcript of session %s: %s", session_id,
+                            sanitize.one_line(str(exc), limit=300))
+        if not session_id:
+            return None
+        try:
+            return self.logs(session_id, lines=TRANSCRIPT_LOG_LINES) or None
+        except ClaudeError:
+            return None
+
     def attach_command(self, session_id: str) -> str:
         return f"claude attach {session_id}"
-
-    def fork(
-        self,
-        session_id: str,
-        prompt: str,
-        *,
-        session_uuid: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-    ) -> CommandResult:
-        return self.cli.fork(session_uuid or session_id, prompt, model=model, effort=effort)
-
 
 runtime_mod.register(ClaudeRuntime)
 
@@ -1308,15 +1685,21 @@ __all__ = [
     "STOPPED",
     "Session",
     "UNKNOWN",
+    "USAGE_PROVIDER",
     "WORKING",
     "agent_file_candidates",
     "copy_started_by",
     "hook_settings",
+    "input_digest",
+    "permission_timeout_of",
     "launch_settings",
     "parse_hook",
     "reset_time",
     "parse_session",
     "parse_sessions",
+    "session_failure",
     "status_line_windows",
+    "transcript_file",
+    "transcript_text",
     "worker_from_session",
 ]

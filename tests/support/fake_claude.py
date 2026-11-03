@@ -182,19 +182,36 @@ def main(argv: list[str]) -> int:
         return 0
 
     if "--resume" in argv and "--fork-session" in argv and "--bg" in argv:
-        # `claude --resume <id> --fork-session --bg "<prompt>"`: a new session that
-        # continues a copy of the conversation.
+        # `claude --resume <id> --fork-session --bg [-n <name>] ... "<prompt>"`: a new
+        # session that continues a copy of the conversation, in the directory it was run
+        # in, under the name it was given.
         target = argv[argv.index("--resume") + 1]
-        record(state, "forks", {"argv": argv, "target": target, "prompt": argv[-1]})
+        record(state, "forks", {
+            "argv": argv, "target": target, "prompt": argv[-1], "cwd": os.getcwd(),
+            "stdin": stdin_kind(),
+        })
         original = next(
             (s for s in state.get("sessions", []) if target in (s.get("uuid"), s.get("sessionId"), s.get("id"))), None
         )
-        if original is None:
+        if original is None or state.get("fork_fails"):
             save(state)
             sys.stderr.write(f"No conversation found with session ID: {target}\n")
             return 1
+        if state.get("require_trust") and not is_trusted(os.getcwd()):
+            save(state)
+            sys.stderr.write(
+                f"Workspace not trusted. Run `claude` in {os.getcwd()} once and accept the "
+                f"trust prompt, then retry.\n"
+            )
+            return 1
         serial = next_serial(state)
-        copy = {**original, "id": f"s{serial}", "uuid": f"uuid-{serial}", "state": "working"}
+        copy = {
+            **original, "id": f"s{serial}", "uuid": f"uuid-{serial}", "state": "working",
+            "cwd": os.getcwd(),
+        }
+        for flag in ("-n", "--name"):
+            if flag in argv:
+                copy["name"] = argv[argv.index(flag) + 1]
         run_process(copy, serial)
         state["sessions"].append(copy)
         save(state)

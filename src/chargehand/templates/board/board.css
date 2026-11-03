@@ -32,6 +32,13 @@ header.top h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2
 .throttle { color: var(--muted); font-size: 12px; display: flex; gap: 10px; }
 .throttle b { color: var(--text); font-weight: 600; }
 .throttle .paused { color: var(--amber); font-weight: 600; }
+.throttle .model-limit { color: var(--red); font-weight: 600; border: 1px solid var(--red); border-radius: 10px; padding: 0 7px; }
+.hidden-count { color: var(--amber); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+.jobs { color: var(--muted); font-size: 12px; display: flex; gap: 10px; max-width: 40vw; overflow: hidden; }
+.jobs .job { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+.jobs .count { white-space: nowrap; flex-shrink: 0; }
+.jobs b { color: var(--text); font-weight: 600; }
+.jobs .job.failed, .note.job.failed { color: var(--red); }
 .health { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-family: var(--mono); flex: 1 1 0; min-width: 120px; max-width: 420px; }
 .health .dot { flex: none; }
 .health .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -52,6 +59,7 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .dot.needs_you { background: var(--red); box-shadow: 0 0 0 3px rgba(248,81,73,.2); animation: pulse 1.2s infinite; }
 .dot.working { background: var(--green); box-shadow: 0 0 0 3px rgba(63,185,80,.18); animation: pulse 1.6s infinite; }
 .dot.queued { background: var(--accent); }
+.dot.parked { background: var(--prompt); }
 .dot.idle { background: var(--amber); }
 .dot.closed { background: var(--grey); }
 .health .dot { background: var(--green); }
@@ -70,6 +78,7 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .chip.state.paused, .chip.state.parked { color: var(--amber); border-color: var(--amber); }
 .card .age { margin-left: auto; color: var(--faint); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
 .card .title { font-weight: 600; font-size: 13.5px; margin-bottom: 5px; line-height: 1.35; }
+.card .title .handle { margin-left: 8px; font-weight: 400; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .card a { color: var(--accent); text-decoration: none; }
 .card a:hover { text-decoration: underline; }
 .card .meta { color: var(--muted); font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; font-family: var(--mono); }
@@ -77,6 +86,10 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .card .path { color: var(--faint); font-size: 11px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 6px; }
 .card .alert { color: var(--red); font-size: 12px; margin: 4px 0; font-weight: 500; overflow-wrap: anywhere; }
 .card .note { color: var(--amber); font-size: 12px; margin: 4px 0; overflow-wrap: anywhere; }
+.card .prompt pre.input { font-family: ui-monospace, Menlo, monospace; font-size: 11px; margin: 2px 0 4px; padding: 4px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8em; overflow: auto; }
+.card .prompt .answers { display: flex; gap: 5px; flex-wrap: wrap; margin: 4px 0; }
+.card .prompt button.answer.allow, .card .prompt button.answer.always { border-color: var(--green); }
+.card .prompt button.answer.deny { border-color: var(--red); color: var(--red); }
 .card .snippet { font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; white-space: pre-line; overflow-wrap: anywhere; }
 .card .snippet .who { color: var(--faint); }
 .card .snippet.prompt { color: var(--prompt); -webkit-line-clamp: 4; }
@@ -84,3 +97,43 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .card .attach { margin-top: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
 
 footer { padding: 6px 16px; color: var(--faint); font-size: 11px; border-top: 1px solid var(--border); font-family: var(--mono); }
+
+nav.controls { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+nav.controls .repositories { display: flex; gap: 6px; flex-wrap: wrap; }
+nav.controls .setting { display: flex; align-items: center; gap: 4px; }
+nav.controls .setting:first-of-type { margin-left: auto; }
+button { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 2px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+button:hover { background: var(--card-hover); border-color: #3a4150; }
+button.primary { border-color: var(--accent); color: var(--accent); }
+button.repository.resume, button.action.continue { border-color: var(--green); }
+button.action.cancel, button.action.discard { border-color: var(--red); color: var(--red); }
+input, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; font: inherit; font-size: 12px; }
+input[type=checkbox] { padding: 0; }
+.notice { padding: 6px 16px; font-size: 12px; font-family: var(--mono); border-bottom: 1px solid var(--border); color: var(--muted); overflow-wrap: anywhere; }
+.notice.ok { color: var(--green); }
+.notice.bad { color: var(--red); }
+.notice.pending { color: var(--amber); }
+.panel { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.panel h3 { margin: 0 8px 4px 0; font-size: 13px; font-weight: 600; }
+.panel .field { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+.panel .field input[type=text] { min-width: 260px; }
+.panel .buttons { display: flex; gap: 6px; }
+.card .actions { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.card .actions .force { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 3px; margin-right: 4px; }
+.card .actions button { font-size: 11px; padding: 1px 7px; }
+.group { display: flex; align-items: center; gap: 6px; padding: 4px 2px 0; color: var(--muted); font-size: 11.5px; font-weight: 600; }
+.group .toggle { border: none; background: none; padding: 0 2px; color: var(--muted); font-size: 11px; }
+.group .label { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group .configured, .group .folded { color: var(--faint); font-weight: 400; font-family: var(--mono); font-size: 10.5px; }
+.group .edit { margin-left: auto; font-size: 10.5px; padding: 0 6px; }
+.group.hidden-repository, .card.hidden-repository { opacity: .55; }
+.chip.pin { color: var(--accent); border-color: var(--accent); }
+.chip.flag { color: var(--amber); border-color: var(--amber); }
+.card .title .icon, .group .icon { margin-right: 4px; }
+.card .actions .board { margin-left: auto; display: flex; gap: 5px; }
+.panel .field input.icon { min-width: 120px; }
+[hidden] { display: none !important; }
+.chip.clone { color: var(--muted); border-color: var(--border); }
+.panel .field textarea.prompt { min-width: 420px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 4px 6px; font: inherit; font-family: var(--mono); font-size: 11.5px; }
+.panel .modes { display: flex; gap: 10px; }
+.panel .note { color: var(--amber); font-size: 12px; }

@@ -19,6 +19,7 @@ from chargehand.delivery import (
     MESSAGE_HEADER,
     UNKNOWN_KIND,
     UsageReading,
+    UsageWindow,
     usage_admits,
     wake_message,
 )
@@ -123,6 +124,24 @@ def entry(pointer: str, number: int = 1, kind: str = "comment") -> InboxEntry:
     )
 
 
+def test_a_reply_from_the_board_reaches_the_message_as_one_clean_line():
+    reply = dataclasses.replace(
+        entry("say \x1b[2JPONG\n‮now " + "x" * 600, 2, kind=ledger_mod.REPLY_KIND),
+        source=ledger_mod.REPLY_SOURCE,
+    )
+    # The same text from any other source is a pointer like any other, and is left out.
+    impostor = entry("say PONG now", 3, kind=ledger_mod.REPLY_KIND)
+
+    message, left_out = wake_message([entry("https://example.invalid/a", 1), reply, impostor])
+
+    lines = message.splitlines()
+    assert lines[:2] == [delivery_mod.MESSAGE_HEADER, "comment: https://example.invalid/a"]
+    assert lines[2].startswith(delivery_mod.REPLY_PREFIX + "say PONG now xxx")
+    assert len(lines[2]) == len(delivery_mod.REPLY_PREFIX) + ledger_mod.REPLY_LIMIT
+    assert "\x1b" not in message and "‮" not in message
+    assert len(lines) == 3 and left_out == 1
+
+
 def test_the_message_lists_each_usable_pointer_once_and_nothing_else():
     message, left_out = wake_message([
         entry("https://example.invalid/a", 1),
@@ -201,13 +220,20 @@ def test_the_shipped_implementer_prompt_says_what_each_event_kind_asks_for():
         assert phrase in prompt, phrase
 
 
-def test_an_unknown_or_old_usage_reading_admits_a_wake():
+def reading(read_at: float, **used: float) -> UsageReading:
+    """A reading of the claude provider with *used* percent per window."""
+    return UsageReading(
+        "claude", {kind: UsageWindow(kind, percent) for kind, percent in used.items()}, read_at
+    )
+
+
+def test_no_usage_reading_admits_a_wake_and_an_old_one_still_counts():
     now = 10_000.0
     assert usage_admits(None, now=now)
-    old = UsageReading({"five_hour": 99.0}, read_at=now - delivery_mod.USAGE_MAX_AGE_SECS - 1)
-    assert usage_admits(old, now=now)
-    assert usage_admits(UsageReading({"five_hour": 80.0, "seven_day": 10.0}, read_at=now), now=now)
-    assert not usage_admits(UsageReading({"five_hour": 81.0}, read_at=now), now=now)
+    old = reading(now - 3 * 86400, seven_day=99.0)
+    assert not usage_admits(old, now=now)
+    assert usage_admits(reading(now, seven_day=80.0), now=now)
+    assert not usage_admits(reading(now, seven_day=81.0), now=now)
 
 
 # ----- one wake per tick ----------------------------------------------------------
@@ -457,15 +483,17 @@ def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     tmp_path, repo, claude_state, board
 ):
     write_role(repo, "reviewer", REVIEWER)
-    readings = [UsageReading({"five_hour": 95.0}, read_at=time.time())]
-    harness = build(tmp_path, repo, claude_state, board, usage=lambda: readings[0])
+    readings = [None]
+    harness = build(tmp_path, repo, claude_state, board, usage=lambda provider: readings[0])
     reviewer = start_reviewer(harness)
     end_turn(harness)
     emit_three()
+    # Set after the start: the weekly window above the wake reserve holds new workers too.
+    readings[0] = reading(time.time(), seven_day=95.0)
 
     harness.runner = Runner(
         harness.config, harness.ledger, git=Git(), notifier=harness.notifier,
-        usage=lambda: readings[0],
+        usage=lambda provider: readings[0],
     )
     report = harness.runner.tick()
 
@@ -476,7 +504,7 @@ def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     readings[0] = None
     harness.runner = Runner(
         harness.config, harness.ledger, git=Git(), notifier=harness.notifier,
-        usage=lambda: readings[0],
+        usage=lambda provider: readings[0],
     )
     report = harness.runner.tick()
     assert report.woken == ["reviewer/PR-7"]
@@ -582,3 +610,30 @@ def test_no_branch_is_read_when_no_source_has_pull_requests(wired, monkeypatch):
     report = wired.runner.tick()
 
     assert report.errors == []
+
+
+def test_a_permission_prompt_of_the_woken_turn_stays_open(wired, monkeypatch):
+    """The new turn can ask for permission before the wake writes `running`."""
+    from chargehand import claude
+
+    reviewer = start_reviewer(wired)
+    end_turn(wired)
+    emit_three()
+    real = claude.ClaudeRuntime.wake
+
+    def wake_then_prompt(self, session_id, message, **kwargs):
+        result = real(self, session_id, message, **kwargs)
+        hook = claude.parse_hook("PermissionRequest", {
+            "session_id": reviewer.session_uuid, "tool_name": "Bash",
+            "tool_input": {"command": "date"},
+        })
+        wired.runner.apply_hook(wired.ledger.get(reviewer.id), hook)
+        return result
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "wake", wake_then_prompt)
+
+    report = wired.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    [prompt] = wired.ledger.open_permission_prompts(wired.ledger.get(reviewer.id))
+    assert prompt.tool_name == "Bash"

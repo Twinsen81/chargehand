@@ -162,27 +162,103 @@ public location.
   0700 under the state directory, and the `SessionStart` command hook names the token
   file, not the token, and runs its script with `python -I`, so nothing in the worktree
   is imported. The settings file is deleted when its session is removed. A post moves
-  only the live worker whose session posted it. The daemon answers every post with an
-  empty object, so it never makes a permission decision for a session, never keeps a
-  turn running and never adds text to the model's context. The payload is untrusted: the
+  only the live worker whose session posted it. The daemon answers every post but a
+  permission prompt with an empty object, so it never keeps a turn running and never
+  adds text to the model's context. The payload is untrusted: the
   last answer, the tool input and the other fields are cleaned of terminal control
   sequences and capped when stored, never reach a notification or a prompt, and
   `GET /api/state` returns them as JSON data for the page to escape. `status --json`
   names the last hook event and the reset time, but no payload text.
-- **A read-only board.** `GET /` serves one static page, its script and its style sheet,
+- **Permission decisions come from the operator only.** The daemon holds a session's
+  permission hook open and answers it with allow or deny only after the operator clicks
+  Allow, Deny or Always allow on the board, which is a `POST` with the token. Nothing in a
+  hook payload, a tracker or a session's output can answer a prompt. Always allow records
+  a rule for that one worker in the ledger: the same tool with the same input, matched by
+  a SHA-256 hash of the whole input as the session sent it, so an input that differs
+  after the display cap or in a control character does not match. The one key left out
+  is the `description` of a Bash call, which the model words anew for each call and which
+  changes nothing the command does. The rule never changes
+  a role, a repository or Claude Code's settings, and it ends with the worker. A hook the
+  daemon holds is answered with no decision, so the session shows its own dialog, when
+  the hook's timeout comes near (the role's `permission_timeout_secs`, 600 seconds by
+  default), when the worker leaves `blocked` because the operator answered in the session,
+  and when the daemon stops; after a restart a prompt can only be answered in the session.
+  The first answer wins: the ledger row changes only while it is open and held, so a
+  second click, a late click and a click after a timeout change nothing. Before it takes
+  a click, the daemon checks in a fresh session listing that the session still shows a
+  permission dialog; after an answer in the session the click is refused and the card
+  is cancelled, so the ledger never records a board decision that the session did not
+  apply. Only the short time between that listing and the answer is left open.
+- **The board.** `GET /` serves one static page, its script and its style sheet,
   all from the package; nothing else is served as a file, and the page loads nothing
   from another origin. They are sent with `Content-Security-Policy: default-src 'none';
   script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri
   'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
   `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, so no inline script or
-  style runs and no other site can frame the page. The page reads `GET /api/board` and
-  has no action: it sends no request other than that read, and it holds no token. Every
+  style runs and no other site can frame the page. The page reads `GET /api/board`. Every
   text field in that answer is cleaned of control sequences and direction overrides on
   the server, `<`, `>` and `&` are escaped in its JSON, and the page sets text with
   `textContent` only, never as markup. A link is made only from a plain http(s) URL, and
   opens with `rel="noopener noreferrer"`. The board shows session text (the last prompt,
-  the last answer, a permission prompt's tool input) that `status` leaves out, so it is
+  the last answer, a permission prompt's tool name and input) that `status` leaves out, so it is
   for the operator's own browser on the machine.
+- **Board actions hold the token.** Each action is a `POST` with the bearer token, like
+  any other mutating call, and records the same control request as the CLI, which the
+  tick applies; no action handler calls `claude`, git or a tracker, except attach (below).
+  The operator pastes the token into the page once; the page keeps it in the browser's
+  `localStorage` for `http://127.0.0.1:<port>` and sends it only in the `Authorization`
+  header. It is never in a URL, in `GET /`, or in any answer. Anything that can run
+  script in that origin, or read that browser profile, can therefore read the token, so
+  use the board in your own browser profile; "Forget token" removes it. Another origin
+  cannot read it, and the `Host` check and the missing CORS headers still apply. The
+  token is the same one every client uses: a board action can do what any CLI command can,
+  and no more.
+- **Operator text from the board.** A reply is trusted operator text: it reaches the
+  session's next turn as written. It is one line, cleaned of control sequences and
+  direction overrides, capped at 500 characters, and carried in the inbox under the
+  source name `board`, which no configured source may take, so no event from a source
+  can pass as a reply. The request row keeps the line, so it is in the ledger like the
+  other request arguments.
+- **The prompt of a clone.** The clone form sends a prompt template that the operator
+  edited: trusted operator text from a holder of the token, or from the command line, as
+  a role file is. It may reach the clone's first prompt; tracker text never does. It is
+  cleaned of control sequences and direction overrides, refused above 16 KiB, and checked
+  for the role prompt's placeholders, so `{title}` and `{body}` are refused as in a role
+  file. A model name that starts with `-` is refused, because it goes into the command
+  line. The request row and the clone's ledger row keep the prompt; log lines name only
+  its length. `GET /api/workers/<id>/clone` needs no token, as every read, and shows the
+  role's prompt template, which the card already shows filled in.
+- **A clone and its original's worktree.** Two workers never work in one worktree, but a
+  clone in full mode starts with a copy of the original's conversation, which names the
+  original's worktree, and a fresh clone can find it too. A line before a full-mode
+  clone's prompt says that this worktree belongs to another worker, and the clone's own
+  settings file denies `Edit(//<original worktree>/**)` and `Write(//<original
+  worktree>/**)`, as given and resolved. A clone of a clone gets the same line and rules for
+  the worktree of every earlier original, because a copy of a copy names them all. A deny rule holds in every permission mode,
+  `auto` and `bypassPermissions` included, so the file tools (Edit, Write and the other
+  file-editing tools) cannot change the original's files. The Bash tool is not covered: a
+  rule matches the text of a command, not the files it changes, so under `auto` or
+  `bypassPermissions` a shell command can still write there; a role in `manual` mode asks
+  before such a command.
+- **Board settings.** Names, icons, pins and the collapsed and hidden repositories are
+  written by `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board`,
+  with the token, straight into the ledger's `board_state` table; they reach no session,
+  no prompt, no notification and no log line, and only the board model reads them. A name
+  is operator text, cleaned to one line and refused above 60 characters. An icon is
+  accepted only as one short emoji (one symbol, or symbols joined by the zero-width
+  joiner, each with an optional variation selector and skin tone; a flag of two regional
+  indicators or of tag characters; or a keycap after `#`, `*` or a digit; no letters, no
+  markup) or a name from a bundled set, so nothing is uploaded or fetched. The model cleans both again when it reads them, because an
+  import writes the same table. Hiding a repository only filters the board: its workers
+  are still supervised and still notify, so hiding cannot silence a blocked worker.
+- **Attach runs a terminal on this machine.** `POST /api/workers/<id>/attach` makes the
+  daemon run `/usr/bin/osascript`, which opens an iTerm2 or Terminal.app window that runs
+  the worker's attach command. The terminal is one of those two names; the session id must
+  be a plain identifier; the command must be plain words, and it reaches the AppleScript as
+  an argument, never inside the script's source, so no text in it can change the script.
+  macOS asks once whether the daemon's process may control the terminal (Privacy &
+  Security, Automation). The board embeds no chat: a conversation with a session happens
+  in that terminal.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
@@ -224,6 +300,27 @@ public location.
   because it usually crosses a third-party relay. Stripping terminal escapes would not
   make that text safe to forward; it is kept local instead, in the ledger, and reached
   through `status --verbose-titles` and `logs`.
+- **Export carries no secret.** `chargehand export` never puts the token in the archive
+  and never reads the Keychain. It leaves out every configuration key that can carry a
+  credential, and it refuses to write an archive in which a file still contains the home
+  directory or the token. `chargehand import` treats the archive as input it checks: it
+  refuses a newer format, a file name outside the archive's layout, a symlink and a file
+  the manifest does not list; it writes no file and no board setting that exists without
+  `--force`; it cleans board names and icons as the board does; and it writes a new token
+  rather than taking one from the archive. The archive still holds the notification hook
+  and the role files, which run as the operator: import only an archive you made. The hook
+  is copied as it is, so a credential written into it, such as a private push topic, is
+  in the archive too; export says so when it copies a hook.
+- **Worker archives stay private.** An archive of a worker holds its worktree and its
+  session transcript, which can contain anything the session read, so the zip has mode
+  0600 in a directory of mode 0700 under the state directory, and its content never
+  reaches a log line, a notification or the board. A symbolic link in the worktree is
+  stored as a link, so a link to a file elsewhere does not copy that file into the zip. The
+  transcript path comes from a hook post, so only a regular `.jsonl` file under Claude
+  Code's `projects` directory is read. The settings file of a session, which holds the
+  daemon's token, is not in the worktree and so not in the archive. The worktree is
+  removed only after the zip is complete and has passed its check, and only by the tick,
+  with the guard of discard applied again.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 ### Known limits

@@ -22,14 +22,16 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from chargehand import __version__, daemonlog, install, paths, sanitize, serve, trackers
+from chargehand import __version__, daemonlog, install, paths, sanitize, serve, trackers, transfer
+from chargehand import clone as clone_mod
+from chargehand import ledger as ledger_mod
 from chargehand import usage as usage_mod
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
 from chargehand.config import MachineConfig, load_machine_config, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError, TickBusy
 from chargehand.gitutil import Git
-from chargehand.ledger import Ledger, Worker, open_ledger
+from chargehand.ledger import ORIGIN_SOURCE, Ledger, Worker, open_ledger
 from chargehand.notify import Notifier
 from chargehand.tick import REQUEST_MESSAGE_LIMIT, Runner, TickReport, tick_lock
 from chargehand.trackers import Status
@@ -127,14 +129,22 @@ def _span(secs: float) -> str:
 def _branch_is_ours(worker: Worker) -> bool:
     # A session can rename its branch after the tracker's convention, which puts a slug of
     # the issue title into the name, and an adopted session is recorded under the branch
-    # it is on. The runner's own placeholder ends in the item.
-    return worker.branch.endswith(worker.item)
+    # it is on. The runner's own placeholder ends in the item, or for a worker started by
+    # hand in the name of its worktree, which carries its id.
+    tail = worker.item if worker.origin == ORIGIN_SOURCE else worker.worktree_path.name
+    return bool(tail) and worker.branch.endswith(tail)
 
 
 def _worker_dict(
     worker: Worker, *, verbose: bool, runner: Runner | None = None
 ) -> dict[str, object]:
     payload: dict[str, object] = {
+        "id": worker.id,
+        # The name a command takes; it resolves back to this worker.
+        "handle": worker.target,
+        "origin": worker.origin,
+        # The id of the worker a clone was made from.
+        "parent": worker.parent_id,
         "item": worker.item,
         "role": worker.role,
         "runtime": worker.runtime,
@@ -309,7 +319,8 @@ def build_status(
             "working": sum(1 for w in workers if w.state in ("launching", "running")),
             "open": len(workers),
             "pending_requests": [
-                {"kind": r["kind"], "target": r["target"], "created_at": r["created_at"]}
+                {"id": r["id"], "kind": r["kind"], "target": r["target"],
+                 "origin": r["origin"], "created_at": r["created_at"]}
                 for r in ledger.pending_requests()
             ],
         },
@@ -373,8 +384,14 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
             )
             if worker.get("attach"):
                 detail = f"{detail} · {worker['attach']}".strip(" ·")
+            # A worker started by hand may share its item with others: its handle has its id.
+            shown = (
+                sanitize.scrub_identifier(str(worker["item"]))
+                if worker.get("origin", ORIGIN_SOURCE) == ORIGIN_SOURCE and worker["item"]
+                else sanitize.one_line(str(worker["handle"]), limit=40)
+            )
             lines.append(
-                f"  {sanitize.scrub_identifier(str(worker['item'])):<14} "
+                f"  {shown:<14} "
                 f"{sanitize.scrub_identifier(str(worker['role'])):<12} {worker['state']:<10} "
                 f"{str(worker['session_state'] or '-'):<9} "
                 f"{_elapsed(worker['created_at']):>6} {worker['step']:>4}  "
@@ -387,7 +404,8 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append("")
         lines.append("pending control requests")
         for request in runner["pending_requests"]:
-            lines.append(f"  {request['kind']} {request['target'] or ''}".rstrip())
+            target = f" {request['target']}" if request["target"] else ""
+            lines.append(f"  {request['kind']}{target} (from {request['origin']})")
     return "\n".join(lines)
 
 
@@ -547,23 +565,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
-def _find_worker(ledger: Ledger, item: str, role: str | None) -> tuple[Worker | None, str]:
-    live = ledger.live_workers_for(item)
-    if role is not None:
-        live = [w for w in live if w.role == role]
-    if len(live) > 1:
-        names = ", ".join(sorted(w.role for w in live))
-        return None, f"{sanitize.scrub_identifier(item)} has live workers in several roles ({names}); pass --role"
-    worker = live[0] if live else ledger.latest_worker_for(item, role)
-    if worker is None:
-        return None, f"no worker recorded for {sanitize.scrub_identifier(item)}"
-    return worker, ""
-
-
 def cmd_logs(args: argparse.Namespace) -> int:
     config = _load_config(args)
     with open_ledger() as ledger:
-        worker, problem = _find_worker(ledger, args.item, args.role)
+        worker, problem = ledger.find_worker(args.item, args.role)
     if worker is None:
         print(problem, file=sys.stderr)
         return EXIT_ERROR
@@ -714,6 +719,26 @@ def cmd_discard(args: argparse.Namespace) -> int:
     return _request(args, "discard", args.item, force=args.force, **_role_args(args))
 
 
+def cmd_clone(args: argparse.Namespace) -> int:
+    """Record the request the board's clone form records, with origin ``cli``."""
+    prompt = args.prompt
+    if args.prompt_file is not None:
+        try:
+            prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"chargehand: cannot read the prompt file: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    try:
+        extra = clone_mod.clone_args({
+            "mode": args.mode, "prompt": prompt, "model": args.model, "effort": args.effort,
+            "subscribe": args.subscribe,
+        })
+    except clone_mod.CloneArgsError as exc:
+        print(f"chargehand: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return _request(args, clone_mod.CLONE, args.item, **extra, **_role_args(args))
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     if sys.platform != "darwin":
         print("install writes a launchd LaunchAgent, which is macOS only. On other "
@@ -840,6 +865,82 @@ def cmd_templates(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _config_path(args: argparse.Namespace) -> Path:
+    return Path(args.config).expanduser() if args.config else paths.config_file()
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    try:
+        exported = transfer.export_setup(
+            Path(args.file).expanduser(), config_path=_config_path(args), force=args.force
+        )
+    except transfer.Refused as exc:
+        print(sanitize.one_line(str(exc), limit=4000), file=sys.stderr)
+        return EXIT_REFUSED
+    _print(f"wrote {exported.path}")
+    for member in exported.members:
+        _print(f"  {member}")
+    if exported.board_rows:
+        _print(f"  {exported.board_rows} board setting(s) of the configured repositories")
+    for dropped in exported.dropped:
+        _print(f"left out {sanitize.one_line(dropped.where, limit=200)}: set it again after the import")
+    _print("The archive holds no token and no Keychain value. Import it with "
+           "`chargehand import <file>`.")
+    if exported.notify_member:
+        # The hook is the operator's own script and is copied byte for byte, so a
+        # credential written into it travels too.
+        _print(f"{exported.notify_member} is your notification hook as it is: check that "
+               "it holds no credential, such as a private push topic, before you share the archive.")
+    for line in exported.kept:
+        _print(sanitize.one_line(line, limit=500))
+    return EXIT_OK
+
+
+def _ask(question: str, default: str) -> str:
+    """One answer from stdin. The question goes to stderr, so a script can pipe the answers in."""
+    shown = sanitize.one_line(f"{question} [{default}]", limit=300)
+    print(f"{shown}: ", end="", file=sys.stderr, flush=True)
+    line = sys.stdin.readline()
+    if not sys.stdin.isatty():
+        print(file=sys.stderr)
+    return line.strip()
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    given: dict[str, str] = {}
+    for pair in args.repository:
+        name, sep, value = pair.partition("=")
+        if not sep or not name or not value:
+            print(f"--repository takes NAME=PATH, not {pair!r}", file=sys.stderr)
+            return EXIT_ERROR
+        given[name] = value
+    try:
+        imported = transfer.import_setup(
+            Path(args.file).expanduser(),
+            config_path=_config_path(args),
+            ask=_ask,
+            repository_paths=given,
+            worktree_root=args.worktree_root,
+            force=args.force,
+        )
+    except transfer.Refused as exc:
+        print(sanitize.one_line(str(exc), limit=4000), file=sys.stderr)
+        return EXIT_REFUSED
+    for path in imported.written:
+        _print(f"wrote {path}")
+    if imported.board_rows:
+        _print(f"restored {imported.board_rows} board setting(s)")
+    if imported.token_created:
+        _print(f"wrote a new token to {imported.token_file}")
+    else:
+        _print(f"kept the token in {imported.token_file}")
+    _print("")
+    _print(f"Still to do by hand; `chargehand doctor` lists these from {imported.steps_file.name}:")
+    for step in imported.steps:
+        _print(f"  - {sanitize.one_line(str(step['detail']), limit=500)}")
+    return EXIT_OK
+
+
 # ----- parser ---------------------------------------------------------------
 
 
@@ -862,8 +963,16 @@ def build_parser() -> argparse.ArgumentParser:
         return sub
 
     def add_item(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("item", help="the work item, such as an issue identifier")
-        sub.add_argument("--role", help="the worker's role, when several roles hold the item")
+        sub.add_argument(
+            "item",
+            help="the work item, such as an issue identifier, or a worker's handle from "
+                 "`status --json`, such as implementer/ABC-1 or implementer/ABC-1#7, or '#7' quoted",
+        )
+        sub.add_argument(
+            "--role",
+            help="the worker's role; with an item it means the role/item handle, which names "
+                 "that role's start-rule worker, live or finished, before workers started by hand",
+        )
 
     tick = add("tick", cmd_tick, "run one tick now")
     tick.add_argument("--json", action="store_true")
@@ -923,6 +1032,30 @@ def build_parser() -> argparse.ArgumentParser:
     discard.add_argument("--force", action="store_true", help="discard even with unpushed commits")
     _add_request_flags(discard)
 
+    clone = add(
+        "clone", cmd_clone,
+        "start a new worker from an existing one, in a worktree of its own on its branch",
+    )
+    add_item(clone)
+    clone.add_argument(
+        "--mode", required=True, choices=ledger_mod.CLONE_MODES,
+        help="fresh: nothing from the old session; full: a copy of its conversation",
+    )
+    prompt = clone.add_mutually_exclusive_group()
+    prompt.add_argument("--prompt", metavar="TEXT",
+                        help="the first prompt template instead of the role's")
+    prompt.add_argument("--prompt-file", metavar="PATH",
+                        help="read the first prompt template from PATH")
+    clone.add_argument("--model", help="the model instead of the role's, such as sonnet")
+    clone.add_argument("--effort", choices=roles_mod.EFFORT_LEVELS,
+                       help="the effort instead of the role's")
+    clone.add_argument(
+        "--subscribe", action="append", default=[], metavar="KIND",
+        help="an event kind on the item that wakes the clone; repeatable. Default: none, so "
+             "only a reply from the board reaches it",
+    )
+    _add_request_flags(clone)
+
     serve_cmd = add("serve", cmd_serve, "run the daemon: the tick on a timer and the loopback API")
     serve_cmd.add_argument(
         "--log-file", metavar="PATH",
@@ -931,7 +1064,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     statusline = add(
         "statusline", cmd_statusline,
-        "status line wrapper: record the usage windows, then run your own status line command",
+        "status line wrapper: record the weekly usage window, "
+        "then run your own status line command",
     )
     statusline.add_argument(
         "user_command", nargs="*", metavar="-- COMMAND",
@@ -960,6 +1094,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--role", action="append", default=[], metavar="NAME",
         help="write this starter role and its agent file instead of the implementer; "
              "repeatable (e.g. pr-reviewer)",
+    )
+
+    export = add("export", cmd_export,
+                 "write this machine's setup to one archive, without secrets")
+    export.add_argument("file", help="the archive to write, such as setup.zip")
+    export.add_argument("--force", action="store_true", help="overwrite an existing archive")
+
+    import_cmd = add("import", cmd_import, "unpack an archive from `export` on this machine")
+    import_cmd.add_argument("file", help="the archive that `export` wrote")
+    import_cmd.add_argument("--force", action="store_true", help="overwrite existing files")
+    import_cmd.add_argument(
+        "--repository", action="append", default=[], metavar="NAME=PATH",
+        help="the path of a repository on this machine; repeatable. Without it, import "
+             "asks, or reads one line per repository from stdin",
+    )
+    import_cmd.add_argument(
+        "--worktree-root", metavar="PATH",
+        help="where workers' worktrees go on this machine. Without it, import asks, or "
+             "reads it from stdin after the repository paths",
     )
 
     templates = add("templates", cmd_templates, "print a bundled template")

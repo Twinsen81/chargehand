@@ -291,7 +291,7 @@ type = "github"
 
 `[[route]]` with `repo` and `max_open_attempts` are the older spellings and stay accepted.
 
-The daemon reads one more table. Every key is optional; these are the defaults:
+The daemon reads two more tables. Every key is optional; these are the defaults:
 
 ```toml
 [serve]
@@ -299,7 +299,14 @@ port = 7878                         # on 127.0.0.1; no key binds another address
 token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
 tick_interval_secs = 60             # how often the daemon ticks
 usage_file = "~/.cache/chargehand/usage.json"     # the status line wrapper writes it
+
+[usage]
+wake_reserve_percent = 20           # no wake while the week is above 80 %
+new_worker_reserve_percent = 30     # no new worker while the week is above 70 %
 ```
+
+The reserves keep a part of the subscription's weekly usage window for your own sessions (see
+"Admission" in section 5 and "Delivery" in section 6).
 
 `poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
 interval of `watch`, capped at 30 seconds.
@@ -324,6 +331,7 @@ effort = "high"                     # optional, passed as --effort
 prompt = "/work-issue {item}"       # or just "{item}"
 permission_mode = "auto"            # auto | manual | acceptEdits | dontAsk | plan | bypassPermissions
 allow = ["Bash(gh pr *)"]           # optional allow rules for this role's sessions
+permission_timeout_secs = 600       # optional: how long a permission prompt waits for the board
 setup = "scripts/prepare.sh {worktree}"   # optional, runs after the repository's setup
 status_file = "/tmp/chargehand/{item}/status.json"   # optional, see "Supervision"
 
@@ -437,7 +445,8 @@ runtime's name, and the board will show what a worker's runtime cannot do.
 
 Role files stay flat. The common keys (`runtime`, `prompt`, `model`, `effort`, `checkout`,
 `setup`, `status_file`, `[[start]]`, `[policy]`) sit next to the keys of the role's runtime,
-and the runtime checks its own: `agent`, `permission_mode` and `allow` belong to `claude`.
+and the runtime checks its own: `agent`, `permission_mode`, `allow` and
+`permission_timeout_secs` belong to `claude`.
 A key that neither the common set nor the runtime knows is an error, so a role written for
 one runtime does not start silently on another.
 
@@ -447,6 +456,23 @@ closed; a resume that starts a copy instead is reported as a fault. The test sui
 second runtime with fewer capabilities, whose processes chargehand hosts, and the tick tests
 that must behave the same run on both.
 
+Fork copies a session into a new one that keeps the conversation; a clone in full mode
+uses it (section 7). For `claude` it is `claude --resume <full session id> --fork-session
+--bg -n <name> --permission-mode <mode> --settings <file> --model <model> --effort
+<effort> "<prompt>"`, run in the clone's own worktree with stdin `/dev/null`, after the
+same trust entry and settings file as a launch. Observed on 2026-11-03 with Claude Code
+2.1.317, against an idle original in another worktree of the same repository: the resume
+finds the conversation from the new worktree; the copy lists with the new worktree as its
+working directory and the given name, its transcript is kept for the new directory, and
+the original's transcript and session are unchanged; the copy keeps the earlier turns
+(it answered with a word the original was told to remember) and runs its new turn on the
+given model and effort, in the given permission mode; `-n` and `--settings` apply, and
+its hooks reach the daemon under its own session id, SessionStart included, with stdin
+`/dev/null`; a stop and an in-place resume of the copy keep its model, effort and
+permission mode; and the original still wakes in place in its own session. A copy
+without the flags falls back to the default effort and permission mode, so they are
+always passed again.
+
 A command template is split into arguments *before* its variables are substituted, and nothing
 is run through a shell, so a value containing spaces or shell metacharacters stays one argument.
 
@@ -455,8 +481,18 @@ is run through a shell, so a value containing spaces or shell metacharacters sta
 ### Admission
 
 A new launch needs `working < max_concurrent`, `working + blocked < max_open_workers`, the
-repository's own `max_concurrent` when it has one, and the role's `max_workers` when it has
-one.
+repository's own `max_concurrent` when it has one, the role's `max_workers` when it has
+one, and the usage reserve for new workers: the weekly window of the role's provider at or
+below 100 minus `new_worker_reserve_percent` (70 % by default). The usage readings are kept
+per provider (window kind, percent used, reset time), and each runtime names the provider
+its sessions draw on; only `claude` has readings, from the status line wrapper's usage
+file. No usage file is no reading, and no reading means no reserve. The newest reading
+counts however old it is: the status line wrapper writes the file only while an
+interactive session shows its status line, and between sessions the last reading is the
+best one there is. Once the weekly window's reset time has passed, its percentage belongs
+to the week before, so the reading holds nothing. The check covers the start
+rules, the board's new workers, clones and every later way to start one. A start that the reserve
+holds waits as one that a cap holds; a board request is refused with the reason.
 
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
@@ -473,13 +509,20 @@ idempotent, and the row's `step` advances after each one.
 2. Swap the labels, then re-read the issue to verify. A write that reports failure is not
    assumed to have failed; the row stays `launching` and reconciliation settles it.
 3. Fetch, then create the worktree on a placeholder branch (skip if it already exists).
-   The session may rename the branch later. Removing the worktree deletes the branch
+   A clone's branch starts from its original's current branch (the branch the original's
+   worktree is on now, which follows a rename, else its recorded branch), so its commits,
+   pushed or not, carry over; its uncommitted changes do not. Every other worker's branch
+   starts from `base`. The session may rename the branch later. Removing the worktree deletes the branch
    under its new name too, when git's reflog records the rename; a branch the session
    switched to in any other way is kept, and the result says so.
 4. Run the repository's setup script in the worktree, then the role's. Failure marks the
    worker failed.
 5. Start the background session, named `<role>/<item>`, with the role's agent, model,
-   effort, permission mode and allow rules.
+   effort, permission mode and allow rules. A clone uses the prompt template, model and
+   effort chosen for it where it has them, filled in with its own worktree and branch;
+   in full mode the session is a fork of the original's, with one line before the prompt
+   that names the clone's worktree and branch and says that the original's worktree
+   belongs to another worker.
    Starting inside a linked worktree means Claude Code does not create one of its own.
 6. Find the new session in the listing by name or working directory and record its ids.
    `state = running`. Looking it up rather than scraping the launch output is what makes
@@ -552,11 +595,50 @@ hook carries in its `Authorization` header and the `SessionStart` command reads 
 reads `session_id`, `cwd`, `transcript_path`, `last_assistant_message`, `error`,
 `notification_type`, `tool_name`, `tool_input` and `source`), and the post maps to the
 live worker with that session id, else to the live worker without a session id yet whose
-worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer is
-`{}`: a `Stop` gets no decision that would keep the turn running, a `SessionStart` gets no
-context for the model, and a `PermissionRequest` gets no decision, so the session keeps its
-own dialog. A hook that times out, or finds no daemon, is an error that Claude Code reports
-and goes past; the session runs on, and the next tick reads its state from the listing.
+worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer
+but a held permission prompt's is `{}`: a `Stop` gets no decision that would keep the turn
+running, and a `SessionStart` gets no context for the model. A hook that times out, or
+finds no daemon, is an error that Claude Code reports and goes past; the session runs on,
+and the next tick reads its state from the listing.
+
+**Permission prompts on the board.** For a runtime with board permissions, the daemon
+holds a `PermissionRequest` post open, and the worker's card in Needs you shows the tool
+and its input with Allow, Deny and Always allow. The `PermissionRequest` hook waits
+`permission_timeout_secs` (a `claude` role key, 600 seconds by default, 20 to 3600); the
+other hooks keep their 10 seconds. A session keeps the timeout of its launch, and the
+daemon reads it from the session's settings file: a session launched with the old
+10 seconds is not held. A prompt is a ledger record: `open`, then `resolved` (with the
+decision and who decided: `board` or `rule`) or `cancelled` (by the `session`). The board's
+answer, `POST /api/workers/<id>/answer` with `prompt` and `answer` (`allow`, `deny` or
+`always`), resolves the row only while it is open and a hook still holds it, so the first
+answer wins and a second click answers 409, "already resolved"; the held hook then
+returns Claude Code's decision. Before it writes, the answer asks the runtime whether the
+session still shows a permission dialog (`claude agents`: `blocked`, waiting for
+"permission prompt"). Claude Code keeps the hook's connection open after an answer in
+`claude attach`, and no hook may come for a long time after it, but the listing shows the
+answer within a fraction of a second. When the session no longer shows the dialog, the
+click is refused with 409, "already resolved", and the record is cancelled at once; when
+the listing cannot be read, the click is refused and the record stays open. Always
+allow also records a rule for that worker: the same tool with the same input, matched by
+a hash of the whole input (except a Bash call's `description`, which the model words
+anew for each call). The next such post
+is allowed at once, with no card and no notification, and is recorded as resolved by the
+rule. A rule never changes the role, the repository or Claude Code's settings.
+
+The hook answers `{}`, so the session shows its own dialog, in three cases: the record is
+cancelled because the session no longer shows the dialog; five seconds before the
+hook's timeout; and when the daemon stops. A record is cancelled when the worker leaves
+`blocked`, when its turn or session ends, and when a wake or a continue starts a new turn
+or session; a record from that new turn, recorded while the wake or the continue ran,
+stays open, and so does one recorded during a launch. An answer in `claude attach` sends
+no hook, and the tick may be a minute away, so while it holds hooks the daemon also looks
+at the session listing, half a second after a hold starts and then every 2 seconds, one
+listing for all held hooks on a thread of its own, and cancels a record whose session
+showed the dialog and no longer does. After a timeout or a restart the record is
+*released*: it stays `open`, because the session still shows the dialog, with
+`released_at` set, so no hook holds it, and the card says to answer in the session. The
+record has a `kind` and an `options` list, so a question with its own options can use
+the same record and card.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks
 existed is followed by the diff alone.
 
@@ -564,9 +646,9 @@ existed is followed by the diff alone.
 |---|---|
 | `SessionStart` | the worker is `running` |
 | `Stop` | as a `done` session: the status file, then `idle` (or what the file says) |
-| `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one |
+| `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one; a limit of one model family also sets the board's model-limit badge |
 | `StopFailure`, any other error | the worker is `blocked`, "session failed" |
-| `PermissionRequest` | the worker is `blocked`, and the prompt is recorded with its tool and input |
+| `PermissionRequest` | the worker is `blocked`, the prompt is recorded with its tool and input, and the post waits for the board's answer; with a matching Always allow rule, it is allowed at once and nothing else changes |
 | `Notification` `permission_prompt` | the worker is `blocked` |
 | `Notification`, other types | no change |
 
@@ -578,14 +660,22 @@ for before a hook arrived is older than that hook, and the diff leaves that work
 the next tick. The last answer, the tool input and the other payload text are untrusted:
 they are cleaned of control sequences and capped when stored, kept out of notifications,
 and escaped when the page renders them. `/api/state` shows each worker's last hook, its
-last answer, its reset time and its open permission prompts. A prompt is resolved when the
-worker leaves `blocked` by any path, a `stop` or a `cancel` included.
+last answer, its reset time and its open permission prompts. An open prompt is cancelled
+when the worker leaves `blocked` by any path, or when its turn or session ends, a `stop` or
+a `cancel` included.
 
 The usage-limit category has not been observed yet (a missing model gives
 `model_not_found`), so it is matched defensively: a category such as `rate_limit` or
 `usage_limit`, or an unnamed one whose message says so. The raw category is kept in
 `last_error`. The reset time is read from an epoch, an ISO 8601 time, or a clock time such
-as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown.
+as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown. The same
+check reads a `failed` session in the listing: a category or a message in its error
+fields that names a usage limit parks the worker as the hook does, for a session whose
+hook did not arrive. A message that names a model family's own limit, such as "Opus
+weekly limit reached", also records that family for the board's top bar, because the usage
+window has no per-model part. Claude Code can still name the limit of a window that the
+subscription no longer has (it had a shorter window until 2026-11-03); such a message
+parks too.
 
 | Session state | Meaning | Action |
 |---|---|---|
@@ -599,8 +689,12 @@ question and the worker waits for events), `queued` (events wait in its inbox fo
 that admission held back), `blocked` (it needs you), `paused` (stopped by `stop`) or
 `parked` (a usage limit ended its turn; it waits for the reset). On the tracker, `idle`,
 `queued` and `parked` keep the blocked label, as a finished turn did before: the operator
-may want to look at what the turn left. Delivery, the watchdog and the session diff never
-move a `parked` worker; `continue` respawns it.
+may want to look at what the turn left. The watchdog and the session diff never move a
+`parked` worker. Parking is not a failure: it uses no launch attempt and no retry, and it
+is notified once. Once its reset time has passed, delivery resumes the worker in the same
+session with a short continue message, oldest reset first, through the same admission as
+a wake, so a long list of parked workers does not use the new window at once. A worker
+parked without a reset time waits for `continue`, which respawns it.
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -637,16 +731,24 @@ line per event with its kind, a colon and its pointer, for example
 `review_requested: https://github.com/o/r/pull/1`, and nothing else. Two events of one kind
 on one pointer give one line; one pointer with two kinds gives two lines. A pointer that is
 not a plain http(s) URL or identifier is left out, and a kind that is not a plain lower-case
-name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. The role
+name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrives. A reply
+typed on the board (section 7) is the one line that carries text:
+`reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
-`max_wakes_per_day` over the last 24 hours, and the usage reserve (no reading yet means
-no reserve). A worker that is not admitted becomes `queued` and keeps its events. The
+`max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
+worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
+reading means no reserve; a reading counts however old it is, until the window's reset
+time has passed (see "Admission" in section 5). A worker that is not admitted becomes `queued` and
+keeps its events, and the reason it waits is kept for the board. The
 runtime then wakes the same session: `claude` stops a live idle process, confirms that it
 stopped, and resumes it by the full session id. It reads the listing again first: a session
 that started a turn or opened a prompt since the tick's listing is left alone, and its
 events wait. After the wake, one ledger transaction marks
 the events delivered and records the wake on the worker and as a `wake` row in `sessions`.
+The worker becomes `running` only while no hook came in since delivery read it: a hook
+of the new turn, such as a permission prompt, wrote the state the session shows, and the
+wake then adds only its own record. `continue` writes its state the same way.
 A crash between the two leaves the events in the inbox, and a later tick wakes the worker
 with them again, which costs one turn. A resume that starts a copy is a fault: the worker
 is paused with the reason, keeps its session and its events, and you are notified. A
@@ -716,9 +818,13 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
+chargehand clone <ITEM> --mode fresh|full [--prompt TEXT | --prompt-file PATH] [--model M]
+                 [--effort E] [--subscribe KIND]...   # a new worker from an existing one
 chargehand tick                     # run a tick now, under the tick lock
 chargehand serve                    # the daemon; `install` writes the job that runs it
-chargehand statusline -- '<command>'   # status line wrapper: records the usage windows
+chargehand statusline -- '<command>'   # status line wrapper: records the weekly usage window
+chargehand export <FILE>            # this machine's setup in one archive, without secrets
+chargehand import <FILE>            # unpack it on another machine; asks for the paths
 ```
 
 Commands that take an item also take `--role`, which is needed when workers of several
@@ -757,25 +863,190 @@ roles hold the item. `--route` stays accepted for `--repository`.
   and patches its cards in place, keyed by worker, so a hook shows within a second and
   the scroll position of each column stays. That answer is built from the ledger, the
   role files and the usage file only: no tracker call and no session listing per
-  request. The top bar shows the two usage windows with their reset times and levels
+  request. The top bar shows the weekly usage window with its reset time and level
   (grey when unknown), the launch throttle (working against `max_concurrent`, open
-  against `max_open_workers`, pauses) and the daemon's health (last tick, its duration,
-  errors, uptime, version). The columns are Needs you (`blocked`), Working (`launching`,
-  `running`), Queued (`queued`, and `parked` with its reset time), Idle (`idle`,
-  `paused`) and Closed (workers that finished in the last 24 hours). A card shows the
-  role, the item with its link, the branch, the worktree, the model and effort of the
-  role, the last prompt (the role's first prompt before any wake, else the wake message
-  of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open
-  permission prompt, the wakes in the window of the daily wake cap, an approximate token
-  count (the transcript's size over four) and the attach command. The board is
-  read-only: actions on workers are not built yet.
+  against `max_open_workers`, pauses), a model-limit badge while a turn that failed on
+  one model family's own limit waits for its reset (or for a fixed time when the failure
+  gave no reset time), and the daemon's health (last tick, its duration, errors, uptime,
+  version). The columns are Needs you (`blocked`), Working (`launching`, `running`),
+  Queued (`queued`, with the reason each worker waits: a cap or the usage reserve),
+  Parked (`parked`, with its reset time, and the reason a resume waits once the reset has
+  passed), Idle (`idle`, `paused`) and Closed (workers that finished in the last 24
+  hours). A card shows the role, the item with its link, the branch, the worktree, the
+  worker's model and effort (the role's, or the ones chosen for a clone), the last prompt
+  (the first prompt before any wake, as the launch built it, else the wake message of the
+  last wake, rebuilt from the inbox rows it delivered), the
+  last answer, an open permission prompt with Allow, Deny and Always allow while its hook
+  waits (section 6), the wakes in the window of the daily wake cap, an approximate token
+  count (the transcript's size over four) and the attach command.
+- **Board actions.** Every control command has a button, and each button records the
+  same request as the command, with `origin` `board` where the CLI records `cli`; the
+  tick applies both alike, so the daemon stays the one writer. `status --json` shows the
+  origin of each pending request, and the tick's log line for a request names it. The
+  API, every call a `POST` with the token and a JSON body:
+  `POST /api/workers` starts a worker (`repository`, `role`, an optional `item`, and
+  `subscribe`, the event kinds on the item that wake it); `POST /api/workers/<id>/<action>`
+  with `pause` (the CLI's `stop`), `continue` and `retry` (each with `force`), `cancel`,
+  `discard` (with `force`), `archive` (with `force`), `reply` (`text`), `clone` (see
+  below), `attach` (`terminal`) and `answer` (`prompt` and `answer`, for a permission
+  prompt; it answers at once, see section 6); `POST /api/repositories/<name>/pause` and
+  `/resume`, `/archive`
+  (with `force`) and `/unarchive`; `POST /api/pause` and `/api/resume` for all
+  repositories. An action waits up to three seconds for the tick
+  and answers with the request's outcome, or with the request pending;
+  `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
+  The page asks for the token once, keeps it in the browser's `localStorage` for this
+  origin, and sends it only in the `Authorization` header, never in a URL.
+  A worker started from the board has origin `board`. The one-worker-per-role-and-item
+  rule of the start rules does not hold it, but a paused repository and every cap do.
+  Its item, when given, becomes a work item through the repository's tracker, which
+  knows the item's format; it follows the event kinds you chose on that item, and it
+  never writes the queue label. For a start rule it holds its item for those kinds only:
+  a start event of another kind is not delivered to it and starts a worker as if it were
+  not there. The queue label is the exception, as for any live worker on the item: the
+  queue start waits until it ends. The session of a finished one is reported, never
+  adopted as a start rule's worker. A role that checks out its item needs an item. Its worktree and branch end in its id
+  (`<root>/<role>/<item>-<id>`, `<prefix><role>/<item>-<id>`, or `worker-<id>` without
+  an item), so several such workers can work on one item. A `retry` of such a worker
+  starts a new one the same way. Workers that share a role and an item are told apart
+  by a handle with the worker's id, `role/item#id` (`role/#id` without an item); a
+  worker that a start rule created keeps `role/item`. Every command that takes an item
+  also takes a handle, and `#id` alone; a shell reads a word that starts with `#` as a
+  comment, so quote it: `chargehand stop '#7'`. One rule resolves a target, in order:
+  (1) an id handle names the worker with that id; (2) `role/item`, or an item with
+  `--role`, is a handle, and when a worker has exactly that handle it wins, the live one
+  first, then the newest; (3) otherwise the item decides: its one live worker (in the
+  role, when known), or among several the one start-rule worker that the bare item
+  names, or with none live the newest recorded. A bare item whose one live worker was
+  started by hand, while a start-rule worker on the item has ended, is refused, because a
+  notification about that worker carried the bare item. Anything else is refused with
+  each candidate as `role/item#id`, and a refusal about a finished worker lists the live
+  workers on its item. `cancel` and `discard` name the worker they acted on. Every handle chargehand prints resolves back to its
+  worker under this rule: `status --json` and the board show `role/item` for a live
+  start-rule worker and the id handle for every other worker, finished ones included,
+  and a hint in a refusal uses the bare item only when the rule resolves it to that
+  worker.
+  A reply is one line of text, cleaned of control sequences and capped at 500
+  characters. It enters the worker's inbox as an event of the source `board`, the path
+  a comment on its item takes, so delivery wakes the worker with it under the same caps
+  and the same usage reserve. No configured source may be named `board`. A worker that
+  is blocked, paused or parked keeps the reply in its inbox until it is idle again, and
+  the answer says so.
+  Attach opens a terminal window that runs the card's attach command (`claude attach
+  <session id>`): iTerm2 or Terminal.app, chosen on the page, through `osascript`, on
+  macOS only. The daemon's request thread runs it at once, because the tick can be busy
+  with a launch for minutes, and records an `attach` request that is already applied, for
+  the audit trail. The command reaches the AppleScript as an argument, never as part of
+  its source, and only a command of plain words is accepted. The board has no chat:
+  anything that needs a conversation goes through attach.
+- **Clone.** A clone is a new worker made from an existing one, for a second opinion, a
+  retry with another prompt, or another model. `POST /api/workers/<id>/clone` takes
+  `mode` (`fresh`: nothing from the old session; `full`: a copy of its conversation),
+  and optionally `prompt` (a prompt template, at most 16 KiB, cleaned of control
+  sequences, with the same placeholders as a role's prompt), `model` (a model name or
+  alias that does not start with `-`), `effort` (a level of the role file) and
+  `subscribe` (event kinds on the original's item, only when it has one); a bad value is
+  refused with 400 before a request is recorded. `chargehand clone <ITEM> --mode ...`
+  records the same request row, with origin `cli`. `GET /api/workers/<id>/clone`, a read
+  without the token, answers what the card's clone form starts with: the worker's prompt
+  template, model and effort (its role's, or for a clone the ones chosen for it), the
+  effort levels, the item, `modes` with `full` only while a copy is possible, and
+  `full_refused` with the reason otherwise. The form has a mode choice, the prompt as a
+  text area, the model, the effort and, for a worker with an item, the event kinds,
+  empty by default. A card offers Clone while the worker's worktree or branch exists:
+  not after garbage collection or an archive, nor while an archive of it runs.
+  The tick checks the request again and refuses it, before any ledger row or worktree
+  exists, when the repository is paused or unavailable, when the original's branch is
+  gone, for full mode when the runtime cannot fork, the original has no session, or it
+  is launching, running or blocked (a copy would take a turn in progress or an open
+  prompt), and when a cap or the usage reserve for new workers holds it. A clone has
+  origin `clone`, the original's role and item, and the id handle; the
+  one-worker-per-role-and-item rule does not hold it. It gets a new worktree and branch
+  (`<item>-<id>`) from the original's current branch (section 5), so the two never
+  write the same tree; when the original's worktree has uncommitted changes, the answer
+  says that they are not in the clone. By default it follows no event kinds, so it
+  costs nothing per comment and only a reply from the board reaches it. Its original,
+  mode, prompt, model and effort are columns of its ledger row (schema version 9), so
+  a launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a
+  new clone of the same original with them, or says why it cannot. A full-mode fork is
+  recorded as a `fork` session. A clone's session gets `Edit` and `Write` deny rules
+  for its original's worktree in its own settings file, in both modes, and for the
+  worktree of every earlier original of a clone of a clone, because a copy of a copy
+  names them all; the line before a full-mode prompt names them all too. A deny rule holds
+  in every permission mode, so its file tools cannot change the original's tree, while
+  its Bash tool is not covered (SECURITY.md). The clone's branch holds the original's
+  commits, so its retry, discard and archive refuse while those are not pushed, unless
+  forced. In a repository group of one column a clone's card follows its original's
+  card, and a clone of a clone follows its own original, when both cards are pinned or
+  both are not: a pinned clone of an unpinned card stays with the pinned cards, and an
+  unpinned clone of a pinned card stays with the others, so the pinned cards still come
+  first. Every clone card carries "clone of <handle>".
+- **Board personalisation.** Each column groups its cards by repository, under a heading
+  with the repository's name, icon, card count and a collapse toggle. A repository can be
+  renamed, given an icon, pinned, collapsed and hidden; a worker can be renamed, given an
+  icon and pinned. This is state, not configuration: it lives in the ledger's
+  `board_state` table (schema version 6), one row per kind (`repository` or `worker`),
+  key (the configured repository name or the worker id) and field, so it survives a
+  restart of the daemon. The API: `POST /api/repositories/<name>/board` with any of
+  `name`, `icon`, `pinned`, `collapsed` and `hidden`, and `POST /api/workers/<id>/board`
+  with `name`, `icon` and `pinned`; `false`, `null` or an empty text drops a setting. It
+  needs the token like every `POST`, and it writes the table at once without a request
+  row, because it has no effect outside the ledger. A display name is one cleaned line of
+  at most 60 characters; it never changes the configured name, the handle or the session
+  name, so the CLI, the ledger and the sessions see the same names as before. An icon is
+  one emoji or a name from a small bundled set (`star`, `rocket`, `bug`, ...); nothing is
+  uploaded. A board pin only sorts: in each column the pinned repositories come first,
+  then the others by their latest card, and in each repository the pinned cards come
+  first, then the others by their last activity. A collapsed repository shows only its
+  pinned cards and the number of cards it folds. The card labels this pin "board pin":
+  Claude Code's own pin in agent view keeps a session's process alive, and this one does
+  not; the session listing does not report that pin, so the board does not show it. A
+  hidden repository's cards leave the board, and the top bar shows the hidden count and a
+  filter that shows them again (`GET /api/board?show_hidden=1`). Only the board model
+  reads the table: launches, supervision, notifications, `status` and the tick do not,
+  so a hidden repository's workers run, are supervised and notify as before.
+- **Archives and jobs.** An archive is one zip of what a worker leaves: its worktree (and
+  the item checkout of a `checkout = "item"` role), the session transcript as text, its
+  ledger row and its sessions as JSON, and its handoff note when one exists. It is written
+  under the state directory as `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip`, mode
+  0600; the time and the worker id keep two archives apart. The guard runs again when the
+  cancel of a live worker has applied, before the zip. The `archive` request is applied
+  by the tick like any other: it refuses a worker that is archived, that has an archive
+  under way, or whose worktree was already removed; it applies the guard of discard
+  (unpushed commits or uncommitted changes refuse it unless forced, and a forced archive
+  keeps the files, not the commits); for a live worker it records a `cancel` request with
+  the same origin and lets the archive wait for it. The archive itself is a row of the
+  `jobs` table (schema version 8, with `workers.archived_at`): a kind, a target, its
+  arguments, a state, progress text, a result path, an error and its times. The states are
+  `waiting` (for the cancel), `queued`, `running`, `written`, `done` and `failed`. A thread
+  of the daemon, not the tick and not a request handler, runs the queued jobs one at a
+  time: it writes `<name>.zip.part` with the transcript read from the session's transcript
+  file (only a `.jsonl` file under Claude Code's `projects` directory; otherwise
+  `claude logs`), reads every member back to check its CRC, syncs the file, and renames it
+  to its final name; a file is streamed in chunks, a symbolic link is stored as a link, and
+  sockets and pipes are left out. Only then is the job `written`, and the next tick, the
+  one writer of git and of sessions, applies the guard again and removes the session, the
+  worktree and the branch through garbage collection, and sets `archived_at`. Garbage
+  collection, discard and retry leave a worker alone while an archive of it is under way.
+  A stop of the daemon during the zip, or a crash, leaves at most the `.part` file and the
+  job `running`; the next start of the job thread deletes every `.part` file and puts
+  `running` jobs back in the queue, so the job runs again from the start. `archive_repository`
+  hides the repository (the `hidden` board setting) and queues an archive of each of its
+  workers that still has a worktree; it refuses while the repository has live workers, or
+  while any worker holds work that is not pushed, unless forced, which cancels the live
+  workers first. `unarchive_repository` only shows the repository again; the zips stay. The
+  top bar shows the jobs of the last hour: a running or failed job in full, the others as
+  one count per state (waiting, queued, written, archived), so that the archive of a whole
+  repository stays readable; each card shows its worker's job and archive time. Restoring
+  a worktree from a zip is a manual step (see the README), not a button.
 - **Usage readings.** Claude Code gives a status line command the subscription's
-  `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
-  `resets_at`. It sends them on subscription plans only, and only after the session's first
-  API response. `chargehand statusline -- '<command>'` reads that payload, writes both
-  windows with the time it wrote them to `usage_file` (atomically, mode 0600), and then
-  runs `<command>` through a shell with the same stdin, passing its output and exit code
-  through. A payload without `rate_limits` leaves the file as it is, and a file that cannot
+  `rate_limits`: a `seven_day` window with `used_percentage` and `resets_at`. It sends them
+  on subscription plans only, and only after the session's first API response.
+  `chargehand statusline -- '<command>'` reads that payload, writes the `seven_day` window
+  with the time it wrote it to `usage_file` (atomically, mode 0600), and then runs
+  `<command>` through a shell with the same stdin, passing its output and exit code
+  through. Other windows in `rate_limits` or in the file are ignored without a message. A
+  payload without the `seven_day` window leaves the file as it is, and a file that cannot
   be written changes nothing in the status line. chargehand does not edit your settings;
   you wrap your own command in `~/.claude/settings.json`:
 
@@ -787,14 +1058,14 @@ roles hold the item. `--route` stays accepted for `--repository`.
   ```
 
   Without a status line of your own, leave out `-- '<command>'`; the status line is then
-  empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for each
-  window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
-  `red` from 80 %. A reading older than 30 minutes, a missing or unreadable file, and a
-  window whose reset time has passed are unknown, with the level `grey`. `status --json`
+  empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for the
+  `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
+  `red` from 80 %. A missing or unreadable file and a window whose reset time has passed
+  are unknown, with the level `grey`; the age of the file does not matter. `status --json`
   carries the same object.
 - **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
-  progress finishes, the rest of that tick is skipped, the server shuts down, and the exit
-  code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL
+  progress finishes, the rest of that tick is skipped, a job in progress stops and goes
+  back to the queue, the server shuts down, and the exit code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL
   when the daemon has not exited after the job's `ExitTimeOut`, 300 seconds; a phase that
   runs longer, such as a slow setup script, is then killed and reconciled as an
   interrupted launch.
@@ -899,6 +1170,58 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 - Sessions do not survive a restart. The ledger, the labels and the worktrees do, and the
   next tick parks any run whose session is gone, so a restart costs progress but never
   consistency.
+- Archives build up under `archive/` in the state directory; nothing deletes them. They
+  are not part of an export.
+
+### Moving a setup to another machine
+
+`chargehand export <file>` writes one zip archive with a `manifest.json` (format version,
+chargehand version, time, member list). It holds:
+
+- The machine configuration. Repository paths, `worktree_root`, `usage_file`, and every
+  `*_bin` key are written with `~` for the home directory; `token_file` and `usage_file` are
+  left out when they have their default value, so the default of the other machine applies.
+  The notification hook's command names the script in the archive. Each repository gets an
+  explicit `name`, because the board settings are kept by name. Keys that can carry a
+  credential (`api_key_command`, and any key whose name ends in `token`, `secret`,
+  `password` or `api_key`) are left out and listed in the manifest. Comments and the keys
+  export does not rewrite stay as they are: the standard library has no TOML writer, so the
+  file is rewritten as text and parsed again.
+- The role files in `~/.config/chargehand/roles/`, and the agent files in
+  `~/.claude/agents/` that the machine-level roles or the repositories' enabled roles name.
+  Repository-level role files travel with their repository.
+- The notification hook, when its command runs a file in the home or the configuration
+  directory, copied as it is. A program installed elsewhere, such as a system or Homebrew
+  binary, stays where it is, and the command keeps naming it. So does a file in the home
+  directory that cannot travel as it is: one over 4 MB, one that is not text, or a
+  generated shim that contains the home directory's path. Export says why, and import
+  lists installing it as a manual step. The archive holds no file larger than 4 MB and at
+  most 512 files, the limits import applies.
+- The `statusLine` entry of `~/.claude/settings.json` when it runs `chargehand statusline`.
+- The board settings of the configured repositories. Worker settings are not exported: they
+  are kept by worker id, and a worker id means nothing on another machine.
+
+The archive never holds the daemon's token, a Keychain value, or the rest of the ledger.
+Export refuses to write an archive in which any file still contains the home directory or
+the token, and names the file.
+
+`chargehand import <file>` checks the archive first: it refuses a format version newer
+than it knows, a file name outside the layout above, a symlink, and a member that the
+manifest does not list. It then asks for each repository's path and for the worktree root
+(the archive's values are the defaults), or takes them from `--repository NAME=PATH` and
+`--worktree-root`, or reads one line per question from stdin. It never overwrites a file or
+a board setting without `--force`, and it checks all of them before it writes anything. It
+writes the configuration, the role and agent files and the hook, restores the board
+settings through the board's cleaning rules, and writes a new token. It does not write
+`~/.claude/settings.json`, and it does not install the launchd job.
+
+What is left to do by hand goes to `imported-steps.json` next to the configuration:
+each credential key that was left out, the tracker's key or sign-in, the status line entry,
+`install --load`, the notification method, and each program that the configuration names
+by path and the archive does not carry: the notify program, and every `*_bin` key
+(`claude_bin`, `git_bin`, a tracker's `gh_bin`) given as a path. Export prints one line for each such program. `doctor` lists each
+step; a step it can check (a key that is set again, the status line entry, a loaded job,
+an installed program) shows as done once it is.
 
 ### The daemon's log
 
@@ -934,7 +1257,8 @@ not a record of what workers did: nothing a session wrote reaches it.
   the first eight characters of the session id, and the worker, or "no live worker" with
   the cwd; a refused post names its status. One line per accepted label or status write,
   with the status before and after. One line per wake, with the `kind: pointer` lines of
-  its message. A WARNING heartbeat for a tick longer than the interval, or one that began
+  its message, and the line of a reply from the board, which is the operator's own text.
+  A WARNING heartbeat for a tick longer than the interval, or one that began
   more than two intervals after the previous one ended. An idle tick writes no report line.
 - **One key.** Every line about a worker starts with its handle, `role/item`.
 - **What never appears.** A last answer, a waiting text, a permission prompt's tool
@@ -972,6 +1296,7 @@ Done:
   launch-time deny rules, the assistant skill with its ask rules.
 - Notifications, watchdog, garbage collection, the status-file protocol.
 - `init`, `doctor`, `install`, and the bundled templates.
+- `export` and `import`: a machine's setup carried to another machine without its secrets.
 - Devices shared through a lease tool that chargehand never calls, with the deny rule for
   its operator commands.
 - Roles and workers: role files with an agent, model, effort and allow rules, start rules,
@@ -986,7 +1311,9 @@ Next:
   banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
-- Actions on the board: new worker, reply, pause, cancel, discard.
+- Actions on the board: new worker, reply, pause, cancel, discard, clone in fresh or
+  full mode. A third clone mode that hands over a summary of the old session waits for
+  the handoff note.
 - Packaging, first release.
 - Optional: agents under a separate user.
 

@@ -15,9 +15,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the call only tied chargehand to banksman's output schema. `pool_bin` is still
   accepted for one release, and `doctor` says that it is ignored. The deny rule for
   `banksman admin` stays in the launch deny rules.
+- The five-hour usage window. The subscription has only the weekly window now, so the status
+  line wrapper records only `seven_day`, both reserves read only the weekly window, and the
+  board's top bar shows one gauge. The `usage` object of `/api/board`, `/api/state` and
+  `status --json` has no `five_hour` key any more. A `five_hour` window that a status line
+  payload or an older usage file still carries is ignored without a message, and a turn
+  that fails on a five-hour limit still parks the worker.
+- The age limit of a usage reading. A reading older than 30 minutes no longer counts as
+  unknown: the newest reading holds wakes and new workers however old it is, until the
+  window's reset time has passed. The `usage` object has no `age_secs` key any more, and
+  the gauge no longer turns grey because of age.
 
 ### Added
 
+- Clone a worker, from a card's Clone form or with `chargehand clone <ITEM> --mode
+  fresh|full`. A clone is a new worker with origin `clone`, on its original's role and
+  item, in a worktree of its own branched from the original's current branch, so its
+  commits carry over and the two never write the same tree. Fresh mode starts a new
+  session; full mode starts with a copy of the original's conversation (`claude --resume
+  --fork-session --bg`, run in the clone's worktree with its own name, hook settings,
+  permission mode, model and effort), refused while the original is launching, running or
+  blocked. A clone's settings file denies the Edit and Write tools in the worktrees of its
+  original and of every earlier original, in every permission mode. The form starts with
+  the worker's prompt template, model and effort
+  (`GET /api/workers/<id>/clone`), which you can change, and the event kinds the clone
+  follows, none by default, so only a reply reaches it. The board and the command line
+  record the same `clone` request; the tick refuses it, without a worktree, when the
+  repository is paused, the original's branch is gone, a cap or the usage reserve for new
+  workers holds it. Schema version 9 adds `parent_id`, `clone_mode`, `prompt`, `model` and
+  `effort` to `workers`, so a resumed launch and a `retry` of a clone use the chosen
+  values; `retry` starts a new clone of the same original. A clone's card follows its
+  original's card, `status --json` has `parent`, and cards show the worker's own model and
+  effort.
+- Archive a worker or a whole repository from the board. An archive is one zip under the
+  state directory, `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600,
+  that holds the worktree, the session transcript as text, and the worker's ledger row and
+  sessions as JSON. A live worker is cancelled first, through a cancel request; unpushed
+  commits or uncommitted changes refuse the archive unless forced, as for discard. A new
+  `jobs` table (schema version 8, which also adds `workers.archived_at`) records the work,
+  and a thread of the daemon writes the zip, so a large worktree does not block the tick
+  or the board; the card and the top bar show the job and its progress. The zip is
+  written as a `.part` file, read back in full, synced and renamed; only then does the
+  tick remove the worktree, the branch and the session through garbage collection, after
+  the guard once more. A stop or a crash of the daemon during the zip leaves no archive
+  and no removed worktree, and the job runs again at the next start. Archiving a
+  repository hides it and archives each of its workers that still has a worktree; it
+  refuses while the repository has live workers, unless forced. Unarchive shows it again.
+  Restoring a worktree from an archive is a manual step, described in the README.
+- The usage policy. `[usage]` in the machine configuration keeps a part of the
+  subscription's weekly usage window for interactive work: no wake while it is above 100
+  minus `wake_reserve_percent` (20 by default), and no new worker, from a start rule or the
+  board, while it is above 100 minus `new_worker_reserve_percent` (30 by
+  default). The daemon now reads the status line wrapper's usage file for these reserves;
+  before, no reading reached the wake reserve. No usage file means no reserve; the newest
+  reading counts however old it is, until the window's reset time has passed. Readings are
+  kept per provider, and each runtime names the provider it draws on. A failed session whose
+  listing names a usage limit is now parked as the StopFailure hook parks it. Once the
+  reset time has passed, delivery resumes parked workers in the same session with a short
+  continue message, oldest reset first and within the wake admission; a worker parked
+  without a reset time still waits for `continue`. Parking uses no launch attempt and is
+  notified once. The board has a Parked column with the reset time, shows on a queued or
+  parked card why it waits, and shows a model-limit badge in the top bar when a turn fails
+  on one model family's own limit.
+- `chargehand export <file>` and `chargehand import <file>`. Export writes one zip archive
+  with a versioned manifest: the machine configuration with home paths written as `~` and
+  credential-bearing keys (such as `api_key_command`) left out, the machine-level role
+  files, the user-level agent files the roles name, the notification hook, the status line
+  entry of Claude Code's settings, and the board settings of the configured repositories.
+  It refuses to write an archive in which a file still holds the home directory or the
+  daemon's token. Import refuses a newer format version, a file outside the archive's
+  layout, and a symlink; asks for each repository path and the worktree root (or takes
+  `--repository NAME=PATH`, `--worktree-root` or stdin); never overwrites a file or a
+  board setting without `--force`; and writes a new token. `doctor` lists what is left to
+  do by hand, and marks each step it can check as done.
+- `claude_bin` and `git_bin` accept `~` for the home directory.
+- Permission prompts on the board. The daemon holds a session's `PermissionRequest` hook
+  open, and the worker's card in Needs you shows the tool and its input with Allow, Deny
+  and Always allow; the hook then returns the decision. Always allow records a rule for
+  that worker alone (the same tool with the same input, matched by a hash of the whole
+  input, a Bash call's description excepted), and the next such prompt is allowed without
+  a card. A prompt is now a ledger
+  record that is open, resolved (with the decision and who decided) or cancelled, with a
+  new `permission_rules` table (schema version 7). The first answer wins: an answer in
+  `claude attach` cancels the card, and a second click answers "already resolved". A click
+  is taken only while a fresh session listing shows the permission dialog, so a click
+  after an answer in the session is refused and cancels the card; while a hook waits, the
+  daemon also checks the listing every 2 seconds, so such an answer clears the card. The
+  permission hook waits `permission_timeout_secs`, a new `claude` role key (600 seconds by
+  default); the daemon answers with no decision a little before that, and when it stops,
+  so the session shows its own dialog. `POST /api/workers/<id>/answer` takes the answer.
+- Board personalisation. Rename a repository or a worker, give it an icon (one emoji or a
+  name from a small bundled set) and pin it; collapse a repository to its pinned cards, or
+  hide it. The board groups the cards of each column by repository, pinned first, then by
+  last activity. A hidden repository's workers still run, are supervised and notify; the
+  top bar shows the hidden count and a filter that shows them again. The settings live in
+  the ledger's new `board_state` table (schema version 6), so they survive a restart.
+  `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board` write them.
+  A display name never changes the configured name, the handle or the session name, and
+  the CLI ignores the settings.
+- Board actions. Every control command has a button on the board, and each one records
+  the same request as the command, with origin `board` (the CLI records `cli`; the ledger
+  moves to schema version 5). The API: `POST /api/workers` to start a worker from a role,
+  an optional work item and the event kinds it follows on it; `POST
+  /api/workers/<id>/pause` (the CLI's `stop`), `continue`, `retry`, `cancel`, `discard`,
+  `reply` and `attach`; `POST /api/repositories/<name>/pause` and `/resume`, and
+  `/api/pause` and `/api/resume` for all repositories; `GET /api/requests/<id>` for an
+  outcome. Each `POST` needs the token, which the page asks for once and keeps in the
+  browser. A worker started on the board is not held to one per role and item, but the
+  pause and the caps apply; its worktree and branch end in its id. Reply puts one line
+  into the worker's inbox as an event from the board. Attach opens iTerm2 or
+  Terminal.app with `claude attach` on the worker's session. `status --json` shows each
+  worker's `id`, `origin` and `handle`, and the origin of each pending request.
+- Workers that share a role and an item are named by a handle with the worker's id,
+  `role/item#id`, and every command that takes an item accepts it, `role/item`, and `#id`
+  (quoted in a shell, as `'#7'`). A notification about such a worker carries the handle in
+  `CHARGEHAND_ITEM` and `CHARGEHAND_ISSUE`, which already holds the role. `status --json`
+  and the board show a finished start-rule worker as `role/item#id`; its log lines keep
+  `role/item`. `cancel` and `discard` name the worker they acted on.
 - An investigation log for the daemon. `serve --log-file` writes
   `~/Library/Logs/chargehand.log` through a rotating handler (10 MB, five old files), and
   `install` sets it up; the launchd job's own output moves to `chargehand.launchd.log`.
@@ -36,6 +150,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker (role, item, branch, worktree, model and effort, last prompt and last answer,
   wakes today, estimated tokens, attach command) in the columns Needs you, Working,
   Queued, Idle and Closed. One static page under a strict content security policy.
+
+### Fixed
+
+- A wake or a `continue` no longer puts a worker back to `running` when a hook of the new
+  turn, such as a permission prompt, came in while it ran. The card stays in Needs you and
+  answerable, and the next session diff sends no second notification.
 
 ### Changed
 
@@ -123,9 +243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `chargehand statusline -- '<command>'`, a status line wrapper that writes the
-  subscription's five-hour and weekly usage windows to `usage_file` in `[serve]` and then
+  subscription's weekly usage window to `usage_file` in `[serve]` and then
   runs your own status line command unchanged; `/api/state` and `status --json` show the
-  reading, unknown when it is older than 30 minutes.
+  reading, unknown once the window's reset time has passed.
 - A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
   pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
   pull request head from a separate checkout, `{item_checkout}`, so the author's Claude

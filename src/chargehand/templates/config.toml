@@ -37,10 +37,22 @@ tick_interval_secs = 60
 # label writes and notifications; it never records what a worker said or did.
 # log_level = "info"
 
+# The part of the subscription's weekly usage window that workers leave for your own
+# sessions. The status line wrapper (`chargehand statusline`) writes the reading to
+# usage_file. No wake starts while the weekly window is above 100 minus
+# wake_reserve_percent, and no new worker while it is above 100 minus
+# new_worker_reserve_percent. Without a usage file there is no reserve. The newest reading
+# counts however old it is, until the window's reset time passes.
+[usage]
+wake_reserve_percent = 20
+new_worker_reserve_percent = 30
+
 [notify]
 # Receives CHARGEHAND_ITEM, CHARGEHAND_ROLE, CHARGEHAND_STATE, CHARGEHAND_URL,
 # CHARGEHAND_REPOSITORY and CHARGEHAND_DETAIL as environment variables (CHARGEHAND_ISSUE and
-# CHARGEHAND_ROUTE stay set with the same values). The payload carries no issue text and no
+# CHARGEHAND_ROUTE stay set with the same values). For a worker started on the board,
+# CHARGEHAND_ITEM is its handle with its id, such as implementer/ABC-1#7, which already
+# holds the role. The payload carries no issue text and no
 # agent output, because it usually crosses a third-party relay.
 command = "~/.config/chargehand/notify.sh"
 

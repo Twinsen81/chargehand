@@ -18,6 +18,7 @@ SQLite under the state directory, not /tmp, because it has to survive a reboot.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -26,10 +27,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from chargehand import paths
+from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 9
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -67,17 +68,88 @@ LAST_STEP = 4
 # Why a session row exists: the launch, an adoption, a continuation after a refresh,
 # a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`. A wake
 # continues the same session, so each wake has its own `wake` row: the daily wake cap
-# counts them.
+# counts them. A clone in full mode starts with a copy of its original's conversation,
+# which is a `fork` row.
 SESSION_INITIAL = "initial"
 SESSION_ADOPTED = "adopted"
 SESSION_MIGRATED = "migrated"
 SESSION_WAKE = "wake"
+SESSION_FORK = "fork"
 
 # How a worker came to exist. Only `source` workers are held to one per role and item.
 ORIGIN_SOURCE = "source"
 ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
+
+# How much of its original's session a clone gets: nothing, or a copy of the conversation.
+CLONE_FRESH = "fresh"
+CLONE_FULL = "full"
+CLONE_MODES = (CLONE_FRESH, CLONE_FULL)
+
+# Where a control request came from: the command line or the board. Both record the same
+# kinds and arguments; the tick applies them alike.
+REQUEST_CLI = "cli"
+REQUEST_BOARD = "board"
+REQUEST_ORIGINS = (REQUEST_CLI, REQUEST_BOARD)
+
+# A reply that the operator typed on the board waits in the worker's inbox as an event of
+# this source and kind, with the line as its pointer. No configured source may have this
+# name, so only the tick writes such a row; the line is trusted operator text, cleaned to
+# one line of at most REPLY_LIMIT characters.
+REPLY_SOURCE = "board"
+REPLY_KIND = "reply"
+REPLY_LIMIT = 500
+
+# What the board keeps per repository and per worker: names and icons the operator chose,
+# pins, and the folded and hidden repositories. The page reads it and nothing else does, so
+# the configured names, the handles and the session names never change with it.
+BOARD_REPOSITORY = "repository"
+BOARD_WORKER = "worker"
+BOARD_FIELDS: dict[str, tuple[str, ...]] = {
+    BOARD_REPOSITORY: ("name", "icon", "pinned", "collapsed", "hidden"),
+    BOARD_WORKER: ("name", "icon", "pinned"),
+}
+
+# A prompt a session shows the operator. A permission prompt is answered allow or deny; the
+# record also holds a question with its own options, so that both use one card. A prompt is
+# `open` until it is answered (`resolved`, with the decision and who decided) or the
+# session stops showing it (`cancelled`). An open prompt is "released" when `released_at` is
+# set: no hook waits for the board's answer any more (after the hook's timeout or a stop of
+# the daemon), so only the dialog in the session can answer it. It stays `open` because the
+# session still shows that dialog, and it is cancelled when the worker leaves `blocked`.
+PROMPT_PERMISSION = "permission"
+PROMPT_QUESTION = "question"
+PROMPT_OPEN = "open"
+PROMPT_RESOLVED = "resolved"
+PROMPT_CANCELLED = "cancelled"
+PROMPT_STATES = (PROMPT_OPEN, PROMPT_RESOLVED, PROMPT_CANCELLED)
+ALLOW = "allow"
+DENY = "deny"
+# Who resolved or cancelled a prompt: a click on the board, a rule the operator recorded
+# from the board, or the session itself (answered in the terminal, superseded, or stopped).
+RESOLVED_BY_BOARD = "board"
+RESOLVED_BY_RULE = "rule"
+RESOLVED_BY_SESSION = "session"
+
+# Slow work that runs on a thread of the daemon, outside the tick, so that neither the tick
+# nor the board waits for it. Only an archive is such work today: its target is the worker
+# id. `waiting`: a cancel of the live worker must apply first. `queued`: the thread starts
+# it. `running`: the thread writes the archive; a restart of the daemon starts it again.
+# `written`: the archive is complete and verified, and the tick removes the worktree and
+# the session. `done` and `failed` are final.
+JOB_ARCHIVE = "archive"
+JOB_WAITING = "waiting"
+JOB_QUEUED = "queued"
+JOB_RUNNING = "running"
+JOB_WRITTEN = "written"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+JOB_ACTIVE = (JOB_WAITING, JOB_QUEUED, JOB_RUNNING, JOB_WRITTEN)
+JOB_STATES = JOB_ACTIVE + (JOB_DONE, JOB_FAILED)
+
+# A worker handle that names the worker by id: `role/item#id`, or `role/#id` without an item.
+_ID_HANDLE = re.compile(r"(?:([^/#\s]+)/([^/#\s]*))?#([0-9]{1,12})")
 
 # What a worker's `owns_label` says it shows its state on. One worker per item does it,
 # so two workers cannot write the same label in turn. QUEUE: the queue label of its
@@ -126,6 +198,12 @@ _WORKER_COLUMNS = (
     "last_hook_at",
     "last_answer",
     "transcript_path",
+    "archived_at",
+    "parent_id",
+    "clone_mode",
+    "prompt",
+    "model",
+    "effort",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -177,7 +255,16 @@ CREATE TABLE IF NOT EXISTS workers (
     last_hook        TEXT,
     last_hook_at     REAL,
     last_answer      TEXT,
-    transcript_path  TEXT
+    transcript_path  TEXT,
+    -- When an archive of the worker was written and its worktree and session removed.
+    archived_at      REAL,
+    -- A clone: the worker it was made from, how much of that session it got (CLONE_MODES),
+    -- and the prompt template, model and effort the operator chose. NULL is the role's.
+    parent_id        INTEGER,
+    clone_mode       TEXT,
+    prompt           TEXT,
+    model            TEXT,
+    effort           TEXT
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -212,7 +299,8 @@ CREATE TABLE IF NOT EXISTS requests (
     created_at  REAL    NOT NULL,
     applied_at  REAL,
     ok          INTEGER,
-    message     TEXT
+    message     TEXT,
+    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}'
 );
 
 CREATE INDEX IF NOT EXISTS requests_pending ON requests (applied_at);
@@ -282,24 +370,75 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_pending ON events (start_pending);
 
--- A permission prompt a session reported. The session keeps its own dialog; the row is
--- resolved when the worker leaves `blocked`. The tool input is untrusted text.
+-- A prompt a session reported: a permission prompt, or a question with its options (a
+-- JSON list). It is open until the board, a rule or the session resolves it, or the worker
+-- leaves `blocked` and cancels it. The tool input is untrusted text; `input_digest` is a
+-- hash of the whole input, which a rule matches.
 CREATE TABLE IF NOT EXISTS permission_prompts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    worker_id   INTEGER NOT NULL REFERENCES workers (id),
-    tool_name   TEXT    NOT NULL,
-    tool_input  TEXT    NOT NULL DEFAULT '',
-    created_at  REAL    NOT NULL,
-    resolved_at REAL
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    tool_name    TEXT    NOT NULL,
+    tool_input   TEXT    NOT NULL DEFAULT '',
+    created_at   REAL    NOT NULL,
+    resolved_at  REAL,
+    kind         TEXT    NOT NULL DEFAULT 'permission',
+    options      TEXT,
+    input_digest TEXT,
+    state        TEXT    NOT NULL DEFAULT 'open',
+    decision     TEXT,
+    resolved_by  TEXT,
+    released_at  REAL
 );
 
 CREATE INDEX IF NOT EXISTS permission_prompts_open ON permission_prompts (worker_id, resolved_at);
+
+-- "Always allow" for one worker: the daemon allows the same tool with the same input for
+-- that worker by itself. Never a role's, a repository's or Claude Code's settings.
+CREATE TABLE IF NOT EXISTS permission_rules (
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    tool_name    TEXT    NOT NULL,
+    input_digest TEXT    NOT NULL,
+    prompt_id    INTEGER REFERENCES permission_prompts (id),
+    created_at   REAL    NOT NULL,
+    PRIMARY KEY (worker_id, tool_name, input_digest)
+);
 
 -- Where each source's last poll stopped.
 CREATE TABLE IF NOT EXISTS cursors (
     source     TEXT PRIMARY KEY,
     value      TEXT,
     updated_at REAL NOT NULL
+);
+
+-- Slow work for the daemon's job thread; see JOB_STATES. `args` is a JSON object, and
+-- `result_path` the file the job writes.
+CREATE TABLE IF NOT EXISTS jobs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT    NOT NULL,
+    target       TEXT    NOT NULL,
+    args         TEXT    NOT NULL DEFAULT '{{}}',
+    state        TEXT    NOT NULL,
+    progress     TEXT,
+    result_path  TEXT,
+    error        TEXT,
+    created_at   REAL    NOT NULL,
+    started_at   REAL,
+    updated_at   REAL    NOT NULL,
+    finished_at  REAL
+);
+
+CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state);
+CREATE INDEX IF NOT EXISTS jobs_target ON jobs (kind, target);
+
+-- How the board shows a repository or a worker. The key is the configured repository
+-- name or the worker id; only the board reads it.
+CREATE TABLE IF NOT EXISTS board_state (
+    kind       TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (kind, key, field)
 );
 """
 
@@ -352,6 +491,52 @@ DROP INDEX IF EXISTS workers_one_live_per_role_item;
 {_SCHEMA}
 """
 
+# Version 5 records where each control request came from. Every earlier version has the
+# requests table, so each one takes this step; the rows recorded before it came from the CLI.
+_MIGRATE_V4_TO_V5 = f"""
+ALTER TABLE requests ADD COLUMN origin TEXT NOT NULL DEFAULT '{REQUEST_CLI}';
+{_SCHEMA}
+"""
+
+# Version 6 adds the board's own state. It only adds a table, which the schema creates.
+_MIGRATE_V5_TO_V6 = _SCHEMA
+
+# Version 7 makes a prompt a record with a state, a decision and who decided, and adds the
+# per-worker rules. Only a version 4, 5 or 6 file has the old prompts table; an older one
+# gets the table from the schema with every column. A prompt resolved before this version
+# was never answered by chargehand, so its session cancelled it.
+_MIGRATE_V6_TO_V7 = f"""
+ALTER TABLE permission_prompts ADD COLUMN kind TEXT NOT NULL DEFAULT '{PROMPT_PERMISSION}';
+ALTER TABLE permission_prompts ADD COLUMN options TEXT;
+ALTER TABLE permission_prompts ADD COLUMN input_digest TEXT;
+ALTER TABLE permission_prompts ADD COLUMN state TEXT NOT NULL DEFAULT '{PROMPT_OPEN}';
+ALTER TABLE permission_prompts ADD COLUMN decision TEXT;
+ALTER TABLE permission_prompts ADD COLUMN resolved_by TEXT;
+ALTER TABLE permission_prompts ADD COLUMN released_at REAL;
+UPDATE permission_prompts
+SET state = '{PROMPT_CANCELLED}', resolved_by = '{RESOLVED_BY_SESSION}', released_at = resolved_at
+WHERE resolved_at IS NOT NULL;
+{_SCHEMA}
+"""
+
+# Version 8 adds the jobs and the worker's `archived_at`. Every version from 2 on has a
+# workers table without the column; the version 1 copy creates the table with it.
+_MIGRATE_V7_TO_V8 = f"""
+ALTER TABLE workers ADD COLUMN archived_at REAL;
+{_SCHEMA}
+"""
+
+# Version 9 adds what a clone keeps: its original, its mode, and the prompt, model and
+# effort chosen for it. Like version 8, the version 1 copy creates the table with them.
+_MIGRATE_V8_TO_V9 = f"""
+ALTER TABLE workers ADD COLUMN parent_id INTEGER;
+ALTER TABLE workers ADD COLUMN clone_mode TEXT;
+ALTER TABLE workers ADD COLUMN prompt TEXT;
+ALTER TABLE workers ADD COLUMN model TEXT;
+ALTER TABLE workers ADD COLUMN effort TEXT;
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -392,6 +577,12 @@ class Worker:
     last_hook_at: float | None = None
     last_answer: str | None = None
     transcript_path: str | None = None
+    archived_at: float | None = None
+    parent_id: int | None = None
+    clone_mode: str | None = None
+    prompt: str | None = None
+    model: str | None = None
+    effort: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -407,8 +598,39 @@ class Worker:
 
     @property
     def handle(self) -> str:
-        """How a worker is named in logs, in reports, and as its session's display name."""
-        return f"{self.role}/{self.item}" if self.item else f"{self.role}/#{self.id}"
+        """How a worker is named in logs, in reports, and as its session's display name.
+
+        A start rule keeps one live worker per role and item, so `role/item` names it. A
+        worker created by hand may share its role and item with others, so its handle
+        carries its id: `role/item#id`, or `role/#id` without an item. The CLI and the
+        tick accept every handle as a target.
+        """
+        if self.item and self.origin == ORIGIN_SOURCE:
+            return f"{self.role}/{self.item}"
+        return self.id_handle
+
+    @property
+    def id_handle(self) -> str:
+        """The handle with the worker's id, which names it alone in every case."""
+        return f"{self.role}/{self.item or ''}#{self.id}"
+
+    @property
+    def target(self) -> str:
+        """The handle that chargehand prints for a command to name this worker.
+
+        `role/item` for a live start-rule worker: the database keeps one live worker per
+        role and item, and the resolution rule (:meth:`Ledger.find_worker`) prefers it.
+        The id handle for every other worker, because a finished start-rule worker's
+        `role/item` names its successor once a start rule starts one.
+        """
+        return self.id_handle if self.is_terminal else self.handle
+
+    @property
+    def name(self) -> str:
+        """What a message to the operator calls the worker: its item, or its handle."""
+        if self.item and self.origin == ORIGIN_SOURCE:
+            return self.item
+        return self.handle
 
 
 @dataclass(frozen=True)
@@ -430,6 +652,47 @@ class PermissionPrompt:
     tool_input: str
     created_at: float
     resolved_at: float | None
+    kind: str = PROMPT_PERMISSION
+    options: str | None = None
+    input_digest: str | None = None
+    state: str = PROMPT_OPEN
+    decision: str | None = None
+    resolved_by: str | None = None
+    released_at: float | None = None
+
+
+@dataclass(frozen=True)
+class Job:
+    id: int
+    kind: str
+    target: str
+    args: Mapping[str, Any]
+    state: str
+    progress: str | None
+    result_path: str | None
+    error: str | None
+    created_at: float
+    started_at: float | None
+    updated_at: float
+    finished_at: float | None
+
+    @property
+    def is_active(self) -> bool:
+        return self.state in JOB_ACTIVE
+
+    @property
+    def force(self) -> bool:
+        return bool(self.args.get("force"))
+
+
+def _row_to_job(row: sqlite3.Row) -> Job:
+    data = dict(row)
+    try:
+        args = json.loads(data["args"])
+    except (TypeError, ValueError):
+        args = {}
+    data["args"] = args if isinstance(args, dict) else {}
+    return Job(**data)
 
 
 @dataclass(frozen=True)
@@ -540,11 +803,21 @@ class Ledger:
         # old ledger as it was, instead of a renamed table that the next open cannot rename.
         # Every statement of the schema is idempotent: the version 1 copy includes the
         # whole schema, and a version 2 ledger only gains the tables it lacks.
-        # A version 2 file takes both later steps; the version 1 copy includes the whole schema.
+        # A version 2 file takes every later step; the version 1 copy includes the whole
+        # schema but keeps its own requests table, which gains the request origin. Up to
+        # version 3 the schema creates the prompts table whole, so only 4 to 6 alter it.
         script = {
-            1: _MIGRATE_V1_TO_V2,
-            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4,
-            3: _MIGRATE_V3_TO_V4,
+            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
+            + _MIGRATE_V8_TO_V9,
+            4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
+            + _MIGRATE_V8_TO_V9,
+            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            8: _MIGRATE_V8_TO_V9,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -631,17 +904,110 @@ class Ledger:
         ).fetchone()
         return _row_to_worker(row) if row else None
 
-    def latest_worker_for(self, item: str, role: str | None = None) -> Worker | None:
-        if role is None:
-            row = self._conn.execute(
-                "SELECT * FROM workers WHERE item = ? ORDER BY id DESC LIMIT 1", (item,)
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT * FROM workers WHERE item = ? AND role = ? ORDER BY id DESC LIMIT 1",
-                (item, role),
-            ).fetchone()
+    def latest_worker_for(
+        self, item: str, role: str | None = None, *, origin: str | None = None
+    ) -> Worker | None:
+        query, values = "SELECT * FROM workers WHERE item = ?", [item]
+        if role is not None:
+            query, values = query + " AND role = ?", [*values, role]
+        if origin is not None:
+            query, values = query + " AND origin = ?", [*values, origin]
+        row = self._conn.execute(query + " ORDER BY id DESC LIMIT 1", values).fetchone()
         return _row_to_worker(row) if row else None
+
+    def find_worker(self, target: str, role: str | None = None) -> tuple[Worker | None, str]:
+        """The one worker a control command means, or why it cannot tell.
+
+        One rule, applied in this order:
+
+        1. An id handle (`role/item#id`, `role/#id`, `#id`) names the worker with that id;
+           its role and item, and *role* when given, must match.
+        2. A `role/item` handle, or a bare item with *role*, is a handle. When a worker
+           has exactly that handle, the handle wins: the live worker with it first, then
+           the newest one with it. Only a start-rule worker has a handle without an id.
+        3. Otherwise, by the item (in *role* when known): the one live worker on it; with
+           several, the one start-rule worker among them that the bare item names; with
+           none live, the newest recorded. A bare item whose one live worker was started
+           by hand, while a start-rule worker on the item has ended, is refused: a
+           notification about that worker carried the bare item. Anything else is refused,
+           with each candidate as its id handle.
+
+        Every handle chargehand prints (:attr:`Worker.target`, :meth:`target_for`)
+        resolves back to its worker under this rule.
+        """
+        shown = sanitize.one_line(target, limit=100) if target else "''"
+        by_id = _ID_HANDLE.fullmatch(target)
+        if by_id is not None:
+            worker = self.get(int(by_id.group(3)))
+            if worker is None:
+                return None, f"no worker #{by_id.group(3)}"
+            named_role = by_id.group(1)
+            if named_role is not None and (named_role, by_id.group(2) or None) != (
+                worker.role, worker.item
+            ):
+                return None, f"worker #{worker.id} is {worker.id_handle}, not {shown}"
+            if role is not None and role != worker.role:
+                return None, f"worker #{worker.id} is in role {worker.role}, not {role}"
+            return worker, ""
+        item = target
+        if "/" in target:
+            named_role, _, item = target.partition("/")
+            if role is not None and role != named_role:
+                return None, f"{shown} is in role {named_role}, not {role}"
+            role = named_role
+        if role is not None:
+            # Rule 2: an exact handle. The unique index allows one live worker with it.
+            exact = next(
+                (w for w in self.live_workers_for(item)
+                 if w.role == role and w.origin == ORIGIN_SOURCE),
+                None,
+            ) or self.latest_worker_for(item, role, origin=ORIGIN_SOURCE)
+            if exact is not None:
+                return exact, ""
+        live = self.live_workers_for(item)
+        if role is not None:
+            live = [w for w in live if w.role == role]
+        if len(live) > 1:
+            named = [w for w in live if w.name == target]
+            if len(named) == 1:
+                return named[0], ""
+            handles = ", ".join(w.id_handle for w in live)
+            roles = sorted({w.role for w in live})
+            if len(roles) > 1:
+                return None, (
+                    f"{shown} has live workers in several roles ({', '.join(roles)}); pass "
+                    f"--role, or name one of them: {handles}"
+                )
+            return None, f"{shown} has several live workers; name one of them: {handles}"
+        if live:
+            only = live[0]
+            finished = (
+                self.latest_worker_for(item, origin=ORIGIN_SOURCE)
+                if role is None and only.origin != ORIGIN_SOURCE else None
+            )
+            if finished is not None:
+                # A notification about that start-rule worker carried the bare item; the
+                # one live worker started by hand is not the worker it named.
+                return None, (
+                    f"{shown} names a start-rule worker that has ended and a worker started "
+                    f"by hand; name one of them: {finished.id_handle}, {only.id_handle}"
+                )
+            return only, ""
+        latest = self.latest_worker_for(item, role, origin=ORIGIN_SOURCE) or self.latest_worker_for(
+            item, role
+        )
+        if latest is None:
+            return None, f"no worker recorded for {shown}" + (f" in role {role}" if role else "")
+        return latest, ""
+
+    def target_for(self, worker: Worker) -> str:
+        """The shortest name a command can give *worker* now: its item, else its target.
+
+        The item is used only when the rule resolves it to *worker*, so a hint stays as
+        short as before for a worker alone on its item.
+        """
+        found, _ = self.find_worker(worker.name)
+        return worker.name if found is not None and found.id == worker.id else worker.target
 
     def live_workers(self) -> list[Worker]:
         rows = self._conn.execute(
@@ -665,6 +1031,16 @@ class Ledger:
             f"SELECT * FROM workers WHERE gc_done = 0 AND state IN "
             f"({', '.join('?' * len(TERMINAL))}) ORDER BY id",
             TERMINAL,
+        ).fetchall()
+        return [_row_to_worker(row) for row in rows]
+
+    def archivable_workers(self, repository: str) -> list[Worker]:
+        """The workers of *repository* that an archive would take: every live one, and each
+        finished one whose worktree and session are not removed yet, unless archived."""
+        rows = self._conn.execute(
+            f"SELECT * FROM workers WHERE repository = ? AND archived_at IS NULL AND "
+            f"(gc_done = 0 OR state IN ({', '.join('?' * len(NON_TERMINAL))})) ORDER BY id",
+            (repository, *NON_TERMINAL),
         ).fetchall()
         return [_row_to_worker(row) for row in rows]
 
@@ -736,10 +1112,22 @@ class Ledger:
         return replace(worker, **changes)
 
     def _after_state_write(self, worker: Worker, changes: Mapping[str, Any]) -> None:
-        # A worker that leaves `blocked` by any path, a stop or a cancel included, no
-        # longer shows a permission dialog.
-        if "state" in changes and changes["state"] != BLOCKED:
-            self.resolve_permission_prompts(worker, now=changes["updated_at"])
+        # Every state write but `blocked` means the session no longer shows the dialogs the
+        # writer knew of: the worker left `blocked`, its turn or session ended, or a new
+        # turn or session started (a wake, a continue). For a write of `running`, a prompt
+        # recorded after *worker* was read came from the new turn while the action ran, and
+        # stays open: a hook touches the row before it records a prompt, so a row read
+        # later knows of it. The end of a launch (`launching` -> `running`) cancels
+        # nothing: the first dialog of a session can come before the tick confirms it.
+        if "state" not in changes:
+            return
+        state = changes["state"]
+        if state == BLOCKED or (worker.state == LAUNCHING and state == RUNNING):
+            return
+        self.resolve_permission_prompts(
+            worker, now=changes["updated_at"],
+            recorded_by=worker.updated_at if state == RUNNING else None,
+        )
 
     @staticmethod
     def _checked(changes: dict[str, Any]) -> dict[str, Any]:
@@ -764,39 +1152,143 @@ class Ledger:
     # ----- permission prompts -----------------------------------------------
 
     def record_permission_prompt(
-        self, worker: Worker, *, tool_name: str, tool_input: str, now: float | None = None
+        self,
+        worker: Worker,
+        *,
+        tool_name: str,
+        tool_input: str,
+        now: float | None = None,
+        input_digest: str | None = None,
+        resolved_by: str | None = None,
     ) -> int:
-        cursor = self._conn.execute(
-            "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (worker.id, tool_name, tool_input, time.time() if now is None else now),
-        )
+        """Record an open prompt, or with *resolved_by* one that is already allowed."""
+        stamp = time.time() if now is None else now
+        if resolved_by is None:
+            cursor = self._conn.execute(
+                "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
+                "input_digest) VALUES (?, ?, ?, ?, ?)",
+                (worker.id, tool_name, tool_input, stamp, input_digest),
+            )
+        else:
+            cursor = self._conn.execute(
+                "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
+                "input_digest, state, decision, resolved_by, resolved_at, released_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (worker.id, tool_name, tool_input, stamp, input_digest, PROMPT_RESOLVED, ALLOW,
+                 resolved_by, stamp, stamp),
+            )
         return int(cursor.lastrowid)
 
+    def get_permission_prompt(self, prompt_id: int) -> PermissionPrompt | None:
+        row = self._conn.execute(
+            "SELECT * FROM permission_prompts WHERE id = ?", (prompt_id,)
+        ).fetchone()
+        return PermissionPrompt(**dict(row)) if row else None
+
     def open_permission_prompts(self, worker: Worker | None = None) -> list[PermissionPrompt]:
-        """The prompts not yet resolved, of *worker* or of every live worker."""
+        """The open prompts, of *worker* or of every live worker."""
         if worker is not None:
             rows = self._conn.execute(
-                "SELECT * FROM permission_prompts WHERE worker_id = ? AND resolved_at IS NULL "
-                "ORDER BY id",
-                (worker.id,),
+                "SELECT * FROM permission_prompts WHERE worker_id = ? AND state = ? ORDER BY id",
+                (worker.id, PROMPT_OPEN),
             ).fetchall()
         else:
             rows = self._conn.execute(
                 f"SELECT p.* FROM permission_prompts p JOIN workers w ON w.id = p.worker_id "
-                f"WHERE p.resolved_at IS NULL AND w.state IN "
+                f"WHERE p.state = ? AND w.state IN "
                 f"({', '.join('?' * len(NON_TERMINAL))}) ORDER BY p.id",
-                NON_TERMINAL,
+                (PROMPT_OPEN, *NON_TERMINAL),
             ).fetchall()
         return [PermissionPrompt(**dict(row)) for row in rows]
 
-    def resolve_permission_prompts(self, worker: Worker, *, now: float | None = None) -> int:
+    def resolve_permission_prompts(
+        self, worker: Worker, *, now: float | None = None, recorded_by: float | None = None
+    ) -> int:
+        """Cancel the worker's open prompts, or those recorded by *recorded_by*: its session
+        no longer shows them."""
+        stamp = time.time() if now is None else now
         cursor = self._conn.execute(
-            "UPDATE permission_prompts SET resolved_at = ? "
-            "WHERE worker_id = ? AND resolved_at IS NULL",
-            (time.time() if now is None else now, worker.id),
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
+            "released_at = COALESCE(released_at, ?) WHERE worker_id = ? AND state = ? "
+            "AND (? IS NULL OR created_at <= ?)",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN,
+             recorded_by, recorded_by),
         )
         return cursor.rowcount
+
+    def cancel_permission_prompt(self, prompt_id: int, *, now: float | None = None) -> bool:
+        """Cancel one open prompt that its session no longer shows. False when it was not open."""
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
+            "released_at = COALESCE(released_at, ?) WHERE id = ? AND state = ?",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, prompt_id, PROMPT_OPEN),
+        )
+        return cursor.rowcount == 1
+
+    def set_prompt_digest(self, prompt_id: int, input_digest: str) -> None:
+        self._conn.execute(
+            "UPDATE permission_prompts SET input_digest = ? WHERE id = ?", (input_digest, prompt_id)
+        )
+
+    def answer_permission_prompt(
+        self,
+        prompt_id: int,
+        decision: str,
+        *,
+        by: str,
+        rule: bool = False,
+        now: float | None = None,
+    ) -> bool:
+        """Resolve an open prompt that a hook still holds. False when another answer came first.
+
+        The first writer wins: the prompt must be open and not released, so a second click,
+        an answer after a timeout and an answer after the session moved on change nothing.
+        With *rule*, the same tool with the same input is allowed for this worker from now on.
+        """
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            cursor = self._conn.execute(
+                "UPDATE permission_prompts SET state = ?, decision = ?, resolved_by = ?, "
+                "resolved_at = ? WHERE id = ? AND state = ? AND released_at IS NULL",
+                (PROMPT_RESOLVED, decision, by, stamp, prompt_id, PROMPT_OPEN),
+            )
+            if cursor.rowcount != 1:
+                return False
+            if rule:
+                prompt = self.get_permission_prompt(prompt_id)
+                if prompt is None or not prompt.input_digest:
+                    raise ValueError(f"prompt {prompt_id} has no input digest for a rule")
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO permission_rules (worker_id, tool_name, input_digest, "
+                    "prompt_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (prompt.worker_id, prompt.tool_name, prompt.input_digest, prompt_id, stamp),
+                )
+        return True
+
+    def release_permission_prompt(self, prompt_id: int, *, now: float | None = None) -> bool:
+        """Mark an open prompt as held by no hook. False when an answer came first."""
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET released_at = ? "
+            "WHERE id = ? AND state = ? AND released_at IS NULL",
+            (time.time() if now is None else now, prompt_id, PROMPT_OPEN),
+        )
+        return cursor.rowcount == 1
+
+    def has_permission_rule(self, worker: Worker, tool_name: str, input_digest: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM permission_rules WHERE worker_id = ? AND tool_name = ? "
+            "AND input_digest = ?",
+            (worker.id, tool_name, input_digest),
+        ).fetchone()
+        return row is not None
+
+    def permission_rules(self, worker: Worker) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            "SELECT * FROM permission_rules WHERE worker_id = ? ORDER BY created_at",
+            (worker.id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ----- sessions ---------------------------------------------------------
 
@@ -1036,12 +1528,29 @@ class Ledger:
 
     # ----- control requests -------------------------------------------------
 
-    def record_request(self, kind: str, target: str | None = None, **args: Any) -> int:
+    def record_request(
+        self, kind: str, target: str | None = None, *, origin: str = REQUEST_CLI, **args: Any
+    ) -> int:
+        if origin not in REQUEST_ORIGINS:
+            raise ValueError(f"unknown request origin {origin!r}")
         cursor = self._conn.execute(
-            "INSERT INTO requests (kind, target, args, created_at) VALUES (?, ?, ?, ?)",
-            (kind, target, json.dumps(args, sort_keys=True), time.time()),
+            "INSERT INTO requests (kind, target, args, created_at, origin) VALUES (?, ?, ?, ?, ?)",
+            (kind, target, json.dumps(args, sort_keys=True), time.time(), origin),
         )
         return int(cursor.lastrowid)
+
+    def record_applied_request(
+        self, kind: str, target: str | None = None, *, origin: str, ok: bool, message: str,
+        **args: Any,
+    ) -> int:
+        """A request that its caller applied itself, recorded for the audit trail only.
+
+        It is complete from the start, so no tick applies it again.
+        """
+        with self.transaction():
+            request_id = self.record_request(kind, target, origin=origin, **args)
+            self.complete_request(request_id, ok=ok, message=message)
+        return request_id
 
     def pending_requests(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -1074,6 +1583,92 @@ class Ledger:
             (time.time() - older_than_secs,),
         )
         return cursor.rowcount
+
+    # ----- jobs -------------------------------------------------------------
+
+    def create_job(
+        self,
+        kind: str,
+        target: str,
+        *,
+        state: str = JOB_QUEUED,
+        result_path: str | None = None,
+        progress: str | None = None,
+        now: float | None = None,
+        **args: Any,
+    ) -> Job:
+        if state not in JOB_ACTIVE:
+            raise ValueError(f"a job starts in one of {', '.join(JOB_ACTIVE)}, not {state!r}")
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "INSERT INTO jobs (kind, target, args, state, progress, result_path, created_at, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kind, target, json.dumps(args, sort_keys=True), state, progress, result_path,
+             stamp, stamp),
+        )
+        job = self.get_job(int(cursor.lastrowid))
+        assert job is not None
+        return job
+
+    def get_job(self, job_id: int) -> Job | None:
+        row = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return _row_to_job(row) if row else None
+
+    def jobs_in_state(self, states: Sequence[str], kind: str | None = None) -> list[Job]:
+        if not states:
+            return []
+        query = f"SELECT * FROM jobs WHERE state IN ({', '.join('?' * len(states))})"
+        values: list[Any] = list(states)
+        if kind is not None:
+            query, values = query + " AND kind = ?", [*values, kind]
+        rows = self._conn.execute(query + " ORDER BY id", values).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def jobs_of(self, kind: str, target: str) -> list[Job]:
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE kind = ? AND target = ? ORDER BY id", (kind, target)
+        ).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def active_job(self, kind: str, target: str) -> Job | None:
+        return next((job for job in self.jobs_of(kind, target) if job.is_active), None)
+
+    def recent_jobs(self, since: float) -> list[Job]:
+        """Every active job, and those that ended at or after *since*."""
+        rows = self._conn.execute(
+            f"SELECT * FROM jobs WHERE state IN ({', '.join('?' * len(JOB_ACTIVE))}) "
+            f"OR finished_at >= ? ORDER BY id",
+            (*JOB_ACTIVE, since),
+        ).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def update_job(self, job: Job, *, expect: str | None = None, **changes: Any) -> Job | None:
+        """Write *changes* to the job. With *expect*, only while the job is in that state.
+
+        None when *expect* did not match: the tick and the job thread both move jobs, and
+        each move starts from a state that only one of them leaves.
+        """
+        unknown = set(changes) - {"state", "progress", "result_path", "error", "started_at",
+                                  "finished_at", "args"}
+        if unknown:
+            raise ValueError(f"unknown job column(s): {', '.join(sorted(unknown))}")
+        if "state" in changes and changes["state"] not in JOB_STATES:
+            raise ValueError(f"unknown job state: {changes['state']!r}")
+        changes.setdefault("updated_at", time.time())
+        if changes.get("state") in (JOB_DONE, JOB_FAILED):
+            changes.setdefault("finished_at", changes["updated_at"])
+        values = {
+            key: json.dumps(value, sort_keys=True) if key == "args" else value
+            for key, value in changes.items()
+        }
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        query, params = f"UPDATE jobs SET {assignments} WHERE id = ?", [*values.values(), job.id]
+        if expect is not None:
+            query, params = query + " AND state = ?", [*params, expect]
+        cursor = self._conn.execute(query, params)
+        if not cursor.rowcount:
+            return None
+        return self.get_job(job.id)
 
     # ----- runner state -----------------------------------------------------
 
@@ -1120,6 +1715,39 @@ class Ledger:
             if key.startswith("paused:") and value == "1"
         )
 
+    # ----- board state --------------------------------------------------------
+
+    @staticmethod
+    def _board_field(kind: str, field: str) -> None:
+        if kind not in BOARD_FIELDS:
+            raise ValueError(f"unknown board state kind {kind!r}")
+        if field not in BOARD_FIELDS[kind]:
+            raise ValueError(f"unknown board state field {field!r} for a {kind}")
+
+    def board_state(self) -> list[dict[str, Any]]:
+        """Every board state row, as `kind`, `key`, `field`, `value` and `updated_at`."""
+        rows = self._conn.execute(
+            "SELECT kind, key, field, value, updated_at FROM board_state ORDER BY kind, key, field"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_board_state(
+        self, kind: str, key: str, field: str, value: str, *, now: float | None = None
+    ) -> None:
+        self._board_field(kind, field)
+        self._conn.execute(
+            "INSERT INTO board_state (kind, key, field, value, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(kind, key, field) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (kind, key, field, value, time.time() if now is None else now),
+        )
+
+    def delete_board_state(self, kind: str, key: str, field: str) -> None:
+        self._board_field(kind, field)
+        self._conn.execute(
+            "DELETE FROM board_state WHERE kind = ? AND key = ? AND field = ?", (kind, key, field)
+        )
+
 
 def open_ledger(path: Path | None = None) -> Ledger:
     return Ledger(path)
@@ -1133,11 +1761,13 @@ def summarize(workers: Iterable[Worker]) -> Mapping[str, int]:
 
 
 __all__ = [
+    "REQUEST_ORIGINS",
     "Worker",
     "SessionRecord",
     "Subscription",
     "InboxEntry",
     "PermissionPrompt",
+    "Job",
     "Ledger",
     "open_ledger",
     "summarize",

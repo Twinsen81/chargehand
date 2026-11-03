@@ -16,9 +16,14 @@ its own ledger connection, because a SQLite connection belongs to the thread tha
 it. :mod:`chargehand.hooks` receives the posts of the worker sessions there, and
 :mod:`chargehand.board` serves the read-only board.
 
+A third thread runs the slow jobs that the tick records, such as an archive (see
+:mod:`chargehand.archive`), so that neither the tick nor the board waits for them. It
+writes only its files and the job rows; whatever a job leaves for the tick to remove, the
+tick removes.
+
 SIGTERM and SIGINT end the loop between two tick phases: the phase in progress
-finishes, the rest of that tick is skipped, the server shuts down, and the exit code
-is 0.
+finishes, the rest of that tick is skipped, the job in progress stops and starts again
+with the next daemon, the server shuts down, and the exit code is 0.
 """
 
 from __future__ import annotations
@@ -42,10 +47,10 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import parse_qs, urlsplit
 
-from chargehand import __version__, daemonlog, paths, sanitize
+from chargehand import __version__, archive, daemonlog, paths, sanitize
 from chargehand.config import MachineConfig
 from chargehand.errors import ChargehandError, TickBusy
-from chargehand.ledger import Ledger
+from chargehand.ledger import Ledger, Worker
 from chargehand.tick import Runner, TickReport, tick_lock
 
 log = logging.getLogger(__name__)
@@ -330,6 +335,7 @@ class Daemon:
         poll_secs: float = REQUEST_POLL_SECS,
         providers: Iterable[str] = ROUTE_PROVIDERS,
         clock: Callable[[], float] = time.monotonic,
+        jobs: Callable[["Daemon"], archive.JobRunner | None] | None = None,
     ) -> None:
         self.config = config
         self._load_config = load_config or (lambda: self.config)
@@ -361,6 +367,12 @@ class Daemon:
         self._seen_request = 0
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
+        self._jobs_factory = jobs or (lambda daemon: archive.JobRunner(
+            daemon.ledger_path, transcript=daemon.transcript, written=daemon.tick_soon,
+        ))
+        self.jobs: archive.JobRunner | None = None
+        # Set by a job that left work for the tick, so the loop does not wait an interval.
+        self._tick_soon = threading.Event()
 
     # ----- the server -----------------------------------------------------
 
@@ -490,6 +502,18 @@ class Daemon:
         """A runner on a handler thread's *ledger*, built as the loop builds one for a tick."""
         return self._runner_factory(self.config, ledger)
 
+    def transcript(self, ledger: Ledger, worker: Worker) -> str | None:
+        """The worker's session transcript as text, for its archive. Untrusted text."""
+        try:
+            return self.runner(ledger).runtime(worker.runtime).transcript(
+                worker.transcript_path, worker.session_id
+            )
+        except ChargehandError:
+            return None
+
+    def tick_soon(self) -> None:
+        self._tick_soon.set()
+
     # ----- the loop -------------------------------------------------------
 
     def run(self) -> int:
@@ -500,14 +524,23 @@ class Daemon:
         if self._server is None:
             self.start()
         ledger = Ledger(self.ledger_path)
+        self.jobs = self._jobs_factory(self)
         try:
+            if self.jobs is not None:
+                self.jobs.start()
             next_tick = self._clock()
             while not self.stop_requested():
-                if self._clock() >= next_tick or self._request_waits(ledger):
+                soon = self._tick_soon.is_set()
+                if self._clock() >= next_tick or soon or self._request_waits(ledger):
+                    self._tick_soon.clear()
                     if self.tick_once(ledger):
                         next_tick = self._clock() + self.interval_secs
+                    elif soon:
+                        self._tick_soon.set()
                 self.stopping.wait(self._poll_secs)
         finally:
+            if self.jobs is not None:
+                self.jobs.close()
             self.polls.flush()
             ledger.close()
             self.close()
