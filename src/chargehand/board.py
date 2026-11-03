@@ -24,6 +24,10 @@ token writes it at once, as it has no side effect outside the ledger, and nothin
 the model reads it. A hidden repository's workers run, are supervised and notify as
 before; only their cards leave the page until the operator asks to see them.
 
+An archive of a worker, or of every worker of a repository, is a request like the others;
+the zip is written by the daemon's job thread, and the model shows each job on its card and
+in the top bar with its state and progress, read from the ledger as the rest.
+
 Everything a session, a tracker or a hook wrote is untrusted. The model passes it
 through :mod:`chargehand.sanitize`, keeps a link only when it is a plain http(s) URL, and
 escapes ``<``, ``>`` and ``&`` in the JSON; the page renders it as text and never as
@@ -57,10 +61,13 @@ from chargehand.ledger import Ledger, Worker
 from chargehand.roles import Role
 from chargehand.serve import HTTPError, Request, Response, Routes
 from chargehand.tick import (
+    ARCHIVE,
+    ARCHIVE_REPOSITORY,
     MODEL_LIMIT_KEY,
     NEW_WORKER,
     REPLY,
     REQUEST_MESSAGE_LIMIT,
+    UNARCHIVE_REPOSITORY,
     template_values,
 )
 
@@ -127,11 +134,21 @@ WORKER_ACTIONS: dict[str, tuple[str, bool]] = {
     "retry": ("retry", True),
     "discard": ("discard", True),
     "reply": (REPLY, False),
+    "archive": (ARCHIVE, True),
 }
 ATTACH = "attach"
 # The answer to an open prompt: `{"prompt": <id>, "answer": "allow" | "deny" | "always"}`.
 ANSWER = "answer"
-REPOSITORY_ACTIONS = ("pause", "resume")
+# A repository action in the URL, the request kind, and whether it takes force.
+REPOSITORY_ACTIONS: dict[str, tuple[str, bool]] = {
+    "pause": ("pause", False),
+    "resume": ("resume", False),
+    "archive": (ARCHIVE_REPOSITORY, True),
+    "unarchive": (UNARCHIVE_REPOSITORY, False),
+}
+# How long the top bar shows a job that ended, and how many jobs it shows at most.
+JOB_SHOWN_SECS = 3600
+JOB_LIMIT = 20
 
 # What a new worker request may carry: an item as its tracker names it, and the event
 # kinds it follows on that item.
@@ -413,7 +430,7 @@ def new_worker(request: Request) -> Response:
 
 
 def repository_action(request: Request) -> Response:
-    """``POST /api/repositories/<name>/<pause|resume|board>``."""
+    """``POST /api/repositories/<name>/<pause|resume|archive|unarchive|board>``."""
     parts = _segments(request, "/api/repositories")
     if len(parts) != 2 or (parts[1] not in REPOSITORY_ACTIONS and parts[1] != PERSONALISE):
         raise HTTPError(404, "not found")
@@ -425,7 +442,10 @@ def repository_action(request: Request) -> Response:
             request, ledger_mod.BOARD_REPOSITORY, repository.name, _body(request),
             name=f"repository {repository.name}",
         )
-    return _record(request, parts[1], repository.name)
+    kind, takes_force = REPOSITORY_ACTIONS[parts[1]]
+    if takes_force:
+        return _record(request, kind, repository.name, force=_flag(_body(request), "force"))
+    return _record(request, kind, repository.name)
 
 
 # ----- the board's own state -------------------------------------------------------
@@ -603,6 +623,11 @@ def build(
     )[:CLOSED_LIMIT]
     roles = _Roles(config)
     prompts = ledger.open_permission_prompts()
+    jobs = ledger.recent_jobs(current - max(JOB_SHOWN_SECS, CLOSED_WINDOW_SECS))
+    # The newest archive of each worker, for its card.
+    archives = {
+        job.target: job for job in jobs if job.kind == ledger_mod.JOB_ARCHIVE
+    }
     personal = BoardState(ledger.board_state())
     repositories = {
         name: personal.shown(ledger_mod.BOARD_REPOSITORY, name)
@@ -614,7 +639,8 @@ def build(
     cards = []
     for worker in (*live, *closed):
         entry = card(
-            worker, ledger, roles, attach=attach, prompts=prompts, now=current, held=held
+            worker, ledger, roles, attach=attach, prompts=prompts, now=current, held=held,
+            job=archives.get(str(worker.id)),
         )
         entry.update(personal.shown(ledger_mod.BOARD_WORKER, str(worker.id)))
         repository = repositories[worker.repository]
@@ -627,6 +653,7 @@ def build(
         for key, title, hint, _ in COLUMNS
     ]
     hidden = [name for name, shown in repositories.items() if shown["hidden"]]
+    workers = {worker.id: worker for worker in (*live, *closed)}
     return {
         "generated_at": current,
         "usage": usage_mod.read_usage(config.serve.usage_file, current),
@@ -640,6 +667,10 @@ def build(
             "paused_repositories": ledger.paused_repositories(),
         },
         "health": _health(health),
+        "jobs": [
+            job_entry(job, workers.get(int(job.target)) if job.target.isdigit() else None, ledger)
+            for job in jobs if job.is_active or (job.finished_at or 0) >= current - JOB_SHOWN_SECS
+        ][-JOB_LIMIT:],
         "columns": columns,
         "repositories": [
             {
@@ -659,6 +690,27 @@ def build(
         "icons": dict(ICONS),
         "terminals": list(terminal_mod.TERMINALS),
         "token_file": str(config.serve.token_file),
+    }
+
+
+def job_entry(job: ledger_mod.Job, worker: Worker | None, ledger: Ledger) -> dict[str, object]:
+    """A job as the top bar and a card show it. Its texts are chargehand's own."""
+    if worker is None and job.kind == ledger_mod.JOB_ARCHIVE and job.target.isdigit():
+        worker = ledger.get(int(job.target))
+    return {
+        "id": job.id,
+        "kind": job.kind,
+        "worker_id": worker.id if worker else None,
+        "handle": worker.target if worker else None,
+        "repository": worker.repository if worker else None,
+        "state": job.state,
+        "active": job.is_active,
+        "progress": sanitize.one_line(job.progress, limit=LINE_LIMIT) if job.progress else None,
+        "result_path": sanitize.one_line(job.result_path, limit=LINE_LIMIT) if job.result_path else None,
+        "error": sanitize.one_line(job.error, limit=300) if job.error else None,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "finished_at": job.finished_at,
     }
 
 
@@ -804,6 +856,7 @@ def card(
     prompts: Iterable[ledger_mod.PermissionPrompt] = (),
     now: float,
     held: Callable[[int], bool] = lambda prompt_id: False,
+    job: ledger_mod.Job | None = None,
 ) -> dict[str, object]:
     role = roles.of(worker)
     live = not worker.is_terminal
@@ -817,7 +870,7 @@ def card(
         "id": worker.id,
         "handle": worker.target,
         "origin": worker.origin,
-        "actions": actions(worker),
+        "actions": actions(worker, job),
         "column": COLUMN_OF[worker.state],
         "state": worker.state,
         "session_state": worker.session_state,
@@ -854,6 +907,8 @@ def card(
             else None
         ),
         "last_hook": worker.last_hook,
+        "job": job_entry(job, worker, ledger) if job else None,
+        "archived_at": worker.archived_at,
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
         "finished_at": worker.finished_at,
@@ -875,10 +930,17 @@ def permission_prompt(
     }
 
 
-def actions(worker: Worker) -> list[str]:
-    """The buttons a card offers: the actions that the worker's state can take now."""
+def actions(worker: Worker, job: ledger_mod.Job | None = None) -> list[str]:
+    """The buttons a card offers: the actions that the worker's state can take now.
+
+    While an archive of the worker is under way, it offers none that would remove or
+    replace what the archive reads.
+    """
+    archiving = job is not None and job.is_active
     if worker.is_terminal:
-        return ["retry"] + ([] if worker.gc_done else ["discard"])
+        if archiving or worker.archived_at is not None:
+            return []
+        return ["retry"] + ([] if worker.gc_done else ["discard", "archive"])
     offered = []
     if worker.state in (ledger_mod.PAUSED, ledger_mod.BLOCKED, ledger_mod.PARKED):
         offered.append("continue")
@@ -887,7 +949,8 @@ def actions(worker: Worker) -> list[str]:
     offered += ["cancel", "reply"]
     if worker.session_id:
         offered.append(ATTACH)
-    offered.append("discard")
+    if not archiving:
+        offered += ["discard", "archive"]
     return offered
 
 

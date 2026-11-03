@@ -678,10 +678,14 @@ def test_a_card_offers_the_actions_its_state_can_take(harness):
         updated = harness.ledger.update(worker, state=state, **changes)
         return board.actions(updated)
 
-    assert card_actions(ledger_mod.RUNNING) == ["pause", "cancel", "reply", "attach", "discard"]
-    assert card_actions(ledger_mod.PAUSED) == ["continue", "cancel", "reply", "attach", "discard"]
+    assert card_actions(ledger_mod.RUNNING) == [
+        "pause", "cancel", "reply", "attach", "discard", "archive"
+    ]
+    assert card_actions(ledger_mod.PAUSED) == [
+        "continue", "cancel", "reply", "attach", "discard", "archive"
+    ]
     assert card_actions(ledger_mod.BLOCKED)[0] == "continue"
-    assert card_actions(ledger_mod.CANCELLED) == ["retry", "discard"]
+    assert card_actions(ledger_mod.CANCELLED) == ["retry", "discard", "archive"]
     assert card_actions(ledger_mod.CANCELLED, gc_done=1) == ["retry"]
 
     page = board.build(harness.config, harness.ledger, health={})

@@ -98,6 +98,9 @@ DEFAULT_PERMISSION_MODE = "auto"
 STOP_WAIT_SECS = 10.0
 STOP_POLL_SECS = 0.25
 
+# How much of a session's output an archive keeps when no transcript file is known.
+TRANSCRIPT_LOG_LINES = 100_000
+
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -644,6 +647,76 @@ def copy_started_by(result: CommandResult) -> str | None:
 def user_claude_dir() -> Path:
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(override).expanduser() if override else Path(os.path.expanduser("~")) / ".claude"
+
+
+def transcript_file(value: str | None) -> Path | None:
+    """*value* as a transcript to read, or None unless it is a session file of Claude Code.
+
+    The path comes from a hook payload, so only a regular `.jsonl` file under the
+    projects directory of the Claude Code configuration is read.
+    """
+    if not value or not os.path.isabs(value) or not value.endswith(".jsonl"):
+        return None
+    try:
+        path = Path(value).resolve(strict=True)
+        root = (user_claude_dir() / "projects").resolve()
+    except (OSError, RuntimeError):
+        return None
+    if root not in path.parents or not path.is_file():
+        return None
+    return path
+
+
+def transcript_text(path: Path) -> str:
+    """A session transcript (JSON lines) as plain text: each message with its role and time.
+
+    A tool call shows its name and input, a tool result its text. Lines that are not a
+    message, and parts that carry no text (thinking, images), are left out.
+    """
+    out: list[str] = []
+    with path.open(encoding="utf-8", errors="replace") as lines:
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict) or record.get("type") not in ("user", "assistant"):
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            body = _transcript_content(message.get("content"))
+            if not body:
+                continue
+            stamp = record.get("timestamp")
+            head = f"{message.get('role') or record['type']}"
+            if isinstance(stamp, str):
+                head = f"[{stamp}] {head}"
+            out.append(f"{head}:\n{body}\n")
+    return "\n".join(out)
+
+
+def _transcript_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"].strip())
+        elif kind == "tool_use":
+            try:
+                shown = json.dumps(block.get("input"), ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                shown = ""
+            parts.append(f"[tool {block.get('name')}] {shown}")
+        elif kind == "tool_result":
+            parts.append(f"[tool result] {_transcript_content(block.get('content'))}".rstrip())
+    return "\n".join(part for part in parts if part)
 
 
 def agent_file_candidates(repo: Path, name: str) -> list[Path]:
@@ -1466,6 +1539,20 @@ class ClaudeRuntime(Runtime):
     def logs(self, session_id: str, *, lines: int = 200) -> str:
         return self.cli.logs(session_id, lines=lines)
 
+    def transcript(self, transcript_path: str | None, session_id: str | None) -> str | None:
+        path = transcript_file(transcript_path)
+        if path is not None:
+            try:
+                return transcript_text(path)
+            except OSError as exc:
+                log.warning("could not read the transcript of session %s: %s", session_id, exc)
+        if not session_id:
+            return None
+        try:
+            return self.logs(session_id, lines=TRANSCRIPT_LOG_LINES) or None
+        except ClaudeError:
+            return None
+
     def attach_command(self, session_id: str) -> str:
         return f"claude attach {session_id}"
 
@@ -1509,5 +1596,7 @@ __all__ = [
     "parse_sessions",
     "session_failure",
     "status_line_windows",
+    "transcript_file",
+    "transcript_text",
     "worker_from_session",
 ]

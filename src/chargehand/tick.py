@@ -13,7 +13,7 @@ Order, once per tick:
 9. sync the tracker labels and the status of source items
 10. admit the tracker's starts: the queue label is a start rule, launched within the
     caps, ledger row first
-11. collect garbage
+11. collect garbage, and remove what an archive that the daemon's job thread wrote holds
 
 The tick reaches a tracker only as a source (:class:`TrackerSource`). Step 7 comes before
 delivery, so a comment on a worker's issue wakes it in the same tick. Step 10 comes after
@@ -40,6 +40,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from chargehand import archive as archive_mod
 from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import daemonlog, gitutil, ledger as ledger_mod, paths, sanitize, trackers
@@ -160,11 +161,18 @@ REQUEST_MESSAGE_LIMIT = 300
 # worker started by hand, and a line of text for a worker.
 NEW_WORKER = "new_worker"
 REPLY = "reply"
+# An archive of one worker, and of every worker of a repository, which also hides it on the
+# board; unarchive shows the repository again. The daemon's job thread writes the zip.
+ARCHIVE = "archive"
+ARCHIVE_REPOSITORY = "archive_repository"
+UNARCHIVE_REPOSITORY = "unarchive_repository"
 
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
 PENDING_NOTIFICATION_PREFIX = "notify-pending:"
 PENDING_NOTIFICATION_MAX_AGE_SECS = 24 * 3600
+
+SESSION_STILL_WORKING = "not collected, its session is still working"
 
 # Names no branch, because the session chose the name and this text reaches the terminal,
 # the tick log, and whichever assistant ran the command.
@@ -1030,6 +1038,7 @@ class Runner:
             # A reply is answered by the request id, so a second reply with the same line
             # is a second event.
             args["request_id"] = request["id"]
+            args["request_origin"] = request.get("origin") or ledger_mod.REQUEST_CLI
             try:
                 ok, message = self._apply_request(kind, target, args, report)
             except ChargehandError as exc:
@@ -1056,6 +1065,12 @@ class Runner:
             return False, f"{kind} needs a work item"
         if kind == NEW_WORKER:
             return self._do_new_worker(target, args, report)
+        if kind == ARCHIVE_REPOSITORY:
+            return self._do_archive_repository(
+                target, bool(args.get("force")), str(args.get("request_origin") or ledger_mod.REQUEST_CLI)
+            )
+        if kind == UNARCHIVE_REPOSITORY:
+            return self._do_unarchive_repository(target)
 
         role = args.get("role") or None
         found, problem = self.ledger.find_worker(target, role)
@@ -1064,6 +1079,12 @@ class Runner:
         worker = found
         context = self.context_for_worker(worker)
 
+        if kind in ("retry", "discard"):
+            job = self.ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id))
+            if job is not None:
+                return False, (
+                    f"{worker.name}: archive job {job.id} is {job.state}; {kind} waits until it ends"
+                )
         if kind == "cancel":
             return self._do_cancel(worker, context, report)
         if kind == "stop":
@@ -1076,6 +1097,10 @@ class Runner:
             return self._do_discard(worker, context, bool(args.get("force")), report)
         if kind == REPLY:
             return self._do_reply(worker, args)
+        if kind == ARCHIVE:
+            return self._do_archive(
+                worker, bool(args.get("force")), str(args.get("request_origin") or ledger_mod.REQUEST_CLI)
+            )
         return False, f"unknown request '{kind}'"
 
     def _twins(self, worker: Worker) -> str:
@@ -1412,6 +1437,114 @@ class Runner:
                 f"could not be removed; remove session {worker.session_id} by hand{kept}"
             )
         return True, f"discarded {worker.id_handle}: session removed, worktree and branch deleted{kept}"
+
+    def _archive_refusal(self, worker: Worker) -> str | None:
+        if worker.archived_at is not None:
+            return f"{worker.name} is archived already"
+        job = self.ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id))
+        if job is not None:
+            return f"{worker.name}: archive job {job.id} is {job.state} already"
+        if worker.is_terminal and worker.gc_done:
+            return (
+                f"{worker.name}: its worktree and session were removed already, so nothing "
+                f"is left to archive"
+            )
+        return None
+
+    def _do_archive(self, worker: Worker, force: bool, origin: str) -> tuple[bool, str]:
+        """Queue an archive of *worker* for the daemon's job thread.
+
+        A zip is not a push, so the guard of discard applies: unpushed commits or a dirty
+        tree refuse it unless *force*. A live worker is cancelled first, through a cancel
+        request; its job waits until that request has applied.
+        """
+        refusal = self._archive_refusal(worker)
+        if refusal is not None:
+            return False, refusal
+        blocker = self._worktree_holds_work(worker)
+        if blocker and not force:
+            return False, (
+                f"{worker.name}: {blocker}. Commit and push that work first, or archive with "
+                f"force: the archive keeps the files, not the commits."
+            )
+        job = self._queue_archive(worker, force, origin)
+        if job.state == ledger_mod.JOB_WAITING:
+            return True, (
+                f"{worker.id_handle} is {worker.state}: cancel requested; archive job {job.id} "
+                f"starts once it has stopped"
+            )
+        return True, f"archive job {job.id} queued for {worker.id_handle}"
+
+    def _queue_archive(self, worker: Worker, force: bool, origin: str) -> ledger_mod.Job:
+        trees = [[archive_mod.WORKTREE_TREE, worker.worktree]]
+        checkout = item_checkout_path(worker)
+        if checkout.exists():
+            trees.append([archive_mod.ITEM_CHECKOUT_TREE, str(checkout)])
+        now = time.time()
+        dest = archive_mod.archive_path(worker, now)
+        args: dict[str, object] = {"force": force, "trees": trees}
+        state, progress = ledger_mod.JOB_QUEUED, "waits for the job thread"
+        if not worker.is_terminal:
+            args["cancel_request"] = self.ledger.record_request(
+                "cancel", worker.id_handle, origin=origin
+            )
+            state, progress = ledger_mod.JOB_WAITING, f"waits for the cancel of {worker.id_handle}"
+        job = self.ledger.create_job(
+            ledger_mod.JOB_ARCHIVE, str(worker.id), state=state, result_path=str(dest),
+            progress=progress, now=now, **args,
+        )
+        log.info("%s: archive job %s is %s", worker.handle, job.id, state)
+        return job
+
+    def _do_archive_repository(self, name: str, force: bool, origin: str) -> tuple[bool, str]:
+        """Hide the repository on the board, and queue an archive of each of its workers
+        that still holds a worktree or a session.
+
+        Live workers refuse it unless *force*, which cancels them first; so does work that
+        is not pushed, as for one worker.
+        """
+        repository = self.config.repository_by_name(name)
+        if repository is None:
+            return False, f"no repository named {sanitize.one_line(name, limit=100)}"
+        candidates = [
+            worker for worker in self.ledger.archivable_workers(repository.name)
+            if self.ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id)) is None
+        ]
+        live = [worker for worker in candidates if not worker.is_terminal]
+        if live and not force:
+            return False, sanitize.one_line(
+                f"repository {repository.name} has {len(live)} live worker(s): "
+                f"{', '.join(worker.id_handle for worker in live)}. Archive it with force to "
+                f"cancel them first.",
+                limit=REQUEST_MESSAGE_LIMIT,
+            )
+        if not force:
+            held = [
+                f"{worker.id_handle}: {blocker}" for worker in candidates
+                if (blocker := self._worktree_holds_work(worker))
+            ]
+            if held:
+                return False, sanitize.one_line(
+                    f"repository {repository.name} is not archived: {'; '.join(held)}. Push "
+                    f"or discard that work, or archive with force.",
+                    limit=REQUEST_MESSAGE_LIMIT,
+                )
+        jobs = [self._queue_archive(worker, force, origin) for worker in candidates]
+        self.ledger.set_board_state(ledger_mod.BOARD_REPOSITORY, repository.name, "hidden", "1")
+        waiting = sum(1 for job in jobs if job.state == ledger_mod.JOB_WAITING)
+        log.info("repository %s archived: %s archive job(s)", repository.name, len(jobs))
+        return True, (
+            f"repository {repository.name} hidden; {len(jobs)} archive job(s) queued"
+            + (f", {waiting} of them after a cancel" if waiting else "")
+        )
+
+    def _do_unarchive_repository(self, name: str) -> tuple[bool, str]:
+        """Show the repository on the board again. The archives stay as they are."""
+        repository = self.config.repository_by_name(name)
+        if repository is None:
+            return False, f"no repository named {sanitize.one_line(name, limit=100)}"
+        self.ledger.delete_board_state(ledger_mod.BOARD_REPOSITORY, repository.name, "hidden")
+        return True, f"repository {repository.name} shows on the board again; its archives stay"
 
     def _worktree_holds_work(self, worker: Worker) -> str | None:
         found = self._checkout_holds_work(worker.worktree_path, (), "its worktree")
@@ -3073,7 +3206,11 @@ class Runner:
     def _collect_garbage(self, report: TickReport) -> None:
         self._check_disk(report)
         self._close_out_finished_issues(report)
+        self._advance_archives(report)
         for worker in self.ledger.workers_needing_gc():
+            if self.ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id)) is not None:
+                # Its archive collects it once the zip is in place.
+                continue
             context = self.context_for_worker(worker)
             if context is None or not context.usable:
                 continue
@@ -3083,22 +3220,96 @@ class Runner:
             if blocker:
                 report.warnings.append(f"{worker.handle}: not collected, {blocker}")
                 continue
-            if worker.session_id and not self._stop_session(worker):
-                report.warnings.append(
-                    f"{worker.handle}: not collected, its session is still working"
-                )
-                continue
-            self._remove_session(worker)
-            try:
-                branches_removed = self._remove_worktree(worker, force=False)
-            except GitError as exc:
-                report.warnings.append(f"{worker.handle}: could not collect: {exc}")
-                continue
-            if not branches_removed:
-                report.warnings.append(f"{worker.handle}: collected, but {KEPT_BRANCH}")
-            self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
-            report.collected.append(worker.handle)
+            problem = self._collect(worker, report)
+            if problem:
+                report.warnings.append(f"{worker.handle}: {problem}")
         self._forget_checkout_heads()
+
+    def _collect(
+        self, worker: Worker, report: TickReport, *, force: bool = False, **changes: object
+    ) -> str | None:
+        """Remove a finished worker's session, worktree and branch, and mark it collected,
+        with *changes*. Why it did not, or None. The caller has applied the guard."""
+        if worker.session_id and not self._stop_session(worker):
+            return SESSION_STILL_WORKING
+        self._remove_session(worker)
+        try:
+            branches_removed = self._remove_worktree(worker, force=force)
+        except GitError as exc:
+            return f"could not collect: {exc}"
+        if not branches_removed:
+            report.warnings.append(f"{worker.handle}: collected, but {KEPT_BRANCH}")
+        self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None, **changes)
+        report.collected.append(worker.handle)
+        return None
+
+    def _advance_archives(self, report: TickReport) -> None:
+        """Move the archive jobs that wait for the tick: one waits for the cancel of its
+        worker, another has its zip in place, so the worker's worktree and session go."""
+        for job in self.ledger.jobs_in_state(
+            [ledger_mod.JOB_WAITING, ledger_mod.JOB_WRITTEN], kind=ledger_mod.JOB_ARCHIVE
+        ):
+            worker = self.ledger.get(int(job.target)) if job.target.isdigit() else None
+            if worker is None:
+                self.ledger.update_job(
+                    job, state=ledger_mod.JOB_FAILED, error=f"no worker {job.target}"
+                )
+            elif job.state == ledger_mod.JOB_WAITING:
+                self._release_archive(job, worker)
+            else:
+                self._finish_archive(job, worker, report)
+
+    def _release_archive(self, job: ledger_mod.Job, worker: Worker) -> None:
+        if worker.is_terminal:
+            self.ledger.update_job(
+                job, expect=ledger_mod.JOB_WAITING, state=ledger_mod.JOB_QUEUED,
+                progress="waits for the job thread",
+            )
+            return
+        request_id = job.args.get("cancel_request")
+        request = self.ledger.get_request(request_id) if isinstance(request_id, int) else None
+        if request is not None and request["applied_at"] is None:
+            return
+        why = request["message"] if request is not None else "the cancel request is gone"
+        self.ledger.update_job(
+            job, expect=ledger_mod.JOB_WAITING, state=ledger_mod.JOB_FAILED, progress=None,
+            error=sanitize.one_line(f"{worker.id_handle} was not cancelled: {why}", limit=300),
+        )
+
+    def _finish_archive(self, job: ledger_mod.Job, worker: Worker, report: TickReport) -> None:
+        """Remove the worktree and the session of an archived worker, guarded once more."""
+        dest = Path(job.result_path or "")
+        if not job.result_path or not dest.is_file():
+            self.ledger.update_job(
+                job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_QUEUED,
+                progress="the archive file is gone; it is written again",
+            )
+            return
+        kept = f"the archive is kept at {dest}"
+        blocker = None if job.force else self._worktree_holds_work(worker)
+        if blocker:
+            self.ledger.update_job(
+                job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_FAILED, progress=None,
+                error=sanitize.one_line(f"not removed: {blocker}; {kept}", limit=300),
+            )
+            report.warnings.append(f"{worker.handle}: archived, but not removed: {blocker}")
+            return
+        problem = self._collect(worker, report, force=job.force, archived_at=time.time())
+        if problem == SESSION_STILL_WORKING:
+            # The stop did not take yet; the next tick tries again.
+            report.warnings.append(f"{worker.handle}: archive written, but {problem}")
+            return
+        if problem:
+            self.ledger.update_job(
+                job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_FAILED, progress=None,
+                error=sanitize.one_line(f"{problem}; {kept}", limit=300),
+            )
+            report.warnings.append(f"{worker.handle}: archive written, but {problem}")
+            return
+        self.ledger.update_job(
+            job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_DONE, progress="archived"
+        )
+        log.info("%s: archived to %s; worktree and session removed", worker.handle, dest)
 
     def _forget_checkout_heads(self) -> None:
         """Drop the records of each worker whose worktree is gone, by any path."""

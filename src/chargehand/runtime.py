@@ -346,6 +346,14 @@ class Runtime(ABC):
     def logs(self, session_id: str, *, lines: int = 200) -> str:
         """The last *lines* of the session's output. Untrusted text."""
 
+    def transcript(self, transcript_path: str | None, session_id: str | None) -> str | None:
+        """The session's conversation as plain text, for an archive, or None. Untrusted text.
+
+        *transcript_path* is what the session's hooks reported, so it is checked before it
+        is read.
+        """
+        return None
+
     @abstractmethod
     def attach_command(self, session_id: str) -> str:
         """The command an operator runs to open the session in a terminal."""

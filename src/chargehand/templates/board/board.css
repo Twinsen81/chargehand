@@ -34,6 +34,9 @@ header.top h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2
 .throttle .paused { color: var(--amber); font-weight: 600; }
 .throttle .model-limit { color: var(--red); font-weight: 600; border: 1px solid var(--red); border-radius: 10px; padding: 0 7px; }
 .hidden-count { color: var(--amber); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+.jobs { color: var(--muted); font-size: 12px; display: flex; gap: 10px; max-width: 40vw; overflow: hidden; }
+.jobs .job { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+.jobs .job.failed, .note.job.failed { color: var(--red); }
 .health { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-family: var(--mono); flex: 1 1 0; min-width: 120px; max-width: 420px; }
 .health .dot { flex: none; }
 .health .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
