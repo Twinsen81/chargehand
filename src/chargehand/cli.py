@@ -23,6 +23,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from chargehand import __version__, daemonlog, install, paths, sanitize, serve, trackers, transfer
+from chargehand import clone as clone_mod
+from chargehand import ledger as ledger_mod
 from chargehand import usage as usage_mod
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
@@ -141,6 +143,8 @@ def _worker_dict(
         # The name a command takes; it resolves back to this worker.
         "handle": worker.target,
         "origin": worker.origin,
+        # The id of the worker a clone was made from.
+        "parent": worker.parent_id,
         "item": worker.item,
         "role": worker.role,
         "runtime": worker.runtime,
@@ -715,6 +719,26 @@ def cmd_discard(args: argparse.Namespace) -> int:
     return _request(args, "discard", args.item, force=args.force, **_role_args(args))
 
 
+def cmd_clone(args: argparse.Namespace) -> int:
+    """Record the request the board's clone form records, with origin ``cli``."""
+    prompt = args.prompt
+    if args.prompt_file is not None:
+        try:
+            prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"chargehand: cannot read the prompt file: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    try:
+        extra = clone_mod.clone_args({
+            "mode": args.mode, "prompt": prompt, "model": args.model, "effort": args.effort,
+            "subscribe": args.subscribe,
+        })
+    except clone_mod.CloneArgsError as exc:
+        print(f"chargehand: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return _request(args, clone_mod.CLONE, args.item, **extra, **_role_args(args))
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     if sys.platform != "darwin":
         print("install writes a launchd LaunchAgent, which is macOS only. On other "
@@ -1007,6 +1031,30 @@ def build_parser() -> argparse.ArgumentParser:
     discard.add_argument("--yes", action="store_true", help="required: this destroys work")
     discard.add_argument("--force", action="store_true", help="discard even with unpushed commits")
     _add_request_flags(discard)
+
+    clone = add(
+        "clone", cmd_clone,
+        "start a new worker from an existing one, in a worktree of its own on its branch",
+    )
+    add_item(clone)
+    clone.add_argument(
+        "--mode", required=True, choices=ledger_mod.CLONE_MODES,
+        help="fresh: nothing from the old session; full: a copy of its conversation",
+    )
+    prompt = clone.add_mutually_exclusive_group()
+    prompt.add_argument("--prompt", metavar="TEXT",
+                        help="the first prompt template instead of the role's")
+    prompt.add_argument("--prompt-file", metavar="PATH",
+                        help="read the first prompt template from PATH")
+    clone.add_argument("--model", help="the model instead of the role's, such as sonnet")
+    clone.add_argument("--effort", choices=roles_mod.EFFORT_LEVELS,
+                       help="the effort instead of the role's")
+    clone.add_argument(
+        "--subscribe", action="append", default=[], metavar="KIND",
+        help="an event kind on the item that wakes the clone; repeatable. Default: none, so "
+             "only a reply from the board reaches it",
+    )
+    _add_request_flags(clone)
 
     serve_cmd = add("serve", cmd_serve, "run the daemon: the tick on a timer and the loopback API")
     serve_cmd.add_argument(

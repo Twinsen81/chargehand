@@ -460,18 +460,54 @@ class ClaudeCLI:
         session_uuid: str,
         prompt: str,
         *,
+        worktree: Path,
+        name: str,
+        permission_mode: str,
         model: str | None = None,
         effort: str | None = None,
+        settings: Mapping[str, Any] | Path | None = None,
         timeout_secs: float = 180.0,
     ) -> CommandResult:
-        """Start a new background session that continues a copy of *session_uuid*'s conversation."""
-        args = ["--resume", session_uuid, "--fork-session", "--bg"]
+        """Start a background session in *worktree* that continues a copy of *session_uuid*'s
+        conversation, with *prompt* as its next turn.
+
+        Observed in Claude Code 2.1.317: run in another worktree of the same repository,
+        the resume finds the conversation; the copy works in *worktree* under *name*, its
+        transcript is kept for that directory, and the original is left as it was. The
+        copy keeps the conversation, but falls back to the default effort and permission
+        mode, so those, the model and the settings are passed again. The job saves them,
+        and an in-place resume of the copy applies them again. stdin is /dev/null, as for
+        a resume, which reads piped text into the prompt; the copy still runs its
+        SessionStart hook.
+
+        Raises :class:`WorkspaceNotTrusted` as :meth:`launch` does. Any other failure
+        names the session and the exit, never the prompt.
+        """
+        args = [
+            "--resume", session_uuid, "--fork-session", "--bg",
+            "-n", name, "--permission-mode", permission_mode,
+        ]
         if model:
             args += ["--model", model]
         if effort:
             args += ["--effort", effort]
+        if isinstance(settings, Path):
+            args += ["--settings", str(settings)]
+        elif settings:
+            args += ["--settings", json.dumps(settings, sort_keys=True)]
         args.append(prompt)
-        return self._run(args, timeout=timeout_secs, check=False)
+        result = self._run(args, cwd=worktree, timeout=timeout_secs, check=False)
+        if result.returncode != 0 and _UNTRUSTED_WORKSPACE in result.stdout + result.stderr:
+            raise WorkspaceNotTrusted(
+                f"Claude Code refused {worktree} as an untrusted workspace: "
+                f"{sanitize.one_line(result.stderr or result.stdout, limit=200)}"
+            )
+        if result.returncode != 0:
+            raise ClaudeError(
+                f"the fork of session {session_uuid} exited {result.returncode}: "
+                f"{sanitize.one_line(result.stderr or result.stdout, limit=300)}"
+            )
+        return result
 
     def one_shot(
         self,
@@ -732,16 +768,19 @@ def launch_settings(
     deny_rules: Sequence[str],
     read_paths: Sequence[Path] = (),
     hooks: Mapping[str, object] | None = None,
+    protected_paths: Sequence[Path] = (),
 ) -> dict[str, object] | None:
     """The per-launch settings payload: the deny rules, the allow rules and the hooks.
 
     Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
     not passed as `--add-dir`: Claude Code loads skills from an added directory, and these
-    paths hold content the operator did not write.
+    paths hold content the operator did not write. Each of *protected_paths* gets `Edit`
+    and `Write` deny rules (:func:`protected_path_rules`).
     """
     permissions: dict[str, list[str]] = {}
-    if deny_rules:
-        permissions["deny"] = list(deny_rules)
+    deny = [*deny_rules, *protected_path_rules(protected_paths)]
+    if deny:
+        permissions["deny"] = deny
     # `//` starts an absolute path in a Claude Code permission rule.
     allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
     if allow:
@@ -752,6 +791,23 @@ def launch_settings(
     if hooks:
         settings["hooks"] = dict(hooks)
     return settings or None
+
+
+def protected_path_rules(paths: Sequence[Path]) -> list[str]:
+    """Deny rules that keep the file tools out of each of *paths*.
+
+    A deny rule holds in every permission mode, `auto` and `bypassPermissions` included,
+    so a clone that continues a copy of another worker's conversation cannot edit that
+    worker's worktree with Edit, Write or another file-editing tool. The Bash tool is not
+    covered: a rule matches a command's text, not the files it changes. A path is named as
+    given and resolved, because Claude Code may compare either (`/tmp` is `/private/tmp`).
+    """
+    rules: list[str] = []
+    for path in paths:
+        for variant in dict.fromkeys((str(Path(path)), os.path.realpath(path))):
+            # `//` starts an absolute path in a Claude Code permission rule.
+            rules += [f"Edit(/{variant}/**)", f"Write(/{variant}/**)"]
+    return rules
 
 
 # ----- session hooks ---------------------------------------------------------
@@ -861,6 +917,10 @@ def permission_timeout_of(settings: Mapping[str, Any]) -> int | None:
     except (KeyError, IndexError, TypeError):
         return None
     return timeout if isinstance(timeout, int) and not isinstance(timeout, bool) else None
+
+
+def _permission_mode(spec: LaunchSpec) -> str:
+    return str(spec.options.get("permission_mode") or DEFAULT_PERMISSION_MODE)
 
 
 def settings_file_for(worktree: Path) -> Path:
@@ -1249,7 +1309,10 @@ class ClaudeRuntime(Runtime):
         hooks = self.hooks(
             spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
         )
-        settings = launch_settings(spec.options, self.deny_rules, spec.read_paths, hooks=hooks)
+        settings = launch_settings(
+            spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
+            protected_paths=spec.protected_paths,
+        )
         if not hooks or settings is None:
             return settings
         path = settings_file_for(spec.worktree)
@@ -1259,7 +1322,10 @@ class ClaudeRuntime(Runtime):
             # The token must not go on the command line; the session diff follows it.
             if warn is not None:
                 warn(f"{spec.name}: could not write {path} ({exc}); the session posts no hooks")
-            return launch_settings(spec.options, self.deny_rules, spec.read_paths)
+            return launch_settings(
+                spec.options, self.deny_rules, spec.read_paths,
+                protected_paths=spec.protected_paths,
+            )
 
     @classmethod
     def parse_role_options(cls, table: Mapping[str, object], where: str) -> dict[str, object]:
@@ -1363,21 +1429,64 @@ class ClaudeRuntime(Runtime):
         helps only when the entry is gone: a refusal while the entry is still in the
         file has another cause, and is reported at once.
         """
+        return self._start(
+            spec,
+            warn,
+            lambda settings: self.cli.launch(
+                worktree=spec.worktree,
+                name=spec.name,
+                prompt=spec.prompt,
+                permission_mode=_permission_mode(spec),
+                agent=spec.options.get("agent") or None,
+                model=spec.model,
+                effort=spec.effort,
+                settings=settings,
+            ),
+        )
+
+    def fork(
+        self,
+        spec: LaunchSpec,
+        *,
+        session_id: str,
+        session_uuid: str | None = None,
+        warn: Callable[[str], None] | None = None,
+    ) -> LaunchResult:
+        """Start a copy of the session's conversation as a new session, as a launch would.
+
+        The copy gets the trust entry, its own settings file with the hooks, its name, and
+        the role's permission mode, model and effort, the same as a launch in
+        ``spec.worktree``; only the full session id finds the conversation.
+        """
+        return self._start(
+            spec,
+            warn,
+            lambda settings: self.cli.fork(
+                session_uuid or session_id,
+                spec.prompt,
+                worktree=spec.worktree,
+                name=spec.name,
+                permission_mode=_permission_mode(spec),
+                model=spec.model,
+                effort=spec.effort,
+                settings=settings,
+            ),
+        )
+
+    def _start(
+        self,
+        spec: LaunchSpec,
+        warn: Callable[[str], None] | None,
+        start: Callable[[dict[str, object] | Path | None], CommandResult],
+    ) -> LaunchResult:
+        """Write the settings, record the trust entry, and run *start* until it is not refused
+        for a trust entry that another process removed; see :meth:`launch`."""
         attempt = 1
         settings = self._settings_for(spec, warn)
         while True:
             trusted = self._trust(spec, warn)
             try:
-                result = self.cli.launch(
-                    worktree=spec.worktree,
-                    name=spec.name,
-                    prompt=spec.prompt,
-                    permission_mode=str(spec.options.get("permission_mode") or DEFAULT_PERMISSION_MODE),
-                    agent=spec.options.get("agent") or None,
-                    model=spec.model,
-                    effort=spec.effort,
-                    settings=settings,
-                )
+                result = start(settings)
             except WorkspaceNotTrusted as exc:
                 if not trusted:
                     raise
@@ -1561,18 +1670,6 @@ class ClaudeRuntime(Runtime):
 
     def attach_command(self, session_id: str) -> str:
         return f"claude attach {session_id}"
-
-    def fork(
-        self,
-        session_id: str,
-        prompt: str,
-        *,
-        session_uuid: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-    ) -> CommandResult:
-        return self.cli.fork(session_uuid or session_id, prompt, model=model, effort=effort)
-
 
 runtime_mod.register(ClaudeRuntime)
 

@@ -133,3 +133,7 @@ input[type=checkbox] { padding: 0; }
 .card .actions .board { margin-left: auto; display: flex; gap: 5px; }
 .panel .field input.icon { min-width: 120px; }
 [hidden] { display: none !important; }
+.chip.clone { color: var(--muted); border-color: var(--border); }
+.panel .field textarea.prompt { min-width: 420px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 4px 6px; font: inherit; font-family: var(--mono); font-size: 11.5px; }
+.panel .modes { display: flex; gap: 10px; }
+.panel .note { color: var(--amber); font-size: 12px; }

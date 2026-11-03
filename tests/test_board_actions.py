@@ -100,8 +100,11 @@ def test_the_page_sends_the_token_only_in_a_header(daemon):
     assert "?token" not in script and "token=" not in script
     page = (board.asset_dir() / "index.html").read_text()
     assert 'type="password"' in page
-    # No chat: the only text a session gets from the board is a one-line reply.
-    assert "<textarea" not in page and "textarea" not in script
+    # No chat: a session gets a one-line reply from the board, and the one multi-line text,
+    # the first prompt of a clone, only in the clone form.
+    assert "<textarea" not in page and script.count("textarea") == 1
+    clone_form = script[script.index("async function openClone("):script.index("function openNewWorker(")]
+    assert clone_form.count("textarea") == 1
     assert "maxLength = REPLY_MAX" in script
 
 
@@ -679,13 +682,13 @@ def test_a_card_offers_the_actions_its_state_can_take(harness):
         return board.actions(updated)
 
     assert card_actions(ledger_mod.RUNNING) == [
-        "pause", "cancel", "reply", "attach", "discard", "archive"
+        "pause", "cancel", "reply", "attach", "discard", "archive", "clone"
     ]
     assert card_actions(ledger_mod.PAUSED) == [
-        "continue", "cancel", "reply", "attach", "discard", "archive"
+        "continue", "cancel", "reply", "attach", "discard", "archive", "clone"
     ]
     assert card_actions(ledger_mod.BLOCKED)[0] == "continue"
-    assert card_actions(ledger_mod.CANCELLED) == ["retry", "discard", "archive"]
+    assert card_actions(ledger_mod.CANCELLED) == ["retry", "discard", "archive", "clone"]
     assert card_actions(ledger_mod.CANCELLED, gc_done=1) == ["retry"]
 
     page = board.build(harness.config, harness.ledger, health={})

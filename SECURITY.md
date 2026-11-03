@@ -219,6 +219,27 @@ public location.
   source name `board`, which no configured source may take, so no event from a source
   can pass as a reply. The request row keeps the line, so it is in the ledger like the
   other request arguments.
+- **The prompt of a clone.** The clone form sends a prompt template that the operator
+  edited: trusted operator text from a holder of the token, or from the command line, as
+  a role file is. It may reach the clone's first prompt; tracker text never does. It is
+  cleaned of control sequences and direction overrides, refused above 16 KiB, and checked
+  for the role prompt's placeholders, so `{title}` and `{body}` are refused as in a role
+  file. A model name that starts with `-` is refused, because it goes into the command
+  line. The request row and the clone's ledger row keep the prompt; log lines name only
+  its length. `GET /api/workers/<id>/clone` needs no token, as every read, and shows the
+  role's prompt template, which the card already shows filled in.
+- **A clone and its original's worktree.** Two workers never work in one worktree, but a
+  clone in full mode starts with a copy of the original's conversation, which names the
+  original's worktree, and a fresh clone can find it too. A line before a full-mode
+  clone's prompt says that this worktree belongs to another worker, and the clone's own
+  settings file denies `Edit(//<original worktree>/**)` and `Write(//<original
+  worktree>/**)`, as given and resolved. A clone of a clone gets the same line and rules for
+  the worktree of every earlier original, because a copy of a copy names them all. A deny rule holds in every permission mode,
+  `auto` and `bypassPermissions` included, so the file tools (Edit, Write and the other
+  file-editing tools) cannot change the original's files. The Bash tool is not covered: a
+  rule matches the text of a command, not the files it changes, so under `auto` or
+  `bypassPermissions` a shell command can still write there; a role in `manual` mode asks
+  before such a command.
 - **Board settings.** Names, icons, pins and the collapsed and hidden repositories are
   written by `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board`,
   with the token, straight into the ledger's `board_state` table; they reach no session,

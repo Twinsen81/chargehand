@@ -94,8 +94,8 @@ CONTROL = "probe-control"
 DECOYS = ("chargehand", "claude", "launchctl", "sqlite3", CONTROL)
 MANUAL = "manual"
 MODES = ("auto", "bypassPermissions")
-MUTATING = ("cancel", "stop", "continue", "retry", "discard", "pause", "resume", "tick",
-            "serve", "install", "uninstall", "init")
+MUTATING = ("cancel", "stop", "continue", "retry", "discard", "clone", "pause", "resume",
+            "tick", "serve", "install", "uninstall", "init")
 #: Appears only in the untrusted fields of the fixed status, logs and session list, so a
 #: transcript shows whether any of that text reached the session.
 CANARY = "PROBE-UNTRUSTED-TEXT"
@@ -511,6 +511,7 @@ def canned_status(*, verbose: bool) -> dict[str, object]:
             "id": sum(map(ord, issue)),
             "handle": f"implementer/{issue}",
             "origin": "source",
+            "parent": None,
             "item": issue,
             "role": "implementer",
             "runtime": "claude",

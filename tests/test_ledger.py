@@ -1007,3 +1007,64 @@ def test_every_older_ledger_gains_the_jobs_and_the_archive_time(tmp_path, versio
         assert ledger.update(worker, archived_at=1.0).archived_at == 1.0
         job = ledger.create_job(ledger_mod.JOB_ARCHIVE, str(worker.id))
         assert ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id)) == job
+
+
+# ----- version 9: what a clone keeps ---------------------------------------------------
+
+# A version 8 ledger: version 7 with the jobs and the worker's archive time.
+V8_SCHEMA = V7_SCHEMA.replace("PRAGMA user_version = 7;", "") + """
+ALTER TABLE workers ADD COLUMN archived_at REAL;
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, target TEXT NOT NULL,
+    args TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL, progress TEXT, result_path TEXT,
+    error TEXT, created_at REAL NOT NULL, started_at REAL, updated_at REAL NOT NULL,
+    finished_at REAL
+);
+PRAGMA user_version = 8;
+"""
+
+
+def test_a_version_eight_ledger_gains_the_clone_columns(tmp_path):
+    path = tmp_path / "v8.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V8_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at, archived_at) VALUES (7, 'implementer', 'ABC-1', "
+        "'i1', 'test', '/repo', '/w/ABC-1', 'b', 'idle', 4, 1.0, 2.0, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        original = ledger.get(7)
+        assert (original.parent_id, original.clone_mode, original.prompt) == (None, None, None)
+        assert (original.model, original.effort) == (None, None)
+        clone = make(ledger, item="ABC-2", worktree="/w/ABC-2-8")
+        clone = ledger.update(
+            clone, origin=ledger_mod.ORIGIN_CLONE, parent_id=7, clone_mode=ledger_mod.CLONE_FULL, prompt="go on in {worktree}",
+            model="sonnet", effort="low",
+        )
+        assert (clone.id, clone.parent_id, clone.clone_mode) == (8, 7, "full")
+        assert (clone.prompt, clone.model, clone.effort) == ("go on in {worktree}", "sonnet", "low")
+
+    with Ledger(path) as ledger:
+        assert ledger.get(8).model == "sonnet"
+
+
+@pytest.mark.parametrize(
+    "version_schema",
+    ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA", "V7_SCHEMA"],
+)
+def test_every_older_ledger_gains_the_clone_columns(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        updated = ledger.update(worker, parent_id=1, clone_mode="fresh", prompt="p", model="m", effort="low")
+        assert (updated.parent_id, updated.clone_mode, updated.prompt) == (1, "fresh", "p")

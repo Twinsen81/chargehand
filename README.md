@@ -100,6 +100,17 @@ token file into the token field once, and the browser keeps it for the page. Wor
 started on the board are named by a handle with their id, such as `implementer/ABC-1#7`,
 which every command that takes an item also accepts.
 
+Clone on a card starts a new worker from that one, in a worktree of its own branched from
+the worker's current branch, so its commits carry over and the two never write the same
+files; uncommitted changes stay with the original. The form starts with the worker's prompt
+template, model and effort, which you can change. Fresh mode starts a new session; full
+mode starts with a copy of the worker's conversation (only while the worker is not in the
+middle of a turn or a prompt). The clone follows no events on the item unless you name the
+kinds, so only your replies reach it. Its card follows the original's card and says "clone
+of" the original. From a terminal: `chargehand clone implementer/ABC-1#7 --mode full
+--model sonnet --prompt-file next.txt`, with `--effort`, `--prompt` and `--subscribe KIND`
+as further options.
+
 The cards of each column are grouped by repository. With Edit you can rename a repository
 or a worker on the board, give it an icon (one emoji or a name such as `rocket` or `bug`)
 and pin it, and collapse or hide a repository. A board pin only sorts: pinned first, then

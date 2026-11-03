@@ -174,6 +174,10 @@ class LaunchSpec:
     *read_paths* are directories outside the worktree that the session must be able to
     read without asking, such as the checkout of a pull request it reviews. They are not
     workspaces: a runtime must not load configuration or instructions from them.
+
+    *protected_paths* are directories the session must not change, such as the worktree of
+    the worker it was cloned from. A runtime denies its file-editing tools there, in every
+    permission mode, as far as its agent can.
     """
 
     worktree: Path
@@ -183,6 +187,7 @@ class LaunchSpec:
     model: str | None = None
     effort: str | None = None
     read_paths: tuple[Path, ...] = ()
+    protected_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -361,14 +366,18 @@ class Runtime(ABC):
     @abstractmethod
     def fork(
         self,
-        session_id: str,
-        prompt: str,
+        spec: LaunchSpec,
         *,
+        session_id: str,
         session_uuid: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-    ) -> CommandResult:
-        """Start a new session that continues a copy of this one's conversation."""
+        warn: Callable[[str], None] | None = None,
+    ) -> LaunchResult:
+        """Start a new session that continues a copy of *session_id*'s conversation.
+
+        The copy is a session of its own, as :meth:`launch` describes it: it works in
+        ``spec.worktree``, is named ``spec.name``, and gets the options, model and effort of
+        *spec* again, because a copy does not keep them all. ``spec.prompt`` is its next turn.
+        """
 
     def health_checks(self) -> list[HealthCheck]:
         """What `doctor` reports about this runtime. By default: whether the listing works."""

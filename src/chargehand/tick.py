@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from chargehand import archive as archive_mod
+from chargehand import clone as clone_mod
 from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import daemonlog, gitutil, ledger as ledger_mod, paths, sanitize, trackers
@@ -166,6 +167,12 @@ REPLY = "reply"
 ARCHIVE = "archive"
 ARCHIVE_REPOSITORY = "archive_repository"
 UNARCHIVE_REPOSITORY = "unarchive_repository"
+# A new worker made from an existing one; see :mod:`chargehand.clone`.
+CLONE = clone_mod.CLONE
+
+# The worker states whose session a copy would take in the middle of something: a launch,
+# a turn in progress, or an open question or permission prompt.
+FORK_BUSY_STATES = (ledger_mod.LAUNCHING, ledger_mod.RUNNING, ledger_mod.BLOCKED)
 
 # A finished worker's last notification, when its hook failed, waits in the runner state
 # under this prefix and the worker id, and is sent again for up to this long.
@@ -234,6 +241,66 @@ def template_values(worker: Worker) -> dict[str, str]:
     values["issue"] = values["item"]
     values["url"] = values["item_url"]
     return values
+
+
+def fork_refusal(worker: Worker) -> str | None:
+    """Why a clone of *worker* cannot get a copy of its session now, or None when it can."""
+    try:
+        capable = runtime_mod.get(worker.runtime).capabilities.fork
+    except ConfigError:
+        capable = False
+    if not capable:
+        return f"runtime {worker.runtime} cannot copy a session; full mode is not available"
+    if worker.gc_done or worker.archived_at is not None or not worker.session_uuid:
+        return f"{worker.id_handle} has no session to copy"
+    if worker.state in FORK_BUSY_STATES:
+        return (
+            f"{worker.id_handle} is {worker.state}; a copy would take a turn in progress or an "
+            f"open prompt, so clone it in full mode once it is idle"
+        )
+    return None
+
+
+def ancestors(ledger: Ledger, worker: Worker) -> list[Worker]:
+    """The worker a clone was made from, then that one's original, and so on.
+
+    A copy of a copy names the worktree of every earlier worker, so a clone keeps out of
+    all of them. A clone's id is above its original's, so the chain ends.
+    """
+    found: list[Worker] = []
+    current = worker
+    while current.parent_id is not None and current.parent_id < current.id:
+        parent = ledger.get(current.parent_id)
+        if parent is None:
+            break
+        found.append(parent)
+        current = parent
+    return found
+
+
+def clone_note(worker: Worker, originals: Sequence[Worker]) -> str:
+    """The line before a full-mode clone's prompt. Only paths and names chargehand chose."""
+    lead = (
+        f"This session continues a copy of another worker's conversation. From now on you "
+        f"work in {worker.worktree} on branch {worker.branch}."
+    )
+    paths = [original.worktree for original in originals]
+    keep_out = "do not change anything there."
+    if len(paths) == 1:
+        return f"{lead} The worktree {paths[0]} belongs to the other worker: {keep_out}"
+    named = f"{', '.join(paths[:-1])} and {paths[-1]}"
+    return f"{lead} The worktrees {named} belong to other workers: {keep_out}"
+
+
+def launch_prompt(
+    worker: Worker, template: str, originals: Sequence[Worker], *, where: str
+) -> str:
+    """The first prompt of *worker*'s session: *template* filled in with the worker's own
+    values, after the note of a full-mode clone. *originals* are its :func:`ancestors`."""
+    prompt = config_mod.render(template, template_values(worker), where=where)
+    if worker.clone_mode == ledger_mod.CLONE_FULL and originals:
+        return f"{clone_note(worker, originals)}\n\n{prompt}"
+    return prompt
 
 
 @dataclass(frozen=True)
@@ -1079,7 +1146,7 @@ class Runner:
         worker = found
         context = self.context_for_worker(worker)
 
-        if kind in ("retry", "discard"):
+        if kind in ("retry", "discard", CLONE):
             job = self.ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id))
             if job is not None:
                 return False, (
@@ -1097,6 +1164,8 @@ class Runner:
             return self._do_discard(worker, context, bool(args.get("force")), report)
         if kind == REPLY:
             return self._do_reply(worker, args)
+        if kind == CLONE:
+            return self._do_clone(worker, context, args, report)
         if kind == ARCHIVE:
             return self._do_archive(
                 worker, bool(args.get("force")), str(args.get("request_origin") or ledger_mod.REQUEST_CLI)
@@ -1163,11 +1232,18 @@ class Runner:
         refusal = self._launch_refusal(repository, role, label)
         if refusal is not None:
             return False, refusal
-        try:
-            worker = self._launch(
+        return self._launch_by_hand(
+            lambda: self._launch(
                 context, role, None, item, report, origin=ledger_mod.ORIGIN_BOARD,
                 kinds=tuple(dict.fromkeys(kinds)),
-            )
+            ),
+            report,
+        )
+
+    def _launch_by_hand(self, launch: Callable[[], Worker], report: TickReport) -> tuple[bool, str]:
+        """Run *launch* for a request, and say what became of the worker."""
+        try:
+            worker = launch()
         except LaunchAborted:
             raise
         except ChargehandError as exc:
@@ -1186,6 +1262,92 @@ class Runner:
                 f"resumes it"
             )
         return True, f"started {worker.handle}"
+
+    def _do_clone(
+        self,
+        original: Worker,
+        context: RepositoryContext | None,
+        raw: Mapping[str, object],
+        report: TickReport,
+    ) -> tuple[bool, str]:
+        """Start a clone of *original*: a worker of its role on its item, in a worktree of
+        its own branched from the original's current branch.
+
+        It has origin ``clone``: the one-worker-per-role-and-item rule does not hold it,
+        but the pause, the caps and the usage reserve do. Every check runs before the
+        ledger row exists, so a refused clone leaves no worktree. Only the branch carries
+        over: uncommitted changes in the original's worktree stay there.
+        """
+        try:
+            args = clone_mod.clone_args(raw)
+        except clone_mod.CloneArgsError as exc:
+            return False, str(exc)
+        mode = str(args["mode"])
+        kinds = tuple(args.get("subscribe") or ())  # type: ignore[arg-type]
+        name = original.id_handle
+        if context is None or not context.usable:
+            detail = f": {context.error}" if context is not None and context.error else ""
+            return False, f"repository {original.repository} is unavailable{detail}"
+        repository = context.repository
+        if self.ledger.is_paused(repository.name):
+            return False, f"repository {repository.name} is paused"
+        if original.gc_done or original.archived_at is not None:
+            return False, f"{name}: its worktree and branch are gone, so there is nothing to clone"
+        if kinds and not original.item:
+            return False, f"{name} has no item, so a clone of it has nothing to follow"
+        if self._clone_base(original) is None:
+            return False, f"{name}: its branch is gone, so a clone has nothing to start from"
+        if mode == ledger_mod.CLONE_FULL:
+            refusal = fork_refusal(original)
+            if refusal is not None:
+                return False, refusal
+        try:
+            role = context.role(original.role)
+        except ConfigError as exc:
+            return False, f"role {original.role} does not load: {exc}"
+        refusal = self._launch_refusal(repository, role, original.item or f"clone of {name}")
+        if refusal is not None:
+            return False, refusal
+        try:
+            dirty = original.worktree_path.exists() and self.git.is_dirty(original.worktree_path)
+        except GitError:
+            dirty = False
+        values = {
+            "parent_id": original.id,
+            "clone_mode": mode,
+            "prompt": args.get("prompt"),
+            "model": args.get("model"),
+            "effort": args.get("effort"),
+        }
+        log.info(
+            "%s: clone requested in %s mode, prompt %s, model %s, effort %s", name, mode,
+            f"of {len(str(values['prompt']))} characters" if values["prompt"] else "of the role",
+            values["model"] or "of the role", values["effort"] or "of the role",
+        )
+        item = context.item_of(original) if original.item else None
+        ok, outcome = self._launch_by_hand(
+            lambda: self._launch(
+                context, role, None, item, report, origin=ledger_mod.ORIGIN_CLONE, kinds=kinds,
+                clone=values,
+            ),
+            report,
+        )
+        if ok and dirty:
+            outcome += f"; the uncommitted changes in the worktree of {name} are not in the clone"
+        return ok, outcome
+
+    def _clone_base(self, original: Worker) -> str | None:
+        """The branch a clone of *original* starts from: the branch its worktree is on now,
+        which follows a rename by its session, or its recorded branch. None when gone."""
+        repo = original.repo_path
+        try:
+            branch = (
+                self.git.worktree_branch(repo, original.worktree_path)
+                if original.worktree_path.exists() else None
+            ) or original.branch
+            return branch if self.git.branch_exists(repo, branch) else None
+        except GitError:
+            return None
 
     def _do_reply(self, worker: Worker, args: dict) -> tuple[bool, str]:
         """Put the operator's line into the worker's inbox, as an event from the board.
@@ -1388,6 +1550,25 @@ class Runner:
                 again["subscribe"] = list(primary.kinds) if primary else []
             ok, outcome = self._do_new_worker(worker.repository, again, report)
             outcome = f"cleared; {outcome}" if ok else f"cleared, but no new worker started: {outcome}"
+            return ok, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
+        if worker.origin == ledger_mod.ORIGIN_CLONE:
+            # A clone is started again as a new clone of the same original, with the
+            # values the operator chose for it.
+            self.ledger.update(worker, gc_done=1)
+            parent = self.ledger.get(worker.parent_id) if worker.parent_id else None
+            if parent is None:
+                ok, outcome = False, "its original is no longer recorded"
+            else:
+                primary = self.ledger.primary_subscription(worker)
+                again = {
+                    "mode": worker.clone_mode or ledger_mod.CLONE_FRESH,
+                    "prompt": worker.prompt,
+                    "model": worker.model,
+                    "effort": worker.effort,
+                    "subscribe": list(primary.kinds) if primary else [],
+                }
+                ok, outcome = self._do_clone(parent, self.context_for_worker(parent), again, report)
+            outcome = f"cleared; {outcome}" if ok else f"cleared, but no new clone started: {outcome}"
             return ok, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
         if not self._drives_label(worker):
             # The queue label would start the queue's role, not this one. A new start
@@ -2859,13 +3040,16 @@ class Runner:
         crash_after_step: int | None = None,
         origin: str = ledger_mod.ORIGIN_SOURCE,
         kinds: Sequence[str] = (),
+        clone: Mapping[str, object] | None = None,
     ) -> Worker:
         """Start a worker of *role* on *item*; *owns_label* says what it marks its state on.
 
         A start rule's worker works in `<root>/<role>/<item>` on `<prefix><role>/<item>`.
         Any other worker may share its role and item with others, so its worktree and
         branch end in its id: `<item>-<id>`, or `worker-<id>` without an item. It follows
-        *kinds* on its item instead of the rule's.
+        *kinds* on its item instead of the rule's. A clone's *clone* values (its original,
+        mode, prompt, model and effort) are written with the row, so that a launch resumed
+        after a crash, and a retry, use them.
         """
         repository = context.repository
         repo_config = context.repo_config
@@ -2895,6 +3079,8 @@ class Runner:
                 start_rule=rule.name if rule is not None else None,
                 runtime=role.runtime,
             )
+            if clone:
+                worker = self.ledger.update(worker, **clone)
             if not by_rule:
                 unique = f"{name}-{worker.id}"
                 worker = self.ledger.update(
@@ -2960,10 +3146,21 @@ class Runner:
 
         # Step 2: fetch, then create the worktree on a placeholder branch. A role that
         # reviews its item gets a second, detached worktree for the item's head.
+        # A clone starts from its original's current branch instead of the base.
         if worker.step < 2:
+            base = repo_config.base
+            if worker.origin == ledger_mod.ORIGIN_CLONE:
+                parent = self.ledger.get(worker.parent_id) if worker.parent_id else None
+                clone_base = self._clone_base(parent) if parent is not None else None
+                if clone_base is None:
+                    return self._fail_worker(
+                        worker, context, "the branch of the worker it clones is gone", report,
+                        notify_detail="the original's branch is gone",
+                    )
+                base = clone_base
             self.git.fetch(context.repository.path, gitutil.remote_of(repo_config.base))
             self.git.add_worktree(
-                context.repository.path, worker.worktree_path, worker.branch, repo_config.base
+                context.repository.path, worker.worktree_path, worker.branch, base
             )
             if role.checkout == roles_mod.CHECKOUT_ITEM:
                 self.git.add_detached_worktree(
@@ -3090,26 +3287,48 @@ class Runner:
                     report,
                     notify_detail="the role's files are not in the worktree",
                 )
-            prompt = config_mod.render(
-                role.prompt,
-                template_values(worker),
-                where=f"{role.source or 'role ' + role.name}.prompt",
-            )
-            result = runtime.launch(
-                LaunchSpec(
-                    worktree=worker.worktree_path,
-                    name=worker.handle,
-                    prompt=prompt,
-                    options=role.options,
-                    model=role.model,
-                    effort=role.effort,
-                    read_paths=(
-                        (item_checkout_path(worker),)
-                        if role.checkout == roles_mod.CHECKOUT_ITEM else ()
-                    ),
+            originals = ancestors(self.ledger, worker)
+            parent = originals[0] if originals else None
+            prompt = launch_prompt(
+                worker,
+                worker.prompt or role.prompt,
+                originals,
+                where=(
+                    "the clone prompt" if worker.prompt
+                    else f"{role.source or 'role ' + role.name}.prompt"
                 ),
-                warn=report.warnings.append,
             )
+            spec = LaunchSpec(
+                worktree=worker.worktree_path,
+                name=worker.handle,
+                prompt=prompt,
+                options=role.options,
+                model=worker.model or role.model,
+                effort=worker.effort or role.effort,
+                read_paths=(
+                    (item_checkout_path(worker),)
+                    if role.checkout == roles_mod.CHECKOUT_ITEM else ()
+                ),
+                # Two workers never write one tree: a clone's file tools stay out of its
+                # original's worktree, whatever its permission mode.
+                protected_paths=tuple(original.worktree_path for original in originals),
+            )
+            if worker.clone_mode == ledger_mod.CLONE_FULL:
+                if parent is None or not parent.session_uuid or parent.gc_done:
+                    return self._fail_worker(
+                        worker, context, "the session of the worker it clones is gone", report,
+                        notify_detail="the original's session is gone",
+                    )
+                busy = fork_refusal(parent)
+                if busy is not None:
+                    # A resumed launch: the next tick tries again, within the launch attempts.
+                    raise AgentRuntimeError(f"{worker.handle}: {busy}")
+                result = runtime.fork(
+                    spec, session_id=parent.session_id or parent.session_uuid,
+                    session_uuid=parent.session_uuid, warn=report.warnings.append,
+                )
+            else:
+                result = runtime.launch(spec, warn=report.warnings.append)
             self.sessions(worker.runtime, refresh=True)
             existing = self._find_worker_session(worker, exclude=owned_elsewhere)
             if existing is None:
@@ -3129,7 +3348,13 @@ class Runner:
             last_error=None,
         )
         self.ledger.record_session(
-            worker, kind=ledger_mod.SESSION_INITIAL, session_id=existing.id, session_uuid=existing.uuid
+            worker,
+            kind=(
+                ledger_mod.SESSION_FORK if worker.clone_mode == ledger_mod.CLONE_FULL
+                else ledger_mod.SESSION_INITIAL
+            ),
+            session_id=existing.id,
+            session_uuid=existing.uuid,
         )
         report.launched.append(worker.handle)
         return worker

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from pathlib import Path
 
 from chargehand.errors import AgentRuntimeError, ConfigError
 from chargehand.runtime import (
@@ -60,6 +59,10 @@ class World:
     @property
     def commands(self) -> list[list[str]]:
         return self.state.setdefault("commands", [])
+
+    @property
+    def forks(self) -> list[dict]:
+        return self.state.setdefault("forks", [])
 
     @property
     def wakes(self) -> list[dict]:
@@ -151,6 +154,7 @@ class FakeRuntime(Runtime):
                 "options": dict(spec.options),
                 "model": spec.model,
                 "effort": spec.effort,
+                "protected_paths": [str(path) for path in spec.protected_paths],
             }
         )
         if _WORLD.state.get("launch_fails"):
@@ -210,23 +214,25 @@ class FakeRuntime(Runtime):
     def attach_command(self, session_id: str) -> str:
         return f"fake-agent resume {session_id}"
 
-    def fork(
-        self,
-        session_id: str,
-        prompt: str,
-        *,
-        session_uuid: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-    ) -> CommandResult:
-        original = _WORLD.find(session_id)
-        if original is None:
-            return _result("fork", session_id, returncode=1, stderr="no such session")
-        copy = _WORLD.add_session(
-            name=original.get("name"), cwd=str(Path(original.get("cwd") or ".")), state=WORKING
+    def fork(self, spec: LaunchSpec, *, session_id: str, session_uuid=None, warn=None) -> LaunchResult:
+        """A copy of the session that works in the spec's worktree, under its name."""
+        _WORLD.forks.append(
+            {
+                "session_id": session_id,
+                "session_uuid": session_uuid,
+                "worktree": str(spec.worktree),
+                "name": spec.name,
+                "prompt": spec.prompt,
+                "options": dict(spec.options),
+                "model": spec.model,
+                "effort": spec.effort,
+            }
         )
+        if _WORLD.find(session_id) is None:
+            raise AgentRuntimeError(f"fake runtime: no session {session_id} to copy")
+        copy = _WORLD.add_session(name=spec.name, cwd=os.path.realpath(spec.worktree), state=WORKING)
         _WORLD.commands.append(["fork", session_id, copy["id"]])
-        return _result("fork", session_id, stdout=copy["id"])
+        return LaunchResult(output=f"copied as {copy['id']}")
 
 
 register(FakeRuntime)
