@@ -86,7 +86,7 @@ the token file has mode 0600. The daemon writes its log to `~/Library/Logs/charg
 (see [The log](#the-log)). To try the daemon without the job, run `chargehand serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
-Open <http://127.0.0.1:7878/> for the board: the usage windows, the launch throttle, a
+Open <http://127.0.0.1:7878/> for the board: the weekly usage window, the launch throttle, a
 badge when a turn hit one model's own limit, and the daemon's health in the top bar, and a
 card per worker in the columns Needs you, Working, Queued (with the reason each worker
 waits), Parked (with the reset time), Idle and Closed. It refreshes every second. Its
@@ -138,11 +138,11 @@ waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and t
 its own dialog, which only `claude attach` can answer; so does a prompt that was open
 when the daemon stopped.
 
-To let the daemon see your subscription's five-hour and weekly usage windows, wrap your
-status line command in `~/.claude/settings.json` with `chargehand statusline`. It writes
-the two windows to `~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then
-runs your command with the same input, so your status line does not change. chargehand
-does not edit the settings file for you:
+To let the daemon see your subscription's weekly usage window, wrap your status line
+command in `~/.claude/settings.json` with `chargehand statusline`. It writes the window to
+`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then runs your command
+with the same input, so your status line does not change. Other windows in the input are
+ignored. chargehand does not edit the settings file for you:
 
 ```json
 "statusLine": {
@@ -151,12 +151,12 @@ does not edit the settings file for you:
 }
 ```
 
-`/api/state` then shows each window's percentage and reset time; a reading older than
+`/api/state` then shows the window's percentage and reset time; a reading older than
 30 minutes counts as unknown.
 
-The readings also keep a part of the windows for your own sessions. No wake starts while a
-window is above 80 %, and no new worker starts while the weekly window is above 70 %; set
-other values in `[usage]`:
+The reading also keeps a part of the weekly window for your own sessions. No wake starts
+while the window is above 80 %, and no new worker starts while it is above 70 %; set other
+values in `[usage]`:
 
 ```toml
 [usage]

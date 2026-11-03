@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the call only tied chargehand to banksman's output schema. `pool_bin` is still
   accepted for one release, and `doctor` says that it is ignored. The deny rule for
   `banksman admin` stays in the launch deny rules.
+- The five-hour usage window. The subscription has only the weekly window now, so the status
+  line wrapper records only `seven_day`, both reserves read only the weekly window, and the
+  board's top bar shows one gauge. The `usage` object of `/api/board`, `/api/state` and
+  `status --json` has no `five_hour` key any more. A `five_hour` window that a status line
+  payload or an older usage file still carries is ignored without a message, and a turn
+  that fails on a five-hour limit still parks the worker.
 
 ### Added
 
@@ -34,9 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses while the repository has live workers, unless forced. Unarchive shows it again.
   Restoring a worktree from an archive is a manual step, described in the README.
 - The usage policy. `[usage]` in the machine configuration keeps a part of the
-  subscription's usage windows for interactive work: no wake while a window is above 100
+  subscription's weekly usage window for interactive work: no wake while it is above 100
   minus `wake_reserve_percent` (20 by default), and no new worker, from a start rule or the
-  board, while the weekly window is above 100 minus `new_worker_reserve_percent` (30 by
+  board, while it is above 100 minus `new_worker_reserve_percent` (30 by
   default). The daemon now reads the status line wrapper's usage file for these reserves;
   before, no reading reached the wake reserve. No usage file means no reserve; a reading
   older than 30 minutes lets wakes through and holds new workers. Readings are kept per
@@ -214,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `chargehand statusline -- '<command>'`, a status line wrapper that writes the
-  subscription's five-hour and weekly usage windows to `usage_file` in `[serve]` and then
+  subscription's weekly usage window to `usage_file` in `[serve]` and then
   runs your own status line command unchanged; `/api/state` and `status --json` show the
   reading, unknown when it is older than 30 minutes.
 - A `pr-reviewer` starter role and its agent file, written by `chargehand init --role

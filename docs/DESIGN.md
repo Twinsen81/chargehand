@@ -301,11 +301,11 @@ tick_interval_secs = 60             # how often the daemon ticks
 usage_file = "~/.cache/chargehand/usage.json"     # the status line wrapper writes it
 
 [usage]
-wake_reserve_percent = 20           # no wake while a window is above 80 %
+wake_reserve_percent = 20           # no wake while the week is above 80 %
 new_worker_reserve_percent = 30     # no new worker while the week is above 70 %
 ```
 
-The reserves keep a part of the subscription's usage windows for your own sessions (see
+The reserves keep a part of the subscription's weekly usage window for your own sessions (see
 "Admission" in section 5 and "Delivery" in section 6).
 
 `poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
@@ -649,7 +649,9 @@ check reads a `failed` session in the listing: a category or a message in its er
 fields that names a usage limit parks the worker as the hook does, for a session whose
 hook did not arrive. A message that names a model family's own limit, such as "Opus
 weekly limit reached", also records that family for the board's top bar, because the usage
-windows have no per-model window.
+window has no per-model part. Claude Code can still name the limit of a window that the
+subscription no longer has (it had a shorter window until 2026-11-03); such a message
+parks too.
 
 | Session state | Meaning | Action |
 |---|---|---|
@@ -710,7 +712,7 @@ typed on the board (section 7) is the one line that carries text:
 `reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake must pass admission: the number of working turns below `max_concurrent`, the role's
-`max_wakes_per_day` over the last 24 hours, and the usage reserve: every window of the
+`max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
 worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
 reading means no reserve, and a reading older than 30 minutes holds no wake back, because
 a wake continues work that already runs. A worker that is not admitted becomes `queued` and
@@ -794,7 +796,7 @@ chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
 chargehand tick                     # run a tick now, under the tick lock
 chargehand serve                    # the daemon; `install` writes the job that runs it
-chargehand statusline -- '<command>'   # status line wrapper: records the usage windows
+chargehand statusline -- '<command>'   # status line wrapper: records the weekly usage window
 chargehand export <FILE>            # this machine's setup in one archive, without secrets
 chargehand import <FILE>            # unpack it on another machine; asks for the paths
 ```
@@ -835,10 +837,10 @@ roles hold the item. `--route` stays accepted for `--repository`.
   and patches its cards in place, keyed by worker, so a hook shows within a second and
   the scroll position of each column stays. That answer is built from the ledger, the
   role files and the usage file only: no tracker call and no session listing per
-  request. The top bar shows the two usage windows with their reset times and levels
+  request. The top bar shows the weekly usage window with its reset time and level
   (grey when unknown), the launch throttle (working against `max_concurrent`, open
   against `max_open_workers`, pauses), a model-limit badge while a turn that failed on
-  one model family's own limit waits for its reset (or for five hours when the failure
+  one model family's own limit waits for its reset (or for a fixed time when the failure
   gave no reset time), and the daemon's health (last tick, its duration, errors, uptime,
   version). The columns are Needs you (`blocked`), Working (`launching`, `running`),
   Queued (`queued`, with the reason each worker waits: a cap or the usage reserve),
@@ -968,12 +970,13 @@ roles hold the item. `--route` stays accepted for `--repository`.
   repository stays readable; each card shows its worker's job and archive time. Restoring
   a worktree from a zip is a manual step (see the README), not a button.
 - **Usage readings.** Claude Code gives a status line command the subscription's
-  `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
-  `resets_at`. It sends them on subscription plans only, and only after the session's first
-  API response. `chargehand statusline -- '<command>'` reads that payload, writes both
-  windows with the time it wrote them to `usage_file` (atomically, mode 0600), and then
-  runs `<command>` through a shell with the same stdin, passing its output and exit code
-  through. A payload without `rate_limits` leaves the file as it is, and a file that cannot
+  `rate_limits`: a `seven_day` window with `used_percentage` and `resets_at`. It sends them
+  on subscription plans only, and only after the session's first API response.
+  `chargehand statusline -- '<command>'` reads that payload, writes the `seven_day` window
+  with the time it wrote it to `usage_file` (atomically, mode 0600), and then runs
+  `<command>` through a shell with the same stdin, passing its output and exit code
+  through. Other windows in `rate_limits` or in the file are ignored without a message. A
+  payload without the `seven_day` window leaves the file as it is, and a file that cannot
   be written changes nothing in the status line. chargehand does not edit your settings;
   you wrap your own command in `~/.claude/settings.json`:
 
@@ -985,8 +988,8 @@ roles hold the item. `--route` stays accepted for `--repository`.
   ```
 
   Without a status line of your own, leave out `-- '<command>'`; the status line is then
-  empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for each
-  window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
+  empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for the
+  `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
   `red` from 80 %. A reading older than 30 minutes, a missing or unreadable file, and a
   window whose reset time has passed are unknown, with the level `grey`. `status --json`
   carries the same object.
