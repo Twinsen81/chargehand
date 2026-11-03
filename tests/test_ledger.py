@@ -944,3 +944,66 @@ def test_a_prompt_from_the_new_turn_survives_the_write_of_the_wake_or_continue_t
 
         assert ledger.get_permission_prompt(newer).state == "open"
         assert ledger.get_permission_prompt(older).state == "cancelled"
+
+
+# ----- version 8: jobs, and when a worker was archived ------------------------------------
+
+# A version 7 ledger: version 6 with the prompts as records and the per-worker rules.
+V7_SCHEMA = V6_SCHEMA.replace("PRAGMA user_version = 6;", "") + """
+ALTER TABLE permission_prompts ADD COLUMN kind TEXT NOT NULL DEFAULT 'permission';
+ALTER TABLE permission_prompts ADD COLUMN options TEXT;
+ALTER TABLE permission_prompts ADD COLUMN input_digest TEXT;
+ALTER TABLE permission_prompts ADD COLUMN state TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE permission_prompts ADD COLUMN decision TEXT;
+ALTER TABLE permission_prompts ADD COLUMN resolved_by TEXT;
+ALTER TABLE permission_prompts ADD COLUMN released_at REAL;
+CREATE TABLE permission_rules (
+    worker_id INTEGER NOT NULL REFERENCES workers (id), tool_name TEXT NOT NULL,
+    input_digest TEXT NOT NULL, prompt_id INTEGER REFERENCES permission_prompts (id),
+    created_at REAL NOT NULL, PRIMARY KEY (worker_id, tool_name, input_digest)
+);
+PRAGMA user_version = 7;
+"""
+
+
+def test_a_version_seven_ledger_gains_the_jobs_and_the_archive_time(tmp_path):
+    path = tmp_path / "v7.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V7_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at) VALUES (7, 'implementer', 'ABC-1', 'i1', "
+        "'test', '/repo', '/w/ABC-1', 'b', 'cancelled', 4, 1.0, 2.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = ledger.get(7)
+        assert (worker.state, worker.archived_at) == ("cancelled", None)
+        assert [w.id for w in ledger.archivable_workers("test")] == [7]
+        job = ledger.create_job(ledger_mod.JOB_ARCHIVE, "7", result_path="/a.zip", force=True)
+        assert (job.state, job.force, job.is_active) == ("queued", True, True)
+        assert ledger.update_job(job, expect=ledger_mod.JOB_RUNNING, state=ledger_mod.JOB_DONE) is None
+        done = ledger.update_job(job, expect=ledger_mod.JOB_QUEUED, state=ledger_mod.JOB_DONE)
+        assert done.finished_at is not None and not done.is_active
+        ledger.update(worker, archived_at=3.0)
+        assert ledger.get(7).archived_at == 3.0
+        assert ledger.archivable_workers("test") == []
+
+
+@pytest.mark.parametrize(
+    "version_schema", ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA"]
+)
+def test_every_older_ledger_gains_the_jobs_and_the_archive_time(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        assert ledger.update(worker, archived_at=1.0).archived_at == 1.0
+        job = ledger.create_job(ledger_mod.JOB_ARCHIVE, str(worker.id))
+        assert ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id)) == job
