@@ -177,13 +177,25 @@ function jobText(job) {
   return what + ': ' + job.state + (job.progress ? ' · ' + job.progress : '');
 }
 
-function renderJobs(jobs) {
+// A running or failed job in full; the others as one count per state, so that an archive
+// of a whole repository does not fill the bar. Each card shows its own job.
+const JOB_COUNT_LABELS = { waiting: ' waiting', queued: ' queued', written: ' written', done: ' archived' };
+
+function renderJobs(summary) {
   const box = $('jobs');
-  const nodes = (jobs || []).map((job) => {
+  const nodes = ((summary && summary.shown) || []).map((job) => {
     const span = el('span', 'job ' + job.state, jobText(job));
     span.title = jobText(job) + (job.result_path ? ' · ' + job.result_path : '');
     return span;
   });
+  for (const [state, label] of Object.entries(JOB_COUNT_LABELS)) {
+    const n = ((summary && summary.counts) || {})[state];
+    if (!n) continue;
+    const span = el('span', 'count ' + state);
+    span.append(el('b', null, n), label);
+    span.title = n + ' archive job(s) ' + state + '; each card shows its own';
+    nodes.push(span);
+  }
   box.replaceChildren(...nodes);
   box.hidden = !nodes.length;
 }
@@ -493,7 +505,7 @@ function render(model) {
   renderGauge('seven_day', usage.known ? usage.seven_day : null);
   renderThrottle(model.throttle, model.model_limit);
   renderHidden(model.hidden);
-  renderJobs(model.jobs);
+  renderJobs(model.job_summary);
   renderHealth(model.health, now);
   renderStats(model.columns);
   renderControls(model);

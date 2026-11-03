@@ -963,9 +963,10 @@ roles hold the item. `--route` stays accepted for `--repository`.
   workers that still has a worktree; it refuses while the repository has live workers, or
   while any worker holds work that is not pushed, unless forced, which cancels the live
   workers first. `unarchive_repository` only shows the repository again; the zips stay. The
-  board shows the active jobs, and those that ended in the last hour, in the top bar, and a
-  worker's job and archive time on its card. Restoring a worktree from a zip is a manual
-  step (see the README), not a button.
+  top bar shows the jobs of the last hour: a running or failed job in full, the others as
+  one count per state (waiting, queued, written, archived), so that the archive of a whole
+  repository stays readable; each card shows its worker's job and archive time. Restoring
+  a worktree from a zip is a manual step (see the README), not a button.
 - **Usage readings.** Claude Code gives a status line command the subscription's
   `rate_limits`: a `five_hour` and a `seven_day` window, each with `used_percentage` and
   `resets_at`. It sends them on subscription plans only, and only after the session's first

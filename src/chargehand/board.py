@@ -149,6 +149,10 @@ REPOSITORY_ACTIONS: dict[str, tuple[str, bool]] = {
 # How long the top bar shows a job that ended, and how many jobs it shows at most.
 JOB_SHOWN_SECS = 3600
 JOB_LIMIT = 20
+# The top bar shows these jobs in full, and counts the others.
+JOB_SHOWN_IN_FULL = (ledger_mod.JOB_RUNNING, ledger_mod.JOB_FAILED)
+JOB_COUNTED = (ledger_mod.JOB_WAITING, ledger_mod.JOB_QUEUED, ledger_mod.JOB_WRITTEN,
+               ledger_mod.JOB_DONE)
 
 # What a new worker request may carry: an item as its tracker names it, and the event
 # kinds it follows on that item.
@@ -654,6 +658,10 @@ def build(
     ]
     hidden = [name for name, shown in repositories.items() if shown["hidden"]]
     workers = {worker.id: worker for worker in (*live, *closed)}
+    shown_jobs = [
+        job_entry(job, workers.get(int(job.target)) if job.target.isdigit() else None, ledger)
+        for job in jobs if job.is_active or (job.finished_at or 0) >= current - JOB_SHOWN_SECS
+    ][-JOB_LIMIT:]
     return {
         "generated_at": current,
         "usage": usage_mod.read_usage(config.serve.usage_file, current),
@@ -667,10 +675,8 @@ def build(
             "paused_repositories": ledger.paused_repositories(),
         },
         "health": _health(health),
-        "jobs": [
-            job_entry(job, workers.get(int(job.target)) if job.target.isdigit() else None, ledger)
-            for job in jobs if job.is_active or (job.finished_at or 0) >= current - JOB_SHOWN_SECS
-        ][-JOB_LIMIT:],
+        "jobs": shown_jobs,
+        "job_summary": job_summary(shown_jobs),
         "columns": columns,
         "repositories": [
             {
@@ -711,6 +717,18 @@ def job_entry(job: ledger_mod.Job, worker: Worker | None, ledger: Ledger) -> dic
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "finished_at": job.finished_at,
+    }
+
+
+def job_summary(entries: list[dict[str, object]]) -> dict[str, object]:
+    """What the top bar shows of the jobs: a running or failed job in full, the others as
+    a count per state, so that an archive of a whole repository stays readable."""
+    return {
+        "shown": [entry for entry in entries if entry["state"] in JOB_SHOWN_IN_FULL],
+        "counts": {
+            state: sum(1 for entry in entries if entry["state"] == state)
+            for state in JOB_COUNTED
+        },
     }
 
 

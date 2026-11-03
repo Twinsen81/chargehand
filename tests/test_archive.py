@@ -526,11 +526,32 @@ def test_the_board_shows_a_job_on_the_card_and_in_the_top_bar(harness):
     assert page["jobs"][0]["state"] == "done" and not page["jobs"][0]["active"]
 
 
+def test_the_top_bar_shows_running_and_failed_jobs_and_counts_the_others(harness):
+    worker = cancelled(harness)
+    make = harness.ledger.create_job
+    running = harness.ledger.update_job(make(ledger_mod.JOB_ARCHIVE, str(worker.id)),
+                                        state=ledger_mod.JOB_RUNNING, progress="zipping: 40%")
+    failed = harness.ledger.update_job(make(ledger_mod.JOB_ARCHIVE, str(worker.id)),
+                                       state=ledger_mod.JOB_FAILED, error="disk full")
+    for state in (ledger_mod.JOB_QUEUED, ledger_mod.JOB_QUEUED, ledger_mod.JOB_WAITING):
+        make(ledger_mod.JOB_ARCHIVE, str(worker.id), state=state)
+    for _ in range(3):
+        harness.ledger.update_job(make(ledger_mod.JOB_ARCHIVE, str(worker.id)),
+                                  state=ledger_mod.JOB_DONE)
+
+    summary = board.build(harness.config, harness.ledger, health={})["job_summary"]
+
+    assert [(entry["id"], entry["state"]) for entry in summary["shown"]] == [
+        (running.id, "running"), (failed.id, "failed")
+    ]
+    assert summary["counts"] == {"waiting": 1, "queued": 2, "written": 0, "done": 3}
+
+
 def test_the_page_offers_archive_and_shows_the_jobs():
     script = (board.asset_dir() / "board.js").read_text()
     page = (board.asset_dir() / "index.html").read_text()
     assert "FORCED = new Set(['continue', 'retry', 'discard', 'archive'])" in script
-    assert "renderJobs(model.jobs)" in script and 'id="jobs"' in page
+    assert "renderJobs(model.job_summary)" in script and 'id="jobs"' in page
     assert "'/unarchive'" in script or "'unarchive'" in script
 
 
