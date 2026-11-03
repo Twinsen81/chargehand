@@ -471,9 +471,11 @@ per provider (window kind, percent used, reset time), and each runtime names the
 its sessions draw on; only `claude` has readings, from the status line wrapper's usage
 file. No usage file is no reading, and no reading means no reserve. A file older than 30
 minutes is a reading of unknown value, and an unknown week holds new workers back, because
-a new worker can run for hours. The check covers the start rules, the board's new workers
-and every later way to start one. A start that the reserve holds waits as one that a cap
-holds; a board request is refused with the reason.
+a new worker can run for hours. The status line wrapper writes the file only while an
+interactive session shows its status line, so once the file exists, new workers wait
+whenever no interactive session ran in the last 30 minutes. The check covers the start
+rules, the board's new workers and every later way to start one. A start that the reserve
+holds waits as one that a cap holds; a board request is refused with the reason.
 
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
@@ -842,12 +844,11 @@ roles hold the item. `--route` stays accepted for `--repository`.
   Queued (`queued`, with the reason each worker waits: a cap or the usage reserve),
   Parked (`parked`, with its reset time, and the reason a resume waits once the reset has
   passed), Idle (`idle`, `paused`) and Closed (workers that finished in the last 24
-  hours). A card shows the
-  role, the item with its link, the branch, the worktree, the model and effort of the
-  role, the last prompt (the role's first prompt before any wake, else the wake message
-  of the last wake, rebuilt from the inbox rows it delivered), the last answer, an open
-  permission prompt with Allow, Deny and Always allow while its hook waits (section 6),
-  the wakes in the window of the daily wake cap, an approximate token
+  hours). A card shows the role, the item with its link, the branch, the worktree, the
+  model and effort of the role, the last prompt (the role's first prompt before any wake,
+  else the wake message of the last wake, rebuilt from the inbox rows it delivered), the
+  last answer, an open permission prompt with Allow, Deny and Always allow while its hook
+  waits (section 6), the wakes in the window of the daily wake cap, an approximate token
   count (the transcript's size over four) and the attach command.
 - **Board actions.** Every control command has a button, and each button records the
   same request as the command, with `origin` `board` where the CLI records `cli`; the
