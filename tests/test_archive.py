@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -154,6 +156,47 @@ def test_a_transcript_is_read_only_from_the_session_files_of_claude_code(tmp_pat
     assert claude_mod.transcript_file(str(inside)) == inside.resolve()
     for value in (str(outside), str(link), "relative.jsonl", str(inside.with_suffix(".txt")), None):
         assert claude_mod.transcript_file(value) is None
+
+
+def test_two_archives_of_one_worker_on_one_day_get_two_files(harness):
+    worker = cancelled(harness)
+    assert archive.archive_path(worker, 1000.0) != archive.archive_path(worker, 1001.0)
+
+
+def test_an_unreadable_transcript_is_logged_without_control_characters(
+    harness, tmp_path, caplog, monkeypatch
+):
+    path = transcript_file(tmp_path)
+
+    def unreadable(path):
+        # The error text can carry the path from the hook payload.
+        raise OSError(f"cannot read {path}\x1b]0;title\x07\x1b[31m")
+
+    monkeypatch.setattr(claude_mod, "transcript_text", unreadable)
+    runtime = harness.runner.runtime("claude")
+    with caplog.at_level("WARNING", logger="chargehand.claude"):
+        runtime.transcript(str(path), None)
+
+    (record,) = [r for r in caplog.records if "transcript" in r.getMessage()]
+    assert "\x1b" not in record.getMessage() and "\x07" not in record.getMessage()
+    assert "cannot read" in record.getMessage()
+
+
+def test_an_unexpected_error_fails_the_job_instead_of_leaving_it_running(harness):
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target)
+
+    def broken(ledger, worker):
+        raise KeyError("transcript")
+
+    jobs_runner = runner(harness, transcript=broken)
+    assert jobs_runner.run_queued(harness.ledger) == 1
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_FAILED and "KeyError" in job.error
+    assert not Path(job.result_path).exists()
+    assert not archive.part_path(Path(job.result_path)).exists()
+    assert jobs_runner.run_queued(harness.ledger) == 0
 
 
 # ----- interruptions -------------------------------------------------------------------------
@@ -360,6 +403,30 @@ def test_an_archive_fails_when_the_cancel_is_refused(harness):
     assert worker.worktree_path.is_dir()
 
 
+def test_work_committed_before_the_cancel_applies_fails_the_archive_before_the_zip(harness):
+    worker = launch(harness)
+    apply_request(harness, "archive", worker.target)
+    assert job_of(harness, worker).state == ledger_mod.JOB_WAITING
+    commit(worker.worktree_path)
+
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_FAILED and "unpushed" in job.error
+    assert not Path(job.result_path).exists()
+    assert worker.worktree_path.is_dir()
+
+
+def test_a_forced_archive_of_a_live_worker_does_not_check_again(harness):
+    worker = launch(harness)
+    apply_request(harness, "archive", worker.target, force=True)
+    commit(worker.worktree_path)
+
+    harness.next_tick()
+
+    assert job_of(harness, worker).state == ledger_mod.JOB_QUEUED
+
+
 # ----- a repository --------------------------------------------------------------------------
 
 
@@ -475,17 +542,34 @@ def test_the_daemon_archives_a_worker_on_its_job_thread_and_the_board_stays_resp
     monkeypatch.setattr(board, "REQUEST_WAIT_SECS", 0.0)
     worker = cancelled(harness)
     (worker.worktree_path / "data.bin").write_bytes(os.urandom(2 * 1024 * 1024))
+    # The copy of the file waits until the board has answered, so the board is asked while
+    # the job runs.
+    copying, answered = threading.Event(), threading.Event()
+    original = archive._copy_file
+
+    def held_copy(*args):
+        copying.set()
+        answered.wait(10)
+        original(*args)
+
+    monkeypatch.setattr(archive, "_copy_file", held_copy)
     config = support.daemon_config(harness.config, tmp_path / "board.token")
     built = support.build(config, notifier=harness.notifier, interval_secs=3600, poll_secs=0.05)
     with support.running(built):
         status, _ = post(built, f"/api/workers/{worker.id}/archive", {"force": True})
         assert status in (200, 202)
+        assert copying.wait(10)
+        started = time.monotonic()
+        status, raw = support.request(built.port, "GET", "/api/board")
+        took = time.monotonic() - started
+        answered.set()
+        assert status == 200 and took < 1.0
+        assert json.loads(raw)["jobs"][0]["state"] == ledger_mod.JOB_RUNNING
         done = support.wait_for(
             lambda: (jobs(harness, worker) or [None])[0] is not None
             and job_of(harness, worker).state == ledger_mod.JOB_DONE,
             timeout=30,
         )
-        assert support.request(built.port, "GET", "/api/board")[0] == 200
     assert done, job_of(harness, worker)
     assert not worker.worktree_path.exists()
     assert harness.ledger.get(worker.id).archived_at is not None

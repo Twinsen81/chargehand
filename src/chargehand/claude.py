@@ -1545,7 +1545,8 @@ class ClaudeRuntime(Runtime):
             try:
                 return transcript_text(path)
             except OSError as exc:
-                log.warning("could not read the transcript of session %s: %s", session_id, exc)
+                log.warning("could not read the transcript of session %s: %s", session_id,
+                            sanitize.one_line(str(exc), limit=300))
         if not session_id:
             return None
         try:

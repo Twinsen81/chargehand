@@ -3,7 +3,7 @@
 An archive holds the worker's worktree (and its item checkout, when it has one), its
 session transcript as text, its ledger row and its sessions as JSON, and its handoff
 note when one exists. It is written under the state directory as
-``archive/<repository>/<role>-<item>-<date>-<id>.zip``, with mode 0600: a transcript
+``archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip``, with mode 0600: a transcript
 can hold anything the session read.
 
 The tick records an archive as a job (see :data:`chargehand.ledger.JOB_STATES`), and
@@ -81,8 +81,8 @@ def _name_part(value: str) -> str:
 
 
 def archive_path(worker: Worker, now: float, root: Path | None = None) -> Path:
-    """Where *worker*'s archive goes. The worker id keeps two names of one day apart."""
-    date = time.strftime("%Y-%m-%d", time.localtime(now))
+    """Where *worker*'s archive goes. The time and the worker id keep two names apart."""
+    date = time.strftime("%Y-%m-%d-%H%M%S", time.localtime(now))
     parts = [_name_part(worker.role)]
     if worker.item:
         parts.append(_name_part(worker.item))
@@ -430,6 +430,16 @@ class JobRunner:
             ledger.update_job(running, expect=ledger_mod.JOB_RUNNING, state=ledger_mod.JOB_FAILED,
                               error=error, progress=None)
             log.error("%s: %s", worker.handle, error)
+            return
+        except Exception as exc:
+            # Anything else, such as a ledger that stayed locked: a job left `running` would
+            # hold its worker until the next start of the daemon.
+            log.exception("%s: the archive job %s failed", worker.handle, job.id)
+            error = sanitize.one_line(
+                f"the archive job failed: {type(exc).__name__}: {exc}", limit=300
+            )
+            ledger.update_job(running, expect=ledger_mod.JOB_RUNNING, state=ledger_mod.JOB_FAILED,
+                              error=error, progress=None)
             return
         ledger.update_job(
             running, expect=ledger_mod.JOB_RUNNING, state=ledger_mod.JOB_WRITTEN,

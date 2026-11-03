@@ -112,7 +112,7 @@ them: commands take the configured names and handles.
 Archive on a card zips what the worker leaves and then removes it: the worktree (and the
 item checkout of a `checkout = "item"` role), the session transcript as text, and the
 worker's ledger row and sessions as JSON, in
-`<state directory>/archive/<repository>/<role>-<item>-<date>-<id>.zip` with mode 0600. A
+`<state directory>/archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600. A
 live worker is cancelled first. As with discard, unpushed commits or uncommitted changes
 refuse the archive unless you tick force; a forced archive keeps the files, not the
 commits. The zip is written by the daemon in the background, so the board stays

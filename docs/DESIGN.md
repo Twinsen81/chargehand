@@ -936,8 +936,9 @@ roles hold the item. `--route` stays accepted for `--repository`.
 - **Archives and jobs.** An archive is one zip of what a worker leaves: its worktree (and
   the item checkout of a `checkout = "item"` role), the session transcript as text, its
   ledger row and its sessions as JSON, and its handoff note when one exists. It is written
-  under the state directory as `archive/<repository>/<role>-<item>-<date>-<id>.zip`, mode
-  0600; the worker id keeps two archives of one day apart. The `archive` request is applied
+  under the state directory as `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip`, mode
+  0600; the time and the worker id keep two archives apart. The guard runs again when the
+  cancel of a live worker has applied, before the zip. The `archive` request is applied
   by the tick like any other: it refuses a worker that is archived, that has an archive
   under way, or whose worktree was already removed; it applies the guard of discard
   (unpushed commits or uncommitted changes refuse it unless forced, and a forced archive

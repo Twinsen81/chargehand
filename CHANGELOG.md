@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Archive a worker or a whole repository from the board. An archive is one zip under the
-  state directory, `archive/<repository>/<role>-<item>-<date>-<id>.zip` with mode 0600,
+  state directory, `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600,
   that holds the worktree, the session transcript as text, and the worker's ledger row and
   sessions as JSON. A live worker is cancelled first, through a cancel request; unpushed
   commits or uncommitted changes refuse the archive unless forced, as for discard. A new

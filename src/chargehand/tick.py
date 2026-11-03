@@ -3261,6 +3261,15 @@ class Runner:
 
     def _release_archive(self, job: ledger_mod.Job, worker: Worker) -> None:
         if worker.is_terminal:
+            # The session could commit until the cancel applied, so the guard runs again
+            # before the zip rather than only before the removal.
+            blocker = None if job.force else self._worktree_holds_work(worker)
+            if blocker:
+                self.ledger.update_job(
+                    job, expect=ledger_mod.JOB_WAITING, state=ledger_mod.JOB_FAILED,
+                    progress=None, error=sanitize.one_line(f"not archived: {blocker}", limit=300),
+                )
+                return
             self.ledger.update_job(
                 job, expect=ledger_mod.JOB_WAITING, state=ledger_mod.JOB_QUEUED,
                 progress="waits for the job thread",
