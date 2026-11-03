@@ -54,6 +54,11 @@ class Session:
     started_at: float | None = None
     pr_url: str | None = None
     kind: str | None = None
+    # A failed session whose error says the provider's usage limit ended its turn, when
+    # the limit resets, and the model family when the limit is the model's own.
+    usage_limit: bool = False
+    reset_at: float | None = None
+    model_limit: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -137,6 +142,8 @@ class Hook:
     error: str | None = None
     usage_limit: bool = False
     reset_at: float | None = None
+    # The model family, such as "opus", when the usage limit is that model's own.
+    model_limit: str | None = None
     notification_type: str | None = None
     tool_name: str | None = None
     tool_input: str | None = None
@@ -214,6 +221,9 @@ class Runtime(ABC):
     # from when a session starts or resumes in a directory. A wake checks that a worker
     # whose item is checked out separately has not changed them.
     workspace_files: ClassVar[tuple[str, ...]] = ()
+    # Whose usage windows this runtime's sessions draw on, for the usage reserve; None
+    # when chargehand has no reading for it.
+    usage_provider: ClassVar[str | None] = None
 
     # ----- configuration ----------------------------------------------------
 
@@ -286,6 +296,7 @@ class Runtime(ABC):
         *,
         session_uuid: str | None = None,
         if_idle: bool = False,
+        if_ended: bool = False,
     ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
 
@@ -293,7 +304,8 @@ class Runtime(ABC):
         question or a permission prompt waits) is not interrupted, and the result has
         ``busy`` set. The runtime decides from its own fresh look, because the caller's
         view of the session can be older. Delivery asks this way; an answer to a question
-        does not.
+        does not. *if_ended* is the same, except that a turn that ended ``failed`` also
+        counts as ended: the resume of a worker that a usage limit parked asks this way.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing
@@ -301,6 +313,15 @@ class Runtime(ABC):
         known about whether the message arrived, and the caller treats it like a failed
         call to the agent, not like a refused wake.
         """
+
+    def failure_reset(self, session: Session, since: float) -> float | None:
+        """When the usage limit that failed *session*'s turn resets, or None when unknown.
+
+        *since* is a time before the failure, such as the start of the turn. A reset time
+        without a date is placed after it, not after now: a failure that the listing shows
+        late, for example after the daemon was down, keeps its own reset time.
+        """
+        return session.reset_at
 
     @abstractmethod
     def stop(self, session_id: str) -> CommandResult:

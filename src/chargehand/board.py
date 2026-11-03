@@ -51,12 +51,18 @@ from chargehand import roles as roles_mod
 from chargehand import terminal as terminal_mod
 from chargehand import usage as usage_mod
 from chargehand.config import MachineConfig
-from chargehand.delivery import WAKE_CAP_WINDOW_SECS, wake_message
+from chargehand.delivery import QUEUE_REASON_PREFIX, WAKE_CAP_WINDOW_SECS, wake_message
 from chargehand.errors import ChargehandError
 from chargehand.ledger import Ledger, Worker
 from chargehand.roles import Role
 from chargehand.serve import HTTPError, Request, Response, Routes
-from chargehand.tick import NEW_WORKER, REPLY, REQUEST_MESSAGE_LIMIT, template_values
+from chargehand.tick import (
+    MODEL_LIMIT_KEY,
+    NEW_WORKER,
+    REPLY,
+    REQUEST_MESSAGE_LIMIT,
+    template_values,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,8 +72,10 @@ COLUMNS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      (ledger_mod.BLOCKED,)),
     ("working", "Working", "Launching, or running a turn",
      (ledger_mod.LAUNCHING, ledger_mod.RUNNING)),
-    ("queued", "Queued", "Events wait for a cap or a usage reset",
-     (ledger_mod.QUEUED, ledger_mod.PARKED)),
+    ("queued", "Queued", "Events wait for a cap or the usage reserve",
+     (ledger_mod.QUEUED,)),
+    ("parked", "Parked", "A usage limit ended the turn; resumes after the reset",
+     (ledger_mod.PARKED,)),
     ("idle", "Idle", "The last turn ended, or paused",
      (ledger_mod.IDLE, ledger_mod.PAUSED)),
     ("closed", "Closed", "Finished in the last 24 hours", ledger_mod.TERMINAL),
@@ -75,6 +83,8 @@ COLUMNS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 COLUMN_OF = {state: key for key, _, _, states in COLUMNS for state in states}
 
 CLOSED_WINDOW_SECS = 24 * 3600
+# How long the model-limit badge shows when the failure gave no reset time.
+MODEL_LIMIT_SHOWN_SECS = 5 * 3600
 CLOSED_LIMIT = 30
 
 PROMPT_LIMIT = 2000
@@ -620,6 +630,7 @@ def build(
     return {
         "generated_at": current,
         "usage": usage_mod.read_usage(config.serve.usage_file, current),
+        "model_limit": model_limit(ledger, current),
         "throttle": {
             "working": sum(1 for w in live if w.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING)),
             "max_concurrent": config.max_concurrent,
@@ -648,6 +659,35 @@ def build(
         "icons": dict(ICONS),
         "terminals": list(terminal_mod.TERMINALS),
         "token_file": str(config.serve.token_file),
+    }
+
+
+def model_limit(ledger: Ledger, now: float) -> dict[str, object] | None:
+    """The top bar's badge: the model family whose own limit failed the last such turn.
+
+    The usage windows have no per-model window, so the failed turn is the only sign. The
+    badge shows until the reset time, or for one five-hour window when none was given.
+    """
+    raw = ledger.get_state(MODEL_LIMIT_KEY)
+    try:
+        data = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("model"), str):
+        return None
+    at = data.get("at")
+    reset_at = data.get("reset_at")
+    if not isinstance(at, (int, float)):
+        return None
+    until = reset_at if isinstance(reset_at, (int, float)) else at + MODEL_LIMIT_SHOWN_SECS
+    if until <= now:
+        return None
+    provider = data.get("provider")
+    return {
+        "provider": sanitize.scrub_identifier(provider) if isinstance(provider, str) else None,
+        "model": sanitize.scrub_identifier(data["model"])[:40],
+        "at": at,
+        "reset_at": reset_at if isinstance(reset_at, (int, float)) else None,
     }
 
 
@@ -807,6 +847,12 @@ def card(
         "tokens_estimate": tokens_estimate(worker.transcript_path),
         "attach": attach(worker) if live and worker.session_id else None,
         "reset_at": worker.reset_at,
+        "queue_reason": (
+            sanitize.one_line(reason, limit=LINE_LIMIT)
+            if worker.state in (ledger_mod.QUEUED, ledger_mod.PARKED)
+            and (reason := ledger.get_state(f"{QUEUE_REASON_PREFIX}{worker.id}"))
+            else None
+        ),
         "last_hook": worker.last_hook,
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
@@ -905,6 +951,7 @@ __all__ = [
     "build",
     "card",
     "last_prompt",
+    "model_limit",
     "register_routes",
     "to_json",
     "tokens_estimate",

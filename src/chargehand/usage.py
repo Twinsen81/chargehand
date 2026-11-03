@@ -11,7 +11,8 @@ one small atomic write, one subprocess. Nothing it does to the usage file can ch
 the status line: a payload without the windows leaves the file as it is, and a failed
 write is ignored.
 
-The daemon reads the file for each ``/api/state``. A reading older than
+The daemon reads the file for each ``/api/state``, and the tick reads it as the claude
+provider's reading for the usage reserves. A reading older than
 :data:`~chargehand.delivery.USAGE_MAX_AGE_SECS` is unknown, and so is a window whose
 reset time has passed, because its percentage belongs to the window before.
 """
@@ -32,7 +33,7 @@ from pathlib import Path
 
 from chargehand import claude, paths
 from chargehand.config import ServeConfig
-from chargehand.delivery import USAGE_MAX_AGE_SECS
+from chargehand.delivery import USAGE_MAX_AGE_SECS, UsageReading, UsageWindow
 
 # The windows the file holds, in the order the board shows them.
 WINDOWS = ("five_hour", "seven_day")
@@ -187,6 +188,34 @@ def _unknown_window() -> dict[str, object]:
     return {"used_percent": None, "resets_at": None, "level": GREY}
 
 
+def _load(path: Path) -> Mapping[str, object] | None:
+    """The file's object when it has a written time; None when missing or unreadable."""
+    try:
+        with path.open("rb") as reader:
+            raw = reader.read(MAX_FILE_BYTES + 1)
+        data = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_FILE_BYTES else None
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, Mapping) or _number(data.get("written_at")) is None:
+        return None
+    return data
+
+
+def _windows(data: Mapping[str, object], now: float) -> dict[str, tuple[float, float | None]]:
+    """Each window with a percentage whose reset time has not passed: percent and reset."""
+    windows = {}
+    for name in WINDOWS:
+        window = data.get(name)
+        if not isinstance(window, Mapping):
+            continue
+        used = percent(window.get("used_percent"))
+        reset = _number(window.get("resets_at"))
+        if used is None or (reset is not None and reset <= now):
+            continue
+        windows[name] = (used, reset)
+    return windows
+
+
 def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
     """The reading in *path*, for the board: each window's percent, reset time and level.
 
@@ -200,33 +229,41 @@ def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
         "age_secs": None,
         **{name: _unknown_window() for name in WINDOWS},
     }
-    try:
-        with path.open("rb") as reader:
-            raw = reader.read(MAX_FILE_BYTES + 1)
-        data = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_FILE_BYTES else None
-    except (OSError, UnicodeDecodeError, ValueError):
+    data = _load(path)
+    if data is None:
         return result
-    if not isinstance(data, Mapping):
-        return result
-    written_at = _number(data.get("written_at"))
-    if written_at is None:
-        return result
+    written_at = float(data["written_at"])  # type: ignore[arg-type]
     age = max(0.0, current - written_at)
     result["written_at"] = written_at
     result["age_secs"] = round(age, 1)
     if age > USAGE_MAX_AGE_SECS:
         return result
     result["known"] = True
-    for name in WINDOWS:
-        window = data.get(name)
-        if not isinstance(window, Mapping):
-            continue
-        used = percent(window.get("used_percent"))
-        reset = _number(window.get("resets_at"))
-        if used is None or (reset is not None and reset <= current):
-            continue
+    for name, (used, reset) in _windows(data, current).items():
         result[name] = {"used_percent": used, "resets_at": reset, "level": level(used)}
     return result
+
+
+def provider_reading(path: Path, provider: str, now: float | None = None) -> UsageReading | None:
+    """The reading in *path* for the reserve, when *provider* is the one the file is for.
+
+    None when the file is missing or unreadable: no reading, so no reserve. A file that
+    is too old is still a reading, with its own time, and the reserve treats it as unknown.
+    """
+    if provider != claude.USAGE_PROVIDER:
+        return None
+    data = _load(path)
+    if data is None:
+        return None
+    current = time.time() if now is None else now
+    return UsageReading(
+        provider=provider,
+        windows={
+            name: UsageWindow(kind=name, used_percent=used, resets_at=reset)
+            for name, (used, reset) in _windows(data, current).items()
+        },
+        read_at=float(data["written_at"]),  # type: ignore[arg-type]
+    )
 
 
 __all__ = [
@@ -240,6 +277,7 @@ __all__ = [
     "configured_usage_file",
     "level",
     "percent",
+    "provider_reading",
     "read_usage",
     "resets_at",
     "run_statusline",

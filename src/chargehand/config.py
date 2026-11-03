@@ -327,6 +327,34 @@ class ServeConfig:
         )
 
 
+@dataclass(frozen=True)
+class UsageConfig:
+    """The `[usage]` table: how much of the provider's usage windows workers leave alone.
+
+    A wake waits while any window is above 100 minus ``wake_reserve_percent``; a new
+    worker waits while the weekly window is above 100 minus ``new_worker_reserve_percent``.
+    """
+
+    wake_reserve_percent: float = 20.0
+    new_worker_reserve_percent: float = 30.0
+
+    @classmethod
+    def parse(cls, table: Mapping[str, object] | None) -> "UsageConfig":
+        if table is None:
+            return cls()
+        where = "usage"
+        if not isinstance(table, Mapping):
+            raise ConfigError(f"{where}: expected a table")
+        _unknown_keys(table, ("wake_reserve_percent", "new_worker_reserve_percent"), where)
+        values = {}
+        for key in ("wake_reserve_percent", "new_worker_reserve_percent"):
+            value = _as_number(table.get(key, getattr(cls, key)), f"{where}.{key}")
+            if value > 100:
+                raise ConfigError(f"{where}.{key}: must be <= 100")
+            values[key] = value
+        return cls(**values)
+
+
 DEFAULT_ROLES = ("implementer",)
 
 # chargehand no longer runs a lease tool: banksman finds a worker's leases by itself and
@@ -437,6 +465,7 @@ class MachineConfig:
     source: Path | None = None
     sources: tuple[SourceConfig, ...] = ()
     serve: ServeConfig = field(default_factory=ServeConfig)
+    usage: UsageConfig = field(default_factory=UsageConfig)
 
     _TOP_LEVEL = (
         "poll_interval_secs",
@@ -460,6 +489,7 @@ class MachineConfig:
         "route",
         "source",
         "serve",
+        "usage",
     )
 
     def repository_by_name(self, name: str) -> Repository | None:
@@ -568,6 +598,7 @@ class MachineConfig:
             source=source,
             sources=sources,
             serve=serve,
+            usage=UsageConfig.parse(data.get("usage")),
         )
 
     def source_by_name(self, name: str) -> SourceConfig | None:

@@ -19,6 +19,7 @@ from chargehand.delivery import (
     MESSAGE_HEADER,
     UNKNOWN_KIND,
     UsageReading,
+    UsageWindow,
     usage_admits,
     wake_message,
 )
@@ -219,13 +220,20 @@ def test_the_shipped_implementer_prompt_says_what_each_event_kind_asks_for():
         assert phrase in prompt, phrase
 
 
+def reading(read_at: float, **used: float) -> UsageReading:
+    """A reading of the claude provider with *used* percent per window."""
+    return UsageReading(
+        "claude", {kind: UsageWindow(kind, percent) for kind, percent in used.items()}, read_at
+    )
+
+
 def test_an_unknown_or_old_usage_reading_admits_a_wake():
     now = 10_000.0
     assert usage_admits(None, now=now)
-    old = UsageReading({"five_hour": 99.0}, read_at=now - delivery_mod.USAGE_MAX_AGE_SECS - 1)
+    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, five_hour=99.0)
     assert usage_admits(old, now=now)
-    assert usage_admits(UsageReading({"five_hour": 80.0, "seven_day": 10.0}, read_at=now), now=now)
-    assert not usage_admits(UsageReading({"five_hour": 81.0}, read_at=now), now=now)
+    assert usage_admits(reading(now, five_hour=80.0, seven_day=10.0), now=now)
+    assert not usage_admits(reading(now, five_hour=81.0), now=now)
 
 
 # ----- one wake per tick ----------------------------------------------------------
@@ -475,15 +483,15 @@ def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     tmp_path, repo, claude_state, board
 ):
     write_role(repo, "reviewer", REVIEWER)
-    readings = [UsageReading({"five_hour": 95.0}, read_at=time.time())]
-    harness = build(tmp_path, repo, claude_state, board, usage=lambda: readings[0])
+    readings = [reading(time.time(), five_hour=95.0)]
+    harness = build(tmp_path, repo, claude_state, board, usage=lambda provider: readings[0])
     reviewer = start_reviewer(harness)
     end_turn(harness)
     emit_three()
 
     harness.runner = Runner(
         harness.config, harness.ledger, git=Git(), notifier=harness.notifier,
-        usage=lambda: readings[0],
+        usage=lambda provider: readings[0],
     )
     report = harness.runner.tick()
 
@@ -494,7 +502,7 @@ def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     readings[0] = None
     harness.runner = Runner(
         harness.config, harness.ledger, git=Git(), notifier=harness.notifier,
-        usage=lambda: readings[0],
+        usage=lambda provider: readings[0],
     )
     report = harness.runner.tick()
     assert report.woken == ["reviewer/PR-7"]

@@ -47,6 +47,7 @@ from chargehand import delivery as delivery_mod
 from chargehand import router as router_mod
 from chargehand import runtime as runtime_mod
 from chargehand import sources as sources_mod
+from chargehand import usage as usage_mod
 from chargehand.config import MachineConfig, RepoConfig, Repository
 from chargehand.errors import (
     AgentRuntimeError,
@@ -117,6 +118,13 @@ UNCONFIGURED_PREFIX = "unconfigured:"
 
 # The notification detail of a worker that a usage limit parked.
 USAGE_LIMIT = "usage limit reached; waits for the reset"
+
+# How far back a usage-limit failure that the listing shows is placed: one five-hour window.
+FAILURE_LOOKBACK_SECS = 5 * 3600
+
+# The last turn that failed on the limit of one model family, for the board's top bar: a
+# JSON object with the provider, the model family, when, and the reset time when known.
+MODEL_LIMIT_KEY = "model-limit"
 
 # How many times a session hook reads its worker again when the tick changed the row
 # between the read and the write.
@@ -472,7 +480,7 @@ class Runner:
         notifier: Notifier | None = None,
         tracker_factory=trackers.build,
         source_factory=sources_mod.build,
-        usage: Callable[[], delivery_mod.UsageReading | None] | None = None,
+        usage: Callable[[str], delivery_mod.UsageReading | None] | None = None,
     ) -> None:
         self.config = config
         self.ledger = ledger
@@ -481,8 +489,11 @@ class Runner:
         self.notifier = notifier or Notifier(config.notify)
         self._tracker_factory = tracker_factory
         self._source_factory = source_factory
-        # The provider's usage windows for the wake reserve. None until a reading exists.
-        self._usage = usage or (lambda: None)
+        # A provider's usage windows for the reserves, by provider; None without a reading.
+        # By default the usage file that the status line wrapper writes.
+        self._usage = usage or (
+            lambda provider: usage_mod.provider_reading(self.config.serve.usage_file, provider)
+        )
         self._sources: dict[str, Source | Exception | None] = {}
         self._contexts: dict[str, RepositoryContext] = {}
         # Which starts this step tries: a `[[source]]`'s in the route step, a tracker's in
@@ -1225,6 +1236,10 @@ class Runner:
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
             return False, self._refusal_message(worker, check)
+        # The state write below compares against this read: a hook of the new session can
+        # come in while the respawn runs.
+        worker = self.ledger.get(worker.id) or worker
+        respawned_at = time.time()
         result = self.runtime(worker.runtime).respawn(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         if result.returncode != 0:
@@ -1243,12 +1258,38 @@ class Runner:
                 f"{worker.name}: respawn reported success but no process is running "
                 f"(the session lists as {session.state})"
             )
-        worker = self.ledger.update(
-            worker, state=ledger_mod.RUNNING, working_since=time.time(), watchdog_notified=0,
-            reset_at=None,
-        )
+        worker = self._write_respawned(worker, respawned_at)
         self._sync_labels(worker, context, report)
         return True, "session respawned"
+
+    def _write_respawned(self, worker: Worker, respawned_at: float) -> Worker:
+        """Record a respawn of *worker*, as read before it, unless a hook of the new
+        session already wrote the state the session shows.
+
+        A paused worker is the exception: a hook does not move it, so its state is written
+        here, `blocked` when the new session already asked for a permission.
+        """
+        fields: dict[str, object] = {"reset_at": None}
+        running = {"state": ledger_mod.RUNNING, "working_since": time.time(), "watchdog_notified": 0}
+        # One transaction, so that no hook writes between the read and the write below.
+        with self.ledger.transaction():
+            written = self.ledger.update_if_unchanged(worker, **running, **fields)
+            if written is not None:
+                return written
+            current = self.ledger.get(worker.id) or worker
+            if current.state == worker.state and current.state in HOOK_FROZEN_STATES:
+                asked = any(
+                    prompt.created_at >= respawned_at
+                    for prompt in self.ledger.open_permission_prompts(current)
+                )
+                state = {"state": ledger_mod.BLOCKED} if asked else running
+                written = self.ledger.update_if_unchanged(current, **state, **fields)
+                if written is not None:
+                    return written
+            if current.state == ledger_mod.PARKED or current.reset_at != worker.reset_at:
+                # A usage limit of the new session parked it again, with its own reset.
+                return current
+            return self.ledger.update(current, **fields)
 
     def _refusal_message(self, worker: Worker, check: WorkspaceCheck) -> str:
         """The `continue` refusal, within what the CLI prints, keeping the remedy whole.
@@ -2048,8 +2089,12 @@ class Runner:
                 # Still idle, with events that admission held back.
                 target_state = ledger_mod.QUEUED
         elif observed == runtime_mod.FAILED:
-            if hook is not None and hook.usage_limit:
+            # A usage limit, from the StopFailure hook or from the listing's error text.
+            limit = hook if hook is not None else session
+            if limit is not None and limit.usage_limit:
                 target_state, detail = ledger_mod.PARKED, USAGE_LIMIT
+                if limit.model_limit:
+                    self._note_model_limit(worker, limit.model_limit, limit.reset_at)
             else:
                 target_state, detail = ledger_mod.BLOCKED, "session failed"
         elif observed == runtime_mod.STOPPED:
@@ -2065,7 +2110,17 @@ class Runner:
 
         if target_state != worker.state:
             before = worker.state
-            written = self.ledger.update_if_unchanged(worker, state=target_state)
+            changes: dict[str, object] = {"state": target_state}
+            if target_state == ledger_mod.PARKED and hook is None and session is not None:
+                # A hook writes its own reset time and error; the listing's are written here.
+                # The listing may show the failure late, so a reset time without a date is
+                # placed after the start of the turn, not after now. One that has passed
+                # already makes the worker due at once.
+                changes.update(
+                    reset_at=self._failure_reset(worker, session),
+                    last_error="usage limit: seen in the session listing",
+                )
+            written = self.ledger.update_if_unchanged(worker, **changes)
             if written is None:
                 raise _RowChanged(worker.handle)
             worker = written
@@ -2090,6 +2145,36 @@ class Runner:
         elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
         return worker
+
+    def _failure_reset(self, worker: Worker, session: Session) -> float | None:
+        """The reset time of a failure the listing shows, placed after the turn's start.
+
+        The start is kept no earlier than one five-hour window back: a turn that started
+        days ago, or whose start the tick never saw, would place a clock time days in the
+        past. A time that cannot be placed after it is read against now, as the listing
+        was parsed.
+        """
+        since = max(
+            worker.working_since or worker.last_wake_at or worker.created_at,
+            time.time() - FAILURE_LOOKBACK_SECS,
+        )
+        try:
+            reset = self.runtime(worker.runtime).failure_reset(session, since)
+        except ConfigError:
+            reset = None
+        return reset if reset is not None else session.reset_at
+
+    def _note_model_limit(self, worker: Worker, model: str, reset_at: float | None) -> None:
+        """Keep the last per-model limit for the board's badge. *model* is a family name."""
+        try:
+            provider = self.runtime(worker.runtime).usage_provider
+        except ConfigError:
+            provider = None
+        model = sanitize.scrub_identifier(model)[:40]
+        self.ledger.set_state(MODEL_LIMIT_KEY, json.dumps({
+            "provider": provider, "model": model, "at": time.time(), "reset_at": reset_at,
+        }))
+        log.info("%s: the turn failed on the %s model limit", worker.handle, model)
 
     def _retry_pending_notifications(self, report: TickReport) -> None:
         for key, detail in self.ledger.all_state().items():
@@ -2167,9 +2252,11 @@ class Runner:
             runtime=self.runtime,
             policy=self._policy_of,
             usage=self._usage,
+            reserve_percent=self.config.usage.wake_reserve_percent,
             crash_after_wake=crash_after_wake,
             guard=lambda worker: self._workspace_check(worker).fault,
             prepare=self._refresh_item_checkout,
+            listed_at_rest=self._listed_at_rest,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -2177,9 +2264,11 @@ class Runner:
         report.errors.extend(result.errors)
         if result.woken or result.faults:
             self.invalidate_sessions()
+        resumed = {worker.id for worker in result.resumed}
         for worker in result.woken:
             # The tick log prints transitions, so a wake shows there too.
-            report.transitions.append(f"{worker.handle}: wake -> {worker.state}")
+            what = "resume after the usage reset" if worker.id in resumed else "wake"
+            report.transitions.append(f"{worker.handle}: {what} -> {worker.state}")
         for worker in self.ledger.workers_in_state([ledger_mod.QUEUED]):
             if worker.id in idle_before:
                 report.transitions.append(f"{worker.handle}: wake held -> queued")
@@ -2187,6 +2276,19 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+
+    def _listed_at_rest(self, worker: Worker) -> bool:
+        """Whether this tick's listing shows *worker*'s session ended or stopped. No new call."""
+        try:
+            listed = self.sessions(worker.runtime)
+        except (AgentRuntimeError, ConfigError):
+            return False
+        session = next((s for s in listed if s.id == worker.session_id), None)
+        if session is None:
+            return False
+        return session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
+            worker, session
+        )
 
     def _workspace_check(self, worker: Worker, *, accept_files: bool = False) -> WorkspaceCheck:
         """Whether the session of a worker with an item checkout may start again where it is.
@@ -2577,7 +2679,31 @@ class Runner:
         in_role = self.ledger.live_count_by_role().get(role.name, 0)
         if role.policy.max_workers is not None and in_role >= role.policy.max_workers:
             return f"{item}: role {role.name} is at its limit ({role.policy.max_workers} workers)"
-        return None
+        return self._usage_refusal(role, item)
+
+    def _usage_refusal(self, role: Role, item: str) -> str | None:
+        """Why the reserve for new workers holds a launch back, or None.
+
+        No reading of the role's provider is no reserve. A reading that is too old holds
+        the launch, because nothing says how much of the week is left.
+        """
+        try:
+            provider = runtime_mod.get(role.runtime).usage_provider
+        except ConfigError:
+            return None
+        if provider is None:
+            return None
+        reading = self._usage(provider)
+        reserve = self.config.usage.new_worker_reserve_percent
+        if reading is None or delivery_mod.new_worker_admits(reading, reserve_percent=reserve):
+            return None
+        weekly = reading.windows.get(delivery_mod.WEEKLY_WINDOW)
+        if reading.is_stale(time.time()) or weekly is None:
+            return f"{item}: held by the usage reserve ({provider} reading is out of date)"
+        return (
+            f"{item}: held by the usage reserve ({provider} {weekly.kind} at "
+            f"{weekly.used_percent:.0f}%, above {100.0 - reserve:.0f}%)"
+        )
 
     def _stale_worktree_for(self, role: str, item: str) -> Path | None:
         """A re-armed item starts a new worker only once the old worktree is gone.
