@@ -1268,21 +1268,25 @@ class Runner:
         """
         fields: dict[str, object] = {"reset_at": None}
         running = {"state": ledger_mod.RUNNING, "working_since": time.time(), "watchdog_notified": 0}
-        written = self.ledger.update_if_unchanged(worker, **running, **fields)
-        if written is not None:
-            return written
-        current = self.ledger.get(worker.id) or worker
-        if current.state == worker.state and current.state in HOOK_FROZEN_STATES:
-            asked = any(
-                prompt.created_at >= respawned_at
-                for prompt in self.ledger.open_permission_prompts(current)
-            )
-            state = {"state": ledger_mod.BLOCKED} if asked else running
-            written = self.ledger.update_if_unchanged(current, **state, **fields)
+        # One transaction, so that no hook writes between the read and the write below.
+        with self.ledger.transaction():
+            written = self.ledger.update_if_unchanged(worker, **running, **fields)
             if written is not None:
                 return written
-            current = self.ledger.get(worker.id) or current
-        return self.ledger.update(current, **fields)
+            current = self.ledger.get(worker.id) or worker
+            if current.state == worker.state and current.state in HOOK_FROZEN_STATES:
+                asked = any(
+                    prompt.created_at >= respawned_at
+                    for prompt in self.ledger.open_permission_prompts(current)
+                )
+                state = {"state": ledger_mod.BLOCKED} if asked else running
+                written = self.ledger.update_if_unchanged(current, **state, **fields)
+                if written is not None:
+                    return written
+            if current.state == ledger_mod.PARKED or current.reset_at != worker.reset_at:
+                # A usage limit of the new session parked it again, with its own reset.
+                return current
+            return self.ledger.update(current, **fields)
 
     def _refusal_message(self, worker: Worker, check: WorkspaceCheck) -> str:
         """The `continue` refusal, within what the CLI prints, keeping the remedy whole.
@@ -2106,8 +2110,12 @@ class Runner:
             changes: dict[str, object] = {"state": target_state}
             if target_state == ledger_mod.PARKED and hook is None and session is not None:
                 # A hook writes its own reset time and error; the listing's are written here.
+                # The listing may show the failure late, so a reset time without a date is
+                # placed after the start of the turn, not after now. One that has passed
+                # already makes the worker due at once.
                 changes.update(
-                    reset_at=session.reset_at, last_error="usage limit: seen in the session listing"
+                    reset_at=self._failure_reset(worker, session),
+                    last_error="usage limit: seen in the session listing",
                 )
             written = self.ledger.update_if_unchanged(worker, **changes)
             if written is None:
@@ -2134,6 +2142,13 @@ class Runner:
         elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
         return worker
+
+    def _failure_reset(self, worker: Worker, session: Session) -> float | None:
+        since = worker.working_since or worker.last_wake_at or worker.created_at
+        try:
+            return self.runtime(worker.runtime).failure_reset(session, since)
+        except ConfigError:
+            return session.reset_at
 
     def _note_model_limit(self, worker: Worker, model: str, reset_at: float | None) -> None:
         """Keep the last per-model limit for the board's badge. *model* is a family name."""
@@ -2227,7 +2242,6 @@ class Runner:
             crash_after_wake=crash_after_wake,
             guard=lambda worker: self._workspace_check(worker).fault,
             prepare=self._refresh_item_checkout,
-            at_rest=self._session_at_rest,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -2247,19 +2261,6 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
-
-    def _session_at_rest(self, worker: Worker) -> bool:
-        """Whether a fresh listing shows *worker*'s session with no turn and no prompt."""
-        try:
-            listed = self.sessions(worker.runtime, refresh=True)
-        except (AgentRuntimeError, ConfigError):
-            return False
-        session = next((s for s in listed if s.id == worker.session_id), None)
-        if session is None:
-            return False
-        return session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
-            worker, session
-        )
 
     def _workspace_check(self, worker: Worker, *, accept_files: bool = False) -> WorkspaceCheck:
         """Whether the session of a worker with an item checkout may start again where it is.

@@ -1363,11 +1363,13 @@ class ClaudeRuntime(Runtime):
         *,
         session_uuid: str | None = None,
         if_idle: bool = False,
+        if_ended: bool = False,
     ) -> WakeResult:
         """Stop the live idle process, confirm it is gone, then resume by the full session id.
 
         With *if_idle*, only a stopped session, or a live one whose last turn ended
-        ``done``, is woken.
+        ``done``, is woken. With *if_ended*, a live one whose last turn ended ``failed``
+        is woken too.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -1382,7 +1384,8 @@ class ClaudeRuntime(Runtime):
         if session is None:
             return WakeResult(False, f"session {session_id} is not in the listing")
         old_pid = _listed_pid(session)
-        if if_idle and not self.is_stopped(session) and session.state != DONE:
+        ended = (DONE, FAILED) if if_ended else (DONE,)
+        if (if_idle or if_ended) and not self.is_stopped(session) and session.state not in ended:
             # A turn runs, or a question or a permission prompt waits; a stop would
             # interrupt the turn or discard the prompt. The caller's listing may be older:
             # a leftover background shell starts a turn by itself, and the operator can
@@ -1441,6 +1444,10 @@ class ClaudeRuntime(Runtime):
 
     def respawn(self, session_id: str) -> CommandResult:
         return self.cli.respawn(session_id)
+
+    def failure_reset(self, session: Session, since: float) -> float | None:
+        limited, reset, _ = session_failure(session.raw, now=since)
+        return reset if limited else None
 
     def remove(self, session_id: str) -> CommandResult:
         return self.cli.remove(session_id)

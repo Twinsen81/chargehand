@@ -296,6 +296,7 @@ class Runtime(ABC):
         *,
         session_uuid: str | None = None,
         if_idle: bool = False,
+        if_ended: bool = False,
     ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
 
@@ -303,7 +304,8 @@ class Runtime(ABC):
         question or a permission prompt waits) is not interrupted, and the result has
         ``busy`` set. The runtime decides from its own fresh look, because the caller's
         view of the session can be older. Delivery asks this way; an answer to a question
-        does not.
+        does not. *if_ended* is the same, except that a turn that ended ``failed`` also
+        counts as ended: the resume of a worker that a usage limit parked asks this way.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing
@@ -311,6 +313,15 @@ class Runtime(ABC):
         known about whether the message arrived, and the caller treats it like a failed
         call to the agent, not like a refused wake.
         """
+
+    def failure_reset(self, session: Session, since: float) -> float | None:
+        """When the usage limit that failed *session*'s turn resets, or None when unknown.
+
+        *since* is a time before the failure, such as the start of the turn. A reset time
+        without a date is placed after it, not after now: a failure that the listing shows
+        late, for example after the daemon was down, keeps its own reset time.
+        """
+        return session.reset_at
 
     @abstractmethod
     def stop(self, session_id: str) -> CommandResult:

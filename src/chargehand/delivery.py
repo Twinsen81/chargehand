@@ -237,7 +237,6 @@ class Delivery:
         clock: Callable[[], float] = time.time,
         guard: Callable[[Worker], str | None] = lambda worker: None,
         prepare: Callable[[Worker], str | None] = lambda worker: None,
-        at_rest: Callable[[Worker], bool] = lambda worker: True,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -253,10 +252,6 @@ class Delivery:
         # Brings what the worker reads up to date before the wake; why the wake must
         # wait, or None.
         self._prepare = prepare
-        # Whether the session of a parked worker has no turn and no prompt now. A failed
-        # turn is no idle turn to the wake, so a resume asks this first and then wakes
-        # without that check.
-        self._at_rest = at_rest
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
@@ -283,11 +278,6 @@ class Delivery:
             key=lambda worker: (worker.reset_at or 0.0, worker.id),
         )
         for worker in due:
-            if not self._at_rest(worker):
-                # The operator may have gone on in the session; the worker waits for the
-                # diff or for `continue`.
-                result.held.append(f"{worker.handle}: resume held, its session is not at rest")
-                continue
             if self._admitted(worker, result):
                 self._wake(worker, RESUME_MESSAGE, (), result)
 
@@ -362,15 +352,24 @@ class Delivery:
             return
         worker = read
         resume = worker.state == ledger_mod.PARKED
+        if resume and worker.notified_state is not None:
+            # The resume starts a new turn. A hook of that turn that parks or blocks the
+            # worker again during the wake is then notified, as after any wake.
+            worker = self.ledger.update(worker, notified_state=None)
+        reason_key = f"{QUEUE_REASON_PREFIX}{worker.id}"
         try:
+            # The runtime's own look decides, right before its stop: the operator may have
+            # started a turn in the session since this tick's listing. A failed turn has
+            # ended, so a resume accepts it.
             outcome = self._runtime(worker.runtime).wake(
                 worker.session_id, message, session_uuid=worker.session_uuid,
-                if_idle=not resume,
+                if_idle=not resume, if_ended=resume,
             )
         except (AgentRuntimeError, ConfigError) as exc:
             # Nothing is known about whether the message arrived. The events stay; if it
             # did arrive, the next wake repeats them, which costs one turn.
             self.ledger.update(worker, last_error=f"wake failed: {exc}"[:500])
+            self.ledger.set_state(reason_key, f"wake failed: {exc}"[:300])
             result.errors.append(f"{worker.handle}: wake failed: {exc}")
             return
         if not outcome.ok:
@@ -379,6 +378,7 @@ class Delivery:
                 # The session started a turn, or opened a prompt, after the listing this
                 # tick read. The events wait for the turn to end; the state diff of a
                 # later tick records the new state.
+                self.ledger.set_state(reason_key, f"wake held, {detail}")
                 result.held.append(f"{worker.handle}: wake held, {detail}")
                 return
             if outcome.copy_id is not None:
@@ -395,6 +395,7 @@ class Delivery:
                 result.errors.append(f"{worker.handle}: wake fault: {detail}")
                 return
             self.ledger.update(worker, last_error=f"wake failed: {detail}"[:500])
+            self.ledger.set_state(reason_key, f"wake failed: {detail}")
             result.errors.append(f"{worker.handle}: wake failed: {detail}")
             return
 
@@ -402,8 +403,7 @@ class Delivery:
             raise DeliveryAborted("delivery aborted after the wake")
         now = self._clock()
         wake_fields: dict[str, object] = {"wakes": worker.wakes + 1, "last_wake_at": now}
-        if resume:
-            wake_fields["reset_at"] = None
+        cleared = {"reset_at": None} if resume else {}
         with self.ledger.transaction():
             self.ledger.mark_delivered(entries, now=now)
             self.ledger.record_wake(
@@ -418,13 +418,18 @@ class Delivery:
                 watchdog_notified=0,
                 last_error=None,
                 **wake_fields,
+                **cleared,
             )
             if written is None:
                 # A hook of the new turn came in during the wake, such as a permission
                 # prompt, and wrote the state that the session shows. That is newer than
-                # this write, so only the record of the wake is added.
-                written = self.ledger.update(self.ledger.get(worker.id) or worker, **wake_fields)
-            self.ledger.delete_state(f"{QUEUE_REASON_PREFIX}{worker.id}")
+                # this write, so only the record of the wake is added. The reset time goes
+                # only while no new limit parked the worker: that one keeps its own.
+                current = self.ledger.get(worker.id) or worker
+                if current.state == ledger_mod.PARKED or current.reset_at != worker.reset_at:
+                    cleared = {}
+                written = self.ledger.update(current, **wake_fields, **cleared)
+            self.ledger.delete_state(reason_key)
         worker = written
         if resume:
             log.info("%s: resumed session %s after the usage limit reset", worker.handle,

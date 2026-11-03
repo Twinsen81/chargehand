@@ -433,7 +433,90 @@ def test_a_parked_session_that_runs_again_is_not_interrupted(harness):
 
     assert harness.claude_state.read().get("resumes", []) == []
     assert harness.worker("ABC-1").state == ledger_mod.PARKED
-    assert "implementer/ABC-1: resume held, its session is not at rest" in report.skipped
+    assert "implementer/ABC-1: wake held, session s1 is working, not idle" in report.skipped
+
+
+def test_a_turn_that_starts_while_a_resume_prepares_is_not_stopped(harness, monkeypatch):
+    """The check and the stop use one listing: the operator can start a turn in between."""
+    from chargehand.tick import Runner
+
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+
+    def operator_starts_a_turn(self, parked):
+        harness.claude_state.set_session_state("ABC-1", "working")
+        return None
+
+    monkeypatch.setattr(Runner, "_refresh_item_checkout", operator_starts_a_turn)
+    harness.next_tick()
+
+    assert ["stop", worker.session_id] not in harness.claude_state.commands
+    assert harness.claude_state.read().get("resumes", []) == []
+    held = harness.worker("ABC-1")
+    assert held.state == ledger_mod.PARKED
+    # The card says why the resume waits now, not an older reason.
+    assert queue_reason(harness, held) == "wake held, session s1 is working, not idle"
+
+
+def test_a_new_limit_during_the_resume_keeps_its_reset_and_is_notified(harness, monkeypatch):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    later = int(time.time()) + 5 * 3600
+    real = claude.ClaudeRuntime.wake
+
+    def wake_then_limit(self, session_id, message, **kwargs):
+        result = real(self, session_id, message, **kwargs)
+        stop_failure(harness, worker, error="rate_limit",
+                     error_details=f"Claude usage limit reached|{later}")
+        return result
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "wake", wake_then_limit)
+    harness.next_tick()
+
+    after = harness.worker("ABC-1")
+    assert after.state == ledger_mod.PARKED
+    assert after.reset_at == pytest.approx(later)
+    assert after.wakes == worker.wakes + 1
+    assert harness.notifications().count(("ABC-1", "parked")) == 2
+
+
+def test_a_new_limit_during_a_continue_keeps_its_reset(harness, monkeypatch):
+    worker = launch(harness)
+    park(harness, worker, None)
+    later = int(time.time()) + 5 * 3600
+    hook = claude.parse_hook("StopFailure", {
+        "session_id": worker.session_uuid, "error": "rate_limit",
+        "error_details": f"Claude usage limit reached|{later}",
+    })
+
+    after = continue_with(harness, worker, monkeypatch, hook)
+
+    assert after.state == ledger_mod.PARKED
+    assert after.reset_at == pytest.approx(later)
+
+
+def test_a_limit_the_listing_shows_late_keeps_the_reset_of_its_turn(harness):
+    """A clock time is placed after the start of the turn, not after the tick."""
+    worker = launch(harness)
+    now = time.time()
+    harness.ledger.update(harness.worker("ABC-1"), working_since=now - 2 * 3600)
+    passed = datetime.fromtimestamp(now - 3600, tz=timezone.utc)
+    harness.claude_state.set_session_state(
+        "ABC-1", "failed", error="rate_limit",
+        errorMessage=f"Usage limit reached, resets {passed:%H:%M} (UTC)",
+    )
+
+    report = harness.next_tick()
+
+    # Parked by the diff, and due at once, so delivery resumes it in the same tick.
+    assert any("running -> parked" in line for line in report.transitions), report.transitions
+    assert "implementer/ABC-1: resume after the usage reset -> running" in report.transitions
+    after = harness.worker("ABC-1")
+    assert after.state == ledger_mod.RUNNING and after.session_id == worker.session_id
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert resume["prompt"] == RESUME_MESSAGE
 
 
 def test_the_resume_waits_for_the_wake_reserve(harness):
