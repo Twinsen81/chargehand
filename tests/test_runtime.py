@@ -274,6 +274,10 @@ def test_a_wake_waits_for_the_old_process_to_exit(claude_runtime, claude_state):
         return pid in ALIVE
 
     claude_runtime.pid_alive = alive
+    # Each pass of the wait lists the sessions through a fake binary, which takes a
+    # subprocess per pass. The process ends on the third check, so the wait must not run
+    # out before three passes however slow the machine is; it returns at the third.
+    claude_runtime.stop_wait_secs = 60.0
 
     assert claude_runtime.wake("s1", "hello").ok
     assert checks[:3] == [86470, 86470, 86470]
