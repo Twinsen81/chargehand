@@ -290,6 +290,16 @@ public location.
   and the role files, which run as the operator: import only an archive you made. The hook
   is copied as it is, so a credential written into it, such as a private push topic, is
   in the archive too; export says so when it copies a hook.
+- **Worker archives stay private.** An archive of a worker holds its worktree and its
+  session transcript, which can contain anything the session read, so the zip has mode
+  0600 in a directory of mode 0700 under the state directory, and its content never
+  reaches a log line, a notification or the board. A symbolic link in the worktree is
+  stored as a link, so a link to a file elsewhere does not copy that file into the zip. The
+  transcript path comes from a hook post, so only a regular `.jsonl` file under Claude
+  Code's `projects` directory is read. The settings file of a session, which holds the
+  daemon's token, is not in the worktree and so not in the archive. The worktree is
+  removed only after the zip is complete and has passed its check, and only by the tick,
+  with the guard of discard applied again.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 ### Known limits

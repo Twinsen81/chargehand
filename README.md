@@ -109,6 +109,26 @@ and notify; the top bar shows how many repositories are hidden, and "show" bring
 These settings are kept in the ledger, so they survive a restart, and the CLI does not use
 them: commands take the configured names and handles.
 
+Archive on a card zips what the worker leaves and then removes it: the worktree (and the
+item checkout of a `checkout = "item"` role), the session transcript as text, and the
+worker's ledger row and sessions as JSON, in
+`<state directory>/archive/<repository>/<role>-<item>-<date>-<id>.zip` with mode 0600. A
+live worker is cancelled first. As with discard, unpushed commits or uncommitted changes
+refuse the archive unless you tick force; a forced archive keeps the files, not the
+commits. The zip is written by the daemon in the background, so the board stays
+responsive; the card and the top bar show the job and its progress. Only once the zip is
+complete and has passed its check does the next tick remove the worktree, the branch and
+the session. A stop or a crash of the daemon during the zip leaves no archive and no
+removed worktree, and the next start of the daemon writes it again. Archive repository
+(under Edit on the repository's heading) hides the repository and archives each of its
+workers that still has a worktree; it refuses while the repository has live workers, unless
+forced, which cancels them first. Unarchive only shows the repository again.
+
+To restore a worktree from an archive, by hand: unzip it somewhere, add a worktree on the
+pushed branch (`git worktree add <path> <branch>` in the repository), and copy the files
+under `worktree/` into it. `transcript.txt`, `worker.json` and `sessions.json` are for
+reading; chargehand does not take an archived worker back.
+
 When a worker's session asks for permission to run a tool, its card in Needs you shows the
 tool and its input with Allow, Deny and Always allow, and the session waits for your
 answer. Always allow also allows the same tool with the same input for that worker from
