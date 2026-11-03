@@ -735,8 +735,9 @@ def job_summary(entries: list[dict[str, object]]) -> dict[str, object]:
 def model_limit(ledger: Ledger, now: float) -> dict[str, object] | None:
     """The top bar's badge: the model family whose own limit failed the last such turn.
 
-    The usage windows have no per-model window, so the failed turn is the only sign. The
-    badge shows until the reset time, or for one five-hour window when none was given.
+    The usage window has no per-model part, so the failed turn is the only sign. The
+    badge shows until the reset time, or for :data:`MODEL_LIMIT_SHOWN_SECS` when none was
+    given.
     """
     raw = ledger.get_state(MODEL_LIMIT_KEY)
     try:

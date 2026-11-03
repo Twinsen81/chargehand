@@ -1,20 +1,21 @@
-"""Usage readings: the subscription's five-hour and weekly windows.
+"""Usage readings: the subscription's weekly window.
 
 A status line command gets a JSON payload on stdin, and
-:func:`chargehand.claude.status_line_windows` finds the two windows in it. The wrapper
-(``chargehand statusline -- '<your command>'``) writes those two windows to the usage
-file and then runs the user's own status line command with the same stdin, so the
-status line shows what it showed before.
+:func:`chargehand.claude.status_line_windows` finds the weekly window in it. The wrapper
+(``chargehand statusline -- '<your command>'``) writes that window to the usage file and
+then runs the user's own status line command with the same stdin, so the status line
+shows what it showed before. Other windows in a payload or in the file are skipped
+without a message, because older payloads and files can still carry them.
 
 The wrapper runs on every status line refresh, so it does little: one read of stdin,
 one small atomic write, one subprocess. Nothing it does to the usage file can change
-the status line: a payload without the windows leaves the file as it is, and a failed
-write is ignored.
+the status line: a payload without the weekly window leaves the file as it is, and a
+failed write is ignored.
 
 The daemon reads the file for each ``/api/state``, and the tick reads it as the claude
-provider's reading for the usage reserves. A reading older than
-:data:`~chargehand.delivery.USAGE_MAX_AGE_SECS` is unknown, and so is a window whose
-reset time has passed, because its percentage belongs to the window before.
+provider's reading for the usage reserves. The newest reading counts however old it is;
+only a window whose reset time has passed is unknown, because its percentage belongs to
+the window before.
 """
 
 from __future__ import annotations
@@ -33,10 +34,10 @@ from pathlib import Path
 
 from chargehand import claude, paths
 from chargehand.config import ServeConfig
-from chargehand.delivery import USAGE_MAX_AGE_SECS, UsageReading, UsageWindow
+from chargehand.delivery import WEEKLY_WINDOW, UsageReading, UsageWindow
 
-# The windows the file holds, in the order the board shows them.
-WINDOWS = ("five_hour", "seven_day")
+# The windows the file holds and the board shows.
+WINDOWS = (WEEKLY_WINDOW,)
 
 GREEN = "green"
 AMBER = "amber"
@@ -219,25 +220,19 @@ def _windows(data: Mapping[str, object], now: float) -> dict[str, tuple[float, f
 def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
     """The reading in *path*, for the board: each window's percent, reset time and level.
 
-    ``known`` is False when the file is missing, unreadable, or older than
-    :data:`USAGE_MAX_AGE_SECS`; then every window is grey.
+    ``known`` is False when the file is missing or unreadable; then every window is grey.
+    The reading counts however old it is; a window whose reset time has passed is grey.
     """
     current = time.time() if now is None else now
     result: dict[str, object] = {
         "known": False,
         "written_at": None,
-        "age_secs": None,
         **{name: _unknown_window() for name in WINDOWS},
     }
     data = _load(path)
     if data is None:
         return result
-    written_at = float(data["written_at"])  # type: ignore[arg-type]
-    age = max(0.0, current - written_at)
-    result["written_at"] = written_at
-    result["age_secs"] = round(age, 1)
-    if age > USAGE_MAX_AGE_SECS:
-        return result
+    result["written_at"] = float(data["written_at"])  # type: ignore[arg-type]
     result["known"] = True
     for name, (used, reset) in _windows(data, current).items():
         result[name] = {"used_percent": used, "resets_at": reset, "level": level(used)}
@@ -247,8 +242,8 @@ def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
 def provider_reading(path: Path, provider: str, now: float | None = None) -> UsageReading | None:
     """The reading in *path* for the reserve, when *provider* is the one the file is for.
 
-    None when the file is missing or unreadable: no reading, so no reserve. A file that
-    is too old is still a reading, with its own time, and the reserve treats it as unknown.
+    None when the file is missing or unreadable: no reading, so no reserve. An old file is
+    still the current reading; a window whose reset time has passed is left out.
     """
     if provider != claude.USAGE_PROVIDER:
         return None

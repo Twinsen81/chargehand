@@ -116,7 +116,7 @@ function renderGauge(name, window) {
   gauge.className = 'gauge ' + level;
   gauge.querySelector('.fill').style.width = (used === null ? 0 : Math.min(100, used)) + '%';
   gauge.querySelector('.value').textContent = used === null ? '-' : Math.round(used) + '%';
-  const reset = used === null ? '' : clock(window.resets_at, name === 'seven_day');
+  const reset = used === null ? '' : clock(window.resets_at, true);
   gauge.querySelector('.reset').textContent = reset ? 'resets ' + reset : '';
 }
 
@@ -138,7 +138,7 @@ function renderThrottle(t, limit) {
   if (limit && limit.model) {
     const badge = el('span', 'model-limit', limit.model + ' limit' +
       (typeof limit.reset_at === 'number' ? ' until ' + clock(limit.reset_at, true) : ''));
-    badge.title = 'A turn failed on the ' + limit.model + ' model limit; the usage windows do not show it';
+    badge.title = 'A turn failed on the ' + limit.model + ' model limit; the weekly usage window does not show it';
     nodes.push(badge);
   }
   box.replaceChildren(...nodes);
@@ -501,7 +501,6 @@ function render(model) {
   latest = model;
   const now = model.generated_at;
   const usage = model.usage || {};
-  renderGauge('five_hour', usage.known ? usage.five_hour : null);
   renderGauge('seven_day', usage.known ? usage.seven_day : null);
   renderThrottle(model.throttle, model.model_limit);
   renderHidden(model.hidden);
@@ -867,7 +866,6 @@ async function poll() {
       $('refresh').textContent = 'daemon unreachable';
       $('refresh').classList.add('stale');
       $('health').className = 'health unknown';
-      renderGauge('five_hour', null);
       renderGauge('seven_day', null);
     }
   } finally {

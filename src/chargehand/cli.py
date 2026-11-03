@@ -1016,7 +1016,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     statusline = add(
         "statusline", cmd_statusline,
-        "status line wrapper: record the usage windows, then run your own status line command",
+        "status line wrapper: record the weekly usage window, "
+        "then run your own status line command",
     )
     statusline.add_argument(
         "user_command", nargs="*", metavar="-- COMMAND",
