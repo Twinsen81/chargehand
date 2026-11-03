@@ -3255,11 +3255,11 @@ class Runner:
                     job, state=ledger_mod.JOB_FAILED, error=f"no worker {job.target}"
                 )
             elif job.state == ledger_mod.JOB_WAITING:
-                self._release_archive(job, worker)
+                self._release_archive(job, worker, report)
             else:
                 self._finish_archive(job, worker, report)
 
-    def _release_archive(self, job: ledger_mod.Job, worker: Worker) -> None:
+    def _release_archive(self, job: ledger_mod.Job, worker: Worker, report: TickReport) -> None:
         if worker.is_terminal:
             # The session could commit until the cancel applied, so the guard runs again
             # before the zip rather than only before the removal.
@@ -3269,6 +3269,9 @@ class Runner:
                     job, expect=ledger_mod.JOB_WAITING, state=ledger_mod.JOB_FAILED,
                     progress=None, error=sanitize.one_line(f"not archived: {blocker}", limit=300),
                 )
+                report.warnings.append(f"{worker.handle}: not archived: {blocker}")
+                log.warning("%s: archive job %s refused: %s", worker.handle, job.id,
+                            sanitize.one_line(blocker, limit=300))
                 return
             self.ledger.update_job(
                 job, expect=ledger_mod.JOB_WAITING, state=ledger_mod.JOB_QUEUED,

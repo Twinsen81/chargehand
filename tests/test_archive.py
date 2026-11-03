@@ -409,12 +409,13 @@ def test_work_committed_before_the_cancel_applies_fails_the_archive_before_the_z
     assert job_of(harness, worker).state == ledger_mod.JOB_WAITING
     commit(worker.worktree_path)
 
-    harness.next_tick()
+    report = harness.next_tick()
 
     job = job_of(harness, worker)
     assert job.state == ledger_mod.JOB_FAILED and "unpushed" in job.error
     assert not Path(job.result_path).exists()
     assert worker.worktree_path.is_dir()
+    assert f"{worker.handle}: not archived: its worktree holds 1 unpushed commit(s)" in report.warnings
 
 
 def test_a_forced_archive_of_a_live_worker_does_not_check_again(harness):
