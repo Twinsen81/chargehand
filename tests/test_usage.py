@@ -18,6 +18,7 @@ import pytest
 from chargehand import claude, cli, paths, usage
 from chargehand.config import ServeConfig, load_machine_config
 from chargehand.delivery import (
+    WEEKLY_WINDOW,
     UsageReading,
     UsageWindow,
     new_worker_admits,
@@ -178,6 +179,11 @@ def test_percentages_are_clamped_and_reset_times_accept_iso_8601(
     data = json.loads(usage_file.read_text())
     expected = datetime(2027, 1, 15, 10, tzinfo=timezone.utc).timestamp() + offset
     assert data["seven_day"] == {"used_percent": expected_used, "resets_at": expected}
+
+
+def test_the_parser_and_the_reserves_name_the_same_window():
+    # The wrapper keeps only the windows the reserves read; a mismatch would write nothing.
+    assert claude.STATUS_LINE_WINDOW == WEEKLY_WINDOW
 
 
 def test_the_windows_come_from_the_runtime_payload_parser():
