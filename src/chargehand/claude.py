@@ -269,16 +269,19 @@ def parse_sessions(payload: str) -> list[Session]:
 # The provider whose usage windows the status line reports, and whose windows the sessions
 # of this runtime draw on: the Claude subscription.
 USAGE_PROVIDER = "claude"
+# The subscription's usage window, by its name in the status line's ``rate_limits``.
+STATUS_LINE_WINDOW = "seven_day"
 
 
 def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
-    """The usage windows of a status line payload, or None when it carries none.
+    """The usage window of a status line payload, or None when it carries none.
 
     Claude Code gives a status line command ``rate_limits`` on subscription plans, after
-    the session's first API response: a ``five_hour`` and a ``seven_day`` window, each
-    with ``used_percentage`` and ``resets_at``. Each window that is a table comes back
-    as ``{"used_percent": ..., "resets_at": ...}`` with the values as given; checking
-    them is the caller's work.
+    the session's first API response: a ``seven_day`` window with ``used_percentage`` and
+    ``resets_at``. When it is a table it comes back as
+    ``{"seven_day": {"used_percent": ..., "resets_at": ...}}`` with the values as given;
+    checking them is the caller's work. Other windows in ``rate_limits`` are skipped
+    without a message, because older Claude Code versions still send them.
     """
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -287,15 +290,15 @@ def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
     limits = payload.get("rate_limits") if isinstance(payload, Mapping) else None
     if not isinstance(limits, Mapping):
         return None
-    windows = {}
-    for name in ("five_hour", "seven_day"):
-        window = limits.get(name)
-        if isinstance(window, Mapping):
-            windows[name] = {
-                "used_percent": window.get("used_percentage"),
-                "resets_at": window.get("resets_at"),
-            }
-    return windows or None
+    window = limits.get(STATUS_LINE_WINDOW)
+    if not isinstance(window, Mapping):
+        return None
+    return {
+        STATUS_LINE_WINDOW: {
+            "used_percent": window.get("used_percentage"),
+            "resets_at": window.get("resets_at"),
+        }
+    }
 
 
 # The start of the refusal Claude Code prints when a background session would start in a
@@ -793,12 +796,14 @@ _USAGE_LIMIT_ERRORS = frozenset({
 })
 _UNNAMED_ERRORS = frozenset({"", "unknown", "error", "api_error"})
 _USAGE_LIMIT_TEXT = re.compile(
-    r"usage limit|hit your limit|(?:5-hour|five-hour|session|weekly|opus) limit"
-    r"|limit (?:will )?resets?",
+    r"usage limit|hit your limit|(?:session|weekly|opus) limit|limit (?:will )?resets?"
+    # Old input: the subscription had a five-hour window until 2026-11-03, and Claude
+    # Code can still name it in a failure for some time. Such a failure parks too.
+    r"|(?:5-hour|five-hour) limit",
     re.IGNORECASE,
 )
-# A limit of one model family, such as "Opus weekly limit reached". The usage windows have
-# no per-model window, so this text is the only sign of one. Only the family name is kept.
+# A limit of one model family, such as "Opus weekly limit reached". The usage window has
+# no per-model part, so this text is the only sign of one. Only the family name is kept.
 _MODEL_LIMIT_TEXT = re.compile(
     r"\b(opus|sonnet|haiku|fable)\b(?:[ \t]+[\w.-]+){0,3}?[ \t]+limit\b", re.IGNORECASE
 )

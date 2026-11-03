@@ -230,10 +230,10 @@ def reading(read_at: float, **used: float) -> UsageReading:
 def test_an_unknown_or_old_usage_reading_admits_a_wake():
     now = 10_000.0
     assert usage_admits(None, now=now)
-    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, five_hour=99.0)
+    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, seven_day=99.0)
     assert usage_admits(old, now=now)
-    assert usage_admits(reading(now, five_hour=80.0, seven_day=10.0), now=now)
-    assert not usage_admits(reading(now, five_hour=81.0), now=now)
+    assert usage_admits(reading(now, seven_day=80.0), now=now)
+    assert not usage_admits(reading(now, seven_day=81.0), now=now)
 
 
 # ----- one wake per tick ----------------------------------------------------------
@@ -483,11 +483,13 @@ def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     tmp_path, repo, claude_state, board
 ):
     write_role(repo, "reviewer", REVIEWER)
-    readings = [reading(time.time(), five_hour=95.0)]
+    readings = [None]
     harness = build(tmp_path, repo, claude_state, board, usage=lambda provider: readings[0])
     reviewer = start_reviewer(harness)
     end_turn(harness)
     emit_three()
+    # Set after the start: the weekly window above the wake reserve holds new workers too.
+    readings[0] = reading(time.time(), seven_day=95.0)
 
     harness.runner = Runner(
         harness.config, harness.ledger, git=Git(), notifier=harness.notifier,

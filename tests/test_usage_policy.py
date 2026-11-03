@@ -130,13 +130,15 @@ def test_the_bundled_configuration_names_both_reserves():
 # ----- the thresholds ----------------------------------------------------------
 
 
-def test_the_wake_reserve_holds_any_window_above_its_threshold():
+def test_the_wake_reserve_reads_the_weekly_window_only():
     now = 50_000.0
 
-    assert delivery_mod.usage_admits(reading(now, five_hour=80.0, seven_day=80.0), now=now)
-    assert not delivery_mod.usage_admits(reading(now, five_hour=80.5), now=now)
-    assert not delivery_mod.usage_admits(reading(now, seven_day=81.0), now=now)
-    assert delivery_mod.usage_admits(reading(now, five_hour=89.0), reserve_percent=10, now=now)
+    assert delivery_mod.usage_admits(reading(now, seven_day=80.0), now=now)
+    assert not delivery_mod.usage_admits(reading(now, seven_day=80.5), now=now)
+    assert delivery_mod.usage_admits(reading(now, seven_day=89.0), reserve_percent=10, now=now)
+    # A reading can carry other kinds; no reserve reads them.
+    assert delivery_mod.usage_admits(reading(now, other=99.0, seven_day=10.0), now=now)
+    assert delivery_mod.usage_admits(reading(now, other=99.0), now=now)
 
 
 def test_the_new_worker_reserve_reads_the_weekly_window_only():
@@ -144,15 +146,14 @@ def test_the_new_worker_reserve_reads_the_weekly_window_only():
 
     assert new_worker_admits(reading(now, seven_day=70.0), now=now)
     assert not new_worker_admits(reading(now, seven_day=71.0), now=now)
-    # The five-hour window resets soon; a new worker waits only for the week.
-    assert new_worker_admits(reading(now, five_hour=99.0, seven_day=10.0), now=now)
-    assert new_worker_admits(reading(now, five_hour=99.0), now=now)
+    assert new_worker_admits(reading(now, other=99.0, seven_day=10.0), now=now)
+    assert new_worker_admits(reading(now, other=99.0), now=now)
     assert new_worker_admits(reading(now, seven_day=85.0), reserve_percent=10, now=now)
 
 
 def test_no_reading_is_no_reserve_and_an_old_one_holds_only_new_workers():
     now = 50_000.0
-    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, five_hour=99.0, seven_day=99.0)
+    old = reading(now - delivery_mod.USAGE_MAX_AGE_SECS - 1, seven_day=99.0)
     recent = reading(now - delivery_mod.USAGE_MAX_AGE_SECS + 1, seven_day=10.0)
 
     assert new_worker_admits(None, now=now) and delivery_mod.usage_admits(None, now=now)
@@ -167,15 +168,15 @@ def test_the_usage_file_is_a_reading_of_the_claude_provider_only(tmp_path):
 
     assert usage_mod.provider_reading(path, "claude", now=now) is None
     usage_mod.write_usage(path, {
-        "five_hour": {"used_percent": 85, "resets_at": now + 600},
-        "seven_day": {"used_percent": 40, "resets_at": now - 1},
+        "seven_day": {"used_percent": 85, "resets_at": now + 600},
     }, now=now - 7200)
 
     found = usage_mod.provider_reading(path, "claude", now=now)
     assert found.provider == "claude" and found.read_at == now - 7200
     assert found.is_stale(now)
+    assert found.windows == {"seven_day": UsageWindow("seven_day", 85.0, now + 600)}
     # A window whose reset time has passed belongs to the window before.
-    assert found.windows == {"five_hour": UsageWindow("five_hour", 85.0, now + 600)}
+    assert usage_mod.provider_reading(path, "claude", now=now + 600).windows == {}
     assert usage_mod.provider_reading(path, "other", now=now) is None
     path.write_text("{not json")
     assert usage_mod.provider_reading(path, "claude", now=now) is None
@@ -192,20 +193,20 @@ def test_the_production_runner_holds_a_wake_by_the_usage_file_with_its_reason(
     reviewer = start_reviewer(harness)
     end_turn(harness)
     emit_three()
-    write_reading(harness, five_hour=85.0, seven_day=40.0)
+    write_reading(harness, seven_day=85.0)
 
     report = harness.next_tick()
 
     assert resumes(harness) == []
     held = harness.ledger.get(reviewer.id)
     assert held.state == ledger_mod.QUEUED
-    reason = "wake held by the usage reserve (claude five_hour at 85%, above 80%)"
+    reason = "wake held by the usage reserve (claude seven_day at 85%, above 80%)"
     assert f"reviewer/PR-7: {reason}" in report.skipped
     assert queue_reason(harness, held) == reason
     shown = card(harness, held)
     assert (shown["column"], shown["queue_reason"]) == ("queued", reason)
 
-    write_reading(harness, five_hour=50.0, seven_day=40.0)
+    write_reading(harness, seven_day=50.0)
     report = harness.next_tick()
 
     assert report.woken == ["reviewer/PR-7"]
@@ -221,7 +222,7 @@ def test_the_wake_reserve_follows_the_configured_percentage(tmp_path, repo, clau
     reviewer = start_reviewer(harness)
     end_turn(harness)
     emit_three()
-    write_reading(harness, five_hour=90.0)
+    write_reading(harness, seven_day=90.0)
 
     assert harness.next_tick().woken == ["reviewer/PR-7"]
     assert harness.ledger.get(reviewer.id).state == ledger_mod.RUNNING
@@ -234,7 +235,7 @@ def test_an_old_reading_holds_no_wake(tmp_path, repo, claude_state, board):
     start_reviewer(harness)
     end_turn(harness)
     emit_three()
-    write_reading(harness, age_secs=3600, five_hour=99.0, seven_day=99.0)
+    write_reading(harness, age_secs=3600, seven_day=99.0)
 
     assert harness.next_tick().woken == ["reviewer/PR-7"]
     harness.ledger.close()
@@ -244,7 +245,7 @@ def test_an_old_reading_holds_no_wake(tmp_path, repo, claude_state, board):
 
 
 def test_a_start_waits_while_the_week_is_above_the_reserve(harness):
-    write_reading(harness, five_hour=10.0, seven_day=75.0)
+    write_reading(harness, seven_day=75.0)
     harness.board.add("ABC-1")
 
     report = harness.next_tick()
@@ -262,7 +263,7 @@ def test_a_start_waits_while_the_week_is_above_the_reserve(harness):
 
 
 def test_an_old_reading_holds_new_workers_and_no_file_holds_none(harness):
-    write_reading(harness, age_secs=3600, five_hour=99.0, seven_day=99.0)
+    write_reading(harness, age_secs=3600, seven_day=99.0)
     harness.board.add("ABC-1")
 
     report = harness.next_tick()
@@ -523,7 +524,7 @@ def test_the_resume_waits_for_the_wake_reserve(harness):
     worker = launch(harness)
     park(harness, worker, time.time() + 3600)
     harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
-    write_reading(harness, five_hour=95.0)
+    write_reading(harness, seven_day=95.0)
 
     harness.next_tick()
 
@@ -558,7 +559,7 @@ def test_a_limit_of_the_account_shows_no_model_badge(harness):
     assert harness.ledger.get_state(MODEL_LIMIT_KEY) is None
 
 
-def test_the_badge_without_a_reset_time_shows_for_five_hours(harness):
+def test_the_badge_without_a_reset_time_shows_for_a_fixed_time(harness):
     at = time.time()
     harness.ledger.set_state(MODEL_LIMIT_KEY, json.dumps(
         {"provider": "claude", "model": "sonnet", "at": at, "reset_at": None}

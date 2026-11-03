@@ -37,11 +37,12 @@ tick_interval_secs = 60
 # label writes and notifications; it never records what a worker said or did.
 # log_level = "info"
 
-# The part of the subscription's usage windows that workers leave for your own sessions.
-# The status line wrapper (`chargehand statusline`) writes the readings to usage_file. No
-# wake starts while a window is above 100 minus wake_reserve_percent, and no new worker
-# while the weekly window is above 100 minus new_worker_reserve_percent. Without a usage
-# file there is no reserve; a reading older than 30 minutes holds new workers, not wakes.
+# The part of the subscription's weekly usage window that workers leave for your own
+# sessions. The status line wrapper (`chargehand statusline`) writes the reading to
+# usage_file. No wake starts while the weekly window is above 100 minus
+# wake_reserve_percent, and no new worker while it is above 100 minus
+# new_worker_reserve_percent. Without a usage file there is no reserve; a reading older
+# than 30 minutes holds new workers, not wakes.
 [usage]
 wake_reserve_percent = 20
 new_worker_reserve_percent = 30

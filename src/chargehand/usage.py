@@ -1,15 +1,16 @@
-"""Usage readings: the subscription's five-hour and weekly windows.
+"""Usage readings: the subscription's weekly window.
 
 A status line command gets a JSON payload on stdin, and
-:func:`chargehand.claude.status_line_windows` finds the two windows in it. The wrapper
-(``chargehand statusline -- '<your command>'``) writes those two windows to the usage
-file and then runs the user's own status line command with the same stdin, so the
-status line shows what it showed before.
+:func:`chargehand.claude.status_line_windows` finds the weekly window in it. The wrapper
+(``chargehand statusline -- '<your command>'``) writes that window to the usage file and
+then runs the user's own status line command with the same stdin, so the status line
+shows what it showed before. Other windows in a payload or in the file are skipped
+without a message, because older payloads and files can still carry them.
 
 The wrapper runs on every status line refresh, so it does little: one read of stdin,
 one small atomic write, one subprocess. Nothing it does to the usage file can change
-the status line: a payload without the windows leaves the file as it is, and a failed
-write is ignored.
+the status line: a payload without the weekly window leaves the file as it is, and a
+failed write is ignored.
 
 The daemon reads the file for each ``/api/state``, and the tick reads it as the claude
 provider's reading for the usage reserves. A reading older than
@@ -33,10 +34,10 @@ from pathlib import Path
 
 from chargehand import claude, paths
 from chargehand.config import ServeConfig
-from chargehand.delivery import USAGE_MAX_AGE_SECS, UsageReading, UsageWindow
+from chargehand.delivery import USAGE_MAX_AGE_SECS, WEEKLY_WINDOW, UsageReading, UsageWindow
 
-# The windows the file holds, in the order the board shows them.
-WINDOWS = ("five_hour", "seven_day")
+# The windows the file holds and the board shows.
+WINDOWS = (WEEKLY_WINDOW,)
 
 GREEN = "green"
 AMBER = "amber"

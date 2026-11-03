@@ -368,33 +368,41 @@ def test_the_board_reads_with_get_and_acts_only_through_its_post_routes(daemon):
     "used, level",
     [(0, "green"), (59.9, "green"), (60, "amber"), (79.9, "amber"), (80, "red"), (100, "red")],
 )
-def test_the_usage_gauges_take_their_level_from_the_usage_file(harness, used, level):
+def test_the_usage_gauge_takes_its_level_from_the_usage_file(harness, used, level):
     now = time.time()
     usage.write_usage(harness.config.serve.usage_file, {
-        "five_hour": {"used_percent": used, "resets_at": now + 3600},
-        "seven_day": {"used_percent": 10, "resets_at": now + 86400},
+        "seven_day": {"used_percent": used, "resets_at": now + 86400},
     }, now=now)
 
     reading = model(harness)["usage"]
 
     assert reading["known"] is True
-    assert reading["five_hour"]["level"] == level
-    assert reading["five_hour"]["resets_at"] == pytest.approx(now + 3600)
-    assert reading["seven_day"]["level"] == "green"
+    assert reading["seven_day"]["level"] == level
+    assert reading["seven_day"]["resets_at"] == pytest.approx(now + 86400)
+    assert set(reading) == {"known", "written_at", "age_secs", "seven_day"}
 
 
-def test_the_usage_gauges_are_grey_without_a_reading_or_with_a_stale_one(harness):
+def test_the_usage_gauge_is_grey_without_a_reading_or_with_a_stale_one(harness):
     page = model(harness)
     assert page["usage"]["known"] is False
     assert {page["usage"][w]["level"] for w in usage.WINDOWS} == {"grey"}
 
     old = time.time() - delivery.USAGE_MAX_AGE_SECS - 60
     usage.write_usage(harness.config.serve.usage_file, {
-        "five_hour": {"used_percent": 90, "resets_at": time.time() + 3600},
+        "seven_day": {"used_percent": 90, "resets_at": time.time() + 86400},
     }, now=old)
     page = model(harness)
     assert page["usage"]["known"] is False
-    assert page["usage"]["five_hour"]["level"] == "grey"
+    assert page["usage"]["seven_day"]["level"] == "grey"
+
+
+def test_the_top_bar_has_one_gauge_for_the_weekly_window():
+    page = (board.asset_dir() / "index.html").read_text()
+    script = (board.asset_dir() / "board.js").read_text()
+
+    assert re.findall(r'id="gauge-[^"]*"', page) == ['id="gauge-seven_day"']
+    assert set(re.findall(r"renderGauge\('([^']*)'", script)) == set(usage.WINDOWS)
+    assert set(re.findall(r"usage\.([a-z_]+)", script)) == {"known", *usage.WINDOWS}
 
 
 # ----- no calls per request ----------------------------------------------------------

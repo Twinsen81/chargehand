@@ -55,14 +55,14 @@ WORKING_STATES = (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
 # The daily wake cap counts the wakes of this window, which moves with the clock.
 WAKE_CAP_WINDOW_SECS = 24 * 3600
 
-# No wake while a usage window is above 100 minus this percentage.
+# No wake while the weekly window is above 100 minus this percentage.
 DEFAULT_WAKE_RESERVE_PERCENT = 20.0
 # No new worker while the weekly window is above 100 minus this percentage.
 DEFAULT_NEW_WORKER_RESERVE_PERCENT = 30.0
 # An older reading counts as unknown. An unknown reading holds no wake back, because a
 # wake continues work that already runs, but it holds new workers back.
 USAGE_MAX_AGE_SECS = 30 * 60
-# The window that the reserve for new workers reads.
+# The window that both reserves read. A reading can carry other kinds; no reserve reads them.
 WEEKLY_WINDOW = "seven_day"
 
 # Why a held worker waits, as the board shows it: this prefix and the worker id, in the
@@ -128,16 +128,14 @@ def window_over_reserve(
     reserve_percent: float = DEFAULT_WAKE_RESERVE_PERCENT,
     now: float | None = None,
 ) -> UsageWindow | None:
-    """The first window of a current *reading* above 100 minus *reserve_percent*, or None."""
+    """The weekly window of a current *reading* when above 100 minus *reserve_percent*, or None."""
     if reading is None:
         return None
     current = time.time() if now is None else now
     if reading.is_stale(current):
         return None
-    limit = 100.0 - reserve_percent
-    return next(
-        (window for window in reading.windows.values() if window.used_percent > limit), None
-    )
+    weekly = reading.windows.get(WEEKLY_WINDOW)
+    return weekly if weekly is not None and weekly.used_percent > 100.0 - reserve_percent else None
 
 
 def new_worker_admits(

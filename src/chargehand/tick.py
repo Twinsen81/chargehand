@@ -120,7 +120,7 @@ UNCONFIGURED_PREFIX = "unconfigured:"
 # The notification detail of a worker that a usage limit parked.
 USAGE_LIMIT = "usage limit reached; waits for the reset"
 
-# How far back a usage-limit failure that the listing shows is placed: one five-hour window.
+# How far back a usage-limit failure that the listing shows is placed, at most.
 FAILURE_LOOKBACK_SECS = 5 * 3600
 
 # The last turn that failed on the limit of one model family, for the board's top bar: a
@@ -2282,10 +2282,10 @@ class Runner:
     def _failure_reset(self, worker: Worker, session: Session) -> float | None:
         """The reset time of a failure the listing shows, placed after the turn's start.
 
-        The start is kept no earlier than one five-hour window back: a turn that started
-        days ago, or whose start the tick never saw, would place a clock time days in the
-        past. A time that cannot be placed after it is read against now, as the listing
-        was parsed.
+        The start is kept no earlier than :data:`FAILURE_LOOKBACK_SECS` back: a turn that
+        started days ago, or whose start the tick never saw, would place a clock time days
+        in the past. A time that cannot be placed after it is read against now, as the
+        listing was parsed.
         """
         since = max(
             worker.working_since or worker.last_wake_at or worker.created_at,

@@ -285,7 +285,7 @@ class ServeConfig:
     port: int = DEFAULT_SERVE_PORT
     token_file: Path = field(default_factory=lambda: paths.config_dir() / TOKEN_FILE_NAME)
     tick_interval_secs: int = 60
-    # Where the status line wrapper writes the usage windows and the daemon reads them.
+    # Where the status line wrapper writes the weekly usage window and the daemon reads it.
     usage_file: Path = field(default_factory=lambda: paths.usage_file())
     # The daemon's log level: debug, info or warning. `-v` overrides it.
     log_level: str = "info"
@@ -329,10 +329,10 @@ class ServeConfig:
 
 @dataclass(frozen=True)
 class UsageConfig:
-    """The `[usage]` table: how much of the provider's usage windows workers leave alone.
+    """The `[usage]` table: how much of the provider's weekly usage window workers leave alone.
 
-    A wake waits while any window is above 100 minus ``wake_reserve_percent``; a new
-    worker waits while the weekly window is above 100 minus ``new_worker_reserve_percent``.
+    A wake waits while the weekly window is above 100 minus ``wake_reserve_percent``; a new
+    worker waits while it is above 100 minus ``new_worker_reserve_percent``.
     """
 
     wake_reserve_percent: float = 20.0
