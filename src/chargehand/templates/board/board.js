@@ -17,6 +17,10 @@
 //
 // An archive runs as a job on a thread of the daemon; the top bar and the card show its
 // state and progress, and the page asks the daemon for nothing else while it runs.
+//
+// Clone opens a form that the daemon fills: the worker's prompt template, model and effort,
+// and whether full mode (a copy of the session) is possible now. The prompt is the one
+// multi-line text the page sends; the daemon checks and caps it as the command line does.
 'use strict';
 
 const POLL_MS = 1000;
@@ -32,7 +36,11 @@ const BOARD_PIN_HINT = 'Board pin: this sorts the card first and keeps it visibl
   'repository. It does not keep the session running.';
 const ACTION_LABELS = {
   continue: 'Continue', pause: 'Pause', cancel: 'Cancel', reply: 'Reply',
-  attach: 'Attach', retry: 'Retry', discard: 'Discard', archive: 'Archive',
+  attach: 'Attach', retry: 'Retry', discard: 'Discard', archive: 'Archive', clone: 'Clone',
+};
+const CLONE_MODE_HINTS = {
+  fresh: 'Nothing from the old session: a new session with the prompt below',
+  full: 'A copy of the old conversation, which goes on with the prompt below',
 };
 const FORCED = new Set(['continue', 'retry', 'discard', 'archive']);
 const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
@@ -254,6 +262,12 @@ function cardChildren(c, now) {
   top.append(role, repo);
   const shown = c.session_state && c.session_state !== c.state ? c.state + ' · ' + c.session_state : c.state;
   top.append(el('span', 'chip state ' + c.state, shown));
+  if (c.parent) {
+    const parent = el('span', 'chip clone', 'clone of ' + c.parent.handle);
+    parent.title = (c.clone_mode === 'full' ? 'Started with a copy of the conversation of ' : 'Started fresh from the branch of ') +
+      c.parent.handle + ', in a worktree of its own';
+    top.append(parent);
+  }
   if (c.pinned) {
     // Claude Code has a pin of its own that keeps a session running; this one only sorts.
     const pin = el('span', 'chip pin', 'board pin');
@@ -630,6 +644,10 @@ function workerAction(c, name, force) {
     openReply(c);
     return;
   }
+  if (name === 'clone') {
+    openClone(c);
+    return;
+  }
   if (name === 'attach') {
     send(path, { terminal: $('terminal').value || 'iterm2' }, what);
     return;
@@ -781,6 +799,83 @@ function openReply(c) {
     panelButtons('Send', submit));
   panel.hidden = false;
   input.focus();
+}
+
+// The daemon fills the form: GET needs no token, as every read.
+async function openClone(c) {
+  let form;
+  try {
+    const response = await fetch('/api/workers/' + encodeURIComponent(c.id) + '/clone',
+      { cache: 'no-store', credentials: 'omit' });
+    form = await response.json();
+    if (!response.ok) {
+      notice('clone ' + c.handle + ': ' + (form.error || 'HTTP ' + response.status), 'bad');
+      return;
+    }
+  } catch (error) {
+    notice('clone ' + c.handle + ': the daemon is unreachable', 'bad');
+    return;
+  }
+  const panel = $('panel');
+  const modes = el('div', 'modes');
+  const radios = {};
+  for (const mode of ['fresh', 'full']) {
+    const label = el('label', 'mode');
+    const radio = el('input');
+    radio.type = 'radio';
+    radio.name = 'clone-mode';
+    radio.value = mode;
+    radio.disabled = !form.modes.includes(mode);
+    radio.checked = mode === 'fresh';
+    label.title = radio.disabled ? (form.full_refused || '') : CLONE_MODE_HINTS[mode];
+    label.append(radio, ' ' + mode);
+    radios[mode] = radio;
+    modes.append(label);
+  }
+  const prompt = el('textarea', 'prompt');
+  prompt.rows = 6;
+  prompt.value = form.prompt || '';
+  prompt.title = 'The first prompt; {item}, {worktree}, {branch} and the other placeholders are filled in for the clone';
+  const model = el('input');
+  model.type = 'text';
+  model.value = form.model || '';
+  model.placeholder = 'the default model';
+  const effort = el('select');
+  const none = el('option', null, 'default');
+  none.value = '';
+  effort.append(none);
+  for (const level of form.efforts || []) {
+    const option = el('option', null, level);
+    option.value = level;
+    option.selected = level === form.effort;
+    effort.append(option);
+  }
+  const kinds = el('input');
+  kinds.type = 'text';
+  kinds.value = '';
+  kinds.placeholder = 'none: only your replies wake it';
+  kinds.title = 'The event kinds on ' + (form.item || 'the item') + ' that wake the clone, separated by commas';
+  const fields = [field('mode', modes), field('prompt', prompt), field('model', model), field('effort', effort)];
+  if (form.item) fields.push(field('wakes on', kinds));
+  const extra = [];
+  if (form.full_refused) extra.push(el('div', 'note', 'full: ' + form.full_refused));
+  // Only what differs from the role goes into the request, as on the command line.
+  const role = form.role_values || {};
+  const submit = () => {
+    const body = { mode: radios.full.checked ? 'full' : 'fresh' };
+    if (prompt.value.trim() && prompt.value.trim() !== (role.prompt || '').trim()) body.prompt = prompt.value;
+    if (model.value.trim() && model.value.trim() !== role.model) body.model = model.value.trim();
+    if (effort.value && effort.value !== role.effort) body.effort = effort.value;
+    if (form.item) {
+      const chosen = kinds.value.split(',').map((k) => k.trim()).filter(Boolean);
+      if (chosen.length) body.subscribe = chosen;
+    }
+    closePanel();
+    send('/api/workers/' + encodeURIComponent(c.id) + '/clone', body, 'clone ' + c.handle + ' (' + body.mode + ')');
+  };
+  panel.replaceChildren(el('h3', null, 'Clone ' + c.handle), ...fields, panelButtons('Start', submit), ...extra);
+  panel.hidden = false;
+  prompt.focus();
 }
 
 function openNewWorker() {

@@ -456,6 +456,23 @@ closed; a resume that starts a copy instead is reported as a fault. The test sui
 second runtime with fewer capabilities, whose processes chargehand hosts, and the tick tests
 that must behave the same run on both.
 
+Fork copies a session into a new one that keeps the conversation; a clone in full mode
+uses it (section 7). For `claude` it is `claude --resume <full session id> --fork-session
+--bg -n <name> --permission-mode <mode> --settings <file> --model <model> --effort
+<effort> "<prompt>"`, run in the clone's own worktree with stdin `/dev/null`, after the
+same trust entry and settings file as a launch. Observed on 2026-11-03 with Claude Code
+2.1.317, against an idle original in another worktree of the same repository: the resume
+finds the conversation from the new worktree; the copy lists with the new worktree as its
+working directory and the given name, its transcript is kept for the new directory, and
+the original's transcript and session are unchanged; the copy keeps the earlier turns
+(it answered with a word the original was told to remember) and runs its new turn on the
+given model and effort, in the given permission mode; `-n` and `--settings` apply, and
+its hooks reach the daemon under its own session id, SessionStart included, with stdin
+`/dev/null`; a stop and an in-place resume of the copy keep its model, effort and
+permission mode; and the original still wakes in place in its own session. A copy
+without the flags falls back to the default effort and permission mode, so they are
+always passed again.
+
 A command template is split into arguments *before* its variables are substituted, and nothing
 is run through a shell, so a value containing spaces or shell metacharacters stays one argument.
 
@@ -474,7 +491,7 @@ counts however old it is: the status line wrapper writes the file only while an
 interactive session shows its status line, and between sessions the last reading is the
 best one there is. Once the weekly window's reset time has passed, its percentage belongs
 to the week before, so the reading holds nothing. The check covers the start
-rules, the board's new workers and every later way to start one. A start that the reserve
+rules, the board's new workers, clones and every later way to start one. A start that the reserve
 holds waits as one that a cap holds; a board request is refused with the reason.
 
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
@@ -492,13 +509,20 @@ idempotent, and the row's `step` advances after each one.
 2. Swap the labels, then re-read the issue to verify. A write that reports failure is not
    assumed to have failed; the row stays `launching` and reconciliation settles it.
 3. Fetch, then create the worktree on a placeholder branch (skip if it already exists).
-   The session may rename the branch later. Removing the worktree deletes the branch
+   A clone's branch starts from its original's current branch (the branch the original's
+   worktree is on now, which follows a rename, else its recorded branch), so its commits,
+   pushed or not, carry over; its uncommitted changes do not. Every other worker's branch
+   starts from `base`. The session may rename the branch later. Removing the worktree deletes the branch
    under its new name too, when git's reflog records the rename; a branch the session
    switched to in any other way is kept, and the result says so.
 4. Run the repository's setup script in the worktree, then the role's. Failure marks the
    worker failed.
 5. Start the background session, named `<role>/<item>`, with the role's agent, model,
-   effort, permission mode and allow rules.
+   effort, permission mode and allow rules. A clone uses the prompt template, model and
+   effort chosen for it where it has them, filled in with its own worktree and branch;
+   in full mode the session is a fork of the original's, with one line before the prompt
+   that names the clone's worktree and branch and says that the original's worktree
+   belongs to another worker.
    Starting inside a linked worktree means Claude Code does not create one of its own.
 6. Find the new session in the listing by name or working directory and record its ids.
    `state = running`. Looking it up rather than scraping the launch output is what makes
@@ -794,6 +818,8 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
+chargehand clone <ITEM> --mode fresh|full [--prompt TEXT | --prompt-file PATH] [--model M]
+                 [--effort E] [--subscribe KIND]...   # a new worker from an existing one
 chargehand tick                     # run a tick now, under the tick lock
 chargehand serve                    # the daemon; `install` writes the job that runs it
 chargehand statusline -- '<command>'   # status line wrapper: records the weekly usage window
@@ -847,8 +873,9 @@ roles hold the item. `--route` stays accepted for `--repository`.
   Parked (`parked`, with its reset time, and the reason a resume waits once the reset has
   passed), Idle (`idle`, `paused`) and Closed (workers that finished in the last 24
   hours). A card shows the role, the item with its link, the branch, the worktree, the
-  model and effort of the role, the last prompt (the role's first prompt before any wake,
-  else the wake message of the last wake, rebuilt from the inbox rows it delivered), the
+  worker's model and effort (the role's, or the ones chosen for a clone), the last prompt
+  (the first prompt before any wake, as the launch built it, else the wake message of the
+  last wake, rebuilt from the inbox rows it delivered), the
   last answer, an open permission prompt with Allow, Deny and Always allow while its hook
   waits (section 6), the wakes in the window of the daily wake cap, an approximate token
   count (the transcript's size over four) and the attach command.
@@ -860,9 +887,10 @@ roles hold the item. `--route` stays accepted for `--repository`.
   `POST /api/workers` starts a worker (`repository`, `role`, an optional `item`, and
   `subscribe`, the event kinds on the item that wake it); `POST /api/workers/<id>/<action>`
   with `pause` (the CLI's `stop`), `continue` and `retry` (each with `force`), `cancel`,
-  `discard` (with `force`), `archive` (with `force`), `reply` (`text`), `attach`
-  (`terminal`) and `answer` (`prompt` and `answer`, for a permission prompt; it answers at
-  once, see section 6); `POST /api/repositories/<name>/pause` and `/resume`, `/archive`
+  `discard` (with `force`), `archive` (with `force`), `reply` (`text`), `clone` (see
+  below), `attach` (`terminal`) and `answer` (`prompt` and `answer`, for a permission
+  prompt; it answers at once, see section 6); `POST /api/repositories/<name>/pause` and
+  `/resume`, `/archive`
   (with `force`) and `/unarchive`; `POST /api/pause` and `/api/resume` for all
   repositories. An action waits up to three seconds for the tick
   and answers with the request's outcome, or with the request pending;
@@ -911,6 +939,40 @@ roles hold the item. `--route` stays accepted for `--repository`.
   the audit trail. The command reaches the AppleScript as an argument, never as part of
   its source, and only a command of plain words is accepted. The board has no chat:
   anything that needs a conversation goes through attach.
+- **Clone.** A clone is a new worker made from an existing one, for a second opinion, a
+  retry with another prompt, or another model. `POST /api/workers/<id>/clone` takes
+  `mode` (`fresh`: nothing from the old session; `full`: a copy of its conversation),
+  and optionally `prompt` (a prompt template, at most 16 KiB, cleaned of control
+  sequences, with the same placeholders as a role's prompt), `model` (a model name or
+  alias that does not start with `-`), `effort` (a level of the role file) and
+  `subscribe` (event kinds on the original's item, only when it has one); a bad value is
+  refused with 400 before a request is recorded. `chargehand clone <ITEM> --mode ...`
+  records the same request row, with origin `cli`. `GET /api/workers/<id>/clone`, a read
+  without the token, answers what the card's clone form starts with: the worker's prompt
+  template, model and effort (its role's, or for a clone the ones chosen for it), the
+  effort levels, the item, `modes` with `full` only while a copy is possible, and
+  `full_refused` with the reason otherwise. The form has a mode choice, the prompt as a
+  text area, the model, the effort and, for a worker with an item, the event kinds,
+  empty by default. A card offers Clone while the worker's worktree or branch exists:
+  not after garbage collection or an archive, nor while an archive of it runs.
+  The tick checks the request again and refuses it, before any ledger row or worktree
+  exists, when the repository is paused or unavailable, when the original's branch is
+  gone, for full mode when the runtime cannot fork, the original has no session, or it
+  is launching, running or blocked (a copy would take a turn in progress or an open
+  prompt), and when a cap or the usage reserve for new workers holds it. A clone has
+  origin `clone`, the original's role and item, and the id handle; the
+  one-worker-per-role-and-item rule does not hold it. It gets a new worktree and branch
+  (`<item>-<id>`) from the original's current branch (section 5), so the two never
+  write the same tree; when the original's worktree has uncommitted changes, the answer
+  says that they are not in the clone. By default it follows no event kinds, so it
+  costs nothing per comment and only a reply from the board reaches it. Its original,
+  mode, prompt, model and effort are columns of its ledger row (schema version 9), so
+  a launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a
+  new clone of the same original with them, or says why it cannot. A full-mode fork is
+  recorded as a `fork` session. The clone's branch holds the original's commits, so
+  its discard and archive refuse while those are not pushed, unless forced. In a
+  repository group of one column a clone's card follows its original's card, a clone of
+  a clone after its own original, and every clone card carries "clone of <handle>".
 - **Board personalisation.** Each column groups its cards by repository, under a heading
   with the repository's name, icon, card count and a collapse toggle. A repository can be
   renamed, given an icon, pinned, collapsed and hidden; a worker can be renamed, given an
@@ -1241,7 +1303,9 @@ Next:
   banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
-- Actions on the board: new worker, reply, pause, cancel, discard.
+- Actions on the board: new worker, reply, pause, cancel, discard, clone in fresh or
+  full mode. A third clone mode that hands over a summary of the old session waits for
+  the handoff note.
 - Packaging, first release.
 - Optional: agents under a separate user.
 

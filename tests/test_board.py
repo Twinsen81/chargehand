@@ -348,14 +348,15 @@ def test_the_board_reads_with_get_and_acts_only_through_its_post_routes(daemon):
         if getattr(handler, "__module__", "") == board.__name__
     ]
     assert {path for method, path in board_routes if method == "GET"} == {
-        *board.ASSETS, "/api/board", "/api/requests",
+        *board.ASSETS, "/api/board", "/api/requests", "/api/workers",
     }
     assert {path for method, path in board_routes if method == "POST"} == {
         "/api/workers", "/api/repositories", "/api/pause", "/api/resume",
     }
     assert {method for method, _ in board_routes} == {"GET", "POST"}
     script = (board.asset_dir() / "board.js").read_text()
-    assert re.findall(r"fetch\('([^']*)'", script) == ["/api/requests/", "/api/board"]
+    # The clone form reads its defaults with a GET.
+    assert re.findall(r"fetch\('([^']*)'", script) == ["/api/requests/", "/api/workers/", "/api/board"]
     assert script.count("method: 'POST'") == 1
     status, _ = support.request(daemon.port, "POST", "/", body=b"{}", headers=AUTH)
     assert status == 405

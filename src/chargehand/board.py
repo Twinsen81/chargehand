@@ -24,6 +24,12 @@ token writes it at once, as it has no side effect outside the ledger, and nothin
 the model reads it. A hidden repository's workers run, are supervised and notify as
 before; only their cards leave the page until the operator asks to see them.
 
+A clone of a worker is a request like the others. ``GET /api/workers/<id>/clone`` answers
+what its form starts with: the prompt template, model and effort the worker started with,
+and whether a copy of its session is possible now. The edited prompt is operator text: it is
+checked and capped by :func:`chargehand.clone.clone_args`, as the command line checks it.
+A clone's card follows its original's in a repository group of one column.
+
 An archive of a worker, or of every worker of a repository, is a request like the others;
 the zip is written by the daemon's job thread, and the model shows each job on its card and
 in the top bar with its state and progress, read from the ledger as the rest.
@@ -47,6 +53,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
+from chargehand import clone as clone_mod
 from chargehand import config as config_mod
 from chargehand import hooks as hooks_mod
 from chargehand import ledger as ledger_mod
@@ -63,12 +70,14 @@ from chargehand.serve import HTTPError, Request, Response, Routes
 from chargehand.tick import (
     ARCHIVE,
     ARCHIVE_REPOSITORY,
+    CLONE,
     MODEL_LIMIT_KEY,
     NEW_WORKER,
     REPLY,
     REQUEST_MESSAGE_LIMIT,
     UNARCHIVE_REPOSITORY,
-    template_values,
+    fork_refusal,
+    launch_prompt,
 )
 
 log = logging.getLogger(__name__)
@@ -205,6 +214,7 @@ def register_routes(routes: Routes) -> None:
         routes.add("GET", path, asset)
     routes.add("GET", "/api/board", state)
     routes.add("GET", "/api/requests", request_outcome, prefix=True)
+    routes.add("GET", "/api/workers", clone_form, prefix=True)
     routes.add("POST", "/api/workers", new_worker)
     routes.add("POST", "/api/workers", worker_action, prefix=True)
     routes.add("POST", "/api/repositories", repository_action, prefix=True)
@@ -333,7 +343,7 @@ def worker_action(request: Request) -> Response:
     if len(parts) != 2 or not parts[0].isdigit():
         raise HTTPError(404, "not found")
     action = parts[1]
-    if action not in (ATTACH, PERSONALISE, ANSWER) and action not in WORKER_ACTIONS:
+    if action not in (ATTACH, PERSONALISE, ANSWER, CLONE) and action not in WORKER_ACTIONS:
         raise HTTPError(404, f"no worker action {sanitize.one_line(action, limit=40)}")
     body = _body(request)
     ledger = request.ledger()
@@ -349,12 +359,65 @@ def worker_action(request: Request) -> Response:
     target = target_of(worker)
     if action == ATTACH:
         return _attach(request, ledger, worker, target, body)
+    if action == CLONE:
+        return _clone(request, worker, target, body)
     kind, takes_force = WORKER_ACTIONS[action]
     if kind == REPLY:
         return _record(request, kind, target, text=_reply_text(body))
     if takes_force:
         return _record(request, kind, target, force=_flag(body, "force"))
     return _record(request, kind, target)
+
+
+def _clone(request: Request, worker: Worker, target: str, body: dict[str, object]) -> Response:
+    """Record a clone of *worker*, with the arguments the command line records."""
+    try:
+        args = clone_mod.clone_args(body)
+    except clone_mod.CloneArgsError as exc:
+        raise HTTPError(400, str(exc)) from None
+    if args.get("subscribe") and not worker.item:
+        raise HTTPError(400, f"{worker.id_handle} has no item, so a clone of it has nothing to follow")
+    return _record(request, CLONE, target, **args)
+
+
+def clone_form(request: Request) -> Response:
+    """``GET /api/workers/<id>/clone``: what the clone form of a card starts with.
+
+    The prompt template, model and effort are the worker's own: its role's, or for a clone
+    the ones chosen for it. ``modes`` lists ``full`` only while a copy of the session is
+    possible, and ``full_refused`` says why not otherwise. The tick checks all of it again.
+    """
+    parts = _segments(request, "/api/workers")
+    if len(parts) != 2 or not parts[0].isdigit() or parts[1] != CLONE:
+        raise HTTPError(404, "not found")
+    ledger = request.ledger()
+    worker = ledger.get(int(parts[0]))
+    if worker is None:
+        raise HTTPError(404, f"no worker {parts[0]}")
+    if CLONE not in actions(worker, ledger.active_job(ledger_mod.JOB_ARCHIVE, str(worker.id))):
+        raise HTTPError(409, f"{worker.id_handle} cannot be cloned now: its worktree and branch "
+                             f"are gone, or an archive of it is under way")
+    role = _Roles(request.daemon.config).of(worker)
+    if role is None:
+        raise HTTPError(409, f"role {worker.role} of {worker.id_handle} does not load")
+    full = fork_refusal(worker)
+    form = {
+        "id": worker.id,
+        "handle": worker.target,
+        "role": worker.role,
+        "item": sanitize.scrub_identifier(worker.item) if worker.item else None,
+        "prompt": worker.prompt or role.prompt,
+        "model": worker.model or role.model,
+        "effort": worker.effort or role.effort,
+        # A value equal to the role's is not sent, so the clone keeps following its role.
+        "role_values": {"prompt": role.prompt, "model": role.model, "effort": role.effort},
+        "efforts": list(roles_mod.EFFORT_LEVELS),
+        "modes": [ledger_mod.CLONE_FRESH] + ([] if full else [ledger_mod.CLONE_FULL]),
+        "full_refused": full,
+        "subscribe": [],
+        "prompt_limit": clone_mod.PROMPT_LIMIT,
+    }
+    return Response(body=to_json(form), headers=PAGE_HEADERS)
 
 
 def _reply_text(body: dict[str, object]) -> str:
@@ -784,8 +847,9 @@ def _column(
     for entry in chosen:
         if show_hidden or not entry["hidden"]:
             members.setdefault(str(entry["repository"]), []).append(entry)
-    for group in members.values():
+    for name, group in members.items():
         group.sort(key=lambda entry: (not entry["pinned"], -_activity(entry)))
+        members[name] = under_originals(group)
     order = sorted(
         members,
         key=lambda name: (
@@ -811,6 +875,30 @@ def _column(
         "groups": groups,
         "cards": cards,
     }
+
+
+def under_originals(group: list[dict[str, object]]) -> list[dict[str, object]]:
+    """*group* in its order, except that each clone follows its original when both are in it.
+
+    A clone's id is above its original's, so the chains have no loop.
+    """
+    ids = {entry["id"] for entry in group}
+    children: dict[object, list[dict[str, object]]] = {}
+    top = []
+    for entry in group:
+        parent = entry.get("parent")
+        parent_id = parent.get("id") if isinstance(parent, dict) else None
+        if parent_id in ids:
+            children.setdefault(parent_id, []).append(entry)
+        else:
+            top.append(entry)
+    ordered: list[dict[str, object]] = []
+    pending = list(reversed(top))
+    while pending:
+        entry = pending.pop()
+        ordered.append(entry)
+        pending.extend(reversed(children.get(entry["id"], [])))
+    return ordered
 
 
 def _health(health: dict[str, object]) -> dict[str, object]:
@@ -885,10 +973,13 @@ def card(
         if live else None
     )
     cap = role.policy.max_wakes_per_day if role else None
+    parent = ledger.get(worker.parent_id) if worker.parent_id else None
     return {
         "id": worker.id,
         "handle": worker.target,
         "origin": worker.origin,
+        "parent": {"id": parent.id, "handle": parent.target} if parent else None,
+        "clone_mode": worker.clone_mode,
         "actions": actions(worker, job),
         "column": COLUMN_OF[worker.state],
         "state": worker.state,
@@ -900,9 +991,9 @@ def card(
         "pr_url": sanitize.safe_url(worker.pr_url),
         "branch": sanitize.one_line(worker.branch, limit=LINE_LIMIT),
         "worktree": sanitize.one_line(worker.worktree, limit=LINE_LIMIT),
-        "model": role.model if role else None,
-        "effort": role.effort if role else None,
-        "last_prompt": last_prompt(worker, ledger, role),
+        "model": worker.model or (role.model if role else None),
+        "effort": worker.effort or (role.effort if role else None),
+        "last_prompt": last_prompt(worker, ledger, role, parent),
         "last_answer": _text(worker.last_answer, ANSWER_LIMIT),
         "waiting_for": (
             sanitize.one_line(worker.waiting_for, limit=LINE_LIMIT)
@@ -959,7 +1050,7 @@ def actions(worker: Worker, job: ledger_mod.Job | None = None) -> list[str]:
     if worker.is_terminal:
         if archiving or worker.archived_at is not None:
             return []
-        return ["retry"] + ([] if worker.gc_done else ["discard", "archive"])
+        return ["retry"] + ([] if worker.gc_done else ["discard", "archive", CLONE])
     offered = []
     if worker.state in (ledger_mod.PAUSED, ledger_mod.BLOCKED, ledger_mod.PARKED):
         offered.append("continue")
@@ -969,7 +1060,7 @@ def actions(worker: Worker, job: ledger_mod.Job | None = None) -> list[str]:
     if worker.session_id:
         offered.append(ATTACH)
     if not archiving:
-        offered += ["discard", "archive"]
+        offered += ["discard", "archive", CLONE]
     return offered
 
 
@@ -982,21 +1073,23 @@ def _text(value: str | None, limit: int) -> str | None:
     return cleaned or None
 
 
-def last_prompt(worker: Worker, ledger: Ledger, role: Role | None) -> str | None:
-    """The wake message of the last wake, or the role's first prompt before any wake.
+def last_prompt(
+    worker: Worker, ledger: Ledger, role: Role | None, parent: Worker | None = None
+) -> str | None:
+    """The wake message of the last wake, or the first prompt before any wake.
 
     The wake message is rebuilt from the inbox rows that wake delivered, with the code
-    that built it, so the card shows what the session read.
+    that built it, so the card shows what the session read. The first prompt is the
+    worker's own (a clone's chosen one) or its role's, built as the launch builds it.
     """
     if worker.last_wake_at is not None:
         message, _ = wake_message(ledger.delivered_at(worker, worker.last_wake_at))
         return _text(message, PROMPT_LIMIT)
-    if role is None:
+    template = worker.prompt or (role.prompt if role else None)
+    if template is None:
         return None
     try:
-        # A worker without an item has None for {item}; the card shows it empty.
-        values = {name: value or "" for name, value in template_values(worker).items()}
-        rendered = config_mod.render(role.prompt, values, where=f"role {role.name}")
+        rendered = launch_prompt(worker, template, parent, where=f"role {worker.role}")
     except ChargehandError:
         return None
     return _text(rendered, PROMPT_LIMIT)
@@ -1037,4 +1130,6 @@ __all__ = [
     "register_routes",
     "to_json",
     "tokens_estimate",
+    "under_originals",
+    "clone_form",
 ]

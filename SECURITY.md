@@ -219,6 +219,19 @@ public location.
   source name `board`, which no configured source may take, so no event from a source
   can pass as a reply. The request row keeps the line, so it is in the ledger like the
   other request arguments.
+- **The prompt of a clone.** The clone form sends a prompt template that the operator
+  edited: trusted operator text from a holder of the token, or from the command line, as
+  a role file is. It may reach the clone's first prompt; tracker text never does. It is
+  cleaned of control sequences and direction overrides, refused above 16 KiB, and checked
+  for the role prompt's placeholders, so `{title}` and `{body}` are refused as in a role
+  file. A model name that starts with `-` is refused, because it goes into the command
+  line. The request row and the clone's ledger row keep the prompt; log lines name only
+  its length. `GET /api/workers/<id>/clone` needs no token, as every read, and shows the
+  role's prompt template, which the card already shows filled in. A clone in full mode
+  starts with a copy of the original's conversation, which names the original's
+  worktree; a line before its prompt says that this worktree belongs to another worker,
+  and a role in `manual` mode asks before a write there, but under `auto` or
+  `bypassPermissions` the copy can still write into the original's worktree.
 - **Board settings.** Names, icons, pins and the collapsed and hidden repositories are
   written by `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board`,
   with the token, straight into the ledger's `board_state` table; they reach no session,

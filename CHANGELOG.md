@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Clone a worker, from a card's Clone form or with `chargehand clone <ITEM> --mode
+  fresh|full`. A clone is a new worker with origin `clone`, on its original's role and
+  item, in a worktree of its own branched from the original's current branch, so its
+  commits carry over and the two never write the same tree. Fresh mode starts a new
+  session; full mode starts with a copy of the original's conversation (`claude --resume
+  --fork-session --bg`, run in the clone's worktree with its own name, hook settings,
+  permission mode, model and effort), refused while the original is launching, running or
+  blocked. The form starts with the worker's prompt template, model and effort
+  (`GET /api/workers/<id>/clone`), which you can change, and the event kinds the clone
+  follows, none by default, so only a reply reaches it. The board and the command line
+  record the same `clone` request; the tick refuses it, without a worktree, when the
+  repository is paused, the original's branch is gone, a cap or the usage reserve for new
+  workers holds it. Schema version 9 adds `parent_id`, `clone_mode`, `prompt`, `model` and
+  `effort` to `workers`, so a resumed launch and a `retry` of a clone use the chosen
+  values; `retry` starts a new clone of the same original. A clone's card follows its
+  original's card, `status --json` has `parent`, and cards show the worker's own model and
+  effort.
 - Archive a worker or a whole repository from the board. An archive is one zip under the
   state directory, `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600,
   that holds the worktree, the session transcript as text, and the worker's ledger row and
