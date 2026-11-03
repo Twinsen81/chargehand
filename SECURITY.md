@@ -227,11 +227,18 @@ public location.
   file. A model name that starts with `-` is refused, because it goes into the command
   line. The request row and the clone's ledger row keep the prompt; log lines name only
   its length. `GET /api/workers/<id>/clone` needs no token, as every read, and shows the
-  role's prompt template, which the card already shows filled in. A clone in full mode
-  starts with a copy of the original's conversation, which names the original's
-  worktree; a line before its prompt says that this worktree belongs to another worker,
-  and a role in `manual` mode asks before a write there, but under `auto` or
-  `bypassPermissions` the copy can still write into the original's worktree.
+  role's prompt template, which the card already shows filled in.
+- **A clone and its original's worktree.** Two workers never work in one worktree, but a
+  clone in full mode starts with a copy of the original's conversation, which names the
+  original's worktree, and a fresh clone can find it too. A line before a full-mode
+  clone's prompt says that this worktree belongs to another worker, and the clone's own
+  settings file denies `Edit(//<original worktree>/**)` and `Write(//<original
+  worktree>/**)`, as given and resolved. A deny rule holds in every permission mode,
+  `auto` and `bypassPermissions` included, so the file tools (Edit, Write and the other
+  file-editing tools) cannot change the original's files. The Bash tool is not covered: a
+  rule matches the text of a command, not the files it changes, so under `auto` or
+  `bypassPermissions` a shell command can still write there; a role in `manual` mode asks
+  before such a command.
 - **Board settings.** Names, icons, pins and the collapsed and hidden repositories are
   written by `POST /api/repositories/<name>/board` and `POST /api/workers/<id>/board`,
   with the token, straight into the ledger's `board_state` table; they reach no session,

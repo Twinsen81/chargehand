@@ -174,6 +174,10 @@ class LaunchSpec:
     *read_paths* are directories outside the worktree that the session must be able to
     read without asking, such as the checkout of a pull request it reviews. They are not
     workspaces: a runtime must not load configuration or instructions from them.
+
+    *protected_paths* are directories the session must not change, such as the worktree of
+    the worker it was cloned from. A runtime denies its file-editing tools there, in every
+    permission mode, as far as its agent can.
     """
 
     worktree: Path
@@ -183,6 +187,7 @@ class LaunchSpec:
     model: str | None = None
     effort: str | None = None
     read_paths: tuple[Path, ...] = ()
+    protected_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

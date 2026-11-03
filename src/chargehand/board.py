@@ -878,17 +878,18 @@ def _column(
 
 
 def under_originals(group: list[dict[str, object]]) -> list[dict[str, object]]:
-    """*group* in its order, except that each clone follows its original when both are in it.
+    """*group* in its order, except that each clone follows its original when both are in it
+    and both are pinned or both are not, so the pinned cards still come first.
 
     A clone's id is above its original's, so the chains have no loop.
     """
-    ids = {entry["id"] for entry in group}
+    pinned = {entry["id"]: bool(entry.get("pinned")) for entry in group}
     children: dict[object, list[dict[str, object]]] = {}
     top = []
     for entry in group:
         parent = entry.get("parent")
         parent_id = parent.get("id") if isinstance(parent, dict) else None
-        if parent_id in ids:
+        if parent_id in pinned and pinned[parent_id] == pinned[entry["id"]]:
             children.setdefault(parent_id, []).append(entry)
         else:
             top.append(entry)

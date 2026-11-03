@@ -3284,6 +3284,9 @@ class Runner:
                     (item_checkout_path(worker),)
                     if role.checkout == roles_mod.CHECKOUT_ITEM else ()
                 ),
+                # Two workers never write one tree: a clone's file tools stay out of its
+                # original's worktree, whatever its permission mode.
+                protected_paths=(parent.worktree_path,) if parent is not None else (),
             )
             if worker.clone_mode == ledger_mod.CLONE_FULL:
                 if parent is None or not parent.session_uuid or parent.gc_done:

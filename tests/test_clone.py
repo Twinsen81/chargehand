@@ -217,8 +217,13 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
     ]
     assert argv[12:14] == ["--settings", str(settings)]
     assert settings != claude_mod.settings_file_for(original.worktree_path)
-    hooks = json.loads(settings.read_text())["hooks"]
-    assert "Stop" in hooks and "the-daemon-token" not in " ".join(argv)
+    written = json.loads(settings.read_text())
+    assert "Stop" in written["hooks"] and "the-daemon-token" not in " ".join(argv)
+    # The file tools are denied in the original's worktree, in every permission mode.
+    deny = written["permissions"]["deny"]
+    for path in {str(original.worktree_path), os.path.realpath(original.worktree)}:
+        assert f"Edit(/{path}/**)" in deny and f"Write(/{path}/**)" in deny
+    assert not any(clone.worktree in rule for rule in deny)
     # A resume reads piped text into the prompt; the copy still runs its SessionStart hook.
     assert fork["stdin"] == "devnull"
     assert fork["cwd"] == os.path.realpath(clone.worktree)
@@ -564,6 +569,40 @@ def test_a_clone_card_follows_its_original_in_one_column(harness):
     assert order.index(clone.id) == order.index(original.id) + 1
     assert order.index(grandchild.id) == order.index(clone.id) + 1
     assert set(order) == {original.id, other.id, clone.id, grandchild.id}
+
+
+@pytest.mark.parametrize("runtime", ["claude", "fake"])
+def test_a_clone_of_either_mode_is_launched_with_the_originals_worktree_protected(harness, runtime):
+    original = original_worker(harness, role=ROLE if runtime == "claude" else FAKE_ROLE)
+
+    fresh = clone_of(harness, original, mode="fresh")
+
+    if runtime == "claude":
+        argv = harness.claude_state.launches[-1]["argv"]
+        deny = json.loads(argv[argv.index("--settings") + 1])["permissions"]["deny"]
+        assert f"Edit(/{original.worktree}/**)" in deny and f"Write(/{original.worktree}/**)" in deny
+    else:
+        assert fake_runtime.world().launches[-1]["protected_paths"] == [original.worktree]
+    assert fresh.parent_id == original.id
+
+
+def test_a_pinned_clone_keeps_its_place_among_the_pinned_cards():
+    # In page order: pinned first. The pinned clone 8 of the unpinned card 7 stays with
+    # the pinned cards, and the unpinned clone 9 of the pinned card 3 stays with the others.
+    group = [
+        {"id": 3, "pinned": True, "parent": None},
+        {"id": 8, "pinned": True, "parent": {"id": 7, "handle": "a"}},
+        {"id": 7, "pinned": False, "parent": None},
+        {"id": 9, "pinned": False, "parent": {"id": 3, "handle": "b"}},
+        {"id": 5, "pinned": False, "parent": None},
+        {"id": 10, "pinned": False, "parent": {"id": 7, "handle": "a"}},
+    ]
+
+    order = [c["id"] for c in board.under_originals(group)]
+
+    assert order == [3, 8, 7, 10, 9, 5]
+    pins = [next(c["pinned"] for c in group if c["id"] == i) for i in order]
+    assert pins == sorted(pins, reverse=True)
 
 
 def test_under_originals_keeps_the_order_of_cards_whose_original_is_elsewhere():

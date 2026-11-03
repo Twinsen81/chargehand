@@ -969,10 +969,16 @@ roles hold the item. `--route` stays accepted for `--repository`.
   mode, prompt, model and effort are columns of its ledger row (schema version 9), so
   a launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a
   new clone of the same original with them, or says why it cannot. A full-mode fork is
-  recorded as a `fork` session. The clone's branch holds the original's commits, so
-  its discard and archive refuse while those are not pushed, unless forced. In a
-  repository group of one column a clone's card follows its original's card, a clone of
-  a clone after its own original, and every clone card carries "clone of <handle>".
+  recorded as a `fork` session. A clone's session gets `Edit` and `Write` deny rules
+  for its original's worktree in its own settings file, in both modes; a deny rule holds
+  in every permission mode, so its file tools cannot change the original's tree, while
+  its Bash tool is not covered (SECURITY.md). The clone's branch holds the original's
+  commits, so its retry, discard and archive refuse while those are not pushed, unless
+  forced. In a repository group of one column a clone's card follows its original's
+  card, and a clone of a clone follows its own original, when both cards are pinned or
+  both are not: a pinned clone of an unpinned card stays with the pinned cards, and an
+  unpinned clone of a pinned card stays with the others, so the pinned cards still come
+  first. Every clone card carries "clone of <handle>".
 - **Board personalisation.** Each column groups its cards by repository, under a heading
   with the repository's name, icon, card count and a collapse toggle. A repository can be
   renamed, given an icon, pinned, collapsed and hidden; a worker can be renamed, given an

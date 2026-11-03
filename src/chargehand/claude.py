@@ -768,16 +768,19 @@ def launch_settings(
     deny_rules: Sequence[str],
     read_paths: Sequence[Path] = (),
     hooks: Mapping[str, object] | None = None,
+    protected_paths: Sequence[Path] = (),
 ) -> dict[str, object] | None:
     """The per-launch settings payload: the deny rules, the allow rules and the hooks.
 
     Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
     not passed as `--add-dir`: Claude Code loads skills from an added directory, and these
-    paths hold content the operator did not write.
+    paths hold content the operator did not write. Each of *protected_paths* gets `Edit`
+    and `Write` deny rules (:func:`protected_path_rules`).
     """
     permissions: dict[str, list[str]] = {}
-    if deny_rules:
-        permissions["deny"] = list(deny_rules)
+    deny = [*deny_rules, *protected_path_rules(protected_paths)]
+    if deny:
+        permissions["deny"] = deny
     # `//` starts an absolute path in a Claude Code permission rule.
     allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
     if allow:
@@ -788,6 +791,23 @@ def launch_settings(
     if hooks:
         settings["hooks"] = dict(hooks)
     return settings or None
+
+
+def protected_path_rules(paths: Sequence[Path]) -> list[str]:
+    """Deny rules that keep the file tools out of each of *paths*.
+
+    A deny rule holds in every permission mode, `auto` and `bypassPermissions` included,
+    so a clone that continues a copy of another worker's conversation cannot edit that
+    worker's worktree with Edit, Write or another file-editing tool. The Bash tool is not
+    covered: a rule matches a command's text, not the files it changes. A path is named as
+    given and resolved, because Claude Code may compare either (`/tmp` is `/private/tmp`).
+    """
+    rules: list[str] = []
+    for path in paths:
+        for variant in dict.fromkeys((str(Path(path)), os.path.realpath(path))):
+            # `//` starts an absolute path in a Claude Code permission rule.
+            rules += [f"Edit(/{variant}/**)", f"Write(/{variant}/**)"]
+    return rules
 
 
 # ----- session hooks ---------------------------------------------------------
@@ -1289,7 +1309,10 @@ class ClaudeRuntime(Runtime):
         hooks = self.hooks(
             spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
         )
-        settings = launch_settings(spec.options, self.deny_rules, spec.read_paths, hooks=hooks)
+        settings = launch_settings(
+            spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
+            protected_paths=spec.protected_paths,
+        )
         if not hooks or settings is None:
             return settings
         path = settings_file_for(spec.worktree)
@@ -1299,7 +1322,10 @@ class ClaudeRuntime(Runtime):
             # The token must not go on the command line; the session diff follows it.
             if warn is not None:
                 warn(f"{spec.name}: could not write {path} ({exc}); the session posts no hooks")
-            return launch_settings(spec.options, self.deny_rules, spec.read_paths)
+            return launch_settings(
+                spec.options, self.deny_rules, spec.read_paths,
+                protected_paths=spec.protected_paths,
+            )
 
     @classmethod
     def parse_role_options(cls, table: Mapping[str, object], where: str) -> dict[str, object]:

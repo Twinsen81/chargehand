@@ -154,6 +154,7 @@ class FakeRuntime(Runtime):
                 "options": dict(spec.options),
                 "model": spec.model,
                 "effort": spec.effort,
+                "protected_paths": [str(path) for path in spec.protected_paths],
             }
         )
         if _WORLD.state.get("launch_fails"):
