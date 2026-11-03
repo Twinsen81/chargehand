@@ -970,7 +970,9 @@ roles hold the item. `--route` stays accepted for `--repository`.
   a launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a
   new clone of the same original with them, or says why it cannot. A full-mode fork is
   recorded as a `fork` session. A clone's session gets `Edit` and `Write` deny rules
-  for its original's worktree in its own settings file, in both modes; a deny rule holds
+  for its original's worktree in its own settings file, in both modes, and for the
+  worktree of every earlier original of a clone of a clone, because a copy of a copy
+  names them all; the line before a full-mode prompt names them all too. A deny rule holds
   in every permission mode, so its file tools cannot change the original's tree, while
   its Bash tool is not covered (SECURITY.md). The clone's branch holds the original's
   commits, so its retry, discard and archive refuse while those are not pushed, unless

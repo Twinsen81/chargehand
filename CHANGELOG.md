@@ -35,8 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session; full mode starts with a copy of the original's conversation (`claude --resume
   --fork-session --bg`, run in the clone's worktree with its own name, hook settings,
   permission mode, model and effort), refused while the original is launching, running or
-  blocked. A clone's settings file denies the Edit and Write tools in its original's
-  worktree, in every permission mode. The form starts with the worker's prompt template, model and effort
+  blocked. A clone's settings file denies the Edit and Write tools in the worktrees of its
+  original and of every earlier original, in every permission mode. The form starts with
+  the worker's prompt template, model and effort
   (`GET /api/workers/<id>/clone`), which you can change, and the event kinds the clone
   follows, none by default, so only a reply reaches it. The board and the command line
   record the same `clone` request; the tick refuses it, without a worktree, when the

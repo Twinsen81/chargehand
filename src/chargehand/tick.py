@@ -261,21 +261,45 @@ def fork_refusal(worker: Worker) -> str | None:
     return None
 
 
-def clone_note(worker: Worker, parent: Worker) -> str:
+def ancestors(ledger: Ledger, worker: Worker) -> list[Worker]:
+    """The worker a clone was made from, then that one's original, and so on.
+
+    A copy of a copy names the worktree of every earlier worker, so a clone keeps out of
+    all of them. A clone's id is above its original's, so the chain ends.
+    """
+    found: list[Worker] = []
+    current = worker
+    while current.parent_id is not None and current.parent_id < current.id:
+        parent = ledger.get(current.parent_id)
+        if parent is None:
+            break
+        found.append(parent)
+        current = parent
+    return found
+
+
+def clone_note(worker: Worker, originals: Sequence[Worker]) -> str:
     """The line before a full-mode clone's prompt. Only paths and names chargehand chose."""
-    return (
+    lead = (
         f"This session continues a copy of another worker's conversation. From now on you "
-        f"work in {worker.worktree} on branch {worker.branch}. The worktree "
-        f"{parent.worktree} belongs to the other worker: do not change anything there."
+        f"work in {worker.worktree} on branch {worker.branch}."
     )
+    paths = [original.worktree for original in originals]
+    keep_out = "do not change anything there."
+    if len(paths) == 1:
+        return f"{lead} The worktree {paths[0]} belongs to the other worker: {keep_out}"
+    named = f"{', '.join(paths[:-1])} and {paths[-1]}"
+    return f"{lead} The worktrees {named} belong to other workers: {keep_out}"
 
 
-def launch_prompt(worker: Worker, template: str, parent: Worker | None, *, where: str) -> str:
+def launch_prompt(
+    worker: Worker, template: str, originals: Sequence[Worker], *, where: str
+) -> str:
     """The first prompt of *worker*'s session: *template* filled in with the worker's own
-    values, after the note of a full-mode clone."""
+    values, after the note of a full-mode clone. *originals* are its :func:`ancestors`."""
     prompt = config_mod.render(template, template_values(worker), where=where)
-    if worker.clone_mode == ledger_mod.CLONE_FULL and parent is not None:
-        return f"{clone_note(worker, parent)}\n\n{prompt}"
+    if worker.clone_mode == ledger_mod.CLONE_FULL and originals:
+        return f"{clone_note(worker, originals)}\n\n{prompt}"
     return prompt
 
 
@@ -3263,11 +3287,12 @@ class Runner:
                     report,
                     notify_detail="the role's files are not in the worktree",
                 )
-            parent = self.ledger.get(worker.parent_id) if worker.parent_id else None
+            originals = ancestors(self.ledger, worker)
+            parent = originals[0] if originals else None
             prompt = launch_prompt(
                 worker,
                 worker.prompt or role.prompt,
-                parent,
+                originals,
                 where=(
                     "the clone prompt" if worker.prompt
                     else f"{role.source or 'role ' + role.name}.prompt"
@@ -3286,7 +3311,7 @@ class Runner:
                 ),
                 # Two workers never write one tree: a clone's file tools stay out of its
                 # original's worktree, whatever its permission mode.
-                protected_paths=(parent.worktree_path,) if parent is not None else (),
+                protected_paths=tuple(original.worktree_path for original in originals),
             )
             if worker.clone_mode == ledger_mod.CLONE_FULL:
                 if parent is None or not parent.session_uuid or parent.gc_done:

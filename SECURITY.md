@@ -233,7 +233,8 @@ public location.
   original's worktree, and a fresh clone can find it too. A line before a full-mode
   clone's prompt says that this worktree belongs to another worker, and the clone's own
   settings file denies `Edit(//<original worktree>/**)` and `Write(//<original
-  worktree>/**)`, as given and resolved. A deny rule holds in every permission mode,
+  worktree>/**)`, as given and resolved. A clone of a clone gets the same line and rules for
+  the worktree of every earlier original, because a copy of a copy names them all. A deny rule holds in every permission mode,
   `auto` and `bypassPermissions` included, so the file tools (Edit, Write and the other
   file-editing tools) cannot change the original's files. The Bash tool is not covered: a
   rule matches the text of a command, not the files it changes, so under `auto` or

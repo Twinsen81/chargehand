@@ -77,6 +77,7 @@ from chargehand.tick import (
     REQUEST_MESSAGE_LIMIT,
     UNARCHIVE_REPOSITORY,
     fork_refusal,
+    ancestors,
     launch_prompt,
 )
 
@@ -1090,7 +1091,8 @@ def last_prompt(
     if template is None:
         return None
     try:
-        rendered = launch_prompt(worker, template, parent, where=f"role {worker.role}")
+        originals = ancestors(ledger, worker) if parent is not None else []
+        rendered = launch_prompt(worker, template, originals, where=f"role {worker.role}")
     except ChargehandError:
         return None
     return _text(rendered, PROMPT_LIMIT)

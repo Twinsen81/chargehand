@@ -229,6 +229,27 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
     assert fork["cwd"] == os.path.realpath(clone.worktree)
 
 
+def test_a_clone_of_a_clone_protects_the_worktree_of_every_ancestor(harness, tmp_path):
+    token_file = tmp_path / "hooks.token"
+    token_file.write_text("the-daemon-token\n")
+    token_file.chmod(0o600)
+    harness.config = dataclasses.replace(harness.config, serve=ServeConfig(port=4567, token_file=token_file))
+    original = original_worker(harness)
+    child = idle(harness, clone_of(harness, original, mode="full"))
+
+    grandchild = clone_of(harness, child, mode="full", prompt="go on")
+
+    # A copy of a copy names the first original's worktree too.
+    deny = json.loads(claude_mod.settings_file_for(grandchild.worktree_path).read_text())[
+        "permissions"]["deny"]
+    for worktree in (original.worktree, child.worktree):
+        assert f"Edit(/{worktree}/**)" in deny and f"Write(/{worktree}/**)" in deny
+    assert not any(grandchild.worktree in rule for rule in deny)
+    prompt = fork_calls(harness)[-1]["prompt"]
+    assert f"The worktrees {child.worktree} and {original.worktree} belong to other workers" in prompt
+    assert prompt.endswith("\n\ngo on")
+
+
 def test_a_clone_starts_from_the_originals_current_branch_with_its_unpushed_commit(harness):
     original = original_worker(harness)
     run_git("branch", "-m", "feature/renamed-by-the-session", cwd=original.worktree_path)
