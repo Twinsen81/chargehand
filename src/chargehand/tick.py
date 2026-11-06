@@ -211,6 +211,11 @@ _STATUS_FOR_STATE = {
 }
 
 
+def reset_clock(epoch: float) -> str:
+    """A reset time in local time, for an answer: weekday, day, month and minute."""
+    return time.strftime("%a %d %b %H:%M", time.localtime(epoch))
+
+
 def source_failure(name: str, exc: object) -> str:
     """*exc* as one line that names the source *name* once.
 
@@ -1235,7 +1240,7 @@ class Runner:
         if item is None and role.checkout == roles_mod.CHECKOUT_ITEM:
             return False, f"role {role.name} checks out its item, so it needs a work item"
         label = item.key if item else f"new {role.name} worker"
-        refusal = self._launch_refusal(repository, role, label)
+        refusal = self._launch_refusal(repository, role, label, by_hand=True)
         if refusal is not None:
             return False, refusal
         return self._launch_by_hand(
@@ -1311,7 +1316,9 @@ class Runner:
             role = context.role(original.role)
         except ConfigError as exc:
             return False, f"role {original.role} does not load: {exc}"
-        refusal = self._launch_refusal(repository, role, original.item or f"clone of {name}")
+        refusal = self._launch_refusal(
+            repository, role, original.item or f"clone of {name}", by_hand=True
+        )
         if refusal is not None:
             return False, refusal
         try:
@@ -1670,7 +1677,14 @@ class Runner:
         _log_mark(worker.handle, context.item_of(worker), context.source, worker.label_state or "none",
                   Status.QUEUED.value)
         self.ledger.update(worker, gc_done=1)
-        outcome = "re-queued; the next admission pass starts a new worker"
+        holders = self._holders(worker.item) if worker.item else []
+        if holders:
+            outcome = (
+                f"re-queued; it starts when {', '.join(holders)} "
+                f"{'ends' if len(holders) == 1 else 'end'}"
+            )
+        else:
+            outcome = "re-queued; the next admission pass starts a new worker"
         return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
 
     def _do_discard(
@@ -2149,9 +2163,12 @@ class Runner:
                 continue
             handle = f"{role.name}/{sanitize.scrub_identifier(item)}"
             if queue:
-                holder = self.ledger.live_worker_for(item)
-                if holder is not None:
-                    notes.append(f"start waits, {holder.handle} holds the item")
+                holders = self._holders(item)
+                if holders:
+                    verb = "holds" if len(holders) == 1 else "hold"
+                    holding = f"{', '.join(holders)} {verb} the item"
+                    report.skipped.append(f"{item}: start of {handle} waits, {holding}")
+                    notes.append(f"start of {handle} waits, {holding}")
                     deferred = True
                     continue
             elif router_mod.suitable_worker_exists(
@@ -2223,6 +2240,10 @@ class Runner:
                 live = self.ledger.live_worker_for(item, role.name) is not None
                 notes.append(f"launched {handle}" if live else f"launch of {handle} failed")
         return deferred
+
+    def _holders(self, item: str) -> list[str]:
+        """The handles of the live workers on *item*; a queue start waits until none is left."""
+        return [worker.handle for worker in self.ledger.live_workers_for(item)]
 
     def _source_status_owner(self, event: Event) -> int:
         """Whether a worker that *event* starts marks its item on the event's source.
@@ -3102,8 +3123,13 @@ class Runner:
             )
         ]
 
-    def _launch_refusal(self, repository: Repository, role: Role, item: str) -> str | None:
-        """Why the caps hold a new launch back now, or None when it may start."""
+    def _launch_refusal(
+        self, repository: Repository, role: Role, item: str, *, by_hand: bool = False
+    ) -> str | None:
+        """Why the caps hold a new launch back now, or None when it may start.
+
+        *by_hand* is for a request, which the tick refuses once and does not try again.
+        """
         working, open_workers, per_repository = self._counts()
         if working >= self.config.max_concurrent:
             return f"{item}: launch throttle ({working}/{self.config.max_concurrent})"
@@ -3120,12 +3146,14 @@ class Runner:
         in_role = self.ledger.live_count_by_role().get(role.name, 0)
         if role.policy.max_workers is not None and in_role >= role.policy.max_workers:
             return f"{item}: role {role.name} is at its limit ({role.policy.max_workers} workers)"
-        return self._usage_refusal(role, item)
+        return self._usage_refusal(role, item, by_hand=by_hand)
 
-    def _usage_refusal(self, role: Role, item: str) -> str | None:
+    def _usage_refusal(self, role: Role, item: str, *, by_hand: bool = False) -> str | None:
         """Why the reserve for new workers holds a launch back, or None.
 
-        No reading of the role's provider is no reserve.
+        No reading of the role's provider is no reserve. A start rule's start waits and is
+        tried again; a request is refused, so its answer says when the reserve lets a new
+        worker start: the percentage of a weekly window only grows until its reset.
         """
         try:
             provider = runtime_mod.get(role.runtime).usage_provider
@@ -3137,10 +3165,17 @@ class Runner:
         weekly = delivery_mod.window_over_reserve(self._usage(provider), reserve_percent=reserve)
         if weekly is None:
             return None
-        return (
-            f"{item}: held by the usage reserve ({provider} {weekly.kind} at "
-            f"{weekly.used_percent:.0f}%, above {100.0 - reserve:.0f}%)"
+        reading = (
+            f"{provider} {weekly.kind} at {weekly.used_percent:.0f}%, "
+            f"above {100.0 - reserve:.0f}%"
         )
+        if not by_hand:
+            return f"{item}: held by the usage reserve ({reading})"
+        until = (
+            f" until the weekly window resets on {reset_clock(weekly.resets_at)}"
+            if weekly.resets_at is not None else ""
+        )
+        return f"{item}: the usage reserve allows no new worker{until} ({reading})"
 
     def _stale_worktree_for(self, role: str, item: str) -> Path | None:
         """A re-armed item starts a new worker only once the old worktree is gone.

@@ -23,7 +23,7 @@ from chargehand.delivery import (
     new_worker_admits,
 )
 from chargehand.errors import ConfigError
-from chargehand.tick import MODEL_LIMIT_KEY, TickReport
+from chargehand.tick import MODEL_LIMIT_KEY, TickReport, reset_clock
 from test_delivery import REVIEWER, build, emit_three, end_turn, resumes, start_reviewer, write_role
 
 MINIMAL = {"route": [{"repo": "~/code/app", "tracker": {"type": "linear", "team": "ABC"}}]}
@@ -295,8 +295,9 @@ def test_an_old_reading_holds_new_workers_until_its_reset_and_no_file_holds_none
     assert harness.worker("ABC-2").state == ledger_mod.RUNNING
 
 
-def test_a_new_worker_from_the_board_is_held_by_the_reserve(harness):
-    write_reading(harness, seven_day=75.0)
+def test_a_new_worker_from_the_board_is_refused_by_the_reserve_until_the_weekly_reset(harness):
+    write_reading(harness, seven_day=75.0, resets_in=2 * 86400)
+    reset = usage_mod.provider_reading(harness.config.serve.usage_file, "claude").windows["seven_day"].resets_at
     harness.board.add("ABC-1", labels=())
     request_id = harness.ledger.record_request(
         "new_worker", "test", origin=ledger_mod.REQUEST_BOARD, role="implementer", item="ABC-1"
@@ -304,11 +305,20 @@ def test_a_new_worker_from_the_board_is_held_by_the_reserve(harness):
 
     harness.next_tick()
 
+    # A refused request is not tried again, so its answer says so and when to try again.
     answer = harness.ledger.get_request(request_id)
     assert answer["ok"] == 0
-    assert "held by the usage reserve" in answer["message"]
+    assert answer["message"] == (
+        f"ABC-1: the usage reserve allows no new worker until the weekly window resets on "
+        f"{reset_clock(reset)} (claude seven_day at 75%, above 70%)"
+    )
     assert harness.ledger.live_workers() == []
     assert list(harness.worktree_root.rglob("*")) == []
+
+    write_reading(harness, seven_day=60.0)
+    harness.next_tick()
+    assert harness.ledger.live_workers() == []
+    assert harness.ledger.get_request(request_id)["ok"] == 0
 
 
 # ----- parking -----------------------------------------------------------------

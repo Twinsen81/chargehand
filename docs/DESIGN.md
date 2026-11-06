@@ -493,7 +493,9 @@ best one there is. Once the weekly window's reset time has passed, its percentag
 to the week before, so the reading holds nothing. A window without a reset time holds
 nothing either, because nothing would end it. The check covers the start
 rules, the board's new workers, clones and every later way to start one. A start that the reserve
-holds waits as one that a cap holds; a board request is refused with the reason.
+holds waits as one that a cap holds. A request (a new worker from the board, a clone, or the
+`retry` of either) is refused with the reason and is not tried again; a refusal by the reserve
+names the time of the weekly reset, because only the reset lets a new worker start again.
 
 Blocked runs deliberately do not hold a launch slot: a run waiting overnight for an answer
 would otherwise stall the queue. The runner also cannot gate resumes — replies go straight to
@@ -933,7 +935,9 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   never writes the queue label. For a start rule it holds its item for those kinds only:
   a start event of another kind is not delivered to it and starts a worker as if it were
   not there. The queue label is the exception, as for any live worker on the item: the
-  queue start waits until it ends. The session of a finished one is reported, never
+  queue start waits until it ends. Each admission pass names the workers that hold the
+  item in the tick report, and a `retry` that puts the item back in the queue names them
+  in its answer. The session of a finished one is reported, never
   adopted as a start rule's worker. A role that checks out its item needs an item. Its worktree and branch end in its id
   (`<root>/<role>/<item>-<id>`, `<prefix><role>/<item>-<id>`, or `worker-<id>` without
   an item), so several such workers can work on one item. A `retry` of such a worker

@@ -297,6 +297,55 @@ def test_a_comment_on_its_item_wakes_a_board_worker_that_follows_it(harness):
     assert harness.ledger.get(worker.id).wakes == 1
 
 
+def test_a_retry_while_a_board_worker_holds_the_item_names_it_and_starts_when_it_ends(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    source = harness.worker("ABC-1")
+    held_by = board_worker(harness)
+    harness.ledger.record_request("cancel", source.id_handle, origin=ledger_mod.REQUEST_CLI)
+    harness.next_tick()
+    retry = harness.ledger.record_request("retry", source.id_handle, origin=ledger_mod.REQUEST_CLI)
+
+    report = harness.next_tick()
+
+    answer = harness.ledger.get_request(retry)
+    assert answer["ok"] == 1
+    assert answer["message"] == f"re-queued; it starts when {held_by.handle} ends"
+    waits = f"ABC-1: start of implementer/ABC-1 waits, {held_by.handle} holds the item"
+    assert waits in report.skipped, report.skipped
+    # Every admission pass says it again, as a start that a cap holds does.
+    assert waits in harness.next_tick().skipped
+    assert [w.id for w in harness.ledger.live_workers()] == [held_by.id]
+
+    harness.ledger.update(harness.ledger.get(held_by.id), state=ledger_mod.CANCELLED)
+    report = harness.next_tick()
+
+    started = harness.ledger.live_worker_for("ABC-1")
+    assert started is not None and started.origin == ledger_mod.ORIGIN_SOURCE
+    assert started.id not in (source.id, held_by.id)
+    assert not any("holds the item" in line for line in report.skipped)
+
+
+def test_a_retry_names_every_worker_that_holds_the_item(harness):
+    harness.board.add("ABC-1")
+    harness.tick()
+    source = harness.worker("ABC-1")
+    harness.ledger.record_request("cancel", source.id_handle, origin=ledger_mod.REQUEST_CLI)
+    harness.next_tick()
+    first, second = board_worker(harness), board_worker(harness)
+    retry = harness.ledger.record_request("retry", source.id_handle, origin=ledger_mod.REQUEST_CLI)
+
+    report = harness.next_tick()
+
+    assert harness.ledger.get_request(retry)["message"] == (
+        f"re-queued; it starts when {first.handle}, {second.handle} end"
+    )
+    assert (
+        f"ABC-1: start of implementer/ABC-1 waits, {first.handle}, {second.handle} hold the item"
+        in report.skipped
+    ), report.skipped
+
+
 def test_a_source_start_is_not_held_by_a_board_workers_worktree(harness):
     unqueued(harness)
     worker = board_worker(harness)
