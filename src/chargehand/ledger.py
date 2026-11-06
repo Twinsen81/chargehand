@@ -1139,6 +1139,10 @@ class Ledger:
         changes.setdefault("updated_at", time.time())
         if changes.get("state") in TERMINAL and "finished_at" not in changes:
             changes["finished_at"] = changes["updated_at"]
+        if "state" in changes and changes["state"] != PARKED:
+            # A reset time belongs to `parked`. A worker that leaves it by any path, such
+            # as a turn that the operator started and that ended, keeps no old one.
+            changes.setdefault("reset_at", None)
         return changes
 
     def live_worker_by_session_uuid(self, session_uuid: str) -> Worker | None:

@@ -153,6 +153,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A parked worker whose resume waits says why on its card and in the tick report: its
+  session is not in the listing, its state is not recognised, or the listing failed, which
+  is also reported as an error. In each of these cases it said that the session had a turn
+  or a prompt.
+- A clock-time reset in a failure that the session listing shows late, for example after
+  the daemon was down, is placed after the end of the failed turn when the listing gives
+  that time. It was placed after a point at most five hours back, which put a reset that
+  had passed on the next day.
+- A worker that leaves `parked` by any path, such as a turn that the operator started in the
+  session, no longer keeps its old reset time.
+- The status line wrapper no longer writes a weekly window without a reset time it can
+  read, and a usage file that holds one counts as no reading of that window. Only a reset
+  time ends a reading, so such a window held every wake and new worker until the next
+  reading.
 - A reply from the board answers a worker whose turn ended with a question. The session
   lists `state: blocked` with `status: idle`; delivery now wakes the worker with the reply
   and every event that waits, instead of keeping the reply until the worker is idle again.

@@ -81,6 +81,24 @@ def test_a_payload_without_rate_limits_leaves_the_file(usage_file, stdin):
     assert usage_file.read_bytes() == before
 
 
+@pytest.mark.parametrize("window", [
+    {"used_percentage": 85},
+    {"used_percentage": 85, "resets_at": None},
+    {"used_percentage": 85, "resets_at": "next week"},
+])
+def test_a_weekly_window_without_a_reset_time_leaves_the_file(usage_file, window):
+    # Only a reset time ends a reading, so this one would hold every wake until the next.
+    stdin = json.dumps({"rate_limits": {"seven_day": window}}).encode()
+
+    assert usage.run_statusline(stdin, None, usage_file, now=NOW) == 0
+    assert not usage_file.exists()
+
+    usage.run_statusline(_payload(42), None, usage_file, now=NOW)
+    before = usage_file.read_bytes()
+    assert usage.run_statusline(stdin, None, usage_file, now=NOW + 60) == 0
+    assert usage_file.read_bytes() == before
+
+
 @pytest.mark.parametrize("source", ["status line payload", "usage file of the old wrapper"])
 def test_an_old_five_hour_window_is_ignored_without_a_message(
     usage_file, caplog, capfd, source
@@ -308,6 +326,19 @@ def test_a_window_whose_reset_has_passed_is_unknown(usage_file):
     assert reading["known"] is True
     assert reading["seven_day"] == {"used_percent": None, "resets_at": None, "level": "grey"}
     assert usage.provider_reading(usage_file, "claude", now=NOW + 60).windows == {}
+
+
+def test_a_window_without_a_reset_time_is_unknown(usage_file):
+    # As the wrapper wrote it before it skipped such a window: nothing would end it.
+    usage.write_usage(usage_file, {"seven_day": {"used_percent": 85.0, "resets_at": None}}, now=NOW)
+
+    reading = usage.read_usage(usage_file, now=NOW + 60)
+    assert reading["known"] is True
+    assert reading["seven_day"] == {"used_percent": None, "resets_at": None, "level": "grey"}
+    found = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=NOW + 60)
+    assert found.windows == {}
+    assert usage_admits(found, now=NOW + 60)
+    assert new_worker_admits(found, now=NOW + 60)
 
 
 @pytest.mark.parametrize("percent, level", [

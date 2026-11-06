@@ -1540,13 +1540,13 @@ class Runner:
         session already wrote the state the session shows.
 
         A paused worker is the exception: a hook does not move it, so its state is written
-        here, `blocked` when the new session already asked for a permission.
+        here, `blocked` when the new session already asked for a permission. Each state
+        write drops the reset time of a worker that was parked.
         """
-        fields: dict[str, object] = {"reset_at": None}
         running = {"state": ledger_mod.RUNNING, "working_since": time.time(), "watchdog_notified": 0}
         # One transaction, so that no hook writes between the read and the write below.
         with self.ledger.transaction():
-            written = self.ledger.update_if_unchanged(worker, **running, **fields)
+            written = self.ledger.update_if_unchanged(worker, **running)
             if written is not None:
                 return written
             current = self.ledger.get(worker.id) or worker
@@ -1556,13 +1556,12 @@ class Runner:
                     for prompt in self.ledger.open_permission_prompts(current)
                 )
                 state = {"state": ledger_mod.BLOCKED} if asked else running
-                written = self.ledger.update_if_unchanged(current, **state, **fields)
+                written = self.ledger.update_if_unchanged(current, **state)
                 if written is not None:
                     return written
-            if current.state == ledger_mod.PARKED or current.reset_at != worker.reset_at:
-                # A usage limit of the new session parked it again, with its own reset.
-                return current
-            return self.ledger.update(current, **fields)
+            # A hook of the new session wrote the state it shows. A usage limit that parked
+            # it again keeps its own reset time.
+            return current
 
     def _refusal_message(self, worker: Worker, check: WorkspaceCheck) -> str:
         """The `continue` refusal, within what the CLI prints, keeping the remedy whole.
@@ -2514,8 +2513,8 @@ class Runner:
             if target_state == ledger_mod.PARKED and hook is None and session is not None:
                 # A hook writes its own reset time and error; the listing's are written here.
                 # The listing may show the failure late, so a reset time without a date is
-                # placed after the start of the turn, not after now. One that has passed
-                # already makes the worker due at once.
+                # placed after the failure, or after the start of the turn, not after now.
+                # One that has passed already makes the worker due at once.
                 changes.update(
                     reset_at=self._failure_reset(worker, session),
                     last_error="usage limit: seen in the session listing",
@@ -2547,17 +2546,20 @@ class Runner:
         return worker
 
     def _failure_reset(self, worker: Worker, session: Session) -> float | None:
-        """The reset time of a failure the listing shows, placed after the turn's start.
+        """The reset time of a failure the listing shows, placed after the failure.
 
-        The start is kept no earlier than :data:`FAILURE_LOOKBACK_SECS` back: a turn that
-        started days ago, or whose start the tick never saw, would place a clock time days
-        in the past. A time that cannot be placed after it is read against now, as the
-        listing was parsed.
+        When the listing says when the failed turn ended, that time is used, however long
+        ago it was. Otherwise the start of the turn is, kept no earlier than
+        :data:`FAILURE_LOOKBACK_SECS` back: a turn that started days ago, or whose start
+        the tick never saw, would place a clock time days in the past. A time that cannot
+        be placed after it is read as the listing was parsed.
         """
-        since = max(
-            worker.working_since or worker.last_wake_at or worker.created_at,
-            time.time() - FAILURE_LOOKBACK_SECS,
-        )
+        since = session.ended_at
+        if since is None:
+            since = max(
+                worker.working_since or worker.last_wake_at or worker.created_at,
+                time.time() - FAILURE_LOOKBACK_SECS,
+            )
         try:
             reset = self.runtime(worker.runtime).failure_reset(session, since)
         except ConfigError:
@@ -2656,7 +2658,7 @@ class Runner:
             crash_after_wake=crash_after_wake,
             guard=lambda worker: self._workspace_check(worker).fault,
             prepare=self._refresh_item_checkout,
-            listed_at_rest=self._listed_at_rest,
+            resume_hold=self._resume_hold,
             awaits_answer=self._awaits_answer,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
@@ -2686,14 +2688,27 @@ class Runner:
             return None
         return next((s for s in listed if s.id == worker.session_id), None)
 
-    def _listed_at_rest(self, worker: Worker) -> bool:
-        """Whether this tick's listing shows *worker*'s session ended or stopped. No new call."""
-        session = self._listed_session(worker)
+    def _resume_hold(self, worker: Worker) -> str | None:
+        """Why this tick's listing holds the resume of parked *worker*, or None when it may go.
+
+        The listing must show the session with its turn ended, or stopped. No new call,
+        unless an action of this tick dropped the listing; AgentRuntimeError when that
+        call fails.
+        """
+        try:
+            listed = self.sessions(worker.runtime)
+        except ConfigError as exc:
+            return str(exc)
+        session = next((s for s in listed if s.id == worker.session_id), None)
         if session is None:
-            return False
-        return session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
+            return f"session {worker.session_id} is not in the listing"
+        if session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
             worker, session
-        )
+        ):
+            return None
+        if session.state == runtime_mod.UNKNOWN:
+            return "the session state is not recognised"
+        return "the session has a turn or a prompt"
 
     def _awaits_answer(self, worker: Worker) -> bool:
         """Whether blocked *worker* waits for the answer to a question, which a reply gives.

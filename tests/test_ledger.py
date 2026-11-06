@@ -66,6 +66,31 @@ def test_reaching_a_terminal_state_stamps_the_finish_time(ledger):
     assert attempt.finished_at is not None
 
 
+@pytest.mark.parametrize("write", ["update", "update_if_unchanged"])
+@pytest.mark.parametrize("state", [ledger_mod.IDLE, ledger_mod.RUNNING, ledger_mod.BLOCKED,
+                                   ledger_mod.PAUSED, ledger_mod.CANCELLED])
+def test_a_state_write_that_leaves_parked_drops_the_reset_time(ledger, write, state):
+    parked = ledger.update(make(ledger), state=ledger_mod.PARKED, reset_at=1_800_000_000.0)
+    # A write without a state, such as a hook's record, keeps it.
+    parked = ledger.update(parked, last_hook="StopFailure", last_hook_at=10.0)
+    assert ledger.get(parked.id).reset_at == 1_800_000_000.0
+
+    written = getattr(ledger, write)(parked, state=state)
+
+    assert written.reset_at is None
+    assert ledger.get(parked.id).reset_at is None
+
+
+def test_a_write_of_parked_keeps_its_reset_time(ledger):
+    worker = ledger.update(make(ledger), state=ledger_mod.RUNNING)
+
+    parked = ledger.update_if_unchanged(worker, state=ledger_mod.PARKED, reset_at=1_800_000_000.0)
+    assert ledger.get(worker.id).reset_at == 1_800_000_000.0
+    # A write of `parked` that names no reset time keeps the one the row has.
+    ledger.update(parked, state=ledger_mod.PARKED)
+    assert ledger.get(worker.id).reset_at == 1_800_000_000.0
+
+
 def test_an_unknown_column_is_rejected_rather_than_silently_dropped(ledger):
     with pytest.raises(ValueError, match="unknown worker column"):
         ledger.update(make(ledger), stat="running")

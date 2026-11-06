@@ -236,7 +236,7 @@ class Delivery:
         clock: Callable[[], float] = time.time,
         guard: Callable[[Worker], str | None] = lambda worker: None,
         prepare: Callable[[Worker], str | None] = lambda worker: None,
-        listed_at_rest: Callable[[Worker], bool] = lambda worker: True,
+        resume_hold: Callable[[Worker], str | None] = lambda worker: None,
         awaits_answer: Callable[[Worker], bool] = lambda worker: False,
     ) -> None:
         self.ledger = ledger
@@ -253,10 +253,12 @@ class Delivery:
         # Brings what the worker reads up to date before the wake; why the wake must
         # wait, or None.
         self._prepare = prepare
-        # Whether the tick's listing shows a parked worker's session with no turn and no
-        # prompt. A cheap first look, so that a session the operator went on in costs no
-        # refresh of its item checkout; the runtime's wake looks again before its stop.
-        self._listed_at_rest = listed_at_rest
+        # Why the tick's listing does not show a parked worker's session with no turn and
+        # no prompt, or None when it does. A cheap first look, so that a session the
+        # operator went on in costs no refresh of its item checkout; the runtime's wake
+        # looks again before its stop. A listing that cannot be read raises
+        # AgentRuntimeError.
+        self._resume_hold = resume_hold
         # Whether a blocked worker waits for the answer to a question: no permission
         # prompt is open, and the tick's listing shows no turn and no dialog. A first
         # look, as above.
@@ -296,8 +298,13 @@ class Delivery:
             key=lambda worker: (worker.reset_at or 0.0, worker.id),
         )
         for worker in due:
-            if not self._listed_at_rest(worker):
-                self._hold(worker, "resume held, the session has a turn or a prompt", result)
+            try:
+                busy = self._resume_hold(worker)
+            except AgentRuntimeError as exc:
+                busy = f"the session listing failed: {sanitize.one_line(str(exc), limit=200)}"
+                result.errors.append(f"{worker.handle}: {busy}")
+            if busy is not None:
+                self._hold(worker, f"resume held, {busy}", result)
                 continue
             if self._admitted(worker, result):
                 self._wake(worker, RESUME_MESSAGE, (), result)
@@ -444,12 +451,12 @@ class Delivery:
             raise DeliveryAborted("delivery aborted after the wake")
         now = self._clock()
         wake_fields: dict[str, object] = {"wakes": worker.wakes + 1, "last_wake_at": now}
-        cleared = {"reset_at": None} if resume else {}
         with self.ledger.transaction():
             self.ledger.mark_delivered(entries, now=now)
             self.ledger.record_wake(
                 worker, session_id=worker.session_id, session_uuid=worker.session_uuid, now=now
             )
+            # The state write drops the reset time of a resumed worker.
             written = self.ledger.update_if_unchanged(
                 worker,
                 state=ledger_mod.RUNNING,
@@ -459,17 +466,13 @@ class Delivery:
                 watchdog_notified=0,
                 last_error=None,
                 **wake_fields,
-                **cleared,
             )
             if written is None:
                 # A hook of the new turn came in during the wake, such as a permission
                 # prompt, and wrote the state that the session shows. That is newer than
-                # this write, so only the record of the wake is added. The reset time goes
-                # only while no new limit parked the worker: that one keeps its own.
-                current = self.ledger.get(worker.id) or worker
-                if current.state == ledger_mod.PARKED or current.reset_at != worker.reset_at:
-                    cleared = {}
-                written = self.ledger.update(current, **wake_fields, **cleared)
+                # this write, so only the record of the wake is added. A new limit that
+                # parked the worker again keeps its own reset time.
+                written = self.ledger.update(self.ledger.get(worker.id) or worker, **wake_fields)
             self.ledger.delete_state(reason_key)
         worker = written
         if resume:

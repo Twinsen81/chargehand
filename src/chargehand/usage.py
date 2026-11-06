@@ -9,13 +9,14 @@ without a message, because older payloads and files can still carry them.
 
 The wrapper runs on every status line refresh, so it does little: one read of stdin,
 one small atomic write, one subprocess. Nothing it does to the usage file can change
-the status line: a payload without the weekly window leaves the file as it is, and a
-failed write is ignored.
+the status line: a payload without the weekly window, or with one that has no reset time
+the wrapper can read, leaves the file as it is, and a failed write is ignored.
 
 The daemon reads the file for each ``/api/state``, and the tick reads it as the claude
-provider's reading for the usage reserves. The newest reading counts however old it is;
-only a window whose reset time has passed is unknown, because its percentage belongs to
-the window before.
+provider's reading for the usage reserves. The newest reading counts however old it is,
+until its reset time: a window whose reset time has passed is unknown, because its
+percentage belongs to the window before, and so is a window without a reset time, because
+nothing would end it.
 """
 
 from __future__ import annotations
@@ -91,13 +92,18 @@ def resets_at(value: object) -> float | None:
     return moment.timestamp()
 
 
-def windows_from_payload(raw: bytes) -> dict[str, dict[str, float | None]] | None:
-    """The windows of a status line payload with a percentage, or None when none has one."""
-    windows: dict[str, dict[str, float | None]] = {}
+def windows_from_payload(raw: bytes) -> dict[str, dict[str, float]] | None:
+    """The windows of a status line payload with a percentage and a reset time, or None.
+
+    Only its reset time ends a reading, so a window without one would hold the reserves
+    until the next reading. Without it the file keeps the reading it has.
+    """
+    windows: dict[str, dict[str, float]] = {}
     for name, window in (claude.status_line_windows(raw) or {}).items():
         used = percent(window.get("used_percent"))
-        if name in WINDOWS and used is not None:
-            windows[name] = {"used_percent": used, "resets_at": resets_at(window.get("resets_at"))}
+        reset = resets_at(window.get("resets_at"))
+        if name in WINDOWS and used is not None and reset is not None:
+            windows[name] = {"used_percent": used, "resets_at": reset}
     return windows or None
 
 
@@ -202,8 +208,12 @@ def _load(path: Path) -> Mapping[str, object] | None:
     return data
 
 
-def _windows(data: Mapping[str, object], now: float) -> dict[str, tuple[float, float | None]]:
-    """Each window with a percentage whose reset time has not passed: percent and reset."""
+def _windows(data: Mapping[str, object], now: float) -> dict[str, tuple[float, float]]:
+    """Each window with a percentage and a reset time that has not passed: percent and reset.
+
+    A window without a reset time, which an older wrapper wrote, is left out: nothing
+    would end it.
+    """
     windows = {}
     for name in WINDOWS:
         window = data.get(name)
@@ -211,7 +221,7 @@ def _windows(data: Mapping[str, object], now: float) -> dict[str, tuple[float, f
             continue
         used = percent(window.get("used_percent"))
         reset = _number(window.get("resets_at"))
-        if used is None or (reset is not None and reset <= now):
+        if used is None or reset is None or reset <= now:
             continue
         windows[name] = (used, reset)
     return windows
@@ -221,7 +231,8 @@ def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
     """The reading in *path*, for the board: each window's percent, reset time and level.
 
     ``known`` is False when the file is missing or unreadable; then every window is grey.
-    The reading counts however old it is; a window whose reset time has passed is grey.
+    The reading counts however old it is; a window whose reset time has passed, or that
+    has none, is grey.
     """
     current = time.time() if now is None else now
     result: dict[str, object] = {
@@ -243,7 +254,8 @@ def provider_reading(path: Path, provider: str, now: float | None = None) -> Usa
     """The reading in *path* for the reserve, when *provider* is the one the file is for.
 
     None when the file is missing or unreadable: no reading, so no reserve. An old file is
-    still the current reading; a window whose reset time has passed is left out.
+    still the current reading; a window whose reset time has passed, or that has none, is
+    left out.
     """
     if provider != claude.USAGE_PROVIDER:
         return None

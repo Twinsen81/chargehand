@@ -162,7 +162,13 @@ _CWD_KEYS = ("cwd", "workingDirectory", "working_directory", "working_dir", "dir
 _STATE_KEYS = ("state", "status")
 _WAITING_KEYS = ("waitingFor", "waiting_for", "blockedReason", "blocked_reason", "reason")
 _STARTED_KEYS = ("startedAt", "started_at", "createdAt", "created_at", "launchedAt")
+# When the last turn ended. Not in the listing of Claude Code 2.1.319, whose only time is
+# `startedAt`; its own job state names that time `lastTerminalAt`.
+_ENDED_KEYS = ("lastTerminalAt", "endedAt", "ended_at", "failedAt", "failed_at")
 _PR_KEYS = ("prUrl", "pr_url", "pullRequestUrl", "pull_request_url", "pr")
+# How far ahead of this machine's clock a listed time may be, for a clock that differs a
+# little. A time further ahead is not read.
+_CLOCK_SKEW_SECS = 60
 
 
 def _first(node: Mapping[str, Any], keys: Sequence[str]) -> Any:
@@ -200,8 +206,13 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
     if state == WORKING and str(node.get("status") or "").strip().lower() == "idle":
         state = DONE
     waiting = _first(node, _WAITING_KEYS)
+    ended_at = _parse_time(_first(node, _ENDED_KEYS))
+    if ended_at is not None and ended_at > time.time() + _CLOCK_SKEW_SECS:
+        ended_at = None
+    # A clock time in the error is placed after the failure, when the listing says when
+    # that was: the listing can show the failure hours late.
     limited, reset_at, model_limit = (
-        session_failure(node) if state == FAILED else (False, None, None)
+        session_failure(node, now=ended_at) if state == FAILED else (False, None, None)
     )
     return Session(
         id=str(identifier if identifier is not None else uuid),
@@ -212,6 +223,7 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
         raw_state=raw_state,
         waiting_for=str(waiting) if waiting is not None else None,
         started_at=_parse_time(_first(node, _STARTED_KEYS)),
+        ended_at=ended_at,
         # The session's agent influences this value, and `status --json` prints it by
         # default, so it has to be a URL and nothing else.
         pr_url=sanitize.safe_url(_first(node, _PR_KEYS)),
