@@ -503,15 +503,35 @@ def test_agent_files_are_looked_up_in_the_project_then_the_user_directory(tmp_pa
     assert claude_mod.user_agent_file("reviewer") == candidates[1]
 
 
+@pytest.mark.parametrize(
+    "entry, runs",
+    [
+        ({"type": "command", "command": "~/.local/bin/chargehand statusline -- ~/line.sh"}, True),
+        ({"type": "command", "command": "chargehand statusline"}, True),
+        ({"type": "command", "command": "~/line.sh"}, False),
+        ({"type": "command", "command": "chargehand status"}, False),
+        ({"type": "command", "command": "chargehand statuslines"}, False),
+        ({"type": "command"}, False),
+        ({"command": ["chargehand", "statusline"]}, False),
+        ("chargehand statusline", False),
+        (None, False),
+    ],
+)
+def test_the_status_line_runs_the_wrapper_only_when_its_command_runs_chargehand_statusline(entry, runs):
+    assert claude_mod.runs_statusline_wrapper(entry) is runs
+
+
 def test_an_import_step_about_the_status_line_is_done_when_the_settings_run_the_wrapper(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     settings = claude_mod.user_settings_file()
-    step = {"kind": claude_mod.STATUS_LINE_STEP, "runtime": "claude", "settings": str(settings)}
     wrapper = {"type": "command", "command": "~/bin/chargehand statusline -- ~/line.sh"}
+    step = claude_mod.ClaudeRuntime.status_line_step(wrapper)
 
     assert settings == tmp_path / "settings.json"
+    assert step["runtime"] == "claude" and step["settings"] == str(settings)
+    assert '{"statusLine": {"command": "~/bin/chargehand statusline -- ~/line.sh"' in step["detail"]
     assert claude_mod.ClaudeRuntime.import_step_done(step) is False
     settings.write_text("{not json")
     assert claude_mod.ClaudeRuntime.import_step_done(step) is False

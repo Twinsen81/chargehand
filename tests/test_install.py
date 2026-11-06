@@ -17,6 +17,7 @@ from chargehand import install, paths
 from chargehand.cli import EXIT_OK, EXIT_REFUSED, main
 from chargehand.config import load_machine_config
 from chargehand.errors import ChargehandError
+from conftest import make_config
 
 
 def test_the_plist_keeps_the_daemon_running_with_an_explicit_path(monkeypatch):
@@ -662,3 +663,24 @@ def test_doctor_finds_a_notify_program_named_on_path(capsys, config_file, harnes
     checks = _doctor(capsys, config_file)
     assert checks["notify"]["status"] == install.OK
     assert checks["notify"]["detail"] == str(notifier)
+
+
+def test_doctor_asks_the_runtime_an_import_step_names_and_cannot_check_a_step_without_one(tmp_path):
+    config = make_config(tmp_path / "repo", tmp_path / "wt", source=tmp_path / "config.toml")
+    missing = str(tmp_path / "claude" / "settings.json")
+    steps = [
+        # The runtime checks its own step: the settings file it names does not exist yet.
+        {"name": "claude", "kind": "statusline", "runtime": "claude", "settings": missing},
+        # Written before steps named a runtime.
+        {"name": "no runtime", "kind": "statusline", "settings": missing},
+        {"name": "unknown runtime", "kind": "statusline", "runtime": "codex", "settings": missing},
+        {"name": "fake runtime", "kind": "statusline", "runtime": "fake", "settings": missing},
+    ]
+    (tmp_path / install.IMPORT_STEPS_FILE).write_text(json.dumps({"steps": steps}))
+
+    status = {check.name: check.status for check in install.import_checks(config)}
+
+    assert status["claude"] == install.WARN
+    assert status["no runtime"] == install.INFO
+    assert status["unknown runtime"] == install.INFO
+    assert status["fake runtime"] == install.INFO

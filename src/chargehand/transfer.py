@@ -890,17 +890,7 @@ def _steps(archive: Archive, config: MachineConfig, notify_path: Path | None) ->
         except ValueError:
             entry = None
         if claude.runs_statusline_wrapper(entry):
-            settings = claude.user_settings_file()
-            wanted = json.dumps(claude.status_line_settings(entry), sort_keys=True)
-            steps.append({
-                "name": "imported: status line",
-                "kind": claude.STATUS_LINE_STEP,
-                "runtime": claude.ClaudeRuntime.name,
-                "settings": str(settings),
-                "detail": f"add the status line wrapper to {settings}, "
-                          "adjusted to this machine; chargehand does not edit Claude Code's "
-                          f"settings: {wanted}",
-            })
+            steps.append(claude.ClaudeRuntime.status_line_step(entry))
     if sys.platform == "darwin":
         steps.append({
             "name": "imported: launchd",

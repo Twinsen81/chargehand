@@ -773,7 +773,7 @@ def agent_file_candidates(repo: Path, name: str) -> list[Path]:
 
 STATUS_LINE_KEY = "statusLine"
 # The kind of an import step that asks the operator to add the status line wrapper.
-STATUS_LINE_STEP = "statusline"
+_STATUS_LINE_STEP = "statusline"
 
 
 def user_settings_file() -> Path:
@@ -1416,10 +1416,24 @@ class ClaudeRuntime(Runtime):
         return repo_agent_file(repo, name)
 
     @classmethod
+    def status_line_step(cls, entry: object) -> dict[str, object]:
+        """The import step that asks the operator to add the status line *entry* to the user settings."""
+        settings = user_settings_file()
+        wanted = json.dumps(status_line_settings(entry), sort_keys=True)
+        return {
+            "name": "imported: status line",
+            "kind": _STATUS_LINE_STEP,
+            "runtime": cls.name,
+            "settings": str(settings),
+            "detail": f"add the status line wrapper to {settings}, adjusted to this machine; "
+                      f"chargehand does not edit Claude Code's settings: {wanted}",
+        }
+
+    @classmethod
     def import_step_done(cls, step: Mapping[str, Any]) -> bool | None:
-        if step.get("kind") != STATUS_LINE_STEP:
+        if step.get("kind") != _STATUS_LINE_STEP:
             return None
-        # The settings file the import named, which is the one the operator was told to edit.
+        # The settings file the step names, which is the one the operator was told to edit.
         settings_file = step.get("settings")
         if not isinstance(settings_file, str):
             return None
@@ -1750,7 +1764,6 @@ __all__ = [
     "USAGE_PROVIDER",
     "WORKING",
     "STATUS_LINE_KEY",
-    "STATUS_LINE_STEP",
     "agent_file_candidates",
     "copy_started_by",
     "hook_settings",
@@ -1771,7 +1784,6 @@ __all__ = [
     "transcript_file",
     "transcript_text",
     "user_agent_file",
-    "user_claude_dir",
     "user_settings_file",
     "worker_from_session",
 ]
