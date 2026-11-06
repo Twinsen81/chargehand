@@ -377,6 +377,24 @@ def test_the_listing_reads_the_failure_of_a_session():
     assert claude.parse_session({"id": "a1", "state": "done", "error": "rate_limit"}).usage_limit is False
 
 
+def test_the_listing_places_a_clock_time_after_the_failure_it_names():
+    failed = 1_700_000_000
+    clock = datetime.fromtimestamp(failed + 3600, tz=timezone.utc)
+    entry = {"id": "a1", "state": "failed", "error": "rate_limit",
+             "errorMessage": f"Usage limit reached, resets {clock:%H:%M} (UTC)"}
+
+    for listed in (iso(failed), failed * 1000):
+        session = claude.parse_session({**entry, "lastTerminalAt": listed})
+        assert session.ended_at == failed
+        assert session.reset_at == pytest.approx(failed + 3600, abs=60)
+    # Without that time the clock time is the next one after now.
+    assert claude.parse_session(entry).ended_at is None
+    assert claude.parse_session(entry).reset_at > time.time()
+    # A time ahead of this machine's clock is not read.
+    ahead = claude.parse_session({**entry, "lastTerminalAt": iso(time.time() + 3600)})
+    assert ahead.ended_at is None
+
+
 def test_a_parked_worker_without_a_reset_time_waits_for_continue(harness):
     worker = launch(harness)
     park(harness, worker, None)
@@ -454,6 +472,71 @@ def test_a_parked_session_that_runs_again_is_not_interrupted(harness):
     assert harness.claude_state.read().get("resumes", []) == []
     assert harness.worker("ABC-1").state == ledger_mod.PARKED
     assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
+
+
+@pytest.mark.parametrize("listed_as, reason", [
+    ("working", "the session has a turn or a prompt"),
+    ("hibernating", "the session state is not recognised"),
+    (None, "session {session} is not in the listing"),
+])
+def test_the_card_says_why_the_listing_holds_a_resume(harness, listed_as, reason):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    if listed_as is None:
+        harness.claude_state.drop_sessions()
+    else:
+        harness.claude_state.set_session_state("ABC-1", listed_as)
+
+    report = harness.next_tick()
+
+    expected = f"resume held, {reason.format(session=worker.session_id)}"
+    held = harness.worker("ABC-1")
+    assert held.state == ledger_mod.PARKED
+    assert harness.claude_state.read().get("resumes", []) == []
+    assert f"implementer/ABC-1: {expected}" in report.skipped
+    assert queue_reason(harness, held) == expected
+    assert card(harness, held)["queue_reason"] == expected
+
+
+def test_a_resume_held_by_a_failed_listing_reports_the_error(harness, monkeypatch):
+    from chargehand.tick import Runner
+
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    real = Runner._route_trackers
+
+    def listing_fails_after(self, report):
+        # An action of this tick, such as a stop, dropped the listing, and a new one fails.
+        real(self, report)
+        harness.claude_state.set(agents_fail=True)
+        self.invalidate_sessions()
+
+    monkeypatch.setattr(Runner, "_route_trackers", listing_fails_after)
+    report = harness.next_tick()
+
+    held = harness.worker("ABC-1")
+    assert held.state == ledger_mod.PARKED
+    reason = queue_reason(harness, held)
+    assert reason.startswith("resume held, the session listing failed: ")
+    assert "agents unavailable" in reason
+    assert f"implementer/ABC-1: {reason.removeprefix('resume held, ')}" in report.errors
+    assert card(harness, held)["queue_reason"] == reason
+
+
+def test_a_resume_held_by_a_runtime_this_build_lacks_says_so(harness):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1, runtime="nope")
+
+    report = harness.next_tick()
+
+    held = harness.worker("ABC-1")
+    assert held.state == ledger_mod.PARKED
+    reason = queue_reason(harness, held)
+    assert reason.startswith("resume held, the runtime cannot be set up: unknown runtime 'nope'")
+    assert f"implementer/ABC-1: {reason}" in report.skipped
 
 
 def test_a_turn_that_starts_while_a_resume_prepares_is_not_stopped(harness, monkeypatch):
@@ -537,6 +620,45 @@ def test_a_limit_the_listing_shows_late_keeps_the_reset_of_its_turn(harness):
     assert after.state == ledger_mod.RUNNING and after.session_id == worker.session_id
     (resume,) = harness.claude_state.read()["resumes"]
     assert resume["prompt"] == RESUME_MESSAGE
+
+
+def test_a_limit_the_listing_shows_hours_late_is_placed_after_the_failure(harness):
+    """The daemon was down and the hook was lost: the listing names when the turn failed."""
+    worker = launch(harness)
+    now = time.time()
+    harness.ledger.update(harness.worker("ABC-1"), working_since=now - 8 * 3600)
+    failed = now - 6 * 3600
+    # More than FAILURE_LOOKBACK_SECS ago: placed after the lookback, it would be tomorrow.
+    resets = datetime.fromtimestamp(failed + 3600, tz=timezone.utc)
+    harness.claude_state.set_session_state(
+        "ABC-1", "failed", error="rate_limit", lastTerminalAt=iso(failed),
+        errorMessage=f"Usage limit reached, resets {resets:%H:%M} (UTC)",
+    )
+
+    report = harness.next_tick()
+
+    assert any("running -> parked" in line for line in report.transitions), report.transitions
+    assert "implementer/ABC-1: resume after the usage reset -> running" in report.transitions
+    after = harness.worker("ABC-1")
+    assert after.state == ledger_mod.RUNNING and after.session_id == worker.session_id
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert resume["prompt"] == RESUME_MESSAGE
+
+
+def test_a_parked_worker_whose_turn_ends_keeps_no_reset_time(harness):
+    """The operator went on in the session before the reset, and that turn ended."""
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    turn_end = claude.parse_hook("Stop", {
+        "session_id": worker.session_uuid, "last_assistant_message": "Done.",
+    })
+
+    after = harness.runner.apply_hook(harness.ledger.get(worker.id), turn_end)
+
+    assert after.state == ledger_mod.IDLE
+    assert after.reset_at is None
+    assert harness.ledger.get(worker.id).reset_at is None
+    assert card(harness, after)["reset_at"] is None
 
 
 def test_the_resume_waits_for_the_wake_reserve(harness):
@@ -670,7 +792,9 @@ def test_a_permission_prompt_during_a_continue_keeps_the_worker_blocked(
     harness, monkeypatch, state
 ):
     worker = launch(harness)
-    harness.ledger.update(worker, state=state, reset_at=time.time() + 60)
+    # Only a parked worker has a reset time.
+    reset = {"reset_at": time.time() + 60} if state == ledger_mod.PARKED else {}
+    harness.ledger.update(worker, state=state, **reset)
 
     after = continue_with(harness, worker, monkeypatch, prompt_hook(worker))
 

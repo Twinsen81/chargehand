@@ -490,7 +490,8 @@ file. No usage file is no reading, and no reading means no reserve. The newest r
 counts however old it is: the status line wrapper writes the file only while an
 interactive session shows its status line, and between sessions the last reading is the
 best one there is. Once the weekly window's reset time has passed, its percentage belongs
-to the week before, so the reading holds nothing. The check covers the start
+to the week before, so the reading holds nothing. A window without a reset time holds
+nothing either, because nothing would end it. The check covers the start
 rules, the board's new workers, clones and every later way to start one. A start that the reserve
 holds waits as one that a cap holds; a board request is refused with the reason.
 
@@ -671,11 +672,15 @@ The usage-limit category has not been observed yet (a missing model gives
 as "resets 3pm (Europe/Paris)"; a time it cannot read leaves the reset unknown. The same
 check reads a `failed` session in the listing: a category or a message in its error
 fields that names a usage limit parks the worker as the hook does, for a session whose
-hook did not arrive. A message that names a model family's own limit, such as "Opus
-weekly limit reached", also records that family for the board's top bar, because the usage
-window has no per-model part. Claude Code can still name the limit of a window that the
-subscription no longer has (it had a shorter window until 2026-11-03); such a message
-parks too.
+hook did not arrive. The listing can show such a failure hours late, for example after the
+daemon was down, so a clock time from it is placed after the end of the failed turn when
+the listing gives that time, and otherwise after the start of the turn, at most five hours
+back. The listing of Claude Code 2.1.319 gives neither: its entries have no error fields
+and no end time, so there only the StopFailure hook parks a worker. A message that names a
+model family's own limit, such as "Opus weekly limit reached", also records that family
+for the board's top bar, because the usage window has no per-model part. Claude Code can
+still name the limit of a window that the subscription no longer has (it had a shorter
+window until 2026-11-03); such a message parks too.
 
 | Session state | Meaning | Action |
 |---|---|---|
@@ -694,7 +699,13 @@ may want to look at what the turn left. The watchdog and the session diff never 
 is notified once. Once its reset time has passed, delivery resumes the worker in the same
 session with a short continue message, oldest reset first, through the same admission as
 a wake, so a long list of parked workers does not use the new window at once. A worker
-parked without a reset time waits for `continue`, which respawns it.
+parked without a reset time waits for `continue`, which respawns it. The resume also waits
+while the tick's listing does not show the session with its turn ended or stopped, and the
+card says why: the session has a turn or a prompt, it is not in the listing, its state is
+not recognised, or the listing failed, which the tick also reports as an error. The reset
+time belongs to `parked`: every state write other than `parked` clears it, so a worker that
+leaves `parked` by any path, such as a turn that the operator started and that ended, keeps
+no old reset time.
 
 Those states are read from a `state` field, which a background entry carries alongside a
 coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
@@ -1066,8 +1077,9 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   with the time it wrote it to `usage_file` (atomically, mode 0600), and then runs
   `<command>` through a shell with the same stdin, passing its output and exit code
   through. Other windows in `rate_limits` or in the file are ignored without a message. A
-  payload without the `seven_day` window leaves the file as it is, and a file that cannot
-  be written changes nothing in the status line. chargehand does not edit your settings;
+  payload without the `seven_day` window, or with one whose `resets_at` cannot be read,
+  leaves the file as it is, and a file that cannot be written changes nothing in the status
+  line. chargehand does not edit your settings;
   you wrap your own command in `~/.claude/settings.json`:
 
   ```json
@@ -1079,10 +1091,10 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
 
   Without a status line of your own, leave out `-- '<command>'`; the status line is then
   empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for the
-  `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
-  `red` from 80 %. A missing or unreadable file and a window whose reset time has passed
-  are unknown, with the level `grey`; the age of the file does not matter. `status --json`
-  carries the same object.
+  `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber`
+  from 60 %, `red` from 80 %. A missing or unreadable file, a window whose reset time has
+  passed and a window without a reset time are unknown, with the level `grey`; the age of
+  the file does not matter. `status --json` carries the same object.
 - **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
   progress finishes, the rest of that tick is skipped, a job in progress stops and goes
   back to the queue, the server shuts down, and the exit code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL

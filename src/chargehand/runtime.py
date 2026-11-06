@@ -52,6 +52,8 @@ class Session:
     raw_state: str = ""
     waiting_for: str | None = None
     started_at: float | None = None
+    # When the last turn ended, when the listing says so.
+    ended_at: float | None = None
     pr_url: str | None = None
     kind: str | None = None
     # A failed session whose error says the provider's usage limit ended its turn, when
