@@ -246,6 +246,20 @@ class Runtime(ABC):
     def check_role(cls, role: "Role", repo: Path) -> None:
         """Check what a role needs outside its file, such as an agent definition. Raise ConfigError."""
 
+    @classmethod
+    def repo_agent_file(cls, repo: Path, name: str) -> Path | None:
+        """Where the repository *repo* keeps the agent definition *name*, or None when the runtime has none."""
+        return None
+
+    @classmethod
+    def import_step_done(cls, step: Mapping[str, object]) -> bool | None:
+        """Whether a step that an import left about this runtime's own files is done.
+
+        None when this machine cannot show it. An import names the runtime in such a step,
+        so `doctor` asks the runtime and needs to know none of its files.
+        """
+        return None
+
     # The event names a session of this runtime posts to `/hooks/<event>`.
     hook_events: ClassVar[tuple[str, ...]] = ()
 

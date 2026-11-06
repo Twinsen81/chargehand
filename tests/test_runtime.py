@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import os
 import re
@@ -502,3 +503,58 @@ def test_the_tick_the_cli_and_the_roles_reach_claude_code_only_through_the_inter
 
     assert not re.search(r"ClaudeCLI|ClaudeRuntime|claude_mod|chargehand\.claude|from chargehand import claude", text)
     assert '== "claude"' not in text
+
+
+# A Claude Code path or settings key in code. Prose with spaces may name them.
+_CLAUDE_CODE_NAME = re.compile(r"^(?:\S*/)?\.claude(?:/\S*)?$|^settings\.json$|^statusLine$")
+
+
+def _code_strings(tree: ast.Module) -> list[str]:
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body and isinstance(node.body[0], ast.Expr)
+    }
+    return [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
+    ]
+
+
+def _names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+@pytest.mark.parametrize(
+    "module", sorted(p.relative_to(SRC).as_posix() for p in SRC.rglob("*.py") if p.name != "claude.py")
+)
+def test_only_the_claude_module_names_the_files_of_claude_code(module):
+    tree = ast.parse((SRC / module).read_text())
+
+    assert [s for s in _code_strings(tree) if _CLAUDE_CODE_NAME.search(s)] == []
+    assert "user_claude_dir" not in _names(tree)
+
+
+def test_the_architecture_check_finds_a_claude_code_path():
+    tree = ast.parse(
+        '"""Prose may name ~/.claude/agents and statusLine."""\n'
+        'a = home / ".claude" / "agents"\n'
+        'b = f"{home}/.claude/agents/{name}.md"\n'
+        'c = settings.get("statusLine")\n'
+        'd = user_claude_dir() / "settings.json"\n'
+        'e = "copy it to ~/.claude/agents: sessions start there"\n'
+    )
+
+    assert sorted(s for s in _code_strings(tree) if _CLAUDE_CODE_NAME.search(s)) == [
+        ".claude", "/.claude/agents/", "settings.json", "statusLine",
+    ]
+    assert "user_claude_dir" in _names(tree)

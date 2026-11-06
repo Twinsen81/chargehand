@@ -1,4 +1,4 @@
-"""The ``claude`` runtime, and the only module that knows the Claude Code command line.
+"""The ``claude`` runtime, and the only module that knows the Claude Code command line and files.
 
 :class:`ClaudeCLI` is a thin wrapper around the binary. :class:`ClaudeRuntime` puts it
 behind the runtime interface of :mod:`chargehand.runtime`, together with what only a
@@ -758,9 +758,57 @@ def _transcript_content(content: Any) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def repo_agent_file(repo: Path, name: str) -> Path:
+    return repo / ".claude" / "agents" / f"{name}.md"
+
+
+def user_agent_file(name: str) -> Path:
+    return user_claude_dir() / "agents" / f"{name}.md"
+
+
 def agent_file_candidates(repo: Path, name: str) -> list[Path]:
     """Where Claude Code looks for the agent definition *name*: the project, then the user."""
-    return [repo / ".claude" / "agents" / f"{name}.md", user_claude_dir() / "agents" / f"{name}.md"]
+    return [repo_agent_file(repo, name), user_agent_file(name)]
+
+
+STATUS_LINE_KEY = "statusLine"
+# The kind of an import step that asks the operator to add the status line wrapper.
+STATUS_LINE_STEP = "statusline"
+
+
+def user_settings_file() -> Path:
+    return user_claude_dir() / "settings.json"
+
+
+def status_line_entry(settings: object) -> object:
+    """The status line entry of the Claude Code settings *settings*, or None when it has none."""
+    return settings.get(STATUS_LINE_KEY) if isinstance(settings, Mapping) else None
+
+
+def read_status_line(settings_file: Path) -> object:
+    """The status line entry of *settings_file*, or None when the file cannot be read or parsed."""
+    try:
+        settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return status_line_entry(settings)
+
+
+def status_line_settings(entry: object) -> dict[str, object]:
+    """Claude Code settings that set the status line to *entry* and nothing else."""
+    return {STATUS_LINE_KEY: entry}
+
+
+def runs_statusline_wrapper(entry: object) -> bool:
+    """Whether a status line entry of Claude Code's settings runs `chargehand statusline`."""
+    if not isinstance(entry, Mapping):
+        return False
+    command = entry.get("command")
+    return (
+        isinstance(command, str)
+        and "chargehand" in command
+        and re.search(r"\bstatusline\b", command) is not None
+    )
 
 
 def launch_settings(
@@ -1363,6 +1411,20 @@ class ClaudeRuntime(Runtime):
                 f"{role.source or role.name}: agent '{role.agent}' not found; looked for {looked}"
             )
 
+    @classmethod
+    def repo_agent_file(cls, repo: Path, name: str) -> Path | None:
+        return repo_agent_file(repo, name)
+
+    @classmethod
+    def import_step_done(cls, step: Mapping[str, Any]) -> bool | None:
+        if step.get("kind") != STATUS_LINE_STEP:
+            return None
+        # The settings file the import named, which is the one the operator was told to edit.
+        settings_file = step.get("settings")
+        if not isinstance(settings_file, str):
+            return None
+        return runs_statusline_wrapper(read_status_line(Path(settings_file)))
+
     def health_checks(self) -> list[HealthCheck]:
         """The binary and its version, the session listing, and whether `--settings` exists."""
         if not self.cli.is_available():
@@ -1687,6 +1749,8 @@ __all__ = [
     "UNKNOWN",
     "USAGE_PROVIDER",
     "WORKING",
+    "STATUS_LINE_KEY",
+    "STATUS_LINE_STEP",
     "agent_file_candidates",
     "copy_started_by",
     "hook_settings",
@@ -1697,9 +1761,17 @@ __all__ = [
     "reset_time",
     "parse_session",
     "parse_sessions",
+    "read_status_line",
+    "repo_agent_file",
+    "runs_statusline_wrapper",
     "session_failure",
+    "status_line_entry",
+    "status_line_settings",
     "status_line_windows",
     "transcript_file",
     "transcript_text",
+    "user_agent_file",
+    "user_claude_dir",
+    "user_settings_file",
     "worker_from_session",
 ]

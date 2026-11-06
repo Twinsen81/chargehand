@@ -499,3 +499,27 @@ def test_agent_files_are_looked_up_in_the_project_then_the_user_directory(tmp_pa
         tmp_path / "repo" / ".claude" / "agents" / "reviewer.md",
         tmp_path / "cfg" / "agents" / "reviewer.md",
     ]
+    assert claude_mod.ClaudeRuntime.repo_agent_file(tmp_path / "repo", "reviewer") == candidates[0]
+    assert claude_mod.user_agent_file("reviewer") == candidates[1]
+
+
+def test_an_import_step_about_the_status_line_is_done_when_the_settings_run_the_wrapper(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    settings = claude_mod.user_settings_file()
+    step = {"kind": claude_mod.STATUS_LINE_STEP, "runtime": "claude", "settings": str(settings)}
+    wrapper = {"type": "command", "command": "~/bin/chargehand statusline -- ~/line.sh"}
+
+    assert settings == tmp_path / "settings.json"
+    assert claude_mod.ClaudeRuntime.import_step_done(step) is False
+    settings.write_text("{not json")
+    assert claude_mod.ClaudeRuntime.import_step_done(step) is False
+    settings.write_text(json.dumps({"statusLine": {"type": "command", "command": "~/line.sh"}}))
+    assert claude_mod.ClaudeRuntime.import_step_done(step) is False
+    settings.write_text(json.dumps({"theme": "dark", **claude_mod.status_line_settings(wrapper)}))
+    assert claude_mod.read_status_line(settings) == wrapper
+    assert claude_mod.ClaudeRuntime.import_step_done(step) is True
+
+    assert claude_mod.ClaudeRuntime.import_step_done({**step, "kind": "launchd"}) is None
+    assert claude_mod.ClaudeRuntime.import_step_done({**step, "settings": None}) is None
