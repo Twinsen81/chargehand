@@ -344,7 +344,7 @@ class Runtime(ABC):
 
         Then no turn runs and no dialog waits, so a stop and a resume with the answer lose
         nothing. A permission prompt or a question dialog is still open in the session, and
-        a stop would discard it. A stopped session whose last turn ended with a question
+        a stop would discard it. A session without a process that still lists the question
         counts too. A runtime that cannot tell these apart never says True.
         """
         return False

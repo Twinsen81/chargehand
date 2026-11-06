@@ -412,6 +412,59 @@ def test_a_reply_answers_a_question_whose_session_was_stopped_since(daemon, harn
     assert "reply from the operator: yes" in resume["prompt"].splitlines()
 
 
+def test_a_reply_to_a_question_whose_session_was_stopped_waits_for_continue(daemon, harness):
+    """After `claude stop`, a question-blocked session lists `stopped`, not `blocked`."""
+    unqueued(harness)
+    worker = asked(harness, board_worker(harness))
+    harness.runner.runtime("claude").stop(worker.session_id)
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).session_state == "stopped"
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/reply", {"text": "yes"})
+    harness.next_tick()
+    message = harness.ledger.get_request(answer["id"])["message"]
+    assert "kept in the inbox" in message and "`continue` respawns it" in message
+    assert "resumes" not in harness.claude_state.read()
+
+    _, resumed = post(daemon, f"/api/workers/{worker.id}/continue", {"force": False})
+    harness.next_tick()
+    assert harness.ledger.get_request(resumed["id"])["message"] == "session respawned"
+    harness.claude_state.set_session_state(worker.session_id, "done")
+    harness.next_tick()
+
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: yes" in resume["prompt"].splitlines()
+    assert harness.ledger.inbox(worker) == []
+
+
+def test_a_held_answer_shows_why_on_its_card_until_it_goes(daemon, harness):
+    unqueued(harness)
+    unqueued(harness, "ABC-2")
+    worker = asked(harness, board_worker(harness))
+    other = board_worker(harness, item="ABC-2")
+    # The other worker's turn takes the one working slot.
+    harness.config = dataclasses.replace(harness.config, max_concurrent=1)
+
+    def reason():
+        cards = [c for column in board.build(harness.config, harness.ledger, health={})["columns"]
+                 for c in column["cards"]]
+        return next(c for c in cards if c["id"] == worker.id)["queue_reason"]
+
+    post(daemon, f"/api/workers/{worker.id}/reply", {"text": "yes"})
+    harness.next_tick()
+    harness.next_tick()
+
+    held = harness.ledger.get(worker.id)
+    assert (held.state, held.wakes) == (ledger_mod.BLOCKED, 0)
+    assert reason() == "wake held by the global cap (1/1 working)"
+
+    harness.claude_state.set_session_state(other.session_id, "done")
+    harness.next_tick()
+
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+    assert reason() is None
+
+
 def test_only_a_reply_wakes_a_worker_whose_turn_ended_with_a_question(daemon, harness):
     unqueued(harness)
     worker = asked(harness, board_worker(harness, subscribe=["comment"]))
@@ -446,7 +499,8 @@ def test_a_reply_waits_while_the_session_shows_a_prompt(daemon, harness, listed,
 
     outcome = harness.ledger.get_request(answer["id"])
     assert outcome["ok"] == 1 and "kept in the inbox" in outcome["message"]
-    assert ("waits for a permission prompt" in outcome["message"]) is prompt_open
+    assert "waits for the answer to a prompt" in outcome["message"]
+    assert f"`claude attach {worker.session_id}`" in outcome["message"]
     after = harness.ledger.get(worker.id)
     assert (after.state, after.wakes) == (ledger_mod.BLOCKED, 0)
     assert ["stop", worker.session_id] not in harness.claude_state.commands

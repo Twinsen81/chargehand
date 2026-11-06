@@ -1388,11 +1388,22 @@ class Runner:
                 "reply queued; it answers the worker's question, and delivery wakes the "
                 "worker with it"
             )
-        if worker.state == ledger_mod.BLOCKED and self.ledger.open_permission_prompts(worker):
-            return True, (
-                f"reply kept in the inbox; {worker.name} waits for a permission prompt. "
-                f"Answer the prompt first: the reply is delivered once the turn ends"
-            )
+        if worker.state == ledger_mod.BLOCKED:
+            session = self._listed_session(worker)
+            stopped = session is not None and self._is_stopped(worker, session)
+            if self.ledger.open_permission_prompts(worker) or (
+                session is not None and session.state == runtime_mod.BLOCKED and not stopped
+            ):
+                return True, (
+                    f"reply kept in the inbox; {worker.name} waits for the answer to a prompt "
+                    f"in its session. {self._prompt_hint(worker)}; the reply is delivered "
+                    f"once the turn ends"
+                )
+            if stopped:
+                return True, (
+                    f"reply kept in the inbox; the session of {worker.name} has stopped. "
+                    f"`continue` respawns it, and the reply is delivered once its turn ends"
+                )
         return True, (
             f"reply kept in the inbox; {worker.name} is {worker.state}, so it is delivered "
             f"once the worker is idle again"
@@ -1475,9 +1486,7 @@ class Runner:
         answer goes in, as a reply or through its prompt, and the turn goes on.
         """
         session = self._listed_session(worker)
-        if session is None or session.state != runtime_mod.BLOCKED or self._is_stopped(
-            worker, session
-        ):
+        if session is None or self._is_stopped(worker, session):
             return None
         try:
             runtime = self.runtime(worker.runtime)
@@ -1488,9 +1497,24 @@ class Runner:
                 f"{worker.name} asked a question, and its session waits for the answer: "
                 f"send the answer as a reply"
             )
+        if session.state == runtime_mod.DONE:
+            # Blocked by its status file, or by a role that does not load: the turn ended.
+            return (
+                f"{worker.name}: its turn ended and its session waits, so there is nothing "
+                f"to respawn: send a reply"
+            )
+        if session.state == runtime_mod.BLOCKED:
+            return (
+                f"{worker.name}: its session waits for the answer to a prompt. "
+                f"{self._prompt_hint(worker)}"
+            )
+        return None
+
+    def _prompt_hint(self, worker: Worker) -> str:
+        """Where the operator answers a prompt that a session shows."""
         return (
-            f"{worker.name}: its session waits for an answer to a prompt; answer it on the "
-            f"board or with `{self._attach_command(worker)}`"
+            f"Answer a permission prompt on its card, or any prompt with "
+            f"`{self._attach_command(worker)}`"
         )
 
     def _respawned_session(self, worker: Worker) -> Session | None:

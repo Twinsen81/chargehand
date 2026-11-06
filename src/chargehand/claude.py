@@ -1548,9 +1548,11 @@ class ClaudeRuntime(Runtime):
 
         A permission prompt and an AskUserQuestion dialog list as ``blocked`` with
         ``status: waiting``, and a turn that runs lists ``status: busy``. The status is read,
-        not only ``waitingFor``, because ``waitingFor`` is the session's own text. A stopped
-        session keeps the state of its last turn, so a ``blocked`` one without a process
-        counts too, unless it names a permission prompt: a reply does not answer that.
+        not only ``waitingFor``, because ``waitingFor`` is the session's own text. A
+        ``blocked`` entry without a process counts too, unless it names a permission prompt,
+        which a reply does not answer: a respawn of a question-blocked session that started
+        no process left one. After ``claude stop`` the entry lists ``stopped`` instead
+        (observed in Claude Code 2.1.319), and ``continue`` respawns it first.
         """
         if session.state != BLOCKED or "permission" in (session.waiting_for or "").lower():
             return False

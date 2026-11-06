@@ -268,13 +268,16 @@ class Delivery:
         self._resume_parked(result)
         for worker in self.ledger.workers_in_state(WAKE_STATES):
             self._deliver(worker, result)
+        # A blocked worker whose answer waits keeps the reason it is held, as a queued one.
+        answering: set[int] = set()
         for worker in self.ledger.workers_in_state([ledger_mod.BLOCKED]):
             # Only the operator answers a question, so only a reply wakes the worker.
             if any(is_reply(entry) for entry in self.ledger.inbox(worker)) and (
                 self._awaits_answer(worker)
             ):
+                answering.add(worker.id)
                 self._deliver(worker, result)
-        self._forget_reasons()
+        self._forget_reasons(answering)
         return result
 
     def _resume_parked(self, result: DeliveryResult) -> None:
@@ -347,12 +350,15 @@ class Delivery:
         self.ledger.set_state(f"{QUEUE_REASON_PREFIX}{worker.id}", reason)
         result.held.append(f"{worker.handle}: {reason}")
 
-    def _forget_reasons(self) -> None:
-        """Drop the reason of every worker that no longer waits."""
+    def _forget_reasons(self, answering: set[int]) -> None:
+        """Drop the reason of every worker that no longer waits.
+
+        *answering* are the blocked workers whose reply this run tried to deliver.
+        """
         waiting = {
             str(worker.id)
             for worker in self.ledger.workers_in_state([ledger_mod.QUEUED, ledger_mod.PARKED])
-        }
+        } | {str(worker_id) for worker_id in answering}
         for key in self.ledger.all_state():
             if (
                 key.startswith(QUEUE_REASON_PREFIX)
@@ -372,10 +378,21 @@ class Delivery:
         resume = worker.state == ledger_mod.PARKED
         # A reply answers a question that the session asked after this tick's listing too.
         answer = not resume and any(is_reply(entry) for entry in entries)
-        if resume and worker.notified_state is not None:
-            # The resume starts a new turn. A hook of that turn that parks or blocks the
-            # worker again during the wake is then notified, as after any wake.
+        notified = worker.notified_state
+        renotify = worker.state in (ledger_mod.PARKED, ledger_mod.BLOCKED) and notified is not None
+        if renotify:
+            # The resume, or the answer to a question, starts a new turn. A hook of that turn
+            # that parks or blocks the worker again during the wake is then notified, as
+            # after any wake, also when no SessionStart hook came first.
             worker = self.ledger.update(worker, notified_state=None)
+
+        def keep_notified() -> None:
+            # No new turn started, so a blocked worker still shows the question that was
+            # notified; without this, the next state diff would notify it again. A hook that
+            # came in during the wake wrote its own record.
+            if renotify and worker.state == ledger_mod.BLOCKED:
+                self.ledger.update_if_unchanged(worker, notified_state=notified)
+
         reason_key = f"{QUEUE_REASON_PREFIX}{worker.id}"
         try:
             # The runtime's own look decides, right before its stop: the operator may have
@@ -392,6 +409,7 @@ class Delivery:
             self.ledger.update(worker, last_error=f"wake failed: {exc}"[:500])
             self.ledger.set_state(reason_key, f"wake failed: {exc}"[:300])
             result.errors.append(f"{worker.handle}: wake failed: {exc}")
+            keep_notified()
             return
         if not outcome.ok:
             detail = sanitize.one_line(outcome.detail, limit=300)
@@ -401,6 +419,7 @@ class Delivery:
                 # later tick records the new state.
                 self.ledger.set_state(reason_key, f"wake held, {detail}")
                 result.held.append(f"{worker.handle}: wake held, {detail}")
+                keep_notified()
                 return
             if outcome.copy_id is not None:
                 # The message went to a new session that works in the same worktree. The
@@ -418,6 +437,7 @@ class Delivery:
             self.ledger.update(worker, last_error=f"wake failed: {detail}"[:500])
             self.ledger.set_state(reason_key, f"wake failed: {detail}")
             result.errors.append(f"{worker.handle}: wake failed: {detail}")
+            keep_notified()
             return
 
         if self.crash_after_wake:

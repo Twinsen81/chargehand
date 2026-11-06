@@ -1014,7 +1014,7 @@ def card(
         "reset_at": worker.reset_at,
         "queue_reason": (
             sanitize.one_line(reason, limit=LINE_LIMIT)
-            if worker.state in (ledger_mod.QUEUED, ledger_mod.PARKED)
+            if worker.state in (ledger_mod.QUEUED, ledger_mod.PARKED, ledger_mod.BLOCKED)
             and (reason := ledger.get_state(f"{QUEUE_REASON_PREFIX}{worker.id}"))
             else None
         ),
