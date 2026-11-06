@@ -31,10 +31,9 @@ from datetime import date, datetime, timezone
 from datetime import time as clock_time
 from pathlib import Path
 
-from chargehand import __version__, install, paths, sanitize, serve
+from chargehand import __version__, claude, install, paths, sanitize, serve
 from chargehand import board as board_mod
 from chargehand import ledger as ledger_mod
-from chargehand.claude import user_claude_dir
 from chargehand.config import TOKEN_FILE_NAME, MachineConfig
 from chargehand.errors import ChargehandError, ConfigError
 
@@ -402,12 +401,8 @@ def _role_agent(path: Path) -> str | None:
 
 
 def _statusline_entry() -> dict[str, object] | None:
-    try:
-        settings = json.loads((user_claude_dir() / "settings.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    entry = settings.get("statusLine") if isinstance(settings, dict) else None
-    if not install.runs_statusline_wrapper(entry):
+    entry = claude.read_status_line(claude.user_settings_file())
+    if not claude.runs_statusline_wrapper(entry):
         return None
     assert isinstance(entry, Mapping)
     portable = dict(entry)
@@ -616,14 +611,14 @@ def export_setup(
             if agent:
                 agents.add(agent)
     for agent in sorted(agents):
-        source = user_claude_dir() / "agents" / f"{agent}.md"
+        source = claude.user_agent_file(agent)
         if source.is_file():
             members[f"{AGENTS_DIR}/{agent}.md"] = source.read_bytes()
 
     statusline = _statusline_entry()
     if statusline is not None:
         members[STATUSLINE_MEMBER] = (
-            json.dumps({"statusLine": statusline}, indent=2, sort_keys=True) + "\n"
+            json.dumps(claude.status_line_settings(statusline), indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
 
     rows = _board_rows(
@@ -891,19 +886,11 @@ def _steps(archive: Archive, config: MachineConfig, notify_path: Path | None) ->
     raw = archive.members.get(STATUSLINE_MEMBER)
     if raw is not None:
         try:
-            entry = json.loads(raw).get("statusLine")
-        except (ValueError, AttributeError):
+            entry = claude.status_line_entry(json.loads(raw))
+        except ValueError:
             entry = None
-        if install.runs_statusline_wrapper(entry):
-            settings = user_claude_dir() / "settings.json"
-            steps.append({
-                "name": "imported: status line",
-                "kind": "statusline",
-                "settings": str(settings),
-                "detail": f"add the status line wrapper to {settings}, "
-                          "adjusted to this machine; chargehand does not edit Claude Code's "
-                          f"settings: \"statusLine\": {json.dumps(entry, sort_keys=True)}",
-            })
+        if claude.runs_statusline_wrapper(entry):
+            steps.append(claude.ClaudeRuntime.status_line_step(entry))
     if sys.platform == "darwin":
         steps.append({
             "name": "imported: launchd",
@@ -989,7 +976,7 @@ def import_setup(
         if directory == ROLES_DIR:
             targets[paths.config_dir() / "roles" / name] = (content, 0o644)
         elif directory == AGENTS_DIR:
-            targets[user_claude_dir() / "agents" / name] = (content, 0o644)
+            targets[claude.user_agent_file(name.removesuffix(".md"))] = (content, 0o644)
     steps_file = config_dir / install.IMPORT_STEPS_FILE
     planned = [config_path, steps_file, *targets]
 

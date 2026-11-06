@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import plistlib
-import re
 import shlex
 import shutil
 import subprocess
@@ -264,6 +263,15 @@ def starter_roles() -> list[str]:
     return sorted(path.stem for path in (paths.templates_dir() / "roles").glob("*.toml"))
 
 
+def _starter_agent_file(repo: Path, name: str) -> Path | None:
+    """Where the agent file of the starter role *name* goes in *repo*, or None when it has none."""
+    if not (paths.templates_dir() / "agents" / f"{name}.md").is_file():
+        return None
+    with (paths.templates_dir() / "roles" / f"{name}.toml").open("rb") as handle:
+        runtime = tomllib.load(handle).get("runtime", roles_mod.DEFAULT_RUNTIME)
+    return runtime_mod.get(runtime).repo_agent_file(repo, name)
+
+
 def init_repo(repo: Path, *, force: bool = False, roles: Sequence[str] = ()) -> list[Path]:
     """Write the repository configuration and a starter `implementer` role.
 
@@ -281,8 +289,9 @@ def init_repo(repo: Path, *, force: bool = False, roles: Sequence[str] = ()) -> 
         targets.append((config, "chargehand.toml"))
     for name in roles or (roles_mod.DEFAULT_ROLE,):
         targets.append((repo / ".chargehand" / "roles" / f"{name}.toml", f"roles/{name}.toml"))
-        if (paths.templates_dir() / "agents" / f"{name}.md").is_file():
-            targets.append((repo / ".claude" / "agents" / f"{name}.md", f"agents/{name}.md"))
+        agent = _starter_agent_file(repo, name)
+        if agent is not None:
+            targets.append((agent, f"agents/{name}.md"))
     for target, _ in targets:
         if target.exists() and not force:
             raise ChargehandError(f"{target} already exists; pass --force to overwrite")
@@ -487,18 +496,6 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
     return checks
 
 
-def runs_statusline_wrapper(entry: object) -> bool:
-    """Whether a `statusLine` entry of Claude Code's settings runs `chargehand statusline`."""
-    if not isinstance(entry, Mapping):
-        return False
-    command = entry.get("command")
-    return (
-        isinstance(command, str)
-        and "chargehand" in command
-        and re.search(r"\bstatusline\b", command) is not None
-    )
-
-
 def import_checks(config: MachineConfig) -> list[Check]:
     """The manual steps an import left, each one marked done when this machine shows it."""
     steps_file = (config.source.parent if config.source else paths.config_dir()) / IMPORT_STEPS_FILE
@@ -527,20 +524,16 @@ def import_checks(config: MachineConfig) -> list[Check]:
 
 def _step_done(config: MachineConfig, step: Mapping[str, object]) -> bool | None:
     """Whether an imported step is done, or None when this machine cannot show it."""
+    runtime = step.get("runtime")
+    if isinstance(runtime, str):
+        try:
+            return runtime_mod.get(runtime).import_step_done(step)
+        except ConfigError:
+            return None
     kind = step.get("kind")
     if kind == "config_key":
         path = step.get("path")
         return isinstance(path, list) and _config_has(config, [str(p) for p in path])
-    if kind == "statusline":
-        # The import names the settings file, so this module needs no Claude Code paths.
-        settings_file = step.get("settings")
-        if not isinstance(settings_file, str):
-            return None
-        try:
-            settings = json.loads(Path(settings_file).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        return isinstance(settings, dict) and runs_statusline_wrapper(settings.get("statusLine"))
     if kind == "launchd":
         return is_loaded() if sys.platform == "darwin" else None
     if kind == "program":

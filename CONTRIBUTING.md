@@ -41,8 +41,9 @@ interface with one module that knows the pool's CLI, and notifications.
 - **No runtime dependencies.** The standard library only. A tool that launches privileged
   agents should have the smallest possible supply-chain surface. Test-only dependencies are
   fine.
-- **One module per external tool.** Only one module may know the Claude Code command line,
-  and only tracker adapters may know a tracker's API. Everything else works on plain data.
+- **One module per external tool.** Only one module may know the Claude Code command line
+  and its files, such as the agent files and the settings keys, and only tracker adapters
+  may know a tracker's API. Everything else works on plain data.
 - **Side effects have one writer.** Mutating control commands record a request and let the
   tick apply it. Do not add a second code path that calls `claude`, git, or a tracker.
 - **Treat tracker text and agent output as untrusted.** Never put it into a prompt, never
