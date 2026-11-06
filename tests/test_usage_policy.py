@@ -525,6 +525,20 @@ def test_a_resume_held_by_a_failed_listing_reports_the_error(harness, monkeypatc
     assert card(harness, held)["queue_reason"] == reason
 
 
+def test_a_resume_held_by_a_runtime_this_build_lacks_says_so(harness):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1, runtime="nope")
+
+    report = harness.next_tick()
+
+    held = harness.worker("ABC-1")
+    assert held.state == ledger_mod.PARKED
+    reason = queue_reason(harness, held)
+    assert reason.startswith("resume held, the runtime cannot be set up: unknown runtime 'nope'")
+    assert f"implementer/ABC-1: {reason}" in report.skipped
+
+
 def test_a_turn_that_starts_while_a_resume_prepares_is_not_stopped(harness, monkeypatch):
     """The check and the stop use one listing: the operator can start a turn in between."""
     from chargehand.tick import Runner

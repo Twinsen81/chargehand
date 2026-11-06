@@ -678,9 +678,9 @@ the listing gives that time, and otherwise after the start of the turn, at most 
 back. The listing of Claude Code 2.1.319 gives neither: its entries have no error fields
 and no end time, so there only the StopFailure hook parks a worker. A message that names a
 model family's own limit, such as "Opus weekly limit reached", also records that family
-for the board's top bar, because the usage window has no per-model part. Claude Code can still name the limit of a window that the
-subscription no longer has (it had a shorter window until 2026-11-03); such a message
-parks too.
+for the board's top bar, because the usage window has no per-model part. Claude Code can
+still name the limit of a window that the subscription no longer has (it had a shorter
+window until 2026-11-03); such a message parks too.
 
 | Session state | Meaning | Action |
 |---|---|---|
@@ -1091,11 +1091,10 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
 
   Without a status line of your own, leave out `-- '<command>'`; the status line is then
   empty. The daemon reads the file for each `/api/state` and adds a `usage` object: for the
-  `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber` from 60 %,
-  `red` from 80 %. A missing or unreadable file, a window whose reset time has passed and a
-  window without a reset time are unknown, with the level `grey`; the age of the file does
-  not matter. `status --json`
-  carries the same object.
+  `seven_day` window its percent, its reset time and a level, `green` below 60 %, `amber`
+  from 60 %, `red` from 80 %. A missing or unreadable file, a window whose reset time has
+  passed and a window without a reset time are unknown, with the level `grey`; the age of
+  the file does not matter. `status --json` carries the same object.
 - **Stopping the daemon.** SIGTERM or SIGINT ends it between two tick phases: the phase in
   progress finishes, the rest of that tick is skipped, a job in progress stops and goes
   back to the queue, the server shuts down, and the exit code is 0. The next tick reconciles what the skipped phases left. launchd sends SIGKILL

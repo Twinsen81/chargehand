@@ -2698,7 +2698,7 @@ class Runner:
         try:
             listed = self.sessions(worker.runtime)
         except ConfigError as exc:
-            return str(exc)
+            return f"the runtime cannot be set up: {exc}"
         session = next((s for s in listed if s.id == worker.session_id), None)
         if session is None:
             return f"session {worker.session_id} is not in the listing"
