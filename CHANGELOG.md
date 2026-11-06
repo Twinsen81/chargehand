@@ -153,6 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `retry` that puts an item back in the queue while another live worker holds the item,
+  such as a worker started from the board, names that worker in its answer ("re-queued; it
+  starts when implementer/ABC-1#2 ends"), and every admission pass names it in the tick
+  report while the start waits. The answer said that the next admission pass would start a
+  new worker, and only a debug line said why none started.
+- A new worker or a clone that the usage reserve refuses says that it is refused and names
+  the time of the weekly reset, after which the reserve lets a new worker start. The answer
+  said "held by the usage reserve", but the request is not tried again.
 - A parked worker whose resume waits says why on its card and in the tick report: its
   session is not in the listing, its state is not recognised, or the listing failed, which
   is also reported as an error. In each of these cases it said that the session had a turn

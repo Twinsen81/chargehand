@@ -320,7 +320,8 @@ def over_the_reserve(monkeypatch, harness):
     ("fresh", branch_gone, "its branch is gone"),
     ("fresh", paused, "repository test is paused"),
     ("fresh", at_the_cap, "1/1 open workers"),
-    ("fresh", over_the_reserve, "held by the usage reserve (claude seven_day at 75%, above 70%)"),
+    ("fresh", over_the_reserve, "the usage reserve allows no new worker until the weekly window resets on"),
+    ("fresh", over_the_reserve, "(claude seven_day at 75%, above 70%)"),
 ])
 def test_a_refused_clone_says_why_and_leaves_no_worker_and_no_worktree(
     harness, monkeypatch, mode, setup, message
