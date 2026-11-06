@@ -1619,6 +1619,21 @@ class ClaudeRuntime(Runtime):
             return False
         return _listed_pid(session) is None and session.raw.get("status") in (None, "")
 
+    def ended_with_question(self, session: Session) -> bool:
+        """``state: blocked`` with ``status: idle``: the turn ended with a plain-text question.
+
+        A permission prompt and an AskUserQuestion dialog list as ``blocked`` with
+        ``status: waiting``, and a turn that runs lists ``status: busy``. The status is read,
+        not only ``waitingFor``, because ``waitingFor`` is the session's own text. A
+        ``blocked`` entry without a process counts too, unless it names a permission prompt,
+        which a reply does not answer: a respawn of a question-blocked session that started
+        no process left one. After ``claude stop`` the entry lists ``stopped`` instead
+        (observed in Claude Code 2.1.319), and ``continue`` respawns it first.
+        """
+        if session.state != BLOCKED or "permission" in (session.waiting_for or "").lower():
+            return False
+        return session.raw.get("status") == "idle" or self.is_stopped(session)
+
     def wake(
         self,
         session_id: str,
@@ -1627,12 +1642,13 @@ class ClaudeRuntime(Runtime):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
+        if_asked: bool = False,
     ) -> WakeResult:
         """Stop the live idle process, confirm it is gone, then resume by the full session id.
 
         With *if_idle*, only a stopped session, or a live one whose last turn ended
         ``done``, is woken. With *if_ended*, a live one whose last turn ended ``failed``
-        is woken too.
+        is woken too, and with *if_asked*, a live one whose turn ended with a question.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -1648,11 +1664,16 @@ class ClaudeRuntime(Runtime):
             return WakeResult(False, f"session {session_id} is not in the listing")
         old_pid = _listed_pid(session)
         ended = (DONE, FAILED) if if_ended else (DONE,)
-        if (if_idle or if_ended) and not self.is_stopped(session) and session.state not in ended:
-            # A turn runs, or a question or a permission prompt waits; a stop would
-            # interrupt the turn or discard the prompt. The caller's listing may be older:
-            # a leftover background shell starts a turn by itself, and the operator can
-            # answer in agent view.
+        if (
+            (if_idle or if_ended or if_asked)
+            and not self.is_stopped(session)
+            and session.state not in ended
+            and not (if_asked and self.ended_with_question(session))
+        ):
+            # A turn runs, a dialog waits, or a question waits that this message does not
+            # answer; a stop would interrupt the turn or discard the dialog. The caller's
+            # listing may be older: a leftover background shell starts a turn by itself,
+            # and the operator can answer in agent view.
             return WakeResult(
                 False, f"session {session_id} is {session.state}, not idle", busy=True
             )

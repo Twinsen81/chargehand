@@ -158,6 +158,12 @@ EXPLAINED_SESSION_STATES = (runtime_mod.WORKING, runtime_mod.BLOCKED, runtime_mo
 # hint keeps within it.
 REQUEST_MESSAGE_LIMIT = 300
 
+# How long `continue` waits, after a respawn that exited 0, for the listing to show the
+# session's process. The respawn returns before the process is listed: once, a worker
+# that the respawn had started became idle 12 seconds after the first look found none.
+RESPAWN_WAIT_SECS = 20.0
+RESPAWN_POLL_SECS = 0.5
+
 # The request kinds that only the board records, besides the CLI's control commands: a
 # worker started by hand, and a line of text for a worker.
 NEW_WORKER = "new_worker"
@@ -1353,7 +1359,8 @@ class Runner:
         """Put the operator's line into the worker's inbox, as an event from the board.
 
         Delivery wakes the worker with it as with any event, under the same caps and the
-        same usage reserve; a worker that delivery does not wake keeps it until it may.
+        same usage reserve; a worker that delivery does not wake keeps it until it may. A
+        worker blocked by a question is woken by the reply, which answers it.
         """
         if worker.is_terminal:
             return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
@@ -1376,6 +1383,27 @@ class Runner:
             return True, "reply queued; delivery wakes the worker with it"
         if worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING):
             return True, "reply queued; it is delivered when the current turn ends"
+        if self._awaits_answer(worker):
+            return True, (
+                "reply queued; it answers the worker's question, and delivery wakes the "
+                "worker with it"
+            )
+        if worker.state == ledger_mod.BLOCKED:
+            session = self._listed_session(worker)
+            stopped = session is not None and self._is_stopped(worker, session)
+            if self.ledger.open_permission_prompts(worker) or (
+                session is not None and session.state == runtime_mod.BLOCKED and not stopped
+            ):
+                return True, (
+                    f"reply kept in the inbox; {worker.name} waits for the answer to a prompt "
+                    f"in its session. {self._prompt_hint(worker)}; the reply is delivered "
+                    f"once the turn ends"
+                )
+            if stopped:
+                return True, (
+                    f"reply kept in the inbox; the session of {worker.name} has stopped. "
+                    f"`continue` respawns it, and the reply is delivered once its turn ends"
+                )
         return True, (
             f"reply kept in the inbox; {worker.name} is {worker.state}, so it is delivered "
             f"once the worker is idle again"
@@ -1420,6 +1448,10 @@ class Runner:
             return False, (
                 f"{worker.name} is {worker.state}, not paused, blocked or parked{self._twins(worker)}"
             )
+        if worker.state == ledger_mod.BLOCKED:
+            waits = self._waits_in_session(worker)
+            if waits is not None:
+                return False, waits
         check = self._workspace_check(worker, accept_files=force)
         if check.fault is not None:
             return False, self._refusal_message(worker, check)
@@ -1432,22 +1464,76 @@ class Runner:
         if result.returncode != 0:
             return False, f"respawn failed: {sanitize.one_line(result.stderr or result.stdout, limit=200)}"
         # Same rule as stopping: confirm by re-reading rather than trusting the exit code.
-        session = next(
-            (s for s in self.sessions(worker.runtime, refresh=True) if s.id == worker.session_id),
-            None,
-        )
+        session = self._respawned_session(worker)
         if session is None:
             return False, f"{worker.name}: respawn reported success but the session is gone"
         if self.runtime(worker.runtime).is_stopped(session):
             # A stopped session keeps the state of its last turn, often `done`, which says
             # nothing about why the respawn did not take.
             return False, (
-                f"{worker.name}: respawn reported success but no process is running "
-                f"(the session lists as {session.state})"
+                f"{worker.name}: respawn reported success but no process is running after "
+                f"{RESPAWN_WAIT_SECS:g} s (the session lists as {session.state}); if one "
+                f"starts later, the next tick shows it"
             )
         worker = self._write_respawned(worker, respawned_at)
         self._sync_labels(worker, context, report)
         return True, "session respawned"
+
+    def _waits_in_session(self, worker: Worker) -> str | None:
+        """Why `continue` must not respawn blocked *worker*, or None.
+
+        A session whose process is live and waits for input has nothing to respawn: the
+        answer goes in, as a reply or through its prompt, and the turn goes on.
+        """
+        session = self._listed_session(worker)
+        if session is None or self._is_stopped(worker, session):
+            return None
+        try:
+            runtime = self.runtime(worker.runtime)
+        except ConfigError:
+            return None
+        if runtime.ended_with_question(session):
+            return (
+                f"{worker.name} asked a question, and its session waits for the answer: "
+                f"send the answer as a reply"
+            )
+        if session.state == runtime_mod.DONE:
+            # Blocked by its status file, or by a role that does not load: the turn ended.
+            return (
+                f"{worker.name}: its turn ended and its session waits, so there is nothing "
+                f"to respawn: send a reply"
+            )
+        if session.state == runtime_mod.BLOCKED:
+            return (
+                f"{worker.name}: its session waits for the answer to a prompt. "
+                f"{self._prompt_hint(worker)}"
+            )
+        return None
+
+    def _prompt_hint(self, worker: Worker) -> str:
+        """Where the operator answers a prompt that a session shows."""
+        return (
+            f"Answer a permission prompt on its card, or any prompt with "
+            f"`{self._attach_command(worker)}`"
+        )
+
+    def _respawned_session(self, worker: Worker) -> Session | None:
+        """*worker*'s session after a respawn, once the listing shows its process.
+
+        Or the last listing when :data:`RESPAWN_WAIT_SECS` passes first, or None when the
+        session is gone.
+        """
+        deadline = time.monotonic() + RESPAWN_WAIT_SECS
+        while True:
+            session = next(
+                (s for s in self.sessions(worker.runtime, refresh=True) if s.id == worker.session_id),
+                None,
+            )
+            if session is None or not self.runtime(worker.runtime).is_stopped(session):
+                return session
+            if time.monotonic() >= deadline:
+                return session
+            time.sleep(RESPAWN_POLL_SECS)
 
     def _write_respawned(self, worker: Worker, respawned_at: float) -> Worker:
         """Record a respawn of *worker*, as read before it, unless a hook of the new
@@ -2571,6 +2657,7 @@ class Runner:
             guard=lambda worker: self._workspace_check(worker).fault,
             prepare=self._refresh_item_checkout,
             listed_at_rest=self._listed_at_rest,
+            awaits_answer=self._awaits_answer,
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -2591,18 +2678,43 @@ class Runner:
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
 
-    def _listed_at_rest(self, worker: Worker) -> bool:
-        """Whether this tick's listing shows *worker*'s session ended or stopped. No new call."""
+    def _listed_session(self, worker: Worker) -> Session | None:
+        """*worker*'s session as this tick's listing shows it, or None. No new call."""
         try:
             listed = self.sessions(worker.runtime)
         except (AgentRuntimeError, ConfigError):
-            return False
-        session = next((s for s in listed if s.id == worker.session_id), None)
+            return None
+        return next((s for s in listed if s.id == worker.session_id), None)
+
+    def _listed_at_rest(self, worker: Worker) -> bool:
+        """Whether this tick's listing shows *worker*'s session ended or stopped. No new call."""
+        session = self._listed_session(worker)
         if session is None:
             return False
         return session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
             worker, session
         )
+
+    def _awaits_answer(self, worker: Worker) -> bool:
+        """Whether blocked *worker* waits for the answer to a question, which a reply gives.
+
+        No permission prompt is open, and this tick's listing shows the session's turn
+        ended: with a question, or `done` when the status file asked one. A turn that runs,
+        a dialog that waits and a failed turn do not count. No new call.
+        """
+        if worker.state != ledger_mod.BLOCKED or not worker.session_id:
+            return False
+        if self.ledger.open_permission_prompts(worker):
+            return False
+        session = self._listed_session(worker)
+        if session is None:
+            return False
+        if session.state == runtime_mod.DONE:
+            return True
+        try:
+            return self.runtime(worker.runtime).ended_with_question(session)
+        except ConfigError:
+            return False
 
     def _workspace_check(self, worker: Worker, *, accept_files: bool = False) -> WorkspaceCheck:
         """Whether the session of a worker with an item checkout may start again where it is.

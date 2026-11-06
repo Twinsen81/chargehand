@@ -137,6 +137,17 @@ def main(argv: list[str]) -> int:
         if state.get("agents_fail"):
             sys.stderr.write("fake claude: agents unavailable\n")
             return 1
+        pending = state.get("respawn_pending")
+        if pending is not None:
+            # The respawned process registers a few listings after the respawn returned.
+            pending["listings"] -= 1
+            if pending["listings"] <= 0:
+                state.pop("respawn_pending")
+                for session in state.get("sessions", []):
+                    if session.get("id") == pending["id"]:
+                        session["state"] = state.get("respawn_state", "working")
+                        run_process(session, next_serial(state))
+            save(state)
         sys.stdout.write(json.dumps(state.get("sessions", [])))
         return 0
 
@@ -155,18 +166,25 @@ def main(argv: list[str]) -> int:
                     session["state"] = state["stop_state"]
                 else:
                     # Observed in Claude Code 2.1.310: an idle session keeps `state: done`
-                    # after the stop, and `pid` and `status` leave the entry. The state is
-                    # the last turn's, so a session whose turn has ended (done, blocked,
-                    # failed) keeps it the same way. A stop in the middle of a turn reads
-                    # `working` for about a second and then `stopped`; here it reads
-                    # `stopped` at once.
-                    if session.get("state") == "working":
+                    # after the stop, and `pid` and `status` leave the entry. A failed one
+                    # keeps `failed` the same way. Observed in 2.1.319: a session whose
+                    # turn ended with a question lists `stopped`. A stop in the middle of a
+                    # turn reads `working` for about a second and then `stopped`; here it
+                    # reads `stopped` at once.
+                    if session.get("state") in ("working", "blocked"):
                         session["state"] = "stopped"
                     session.pop("pid", None)
                     session.pop("status", None)
             elif action == "respawn" and not failed:
                 if state.get("respawn_starts_no_process"):
                     # Exit 0, and the listing still shows the stopped job.
+                    continue
+                if state.get("respawn_listed_after"):
+                    # Exit 0, and the process shows from the respawn_listed_after-th
+                    # listing on.
+                    state["respawn_pending"] = {
+                        "id": session_id, "listings": int(state["respawn_listed_after"]),
+                    }
                     continue
                 session["state"] = state.get("respawn_state", "working")
                 run_process(session, next_serial(state))

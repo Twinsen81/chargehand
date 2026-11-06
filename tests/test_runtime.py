@@ -256,6 +256,56 @@ def test_a_wake_for_an_idle_session_wakes_an_idle_or_stopped_one(claude_runtime,
     assert claude_state.read()["resumes"][0]["target"] == UUID
 
 
+def dialog(waiting_for):
+    """A live entry that shows a dialog: `status: waiting`."""
+    return session("blocked", pid=86470, status="waiting", waitingFor=waiting_for)
+
+
+def test_the_claude_question_rule_reads_the_status():
+    runtime = ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)))
+    parse = claude_mod.parse_session
+
+    # A plain-text question ended the turn: `blocked` with `status: idle`, or stopped since.
+    assert runtime.ended_with_question(parse(live("blocked")))
+    assert runtime.ended_with_question(parse(session("blocked")))
+    # A permission prompt or an AskUserQuestion dialog waits, or a turn runs.
+    assert not runtime.ended_with_question(parse(dialog("permission prompt")))
+    assert not runtime.ended_with_question(parse(dialog("input needed")))
+    assert not runtime.ended_with_question(parse(session("blocked", pid=86470, status="busy")))
+    # The session's own text cannot make a permission prompt look like a question.
+    assert not runtime.ended_with_question(
+        parse(session("blocked", pid=86470, status="idle", waitingFor="permission prompt"))
+    )
+    assert not runtime.ended_with_question(parse(session("blocked", waitingFor="permission prompt")))
+    for state in ("working", "done", "failed"):
+        assert not runtime.ended_with_question(parse(live(state))), state
+        assert not runtime.ended_with_question(parse(session(state))), state
+
+
+def test_an_answer_wakes_a_session_whose_turn_ended_with_a_question(claude_runtime, claude_state):
+    claude_state.set(sessions=[live("blocked")])
+
+    result = claude_runtime.wake("s1", "reply from the operator: yes", if_idle=True, if_asked=True)
+
+    assert result.ok and not result.busy
+    assert claude_state.commands == [["stop", "s1"]]
+    resume = claude_state.read()["resumes"][0]
+    assert (resume["target"], resume["prompt"]) == (UUID, "reply from the operator: yes")
+
+
+@pytest.mark.parametrize("entry", [
+    live("working"), dialog("permission prompt"), dialog("input needed"),
+], ids=["turn", "permission", "ask-user-question"])
+def test_an_answer_leaves_a_live_turn_or_dialog_alone(claude_runtime, claude_state, entry):
+    claude_state.set(sessions=[entry])
+
+    result = claude_runtime.wake("s1", "reply from the operator: yes", if_idle=True, if_asked=True)
+
+    assert not result.ok and result.busy
+    assert claude_state.commands == []
+    assert "resumes" not in claude_state.read()
+
+
 def test_a_wake_of_a_stopped_job_does_not_stop_it_again(claude_runtime, claude_state):
     claude_state.set(sessions=[stopped_job()])
 

@@ -723,7 +723,7 @@ writes a small JSON file at its yield points and when it finishes.
 The file is what separates a run that succeeded from one that gave up, and it is where a
 pull-request URL comes from. Without it, or when this worker has not written it yet, a
 `done` session makes the worker `idle`. `needs-input` makes it `blocked`, so no event wakes
-it over a question.
+it over a question; a reply from the board does (see "Delivery").
 
 **Delivery.** Once per tick, after the state diff, each `idle` or `queued` worker with
 events in its inbox gets one wake. Its events become one message: a header line, then one
@@ -753,6 +753,16 @@ A crash between the two leaves the events in the inbox, and a later tick wakes t
 with them again, which costs one turn. A resume that starts a copy is a fault: the worker
 is paused with the reason, keeps its session and its events, and you are notified. A
 `blocked`, `paused`, `parked` or `launching` worker is not woken; its events wait.
+The one exception is a reply from the board to a `blocked` worker whose turn ended with a
+question: the reply is the answer, so it wakes the worker, through the same admission,
+with every event that waits. The session then lists `state: blocked` with `status: idle`
+(or `blocked` without a process), or `done` when the status file asked the question, and
+no permission prompt is open in the ledger. After `claude stop` a question-blocked
+session lists `stopped`; the reply then waits, and `continue` respawns the session first.
+Another event does not wake it, because only the operator answers a question. A
+permission prompt and an `AskUserQuestion` dialog list `status: waiting`; a stop would
+discard them, so the reply waits until the turn ends. An answer that admission holds
+keeps the reason on the worker's card, as a queued worker does.
 
 When a worker's branch is on its remote and has an open pull request, the tick subscribes
 the worker to that pull request for `comment`, `review` and `ci_status`, once, so a review
@@ -829,6 +839,14 @@ chargehand import <FILE>            # unpack it on another machine; asks for the
 
 Commands that take an item also take `--role`, which is needed when workers of several
 roles hold the item. `--route` stays accepted for `--repository`.
+
+`continue` respawns the session of a paused, blocked or parked worker. The respawn returns
+before the listing shows the new process, so `continue` reads the listing again for up to
+20 seconds, and answers that no process runs only when none came in that time. A blocked
+worker whose session is live and waits for input is not respawned, because it has nothing
+to respawn: one that asked a question, or whose turn ended `done` with a question in the
+status file, takes the answer as a reply, and one that shows a prompt takes it on its card
+(a permission prompt) or in `claude attach`. The refusal says which.
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
   tracker. It records the request in the ledger and waits for the outcome. The daemon is
@@ -930,8 +948,10 @@ roles hold the item. `--route` stays accepted for `--repository`.
   characters. It enters the worker's inbox as an event of the source `board`, the path
   a comment on its item takes, so delivery wakes the worker with it under the same caps
   and the same usage reserve. No configured source may be named `board`. A worker that
-  is blocked, paused or parked keeps the reply in its inbox until it is idle again, and
-  the answer says so.
+  is blocked by a question gets the reply as its answer: delivery wakes it (section 6,
+  "Delivery"). A worker that is paused or parked, or blocked by a permission prompt, a
+  dialog or a session that failed or stopped, keeps the reply in its inbox until it is
+  idle again, and the answer says what to do first: answer the prompt, or `continue`.
   Attach opens a terminal window that runs the card's attach command (`claude attach
   <session id>`): iTerm2 or Terminal.app, chosen on the page, through `osascript`, on
   macOS only. The daemon's request thread runs it at once, because the tick can be busy

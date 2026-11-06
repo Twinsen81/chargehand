@@ -153,6 +153,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reply from the board answers a worker whose turn ended with a question. The session
+  lists `state: blocked` with `status: idle`; delivery now wakes the worker with the reply
+  and every event that waits, instead of keeping the reply until the worker is idle again.
+  A permission prompt or an `AskUserQuestion` dialog (`status: waiting`) still keeps the
+  reply waiting, and only a reply wakes the worker, not another event. When a cap or the
+  usage reserve holds the answer, the card shows why. A prompt that the answered session
+  shows next is notified, also when no SessionStart hook came first.
+- `continue` no longer respawns a blocked worker whose session is live and waits for
+  input, also one whose status file asked a question. It answers what to do instead: send
+  a reply, or answer a prompt on its card or in `claude attach`. A reply to a worker whose
+  session stopped says that `continue` respawns it first.
+- `continue` waits up to 20 seconds for the respawned process to show in the listing. It
+  could answer that no process ran while the respawn worked and the worker went on a few
+  seconds later.
 - A wake or a `continue` no longer puts a worker back to `running` when a hook of the new
   turn, such as a permission prompt, came in while it ran. The card stays in Needs you and
   answerable, and the next session diff sends no second notification.
