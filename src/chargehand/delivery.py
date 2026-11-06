@@ -26,6 +26,9 @@ record of the wake is added.
 
 A worker that is launching, running, blocked or paused is not woken; its events wait. A
 blocked worker has an open question or permission prompt, which a stop would discard.
+The one exception is a reply from the board to a blocked worker whose turn ended with a
+question: the reply is the answer, so it wakes the worker, through the same admission,
+with every event that waits. No dialog is open then, so the stop discards nothing.
 
 Before the inboxes, each parked worker whose usage limit has reset is resumed in the same
 session with :data:`RESUME_MESSAGE`, oldest reset first, through the same admission. The
@@ -164,6 +167,11 @@ def safe_kind(kind: str) -> str:
     return kind if sanitize.is_event_kind(kind) else UNKNOWN_KIND
 
 
+def is_reply(entry: InboxEntry) -> bool:
+    """Whether *entry* is a line that the operator typed on the board."""
+    return (entry.source, entry.kind) == (ledger_mod.REPLY_SOURCE, ledger_mod.REPLY_KIND)
+
+
 def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
     """The message for *entries*, and how many pointers were left out as unusable.
 
@@ -176,7 +184,7 @@ def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
     lines: list[str] = []
     left_out = 0
     for entry in entries:
-        if (entry.source, entry.kind) == (ledger_mod.REPLY_SOURCE, ledger_mod.REPLY_KIND):
+        if is_reply(entry):
             # The operator's own line from the board: trusted text, which no configured
             # source can write, still kept to one clean line.
             reply = sanitize.one_line(entry.pointer, limit=ledger_mod.REPLY_LIMIT)
@@ -229,6 +237,7 @@ class Delivery:
         guard: Callable[[Worker], str | None] = lambda worker: None,
         prepare: Callable[[Worker], str | None] = lambda worker: None,
         listed_at_rest: Callable[[Worker], bool] = lambda worker: True,
+        awaits_answer: Callable[[Worker], bool] = lambda worker: False,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -248,6 +257,10 @@ class Delivery:
         # prompt. A cheap first look, so that a session the operator went on in costs no
         # refresh of its item checkout; the runtime's wake looks again before its stop.
         self._listed_at_rest = listed_at_rest
+        # Whether a blocked worker waits for the answer to a question: no permission
+        # prompt is open, and the tick's listing shows no turn and no dialog. A first
+        # look, as above.
+        self._awaits_answer = awaits_answer
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
@@ -255,6 +268,12 @@ class Delivery:
         self._resume_parked(result)
         for worker in self.ledger.workers_in_state(WAKE_STATES):
             self._deliver(worker, result)
+        for worker in self.ledger.workers_in_state([ledger_mod.BLOCKED]):
+            # Only the operator answers a question, so only a reply wakes the worker.
+            if any(is_reply(entry) for entry in self.ledger.inbox(worker)) and (
+                self._awaits_answer(worker)
+            ):
+                self._deliver(worker, result)
         self._forget_reasons()
         return result
 
@@ -351,6 +370,8 @@ class Delivery:
             return
         worker = read
         resume = worker.state == ledger_mod.PARKED
+        # A reply answers a question that the session asked after this tick's listing too.
+        answer = not resume and any(is_reply(entry) for entry in entries)
         if resume and worker.notified_state is not None:
             # The resume starts a new turn. A hook of that turn that parks or blocks the
             # worker again during the wake is then notified, as after any wake.
@@ -359,10 +380,11 @@ class Delivery:
         try:
             # The runtime's own look decides, right before its stop: the operator may have
             # started a turn in the session since this tick's listing. A failed turn has
-            # ended, so a resume accepts it.
+            # ended, so a resume accepts it; so has a turn that ended with a question, so
+            # its answer accepts it.
             outcome = self._runtime(worker.runtime).wake(
                 worker.session_id, message, session_uuid=worker.session_uuid,
-                if_idle=not resume, if_ended=resume,
+                if_idle=not resume, if_ended=resume, if_asked=answer,
             )
         except (AgentRuntimeError, ConfigError) as exc:
             # Nothing is known about whether the message arrived. The events stay; if it
@@ -505,6 +527,7 @@ __all__ = [
     "UNKNOWN_KIND",
     "WAKE_STATES",
     "WEEKLY_WINDOW",
+    "is_reply",
     "new_worker_admits",
     "safe_kind",
     "safe_pointer",

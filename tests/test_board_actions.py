@@ -364,6 +364,96 @@ def test_a_reply_to_a_worker_that_delivery_does_not_wake_waits_and_says_so(daemo
     assert harness.ledger.get(worker.id).wakes == 0
 
 
+def asked(harness, worker, **listed):
+    """The listing shows *worker*'s turn ended with a question; a tick blocks the worker."""
+    # The real shape of a plain-text question: `state: blocked`, `status: idle`, no waitingFor.
+    harness.claude_state.set_session_state(worker.session_id, "blocked", **({"status": "idle"} | listed))
+    harness.next_tick()
+    blocked = harness.ledger.get(worker.id)
+    assert blocked.state == ledger_mod.BLOCKED
+    return blocked
+
+
+def test_a_reply_answers_a_worker_whose_turn_ended_with_a_question(daemon, harness):
+    unqueued(harness)
+    worker = asked(harness, board_worker(harness))
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/reply", {"text": "change board.py next"})
+    harness.next_tick()
+
+    outcome = harness.ledger.get_request(answer["id"])
+    assert outcome["ok"] == 1 and "answers the worker's question" in outcome["message"]
+    woken = harness.ledger.get(worker.id)
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, 1)
+    assert ["stop", worker.session_id] in harness.claude_state.commands
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: change board.py next" in resume["prompt"].splitlines()
+    assert harness.ledger.inbox(worker) == []
+
+
+def test_a_reply_answers_a_question_whose_session_was_stopped_since(daemon, harness):
+    """A respawn that took no process leaves the session stopped, still listed `blocked`."""
+    unqueued(harness)
+    worker = board_worker(harness)
+    state = harness.claude_state.read()
+    (entry,) = state["sessions"]
+    entry["state"] = "blocked"
+    del entry["pid"], entry["status"]
+    harness.claude_state.write(state)
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).state == ledger_mod.BLOCKED
+
+    post(daemon, f"/api/workers/{worker.id}/reply", {"text": "yes"})
+    harness.next_tick()
+
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+    assert ["stop", worker.session_id] not in harness.claude_state.commands
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: yes" in resume["prompt"].splitlines()
+
+
+def test_only_a_reply_wakes_a_worker_whose_turn_ended_with_a_question(daemon, harness):
+    unqueued(harness)
+    worker = asked(harness, board_worker(harness, subscribe=["comment"]))
+    harness.board.comment("ABC-1")
+
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).state == ledger_mod.BLOCKED
+    assert "resumes" not in harness.claude_state.read()
+
+    post(daemon, f"/api/workers/{worker.id}/reply", {"text": "yes"})
+    harness.next_tick()
+
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: yes" in resume["prompt"].splitlines()
+    assert any(line.startswith("comment: ") for line in resume["prompt"].splitlines())
+    assert harness.ledger.inbox(worker) == []
+
+
+@pytest.mark.parametrize("listed, prompt_open", [
+    ({"status": "waiting", "waitingFor": "permission prompt"}, False),
+    ({"status": "waiting", "waitingFor": "input needed"}, False),
+    ({}, True),
+], ids=["permission-dialog", "ask-user-question", "prompt-in-the-ledger"])
+def test_a_reply_waits_while_the_session_shows_a_prompt(daemon, harness, listed, prompt_open):
+    unqueued(harness)
+    worker = asked(harness, board_worker(harness), **listed)
+    if prompt_open:
+        harness.ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="{}")
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/reply", {"text": "yes"})
+    harness.next_tick()
+
+    outcome = harness.ledger.get_request(answer["id"])
+    assert outcome["ok"] == 1 and "kept in the inbox" in outcome["message"]
+    assert ("waits for a permission prompt" in outcome["message"]) is prompt_open
+    after = harness.ledger.get(worker.id)
+    assert (after.state, after.wakes) == (ledger_mod.BLOCKED, 0)
+    assert ["stop", worker.session_id] not in harness.claude_state.commands
+    assert "resumes" not in harness.claude_state.read()
+    assert [e.pointer for e in harness.ledger.inbox(worker)] == ["yes"]
+
+
 def test_a_source_named_like_the_board_replies_is_refused(harness):
     from chargehand.config import SourceConfig
 

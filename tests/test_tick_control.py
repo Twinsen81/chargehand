@@ -7,6 +7,7 @@ import json
 import pytest
 
 from chargehand import ledger as ledger_mod
+from chargehand import tick as tick_mod
 from chargehand.errors import LaunchAborted
 from conftest import run_git
 
@@ -468,7 +469,13 @@ def test_an_unrecognised_session_state_never_counts_as_stopped(harness, process_
     assert (harness.worktree("ABC-1")).is_dir()
 
 
-def test_continue_refuses_a_respawn_that_started_no_process(harness):
+@pytest.fixture
+def short_respawn_wait(monkeypatch):
+    monkeypatch.setattr(tick_mod, "RESPAWN_WAIT_SECS", 0.3)
+    monkeypatch.setattr(tick_mod, "RESPAWN_POLL_SECS", 0.01)
+
+
+def test_continue_refuses_a_respawn_that_started_no_process(harness, short_respawn_wait):
     launch(harness)
     harness.claude_state.set_session_state("ABC-1", "done")
     apply_request(harness, "stop", "ABC-1")
@@ -480,8 +487,77 @@ def test_continue_refuses_a_respawn_that_started_no_process(harness):
     assert harness.worker("ABC-1").state == ledger_mod.PAUSED
     # The listing still says `done`, the state of the last turn; the reason is the process.
     assert result["message"] == (
-        "ABC-1: respawn reported success but no process is running (the session lists as done)"
+        "ABC-1: respawn reported success but no process is running after 0.3 s (the session "
+        "lists as done); if one starts later, the next tick shows it"
     )
+
+
+def test_continue_waits_for_the_respawned_process_to_show(harness, monkeypatch):
+    """The respawn returns before its process is listed; the answer is what happened."""
+    monkeypatch.setattr(tick_mod, "RESPAWN_POLL_SECS", 0.01)
+    attempt = launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "done")
+    apply_request(harness, "stop", "ABC-1")
+    harness.claude_state.set(respawn_listed_after=3)
+
+    result = apply_request(harness, "continue", "ABC-1")
+
+    assert (result["ok"], result["message"]) == (1, "session respawned")
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    assert harness.claude_state.commands.count(["respawn", attempt.session_id]) == 1
+    assert "respawn_pending" not in harness.claude_state.read()
+
+
+def test_continue_points_a_question_at_a_reply_and_leaves_the_session(harness):
+    attempt = launch(harness)
+    # A plain-text question ended the turn: `state: blocked`, `status: idle`.
+    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+
+    result = apply_request(harness, "continue", "ABC-1")
+
+    assert result["ok"] == 0
+    assert result["message"] == (
+        "ABC-1 asked a question, and its session waits for the answer: send the answer as a reply"
+    )
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert ["respawn", attempt.session_id] not in harness.claude_state.commands
+    assert harness.claude_state.sessions[0]["status"] == "idle"
+
+
+def test_continue_points_a_dialog_at_its_answer_and_leaves_the_session(harness):
+    attempt = launch(harness)
+    harness.claude_state.set_session_state(
+        "ABC-1", "blocked", status="waiting", waitingFor="permission prompt"
+    )
+    harness.next_tick()
+
+    result = apply_request(harness, "continue", "ABC-1")
+
+    assert result["ok"] == 0
+    assert result["message"] == (
+        f"ABC-1: its session waits for an answer to a prompt; answer it on the board or with "
+        f"`claude attach {attempt.session_id}`"
+    )
+    assert ["respawn", attempt.session_id] not in harness.claude_state.commands
+
+
+def test_continue_respawns_a_blocked_worker_whose_session_was_stopped(harness):
+    """A stopped session lists the state of its last turn; `continue` brings its process back."""
+    attempt = launch(harness)
+    state = harness.claude_state.read()
+    (entry,) = state["sessions"]
+    entry["state"] = "blocked"
+    del entry["pid"], entry["status"]
+    harness.claude_state.write(state)
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+
+    result = apply_request(harness, "continue", "ABC-1")
+
+    assert (result["ok"], result["message"]) == (1, "session respawned")
+    assert ["respawn", attempt.session_id] in harness.claude_state.commands
 
 
 def test_a_stopped_idle_session_keeps_its_worker_paused(harness):

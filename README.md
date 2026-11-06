@@ -93,7 +93,7 @@ waits), Parked (with the reset time), Idle and Closed. It refreshes every second
 buttons do what the control commands do: start a worker from a role, with an optional work
 item and the event kinds on it that wake the worker; pause, continue, cancel, retry or
 discard a worker; reply to a worker with one line of text, which reaches it as an event,
-the way a comment would; attach, which opens an iTerm2 or Terminal.app window (chosen on
+the way a comment would, and answers a question that ended the worker's turn; attach, which opens an iTerm2 or Terminal.app window (chosen on
 the page) running `claude attach` on the worker's session; and pause or resume a
 repository or all of them. The buttons need the daemon's token: paste the content of the
 token file into the token field once, and the browser keeps it for the page. Workers

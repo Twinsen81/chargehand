@@ -302,15 +302,18 @@ class Runtime(ABC):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
+        if_asked: bool = False,
     ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
 
         With *if_idle*, a session whose turn has not ended idle (a turn runs, or a
         question or a permission prompt waits) is not interrupted, and the result has
         ``busy`` set. The runtime decides from its own fresh look, because the caller's
-        view of the session can be older. Delivery asks this way; an answer to a question
-        does not. *if_ended* is the same, except that a turn that ended ``failed`` also
-        counts as ended: the resume of a worker that a usage limit parked asks this way.
+        view of the session can be older. Delivery asks this way. *if_ended* is the same,
+        except that a turn that ended ``failed`` also counts as ended: the resume of a
+        worker that a usage limit parked asks this way. *if_asked* is the same, except that
+        a turn that ended with a question (see :meth:`ended_with_question`) also counts as
+        ended: a reply from the board to that question asks this way.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing
@@ -335,6 +338,16 @@ class Runtime(ABC):
     def is_stopped(self, session: Session) -> bool:
         """Whether the listed *session* has no process left. The one rule for confirming a stop."""
         return session.state in (STOPPED, FAILED)
+
+    def ended_with_question(self, session: Session) -> bool:
+        """Whether the listed *session* is ``blocked`` because its turn ended with a question.
+
+        Then no turn runs and no dialog waits, so a stop and a resume with the answer lose
+        nothing. A permission prompt or a question dialog is still open in the session, and
+        a stop would discard it. A stopped session whose last turn ended with a question
+        counts too. A runtime that cannot tell these apart never says True.
+        """
+        return False
 
     def release(self, worktree: Path) -> None:
         """Delete what the launch in *worktree* kept for its session, once that session is removed."""

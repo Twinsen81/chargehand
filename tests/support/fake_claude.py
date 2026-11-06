@@ -137,6 +137,17 @@ def main(argv: list[str]) -> int:
         if state.get("agents_fail"):
             sys.stderr.write("fake claude: agents unavailable\n")
             return 1
+        pending = state.get("respawn_pending")
+        if pending is not None:
+            # The respawned process registers a few listings after the respawn returned.
+            pending["listings"] -= 1
+            if pending["listings"] <= 0:
+                state.pop("respawn_pending")
+                for session in state.get("sessions", []):
+                    if session.get("id") == pending["id"]:
+                        session["state"] = state.get("respawn_state", "working")
+                        run_process(session, next_serial(state))
+            save(state)
         sys.stdout.write(json.dumps(state.get("sessions", [])))
         return 0
 
@@ -167,6 +178,13 @@ def main(argv: list[str]) -> int:
             elif action == "respawn" and not failed:
                 if state.get("respawn_starts_no_process"):
                     # Exit 0, and the listing still shows the stopped job.
+                    continue
+                if state.get("respawn_listed_after"):
+                    # Exit 0, and the process shows from the respawn_listed_after-th
+                    # listing on.
+                    state["respawn_pending"] = {
+                        "id": session_id, "listings": int(state["respawn_listed_after"]),
+                    }
                     continue
                 session["state"] = state.get("respawn_state", "working")
                 run_process(session, next_serial(state))
