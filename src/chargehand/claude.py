@@ -862,7 +862,7 @@ def launch_settings(
     *,
     mod: bool = False,
     mod_env: Mapping[str, str] | None = None,
-) -> dict[str, object] | None:
+) -> dict[str, object]:
     """The per-launch settings payload: the deny rules, the allow rules, the hooks and the env.
 
     Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
@@ -891,7 +891,7 @@ def launch_settings(
         settings["hooks"] = dict(hooks)
     if mod_env:
         settings["env"] = dict(mod_env)
-    return settings or None
+    return settings
 
 
 def protected_path_rules(paths: Sequence[Path]) -> list[str]:

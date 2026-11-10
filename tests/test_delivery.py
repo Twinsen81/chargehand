@@ -959,3 +959,23 @@ def test_a_wake_the_worktree_guard_refuses_drops_the_outbox_message(wired):
     dropped = wired.ledger.get_outbox(message.id)
     assert (dropped.state, dropped.reason) == (ledger_mod.OUTBOX_DROPPED, "the wake was refused")
     assert pending(wired, paused) == pointers
+
+
+def test_delivery_takes_a_timer_by_its_own_clock(wired):
+    reviewer = start_reviewer(wired)
+    end_turn(wired)
+    wired.next_tick()
+    idle = wired.ledger.get(reviewer.id)
+    assert idle.state == ledger_mod.IDLE
+    due = time.time() + 3600
+    wired.ledger.put_timer(idle, due_at=due, item="PR-7", item_ref="PR-7")
+
+    def run(clock):
+        return delivery_mod.Delivery(
+            wired.ledger, max_concurrent=5, runtime=wired.runner.runtime,
+            policy=wired.runner._policy_of, clock=lambda: clock,
+        ).run()
+
+    assert run(due - 1).woken == []
+    assert [w.id for w in run(due).woken] == [reviewer.id]
+    assert "timer: request_wake" in resumes(wired)[-1]["prompt"].splitlines()

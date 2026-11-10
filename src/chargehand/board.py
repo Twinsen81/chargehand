@@ -402,10 +402,15 @@ def _answer_question(
     worker's inbox, and delivery wakes the worker with it as its next turn.
     """
     text = _reply_text(body)
-    if not ledger.answer_question(question.id, by=ledger_mod.RESOLVED_BY_BOARD):
-        raise HTTPError(409, "this question was already answered, or its worker moved on")
+    # One transaction, so that an answer is never resolved without its reply.
+    with ledger.transaction():
+        if not ledger.answer_question(question.id, by=ledger_mod.RESOLVED_BY_BOARD):
+            raise HTTPError(409, "this question was already answered, or its worker moved on")
+        request_id = ledger.record_request(
+            REPLY, target, origin=ledger_mod.REQUEST_BOARD, text=text
+        )
     log.info("%s: question %d answered on the board", worker.handle, question.id)
-    return _record(request, REPLY, target, text=text)
+    return _answer(ledger, request_id)
 
 
 def _clone(request: Request, worker: Worker, target: str, body: dict[str, object]) -> Response:
