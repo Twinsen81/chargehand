@@ -1221,6 +1221,91 @@ def test_every_older_ledger_gains_the_report_the_handoff_and_the_due_time(tmp_pa
         assert [e.kind for e in ledger.inbox(updated)] == [ledger_mod.TIMER_KIND]
 
 
+# ----- version 12: the transcript of a session that a refresh replaced -----------------
+
+V11_SCHEMA = V10_SCHEMA.replace("PRAGMA user_version = 10;", "") + """
+ALTER TABLE workers ADD COLUMN report_state TEXT;
+ALTER TABLE workers ADD COLUMN report_summary TEXT;
+ALTER TABLE workers ADD COLUMN report_links TEXT;
+ALTER TABLE workers ADD COLUMN reported_at REAL;
+ALTER TABLE workers ADD COLUMN handoff_note TEXT;
+ALTER TABLE workers ADD COLUMN handoff_at REAL;
+ALTER TABLE inbox ADD COLUMN due_at REAL;
+PRAGMA user_version = 11;
+"""
+
+
+def test_a_version_eleven_ledger_keeps_its_sessions_and_gains_their_transcript_path(tmp_path):
+    path = tmp_path / "v11.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V11_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at) VALUES (7, 'implementer', 'ABC-1', 'i1', 'test', "
+        "'/repo', '/w/ABC-1', 'b', 'idle', 4, 1.0, 2.0)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (worker_id, session_id, session_uuid, kind, started_at) "
+        "VALUES (7, 's1', 'u1', 'initial', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (worker_id, session_id, session_uuid, kind, started_at) "
+        "VALUES (7, 's1', 'u1', 'wake', 2.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = ledger.get(7)
+        assert [(r.kind, r.transcript_path) for r in ledger.sessions_of(worker)] == [
+            ("initial", None), ("wake", None),
+        ]
+        ledger.keep_session_transcript(worker, "s1", "/t/s1.jsonl")
+
+    with Ledger(path) as ledger:
+        rows = ledger.sessions_of(ledger.get(7))
+        assert [(r.kind, r.transcript_path) for r in rows] == [
+            ("initial", "/t/s1.jsonl"), ("wake", None),
+        ]
+
+
+@pytest.mark.parametrize(
+    "version_schema",
+    ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA", "V7_SCHEMA",
+     "V8_SCHEMA", "V9_SCHEMA", "V10_SCHEMA"],
+)
+def test_every_older_ledger_gains_the_transcript_path_of_a_session(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        ledger.record_session(worker, kind=ledger_mod.SESSION_INITIAL, session_id="s9",
+                              session_uuid="u9")
+        ledger.keep_session_transcript(worker, "s9", "/t/s9.jsonl")
+        (row,) = ledger.sessions_of(worker)
+        assert row.transcript_path == "/t/s9.jsonl"
+
+
+def test_the_wakes_in_a_session_start_again_after_each_session_row(ledger):
+    worker = make(ledger)
+    ledger.record_session(worker, kind=ledger_mod.SESSION_INITIAL, session_id="s1", session_uuid="u1")
+    ledger.record_wake(worker, session_id="s1", session_uuid="u1", now=10.0)
+    ledger.record_wake(worker, session_id="s1", session_uuid="u1", now=11.0)
+    assert ledger.wakes_in_session(worker) == 2
+
+    ledger.record_session(worker, kind=ledger_mod.SESSION_REFRESH, session_id="s2",
+                          session_uuid="u2", now=12.0)
+
+    assert ledger.wakes_in_session(worker) == 0
+    # The daily cap counts the refresh as a wake.
+    assert ledger.wakes_since(worker, 0.0) == 3
+
+
 # ----- timers and questions ---------------------------------------------------------
 
 

@@ -343,6 +343,9 @@ unless_subscribed = "role"          # for later sources; the queue skips an item
 
 [policy]
 max_workers = 2                     # open workers of this role, across repositories
+max_wakes_per_day = 12              # wakes of one worker over the last 24 hours
+refresh_after_wakes = 20            # optional: a fresh session after this many wakes
+refresh_after_tokens = 120000       # optional: a fresh session past about this many tokens
 ```
 
 A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` and
@@ -552,8 +555,12 @@ identifier alone, for a session from before roles). Found → adopt it.
   adopted when the role and the issue can be derived from its name or path, otherwise
   reported. An adopted session's primary subscription keeps the time of the row it
   replaces, so the events since that start still reach it; its new row has the time of the
-  adoption, so a status file from the earlier run stays stale. No
-  unattended session runs outside the watchdog.
+  adoption, so a status file from the earlier run stays stale. A worktree is compared by
+  its real path, because the listing names a worktree under a linked root (such as `/tmp`
+  on macOS) by the path that the link leads to. A session that a row of the `sessions`
+  table names for a worker, but that is not that worker's current session, such as one
+  that a refresh replaced, is never adopted: it belongs to its worker, and one that works
+  again is reported once. No unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
 survives reboots. A partial unique index over live rows that a start rule created makes two
@@ -804,6 +811,45 @@ permission prompt and an `AskUserQuestion` dialog list `status: waiting`; a stop
 discard them, so the reply waits until the turn ends. An answer that admission holds
 keeps the reason on the worker's card, as a queued worker does.
 
+**Session refresh.** Each wake continues the same session, so the worker keeps what it
+read and decided. A long session gets more expensive with every wake, because each wake
+reads the whole conversation again, and after an hour without a turn its prompt cache is
+cold. The role's `refresh_after_wakes` and `refresh_after_tokens` set a limit; without
+them a worker keeps one session. Once the current session of an `idle` or `queued`
+worker has taken `refresh_after_wakes` wakes (the `wake` rows since its newest session
+row), or holds at least `refresh_after_tokens` tokens, its next admitted wake starts a
+fresh session for the same worker instead. The size is the context that the mod reported
+after the last turn, as a count, or as a percentage of a 200,000-token window; without a
+report, it is the transcript's size on disk at about four bytes per token. The mod sends
+the count, which decides. The ledger keeps no window size, so a percentage alone reads a
+session of a model with a larger window as smaller than it is: the refresh comes later,
+never earlier. A runtime
+whose fresh session would not load the chargehand mod, and so has no tool for the note,
+keeps the session, with a warning. The tick reads the listing again and leaves a session
+alone that started a turn or opened a prompt since its listing; otherwise it stops the
+old session and confirms the stop, so two sessions never run in one worktree, drops the
+old session's open outbox message, and launches a new one in the same worktree under the
+worker's name, with the mod. Its first prompt is chargehand's own text, which names the
+item and the `read_handoff` tool, then the role's prompt, then the waiting events as the
+usual lines. When no note is stored, the text says so and sends the session to the
+worktree, its branch and the item instead of the tool. The handoff note never reaches
+that prompt: the session reads it as the tool's result. So a role with a refresh limit
+should have its worker call `handoff` at the end of every turn; the tool's description
+asks for that too. One ledger transaction then switches the worker's session ids, clears
+what described the old session (its context figures), keeps the old transcript path on
+the old session's row, records a `refresh` row in `sessions`, which the daily wake cap
+counts, and records the wake. The old session is stopped and kept, with its row, for
+`claude --resume`; discard, retry and garbage collection remove every session of the
+worker, and an archive holds the transcript of each one. Until the new ids are recorded,
+the new session's hooks and its mod's hello find the worker by its worktree, as during a
+launch. A hook that came in during the launch, such as a permission prompt, is newer
+than the wake, and keeps the state it wrote; a post that the old session sent while it
+stopped is older, because the tick reads the worker again once the stop is confirmed. A
+crash in that window leaves the events in the inbox, and the next state diff takes the
+new session as the worker's, with the same switch as a refresh that ran to its end. The resume of
+a `parked` worker and the answer to a question stay in the session they belong to. The
+card lists the worker's sessions.
+
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
 launch and at a full-mode clone; Claude Code stores the flag with the job, so the mod
@@ -819,7 +865,7 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   new tool needs no change in the mod), and posts the session start. The hello is the
   record that this session takes its wakes from the outbox. The model sees the tools as
   `mcp__chargehand__<tool>`, and the launch settings allow them, so no permission mode
-  asks for them. In this release: `report`, `ask`, `handoff`, `request_wake` and
+  asks for them. In this release: `report`, `ask`, `handoff`, `read_handoff`, `request_wake` and
   `subscribe(item, kinds)`, which subscribes the worker to an item that a source names by
   its URL or identifier.
 - A tool call goes to `POST /channel/tool/<name>`, and the daemon's answer is the result.
@@ -831,7 +877,9 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   not built: a main-conversation tool call that runs over two minutes moves to a
   background task, and the model would go on without the answer. `handoff(note)` stores
   the note (16 KiB at most) and its time on the worker, for a later session of the same
-  work; it never reaches a log line or a notification. `request_wake(after_secs)` puts a
+  work; it never reaches a log line or a notification. `read_handoff` returns the stored
+  note to the session that calls it, or a line that says no note is stored; it is how a
+  fresh session after a refresh gets the note. `request_wake(after_secs)` puts a
   timer into the worker's inbox, due after 1 second to 7 days, one per worker: a later
   call replaces the one that waits. Delivery takes it once it is due, as any event, with
   the line `timer: request_wake`, through the same admission, and the daily cap counts
@@ -1138,8 +1186,10 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   reads the table: launches, supervision, notifications, `status` and the tick do not,
   so a hidden repository's workers run, are supervised and notify as before.
 - **Archives and jobs.** An archive is one zip of what a worker leaves: its worktree (and
-  the item checkout of a `checkout = "item"` role), the session transcript as text, its
-  ledger row and its sessions as JSON, and its handoff note when one exists. It is written
+  the item checkout of a `checkout = "item"` role), the session transcript as text (and,
+  as `transcript-1.txt` and on, oldest first, the transcript of each session that a refresh
+  replaced), its ledger row and its sessions as JSON, and its handoff note when one exists.
+  It is written
   under the state directory as `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip`, mode
   0600; the time and the worker id keep two archives apart. The guard runs again when the
   cancel of a live worker has applied, before the zip. The `archive` request is applied
@@ -1463,6 +1513,8 @@ Done:
   of a live process from its outbox, the lifecycle posts and the usage readings.
 - The daemon's own usage reading, from Claude Code's experimental `get_usage` request, so
   the week bar and the reserves need neither the status line wrapper nor a running worker.
+- Session refresh: a fresh session for the same worker past a wake or size limit, which
+  reads the worker's handoff note through a tool.
 
 Next:
 

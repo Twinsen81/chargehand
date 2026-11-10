@@ -57,6 +57,9 @@ public location.
   a report's summary and links (only plain http(s) URLs, and only a pull request link
   becomes the card's link), and the handoff note. The board renders them as text, no log
   line or notification carries them, and no prompt that chargehand writes includes them.
+  `read_handoff` gives the note back only as a tool result, to a session of the worker that
+  the post maps to, so a fresh session after a refresh reads it as session data, not as a
+  prompt.
   A report of `done` or `failed` can end the worker that the post maps to, as its status
   file could (see the known limit of the shared token below). A timer from `request_wake` is a wake with
   chargehand's own pointer, under the same caps as any wake. The answer to a question is

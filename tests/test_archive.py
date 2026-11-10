@@ -126,6 +126,37 @@ def test_an_archive_holds_the_tree_the_rows_and_the_transcript(harness, tmp_path
     assert worktree.is_dir()
 
 
+def test_an_archive_holds_the_transcript_of_each_session_a_refresh_replaced(harness):
+    worker = cancelled(harness)
+    # Two refreshes: the first two sessions are kept with their transcript paths.
+    harness.ledger.record_session(worker, kind=ledger_mod.SESSION_INITIAL, session_id="old1",
+                                  session_uuid="u-old1", now=1.0)
+    harness.ledger.keep_session_transcript(worker, "old1", "/t/old1.jsonl")
+    harness.ledger.record_session(worker, kind=ledger_mod.SESSION_REFRESH, session_id="old2",
+                                  session_uuid="u-old2", now=2.0)
+    harness.ledger.record_wake(worker, session_id="old2", session_uuid="u-old2", now=3.0)
+    harness.ledger.record_session(worker, kind=ledger_mod.SESSION_REFRESH,
+                                  session_id=worker.session_id, session_uuid=worker.session_uuid)
+    worker = harness.ledger.update(worker, transcript_path="/t/current.jsonl")
+    read: list[tuple[str | None, str | None]] = []
+
+    def transcript(ledger, w):
+        read.append((w.session_id, w.transcript_path))
+        return f"conversation of {w.session_id}"
+
+    assert apply_request(harness, "archive", worker.target, force=True)["ok"] == 1
+    runner(harness, transcript=transcript).run_queued(harness.ledger)
+
+    with zipfile.ZipFile(job_of(harness, worker).result_path) as zf:
+        assert zf.read("transcript.txt").decode() == f"conversation of {worker.session_id}"
+        assert zf.read("transcript-1.txt").decode() == "conversation of old1"
+        assert zf.read("transcript-2.txt").decode() == "conversation of old2"
+        assert "transcript-3.txt" not in zf.namelist()
+    assert read == [
+        (worker.session_id, "/t/current.jsonl"), ("old1", "/t/old1.jsonl"), ("old2", None),
+    ]
+
+
 def test_a_handoff_note_is_a_member_only_when_there_is_one(harness):
     worker = cancelled(harness)
     with_note = archive.records(worker, [], transcript=None, handoff="next: the tests")

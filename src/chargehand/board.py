@@ -46,9 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import stat
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
@@ -63,7 +61,12 @@ from chargehand import roles as roles_mod
 from chargehand import terminal as terminal_mod
 from chargehand import usage as usage_mod
 from chargehand.config import MachineConfig
-from chargehand.delivery import QUEUE_REASON_PREFIX, WAKE_CAP_WINDOW_SECS, wake_message
+from chargehand.delivery import (
+    QUEUE_REASON_PREFIX,
+    WAKE_CAP_WINDOW_SECS,
+    tokens_estimate,
+    wake_message,
+)
 from chargehand.errors import ChargehandError
 from chargehand.ledger import Ledger, Worker
 from chargehand.roles import Role
@@ -110,8 +113,8 @@ PROMPT_LIMIT = 2000
 PROMPT_INPUT_LIMIT = 1000
 ANSWER_LIMIT = 2000
 LINE_LIMIT = 200
-# A transcript holds about this many bytes per token. The estimate is approximate.
-BYTES_PER_TOKEN = 4
+# How much of a session id a card shows.
+SESSION_ID_LIMIT = 12
 
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
@@ -1063,6 +1066,7 @@ def card(
         "wakes_today": ledger.wakes_since(worker, now - WAKE_CAP_WINDOW_SECS),
         "wake_cap": cap,
         "tokens_estimate": tokens_estimate(worker.transcript_path),
+        "sessions": sessions_of(worker, ledger),
         "attach": attach(worker) if live and worker.session_id else None,
         "reset_at": worker.reset_at,
         "queue_reason": (
@@ -1193,17 +1197,19 @@ def last_prompt(
     return _text(rendered, PROMPT_LIMIT)
 
 
-def tokens_estimate(transcript_path: str | None) -> int | None:
-    """About how many tokens the session's transcript holds, from its size on disk."""
-    if not transcript_path or not os.path.isabs(transcript_path):
-        return None
-    try:
-        info = os.stat(transcript_path)
-    except (OSError, ValueError):
-        return None
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    return info.st_size // BYTES_PER_TOKEN
+def sessions_of(worker: Worker, ledger: Ledger) -> list[dict[str, object]]:
+    """The sessions *worker* had, oldest first: the launch, and each refresh since. A wake
+    continues a session, so it is not one of them."""
+    return [
+        {
+            "kind": record.kind,
+            "id": sanitize.one_line(record.session_id, limit=SESSION_ID_LIMIT) or None,
+            "started_at": record.started_at,
+            "current": bool(worker.session_id) and record.session_id == worker.session_id,
+        }
+        for record in ledger.sessions_of(worker)
+        if record.kind != ledger_mod.SESSION_WAKE and record.session_id
+    ]
 
 
 __all__ = [
