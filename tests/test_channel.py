@@ -115,12 +115,13 @@ def test_subscribe_records_a_subscription_of_the_calling_worker(daemon, harness)
     status, answer = post(daemon, "tool/subscribe", of(worker, input={"item": "DEMO-2", "kinds": ["comment"]}))
 
     assert status == 200 and answer["is_error"] is False
-    assert "DEMO-2" in answer["result"]
+    assert answer["result"] == "You follow DEMO-2 now: a comment on it wakes you."
     followed = {(s.source, s.item): s.kinds for s in harness.ledger.subscriptions_of(worker)}
     assert followed[("cmd", "DEMO-2")] == ("comment",)
 
     # Again with another kind: the first one stays.
-    post(daemon, "tool/subscribe", of(worker, input={"item": "DEMO-2", "kinds": ["ci_status"]}))
+    status, answer = post(daemon, "tool/subscribe", of(worker, input={"item": "DEMO-2", "kinds": ["ci_status"]}))
+    assert answer["result"] == "You follow DEMO-2 now: a comment or a ci_status on it wakes you."
     followed = {(s.source, s.item): s.kinds for s in harness.ledger.subscriptions_of(worker)}
     assert followed[("cmd", "DEMO-2")] == ("comment", "ci_status")
 

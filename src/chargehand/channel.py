@@ -128,7 +128,8 @@ def _subscribe(call: ToolCall) -> ToolResult:
     call.ledger.subscribe(call.worker, item, wanted)
     log.info("%s: follows %s on %s (%s)", call.worker.handle, item.key, item.source,
              ", ".join(wanted))
-    return ToolResult(f"You follow {item.key} now: {', '.join(wanted)} on it wake you.")
+    events = " or ".join(f"a {kind}" for kind in wanted)
+    return ToolResult(f"You follow {item.key} now: {events} on it wakes you.")
 
 
 def _schema(properties: Mapping[str, Any], required: tuple[str, ...]) -> dict[str, Any]:
