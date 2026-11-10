@@ -151,6 +151,11 @@ ASKED = "asked a question; answer it on the board"
 # turn started, so a report this much earlier still counts.
 REPORT_TURN_MARGIN_SECS = 5.0
 
+# The session states that a turn which ended with a question shows: `done` from the Stop
+# hook or the listing, `blocked` from the listing. A blocked worker notified for one of them
+# is not notified again for the other.
+QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
+
 # The worker states that are never notified. A worker that waits for events ends a turn
 # for each event it answers; `status` and the board show it. Blocked, parked, failed, done
 # by a status file and the watchdog states send a notification.
@@ -2496,6 +2501,7 @@ class Runner:
         context = self.context_for_worker(worker)
         detail: str | None = None
         target_state = worker.state
+        was_blocked = worker.state == ledger_mod.BLOCKED
 
         if worker.state == ledger_mod.PARKED and hook is None:
             return worker
@@ -2570,7 +2576,16 @@ class Runner:
             # its session state is the one notified before this turn end.
             if worker.notified_state is not None:
                 worker = self.ledger.update(worker, notified_state=None)
-        elif observed != worker.notified_state and observed != runtime_mod.WORKING:
+        elif (
+            observed != worker.notified_state and observed != runtime_mod.WORKING
+            and not (
+                # One question, two views of its turn end: the Stop hook says `done` and the
+                # ask tool's question blocks the worker, then the listing says `blocked`
+                # (or the other way round). The operator was told once.
+                was_blocked and target_state == ledger_mod.BLOCKED
+                and {observed, worker.notified_state} <= QUESTION_TURN_ENDS
+            )
+        ):
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
