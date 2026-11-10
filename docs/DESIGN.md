@@ -343,6 +343,9 @@ unless_subscribed = "role"          # for later sources; the queue skips an item
 
 [policy]
 max_workers = 2                     # open workers of this role, across repositories
+max_wakes_per_day = 12              # wakes of one worker over the last 24 hours
+refresh_after_wakes = 20            # optional: a fresh session after this many wakes
+refresh_after_tokens = 120000       # optional: a fresh session past about this many tokens
 ```
 
 A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` and
@@ -803,6 +806,33 @@ Another event does not wake it, because only the operator answers a question. A
 permission prompt and an `AskUserQuestion` dialog list `status: waiting`; a stop would
 discard them, so the reply waits until the turn ends. An answer that admission holds
 keeps the reason on the worker's card, as a queued worker does.
+
+**Session refresh.** Each wake continues the same session, so the worker keeps what it
+read and decided. A long session gets more expensive with every wake, because each wake
+reads the whole conversation again, and after an hour without a turn its prompt cache is
+cold. The role's `refresh_after_wakes` and `refresh_after_tokens` set a limit; without
+them a worker keeps one session. Once the current session of an `idle` or `queued`
+worker has taken `refresh_after_wakes` wakes (the `wake` rows since its newest session
+row), or holds at least `refresh_after_tokens` tokens, its next admitted wake starts a
+fresh session for the same worker instead. The size is the context that the mod reported
+after the last turn, as a count, or as a percentage of a 200,000-token window; without a
+report, it is the transcript's size on disk at about four bytes per token. The tick
+reads the listing again and leaves a session alone that started a turn or opened a
+prompt since its listing; otherwise it drops the old session's open outbox message,
+stops the old session and confirms the stop, so two sessions never run in one worktree,
+and launches a new one in the same worktree under the worker's name, with the mod. Its
+first prompt is chargehand's own text, which names the item and the `read_handoff` tool,
+then the role's prompt, then the waiting events as the usual lines. The handoff note
+never reaches that prompt: the session reads it as the tool's result. One ledger
+transaction then switches the worker's session ids, clears what described the old
+session (its transcript path and context figures), records a `refresh` row in
+`sessions`, which the daily wake cap counts, and records the wake. The old session is
+stopped and kept, with its row, for `claude --resume`; discard, retry and garbage
+collection remove every session of the worker. Until the new ids are recorded, the new
+session's hooks and its mod's hello find the worker by its worktree, as during a launch;
+a crash in that window leaves the events in the inbox, and the next state diff takes the
+new session as the worker's. The resume of a `parked` worker and the answer to a
+question stay in the session they belong to. The card lists the worker's sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
@@ -1463,6 +1493,8 @@ Done:
   of a live process from its outbox, the lifecycle posts and the usage readings.
 - The daemon's own usage reading, from Claude Code's experimental `get_usage` request, so
   the week bar and the reserves need neither the status line wrapper nor a running worker.
+- Session refresh: a fresh session for the same worker past a wake or size limit, which
+  reads the worker's handoff note through a tool.
 
 Next:
 

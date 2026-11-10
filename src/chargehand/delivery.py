@@ -15,7 +15,8 @@ events in its inbox goes through these steps:
    up to date waits like one a cap holds.
 4. Wake, so that the same session continues. A session whose chargehand mod said hello
    takes the message from its outbox (see below); any other session is stopped and
-   resumed with it, through the worker's runtime.
+   resumed with it, through the worker's runtime. Past the role's refresh limit the
+   wake starts a fresh session instead (see below).
 5. Record. One ledger transaction marks the events delivered and records the wake on the
    worker and in the sessions table. It comes after the wake: a crash between the two
    leaves the events in the inbox, and a later tick wakes the worker with them again.
@@ -45,11 +46,24 @@ with every event that waits. No dialog is open then, so the stop discards nothin
 Before the inboxes, each parked worker whose usage limit has reset is resumed in the same
 session with :data:`RESUME_MESSAGE`, oldest reset first, through the same admission. The
 reason admission holds a worker is kept for the board.
+
+The refresh. A long session costs more with every wake, because each wake reads the
+whole conversation again. Once an idle or queued worker's session has taken
+``refresh_after_wakes`` wakes, or holds about ``refresh_after_tokens`` tokens (the
+context that the mod reported, else the size of the transcript), its next wake goes to
+a fresh session for the same worker, through the caller: the old session is stopped and
+kept, and a new one starts in the same worktree. Its first prompt is chargehand's own
+text, which names the item and the tool that gives the worker's handoff note, then the
+role's prompt, then the waiting events as usual. The note itself never reaches the
+prompt: the fresh session reads it as a tool result. The resume of a parked worker and
+the answer to a question stay in the session they belong to.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -107,6 +121,12 @@ UNKNOWN_KIND = "event"
 
 # How a reply that the operator typed on the board starts its line in the message.
 REPLY_PREFIX = "reply from the operator: "
+
+# A transcript holds about this many bytes per token. The estimate is approximate.
+BYTES_PER_TOKEN = 4
+# The context window that a reported percentage is read against when the report gave no
+# token count.
+DEFAULT_CONTEXT_WINDOW = 200_000
 
 
 @dataclass(frozen=True)
@@ -227,20 +247,54 @@ def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
     return "\n".join([MESSAGE_HEADER, *lines]), left_out
 
 
+def tokens_estimate(transcript_path: str | None) -> int | None:
+    """About how many tokens the session's transcript holds, from its size on disk."""
+    if not transcript_path or not os.path.isabs(transcript_path):
+        return None
+    try:
+        info = os.stat(transcript_path)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_size // BYTES_PER_TOKEN
+
+
+def session_tokens(worker: Worker) -> int | None:
+    """About how many tokens *worker*'s session reads at a wake, or None when nothing says.
+
+    The context that the session's mod reported after its last turn, as a count or as a
+    percentage of the window; without a report, the size of the transcript.
+    """
+    if worker.context_tokens is not None:
+        return worker.context_tokens
+    if worker.context_percent is not None:
+        return int(worker.context_percent / 100.0 * DEFAULT_CONTEXT_WINDOW)
+    return tokens_estimate(worker.transcript_path)
+
+
 def _record_wake(
-    ledger: Ledger, worker: Worker, entries: Sequence[InboxEntry], now: float, *, start_turn: bool
+    ledger: Ledger,
+    worker: Worker,
+    entries: Sequence[InboxEntry],
+    now: float,
+    *,
+    start_turn: bool,
+    wake_row: bool = True,
 ) -> Worker:
     """Mark *entries* delivered and record one wake of *worker*. The caller holds a transaction.
 
     With *start_turn* the worker becomes ``running``, unless a hook of the new turn wrote
     the state the session shows since *worker* was read; then, and without it, only the
-    record of the wake is added.
+    record of the wake is added. Without *wake_row* the caller has written the session
+    row that records the wake, as a refresh does.
     """
     wake_fields: dict[str, object] = {"wakes": worker.wakes + 1, "last_wake_at": now}
     ledger.mark_delivered(entries, now=now)
-    ledger.record_wake(
-        worker, session_id=worker.session_id, session_uuid=worker.session_uuid, now=now
-    )
+    if wake_row:
+        ledger.record_wake(
+            worker, session_id=worker.session_id, session_uuid=worker.session_uuid, now=now
+        )
     written = None
     if start_turn:
         # The state write drops the reset time of a resumed worker.
@@ -261,6 +315,32 @@ def _record_wake(
         # keeps its own reset time.
         written = ledger.update(ledger.get(worker.id) or worker, **wake_fields)
     ledger.delete_state(f"{QUEUE_REASON_PREFIX}{worker.id}")
+    return written
+
+
+def _switch_session(
+    ledger: Ledger, worker: Worker, session: runtime_mod.Session, now: float
+) -> Worker:
+    """Make *session* the current session of *worker*, as read before the refresh, with a
+    refresh row. The caller holds a transaction.
+
+    What described the old session goes; a hook of the fresh session may have written its
+    own already, and that stays.
+    """
+    current = ledger.get(worker.id) or worker
+    changes: dict[str, object] = {
+        "session_id": session.id,
+        "session_uuid": session.uuid,
+        "session_state": session.state,
+    }
+    for name in ("transcript_path", "context_tokens", "context_percent", "waiting_for"):
+        if getattr(current, name) == getattr(worker, name):
+            changes[name] = None
+    written = ledger.update(current, **changes)
+    ledger.record_session(
+        written, kind=ledger_mod.SESSION_REFRESH, session_id=session.id,
+        session_uuid=session.uuid, now=now,
+    )
     return written
 
 
@@ -351,6 +431,21 @@ def confirm_outbox(
     return CONFIRM_RECORDED, written
 
 
+@dataclass(frozen=True)
+class Refresh:
+    """What the caller's refresh of a worker's session did.
+
+    *session* is the fresh session. *prompted* says whether it started with the first
+    prompt and the waiting events; a session that an earlier, interrupted refresh started
+    did not get them, so they wait for its next wake. *busy* says why the old session
+    cannot be stopped now; then nothing changed.
+    """
+
+    session: runtime_mod.Session | None = None
+    prompted: bool = False
+    busy: str | None = None
+
+
 @dataclass
 class DeliveryResult:
     woken: list[Worker] = field(default_factory=list)
@@ -384,6 +479,7 @@ class Delivery:
         prepare: Callable[[Worker], str | None] = lambda worker: None,
         resume_hold: Callable[[Worker], str | None] = lambda worker: None,
         awaits_answer: Callable[[Worker], bool] = lambda worker: False,
+        refresh: Callable[[Worker, str], Refresh] | None = None,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -409,6 +505,10 @@ class Delivery:
         # prompt is open, and the tick's listing shows no turn and no dialog. A first
         # look, as above.
         self._awaits_answer = awaits_answer
+        # Stops the worker's session and starts a fresh one in its worktree, whose first
+        # prompt carries the message; raises AgentRuntimeError or ConfigError when it
+        # fails. Without it, every wake continues the same session.
+        self._refresh = refresh
         # One fresh listing per runtime and run, for the wakes through the outbox.
         self._listings: dict[str, list[runtime_mod.Session]] = {}
 
@@ -535,6 +635,11 @@ class Delivery:
         if read is None or read.state != worker.state or read.session_id != worker.session_id:
             return
         worker = read
+        if self._refresh is not None and worker.state in WAKE_STATES and entries:
+            why = self._refresh_reason(worker)
+            if why is not None:
+                self._wake_fresh(worker, message, entries, why, result)
+                return
         # A wake through the outbox starts no turn here, so the state stays as it is.
         if self._wake_in_place(worker, message, entries, result):
             return
@@ -617,6 +722,65 @@ class Delivery:
             log.info("%s: woke session %s with %s", worker.handle, worker.session_id,
                      "; ".join(message.splitlines()[1:]))
         result.woken.append(worker)
+
+    def _refresh_reason(self, worker: Worker) -> str | None:
+        """Why *worker*'s next wake goes to a fresh session, or None when it continues this one."""
+        try:
+            policy = self._policy(worker)
+        except ConfigError:
+            return None
+        limit = policy.refresh_after_wakes
+        if limit is not None:
+            wakes = self.ledger.wakes_in_session(worker)
+            if wakes >= limit:
+                return f"{wakes} wake(s) in its session, the role's limit is {limit}"
+        limit = policy.refresh_after_tokens
+        if limit is not None:
+            tokens = session_tokens(worker)
+            if tokens is not None and tokens >= limit:
+                return f"about {tokens} tokens in its session, the role's limit is {limit}"
+        return None
+
+    def _wake_fresh(
+        self,
+        worker: Worker,
+        message: str,
+        entries: Sequence[InboxEntry],
+        why: str,
+        result: DeliveryResult,
+    ) -> None:
+        """Wake *worker* in a fresh session that the caller starts; the old one is kept."""
+        assert self._refresh is not None
+        reason_key = f"{QUEUE_REASON_PREFIX}{worker.id}"
+        # A wake in the old session's outbox would go to a process that is about to stop.
+        drop_open_outbox(self.ledger, worker, "the worker goes on in a fresh session",
+                         now=self._clock())
+        try:
+            refresh = self._refresh(worker, message)
+        except (AgentRuntimeError, ConfigError) as exc:
+            problem = f"refresh failed: {sanitize.one_line(str(exc), limit=300)}"
+            self.ledger.update(self.ledger.get(worker.id) or worker, last_error=problem[:500])
+            self.ledger.set_state(reason_key, problem[:300])
+            result.errors.append(f"{worker.handle}: {problem}")
+            return
+        if refresh.busy is not None or refresh.session is None:
+            detail = sanitize.one_line(refresh.busy or "no fresh session", limit=300)
+            self.ledger.set_state(reason_key, f"wake held, {detail}")
+            result.held.append(f"{worker.handle}: wake held, {detail}")
+            return
+        if self.crash_after_wake:
+            raise DeliveryAborted("delivery aborted after the wake")
+        now = self._clock()
+        with self.ledger.transaction():
+            written = _switch_session(self.ledger, worker, refresh.session, now)
+            if refresh.prompted:
+                written = _record_wake(
+                    self.ledger, written, entries, now, start_turn=True, wake_row=False
+                )
+        log.info("%s: session %s replaces session %s, which is stopped and kept (%s)",
+                 written.handle, written.session_id, worker.session_id or "-", why)
+        if refresh.prompted:
+            result.woken.append(written)
 
     def _wake_in_place(
         self, worker: Worker, message: str, entries: Sequence[InboxEntry], result: DeliveryResult
@@ -776,6 +940,7 @@ __all__ = [
     "OUTBOX_TAKE_SECS",
     "QUEUE_REASON_PREFIX",
     "RESUME_MESSAGE",
+    "Refresh",
     "UsageReading",
     "UsageWindow",
     "UNKNOWN_KIND",
@@ -789,7 +954,9 @@ __all__ = [
     "safe_kind",
     "record_mod_hello",
     "safe_pointer",
+    "session_tokens",
     "take_outbox",
+    "tokens_estimate",
     "usage_admits",
     "wake_message",
     "weekly_window",

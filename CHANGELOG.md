@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
+  effect: once a worker's session has taken that many wakes, or holds about that many
+  tokens (the context that the mod reports, else the transcript size), its next wake stops
+  the session and starts a fresh one for the same worker in the same worktree. The first
+  prompt names the item and the tool that gives the worker's handoff note, then the role's
+  prompt and the waiting events; the note itself never reaches the prompt. The old session
+  is kept, stopped, for `claude --resume`, and the board's card lists both sessions under
+  the one worker. The daily wake cap counts a refresh as a wake. Discard, retry and garbage
+  collection remove every session of a worker.
 - The chargehand mod, a Claude Code plugin that ships in the package and that every worker
   session loads with `--plugin-dir` at launch and at a full-mode clone. Claude Code stores
   the flag with the job, so the mod comes back after a stop and a resume or a respawn. The

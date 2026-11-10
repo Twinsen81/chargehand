@@ -69,12 +69,16 @@ LAST_STEP = 4
 # a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`. A wake
 # continues the same session, so each wake has its own `wake` row: the daily wake cap
 # counts them. A clone in full mode starts with a copy of its original's conversation,
-# which is a `fork` row.
+# which is a `fork` row. A wake past the role's refresh limit starts a fresh session for
+# the same worker instead, which is a `refresh` row; the daily wake cap counts it too.
 SESSION_INITIAL = "initial"
 SESSION_ADOPTED = "adopted"
 SESSION_MIGRATED = "migrated"
 SESSION_WAKE = "wake"
 SESSION_FORK = "fork"
+SESSION_REFRESH = "refresh"
+# The rows that count against the daily wake cap.
+WAKE_KINDS = (SESSION_WAKE, SESSION_REFRESH)
 
 # How a worker came to exist. Only `source` workers are held to one per role and item.
 ORIGIN_SOURCE = "source"
@@ -1570,10 +1574,30 @@ class Ledger:
     def wakes_since(self, worker: Worker, since: float) -> int:
         return int(
             self._conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND started_at >= ?",
-                (worker.id, SESSION_WAKE, since),
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind IN (?, ?) "
+                "AND started_at >= ?",
+                (worker.id, *WAKE_KINDS, since),
             ).fetchone()[0]
         )
+
+    def wakes_in_session(self, worker: Worker) -> int:
+        """The wakes of *worker* since its newest session row other than a wake."""
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND id > "
+                "(SELECT COALESCE(MAX(id), 0) FROM sessions WHERE worker_id = ? AND kind != ?)",
+                (worker.id, SESSION_WAKE, worker.id, SESSION_WAKE),
+            ).fetchone()[0]
+        )
+
+    def session_ids_of_others(self, worker: Worker) -> set[str]:
+        """Every session id that a session row gives another worker of *worker*'s runtime."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT s.session_id FROM sessions s JOIN workers w ON w.id = s.worker_id "
+            "WHERE s.worker_id != ? AND w.runtime = ? AND s.session_id IS NOT NULL",
+            (worker.id, worker.runtime),
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def sessions_of(self, worker: Worker) -> list[SessionRecord]:
         rows = self._conn.execute(

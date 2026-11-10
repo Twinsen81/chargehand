@@ -344,6 +344,13 @@ function cardChildren(c, now) {
     nodes.push(archived);
   }
 
+  if (Array.isArray(c.sessions) && c.sessions.length > 1) {
+    const parts = c.sessions.map((s) => s.kind + ' ' + (s.id || '?') + ' ' + clock(s.started_at, true) +
+      (s.current ? ' (current)' : ''));
+    const sessions = el('div', 'note sessions', 'sessions: ' + parts.join(' · '));
+    sessions.title = 'A refresh starts a fresh session for this worker; the earlier ones are stopped and kept';
+    nodes.push(sessions);
+  }
   if (c.last_prompt) nodes.push(snippet('prompt', 'prompt', c.last_prompt));
   if (c.last_answer) nodes.push(snippet('answer', 'answer', c.last_answer));
 
