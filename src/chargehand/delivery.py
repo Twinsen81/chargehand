@@ -126,7 +126,9 @@ REPLY_PREFIX = "reply from the operator: "
 # A transcript holds about this many bytes per token. The estimate is approximate.
 BYTES_PER_TOKEN = 4
 # The context window that a reported percentage is read against when the report gave no
-# token count.
+# token count. The mod sends the count, which decides; a percentage alone is only a
+# fallback, and the ledger keeps no window size. For a model with a larger window this
+# reads the session as smaller than it is, so the refresh comes later, never earlier.
 DEFAULT_CONTEXT_WINDOW = 200_000
 
 
@@ -319,11 +321,16 @@ def _record_wake(
     return written
 
 
-def _switch_session(
-    ledger: Ledger, worker: Worker, session: runtime_mod.Session, now: float
+def switch_session(
+    ledger: Ledger,
+    worker: Worker,
+    session: runtime_mod.Session,
+    now: float,
+    *,
+    replaced: str | None,
 ) -> Worker:
-    """Make *session* the current session of *worker*, as read before the refresh, with a
-    refresh row. The caller holds a transaction.
+    """Make *session* the current session of *worker*, as read before its launch, with a
+    refresh row; *replaced* is the session it replaces. The caller holds a transaction.
 
     What described the old session goes, and its transcript path stays on its own row, for
     an archive. A hook of the fresh session may have written its own values already, during
@@ -336,8 +343,8 @@ def _switch_session(
     for name in ("transcript_path", "context_tokens", "context_percent", "waiting_for"):
         if getattr(current, name) == getattr(worker, name):
             changes[name] = None
-    if worker.session_id and worker.transcript_path:
-        ledger.keep_session_transcript(worker, worker.session_id, worker.transcript_path)
+    if replaced and worker.transcript_path:
+        ledger.keep_session_transcript(worker, replaced, worker.transcript_path)
     written = ledger.update(current, **changes)
     ledger.record_session(
         written, kind=ledger_mod.SESSION_REFRESH, session_id=session.id,
@@ -442,13 +449,16 @@ class Refresh:
     did not get them, so they wait for its next wake. *busy* says why the old session
     cannot be stopped now; then nothing changed. *keep* says why the worker goes on in
     its session instead, such as a fresh session that would not load the mod and its tool
-    for the handoff note; then the wake continues the session as any wake does.
+    for the handoff note; then the wake continues the session as any wake does. *read* is
+    the worker as read once the old session stopped: a post that the old session sent
+    while it stopped, such as its session end, is older than the fresh session.
     """
 
     session: runtime_mod.Session | None = None
     prompted: bool = False
     busy: str | None = None
     keep: str | None = None
+    read: Worker | None = None
 
 
 @dataclass
@@ -784,14 +794,17 @@ class Delivery:
         if self.crash_after_wake:
             raise DeliveryAborted("delivery aborted after the wake")
         now = self._clock()
+        base = refresh.read or worker
         with self.ledger.transaction():
-            written = _switch_session(self.ledger, worker, refresh.session, now)
+            written = switch_session(
+                self.ledger, base, refresh.session, now, replaced=worker.session_id
+            )
             if refresh.prompted:
-                # Against the worker as read before the refresh: a hook of the fresh
+                # Against the worker as read before the launch: a hook of the fresh
                 # session during its launch, such as a permission prompt, is newer, and
                 # keeps the state it wrote.
                 before = dataclasses.replace(
-                    written, state=worker.state, last_hook_at=worker.last_hook_at
+                    written, state=base.state, last_hook_at=base.last_hook_at
                 )
                 written = _record_wake(
                     self.ledger, before, entries, now, start_turn=True, wake_row=False
@@ -975,6 +988,7 @@ __all__ = [
     "record_mod_hello",
     "safe_pointer",
     "session_tokens",
+    "switch_session",
     "take_outbox",
     "tokens_estimate",
     "usage_admits",

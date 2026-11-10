@@ -240,6 +240,8 @@ def test_a_crash_after_the_launch_of_the_fresh_session_loses_no_event(after_two)
     wake(harness, reviewer)
     wake(harness, reviewer)
     end_turn(harness, reviewer)
+    harness.ledger.update(harness.ledger.get(reviewer.id), context_tokens=500,
+                          context_percent=5.0, transcript_path="/t/old.jsonl")
     dedupe = fake_source.feed().emit("comment", "PR-7")
     # The tick dies after the launch of the fresh session, before it records it.
     harness.fresh_runner()
@@ -252,6 +254,12 @@ def test_a_crash_after_the_launch_of_the_fresh_session_loses_no_event(after_two)
     taken = harness.ledger.get(reviewer.id)
     assert taken.session_id == fresh["id"]
     assert kinds(harness, taken) == ["initial", "wake", "wake", "refresh"]
+    # The same switch as a refresh that ran to its end: the old figures go, and the old
+    # transcript path stays on the old session's row.
+    assert (taken.context_tokens, taken.context_percent, taken.transcript_path) == (
+        None, None, None,
+    )
+    assert harness.ledger.sessions_of(taken)[0].transcript_path == "/t/old.jsonl"
     assert [e.pointer for e in harness.ledger.inbox(taken)] == [
         f"https://tracker.invalid/PR-7#{dedupe}"
     ]
@@ -540,3 +548,105 @@ def test_the_answer_to_a_question_stays_in_its_session_past_the_limit(after_two)
     assert len(launches(harness)) == 1
     assert resumes(harness)[-1]["target"] == reviewer.session_uuid
     assert resumes(harness)[-1]["prompt"].endswith(f"{delivery_mod.REPLY_PREFIX}yes")
+
+
+# ----- a worktree root reached through a symbolic link ------------------------------------
+
+
+def test_a_replaced_session_is_never_adopted_when_the_root_is_reached_through_a_link(
+    tmp_path, repo, claude_state, board
+):
+    # /tmp on macOS: the worktree is stored under the link, and the listing names the real path.
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    write_role(repo, REVIEWER + "\n[policy]\nrefresh_after_wakes = 1\n")
+    worktree_root = tmp_path / "link" / "worktrees"
+    worktree_root.mkdir()
+    config = make_config(
+        repo, worktree_root, roles=("implementer", "reviewer"), sources=(FAKE_SOURCE,)
+    )
+    ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
+    notifier = Notifier(config.notify)
+    harness = Harness(config, ledger, Runner(config, ledger, git=Git(), notifier=notifier),
+                      claude_state, board, repo, repo, worktree_root, notifier)
+    # A worker started by hand: its handle carries its id, so no live worker has its name.
+    ledger.record_request("new_worker", "test", role="reviewer")
+    harness.next_tick()
+    (worker,) = ledger.live_workers()
+    assert worker.origin == ledger_mod.ORIGIN_BOARD
+    assert listed(harness, worker.session_id)["cwd"] != worker.worktree
+
+    def reply(text):
+        end_turn(harness, worker)
+        harness.next_tick()
+        ledger.record_request("reply", ledger.target_for(ledger.get(worker.id)), text=text)
+        return harness.next_tick()
+
+    reply("first")
+    report = reply("second")
+    assert report.woken == [worker.handle]
+    fresh = ledger.get(worker.id)
+    assert fresh.session_id != worker.session_id and len(launches(harness)) == 2
+
+    report = harness.next_tick()
+    report = harness.next_tick()
+
+    assert not any("adopted" in line for line in report.warnings)
+    assert [w.id for w in ledger.live_workers()] == [worker.id]
+    assert report.adopted == []
+    # The old session stays stopped and the worker's own: discard removes both.
+    ledger.record_request("discard", ledger.target_for(fresh), force=True)
+    harness.next_tick()
+    assert harness.claude_state.sessions == []
+    ledger.close()
+
+
+def test_an_earlier_session_of_an_ended_worker_that_works_again_is_reported_not_adopted(
+    after_two
+):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    for _ in range(3):
+        wake(harness, reviewer)
+    harness.ledger.record_request("cancel", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+    assert harness.ledger.get(reviewer.id).is_terminal
+    # The operator resumes the session that the refresh replaced.
+    harness.claude_state.set_session_state(reviewer.session_id, "working", status="busy")
+
+    report = harness.next_tick()
+
+    assert report.adopted == []
+    assert harness.ledger.live_workers() == []
+    assert any(f"session {reviewer.session_id}, an earlier session of reviewer/PR-7" in line
+               for line in report.warnings)
+    # Said once.
+    assert not any(reviewer.session_id in line for line in harness.next_tick().warnings)
+
+
+def test_a_post_of_the_old_session_while_it_stops_does_not_hold_the_fresh_turn(
+    after_two, monkeypatch
+):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    real = claude.ClaudeRuntime.stop
+
+    def stop_then_post(self, session_id):
+        result = real(self, session_id)
+        # The old session's last post, such as the turn end its stop reports.
+        hook = claude.parse_hook("Stop", {"session_id": reviewer.session_uuid,
+                                          "cwd": reviewer.worktree})
+        harness.runner.apply_hook(harness.ledger.get(reviewer.id), hook)
+        return result
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "stop", stop_then_post)
+    report, _ = wake(harness, reviewer)
+
+    assert report.woken == ["reviewer/PR-7"]
+    after = harness.ledger.get(reviewer.id)
+    assert after.session_id != reviewer.session_id
+    assert (after.state, after.session_state) == (ledger_mod.RUNNING, claude.WORKING)
+    assert after.wakes == 3 and harness.ledger.inbox(after) == []

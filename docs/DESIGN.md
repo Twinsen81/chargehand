@@ -555,8 +555,12 @@ identifier alone, for a session from before roles). Found → adopt it.
   adopted when the role and the issue can be derived from its name or path, otherwise
   reported. An adopted session's primary subscription keeps the time of the row it
   replaces, so the events since that start still reach it; its new row has the time of the
-  adoption, so a status file from the earlier run stays stale. No
-  unattended session runs outside the watchdog.
+  adoption, so a status file from the earlier run stays stale. A worktree is compared by
+  its real path, because the listing names a worktree under a linked root (such as `/tmp`
+  on macOS) by the path that the link leads to. A session that a row of the `sessions`
+  table names for a worker, but that is not that worker's current session, such as one
+  that a refresh replaced, is never adopted: it belongs to its worker, and one that works
+  again is reported once. No unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
 survives reboots. A partial unique index over live rows that a start rule created makes two
@@ -816,7 +820,10 @@ worker has taken `refresh_after_wakes` wakes (the `wake` rows since its newest s
 row), or holds at least `refresh_after_tokens` tokens, its next admitted wake starts a
 fresh session for the same worker instead. The size is the context that the mod reported
 after the last turn, as a count, or as a percentage of a 200,000-token window; without a
-report, it is the transcript's size on disk at about four bytes per token. A runtime
+report, it is the transcript's size on disk at about four bytes per token. The mod sends
+the count, which decides. The ledger keeps no window size, so a percentage alone reads a
+session of a model with a larger window as smaller than it is: the refresh comes later,
+never earlier. A runtime
 whose fresh session would not load the chargehand mod, and so has no tool for the note,
 keeps the session, with a warning. The tick reads the listing again and leaves a session
 alone that started a turn or opened a prompt since its listing; otherwise it stops the
@@ -836,8 +843,10 @@ counts, and records the wake. The old session is stopped and kept, with its row,
 worker, and an archive holds the transcript of each one. Until the new ids are recorded,
 the new session's hooks and its mod's hello find the worker by its worktree, as during a
 launch. A hook that came in during the launch, such as a permission prompt, is newer
-than the wake, and keeps the state it wrote. A crash in that window leaves the events in
-the inbox, and the next state diff takes the new session as the worker's. The resume of
+than the wake, and keeps the state it wrote; a post that the old session sent while it
+stopped is older, because the tick reads the worker again once the stop is confirmed. A
+crash in that window leaves the events in the inbox, and the next state diff takes the
+new session as the worker's, with the same switch as a refresh that ran to its end. The resume of
 a `parked` worker and the answer to a question stay in the session they belong to. The
 card lists the worker's sessions.
 

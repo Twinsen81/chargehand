@@ -903,9 +903,13 @@ class Runner:
     ) -> None:
         root = self.config.worktree_root
         live = [w for w in self.ledger.live_workers() if w.runtime == runtime]
-        known = {str(Path(w.worktree)) for w in live} | {w.session_id for w in live if w.session_id}
+        # By the real path: the listing names a worktree under a linked root, such as /tmp
+        # on macOS, by the path the link leads to.
+        known = {os.path.realpath(w.worktree) for w in live} | {
+            w.session_id for w in live if w.session_id
+        }
         for session in sessions:
-            if session.id in known or (session.cwd and str(Path(session.cwd)) in known):
+            if session.id in known or (session.cwd and os.path.realpath(session.cwd) in known):
                 continue
             if not self._under(root, session.cwd):
                 continue
@@ -913,6 +917,18 @@ class Runner:
             by_id = self.ledger.worker_by_session_id(session.id)
             if by_id is not None and by_id.runtime != runtime:
                 by_id = None
+            replaced = None if by_id is not None else self.ledger.worker_by_session_row(session.id)
+            if replaced is not None:
+                # A session that a refresh replaced, or that a removal left behind, belongs to
+                # its worker, which keeps it stopped: it is never adopted as another worker.
+                key = f"orphan-notified:{session.id}"
+                if session.state == runtime_mod.WORKING and not self.ledger.get_state(key):
+                    self.ledger.set_state(key, "1")
+                    report.warnings.append(
+                        f"session {session.id}, an earlier session of {replaced.handle}, is "
+                        f"working again; attach to it or stop it"
+                    )
+                continue
             # A worker started by hand has a worktree of its own and a handle with its id,
             # which name no `role/item` to adopt the session as. Its session is reported,
             # never adopted as a start rule's worker.
@@ -1031,6 +1047,16 @@ class Runner:
                 return False
         self._release_launch_files(worker)
         return True
+
+    def _latest_session_id(self, worker: Worker) -> str | None:
+        """The session that *worker*'s newest session row other than a wake started."""
+        return next(
+            (
+                record.session_id for record in reversed(self.ledger.sessions_of(worker))
+                if record.kind != ledger_mod.SESSION_WAKE and record.session_id
+            ),
+            None,
+        )
 
     def _session_ids(self, worker: Worker) -> set[str]:
         """The ids of every session the worker had: its current one, and the earlier ones."""
@@ -2443,18 +2469,21 @@ class Runner:
                 session = self._find_worker_session(worker, exclude=earlier) or (
                     self._find_worker_session(worker) if earlier else None
                 )
-                if session is not None:
-                    interrupted = worker.session_id is None
+                if session is not None and worker.session_id is None and (
+                    session.id not in earlier
+                ):
+                    # Only a refresh clears a live worker's session: a crash interrupted
+                    # it after the launch of this one, which the refresh would have
+                    # recorded so.
+                    with self.ledger.transaction():
+                        worker = delivery_mod.switch_session(
+                            self.ledger, worker, session, time.time(),
+                            replaced=self._latest_session_id(worker),
+                        )
+                elif session is not None:
                     worker = self.ledger.update(
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
-                    if interrupted:
-                        # Only a refresh clears a live worker's session: one that a crash
-                        # interrupted after its launch. A session with a row adds none.
-                        self.ledger.record_session(
-                            worker, kind=ledger_mod.SESSION_REFRESH,
-                            session_id=session.id, session_uuid=session.uuid,
-                        )
             observed = session.state if session else ledger_mod.SESSION_MISSING
             waiting = session.waiting_for if session else None
             # The listed state only, never its waiting text: that quotes the agent.
@@ -2909,8 +2938,10 @@ class Runner:
             return delivery_mod.Refresh(busy="the session has a turn or a prompt")
         if not self._stop_session(worker):
             raise AgentRuntimeError(f"session {worker.session_id} did not stop")
+        # What the old session posted while it stopped is older than the fresh session.
+        read = self.ledger.get(worker.id) or worker
         if found is not None:
-            return delivery_mod.Refresh(session=found)
+            return delivery_mod.Refresh(session=found, read=read)
         runtime.check_role(role, worker.worktree_path)
         originals = ancestors(self.ledger, worker)
         prompt = refresh_prompt(
@@ -2941,7 +2972,7 @@ class Runner:
                 current_row, session_id=worker.session_id, session_uuid=worker.session_uuid
             )
             raise
-        return delivery_mod.Refresh(session=found, prompted=True)
+        return delivery_mod.Refresh(session=found, prompted=True, read=read)
 
     @staticmethod
     def _loads_mod(runtime: Runtime) -> bool:

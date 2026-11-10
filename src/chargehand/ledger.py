@@ -1237,6 +1237,15 @@ class Ledger:
         ).fetchone()
         return _row_to_worker(row) if row else None
 
+    def worker_by_session_row(self, session_id: str) -> Worker | None:
+        """The newest worker that a session row names *session_id* for, in any state."""
+        row = self._conn.execute(
+            "SELECT w.* FROM workers w JOIN sessions s ON s.worker_id = w.id "
+            "WHERE s.session_id = ? ORDER BY w.id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return _row_to_worker(row) if row else None
+
     def latest_worker_by_session_uuid(self, session_uuid: str) -> Worker | None:
         """The newest worker of the session, in any state."""
         row = self._conn.execute(
