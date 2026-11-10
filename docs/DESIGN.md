@@ -579,8 +579,8 @@ post to the daemon: `SessionStart` with its source, `Stop` with the last answer,
 `PermissionRequest` with the tool and its input. These fire in unattended background
 sessions. Four of them are hooks of type `http`. Claude Code does not run an `http` hook on
 `SessionStart`, so that one is a `command` hook: it runs `hook_post.py` from the installed
-package with `python -I`, which imports nothing from the worktree, reads the token from
-`token_file`, posts its stdin to the daemon, prints nothing (the output of a `SessionStart`
+package with `python -I`, which imports nothing from the worktree, reads the session's
+token from its token file, posts its stdin to the daemon, prints nothing (the output of a `SessionStart`
 command reaches the model) and exits 0 within a few seconds, also when no daemon answers.
 The settings of a launch with hooks are in a file of mode 0600 under the state directory,
 one per worktree, so the token is never on a command line. The file stays while the
@@ -595,13 +595,39 @@ post to the ledger at once, through the same transition and notification code as
 for anything a hook missed: a session launched before the daemon wrote its token, a post
 while the daemon was down, a process that died.
 
-**Hooks.** A post goes to `POST /hooks/<event>` with the daemon's token, which an http
-hook carries in its `Authorization` header and the `SessionStart` command reads from
-`token_file`; a post without it changes nothing. The runtime reads the payload (`claude`
-reads `session_id`, `cwd`, `transcript_path`, `last_assistant_message`, `error`,
-`notification_type`, `tool_name`, `tool_input` and `source`), and the post maps to the
-live worker with that session id, else to the live worker without a session id yet whose
-worktree is the session's working directory, after symlinks are resolved. A post that maps to no live worker changes nothing. Every answer
+**A token per session.** Each launch and each fork writes a new token for its session
+into `worker-tokens/` under the state directory (mode 0600, directory 0700, one file per
+worktree). The session's hooks and its mod send it, and the daemon maps the token to the
+worker: a post acts as the worker whose token it carries, whatever session id and working
+directory it names. The board's token never goes to a session. A token ends with its
+worker: the daemon refuses the token of a worker that ended (its mod's outbox poll is
+answered `ended`), a new launch in the same worktree replaces it, and the file is
+deleted with the settings file when the session is removed. Each launch's settings deny
+`Read`, `Edit` and `Write` on the token and settings files of the other sessions that
+exist then. Like the deny rules, this is a guardrail: a shell command of the same user
+can still read another session's file. The token is not kept in the ledger: the launch
+runs in the runtime, which has no ledger, and the daemon finds the file that holds a
+token and then the newest worker in that file's worktree, a live one first.
+
+How a session gets the token: the settings `env` of the launch reaches the mod
+(`$.env.get`), as the port and the token file did before; the environment of the process
+that runs `claude --bg` is not a reliable way, because a session inherits the environment
+of the background service that hosts it, which the first launch started (see "Settled by
+launching a session through the scheduled job"). So the token goes into the settings
+file, in the http hooks' `Authorization` header, and into its token file, which the
+settings `env` names for the mod and the `SessionStart` command names for hook_post.py.
+
+**Hooks.** A post goes to `POST /hooks/<event>` with the session's token, which an http
+hook carries in its `Authorization` header and the `SessionStart` command reads from the
+session's token file; a post without a valid token changes nothing. The runtime reads
+the payload (`claude` reads `session_id`, `cwd`, `transcript_path`,
+`last_assistant_message`, `error`, `notification_type`, `tool_name`, `tool_input` and
+`source`), and the post maps to the worker whose token it carries; a worker that ended
+changes nothing. A session launched before sessions had their own token posts with the
+board's token, which `/hooks` still accepts, and the daemon logs that once per session;
+its post maps to the live worker with that session id, else to the live worker without a
+session id yet whose worktree is the session's working directory, after symlinks are
+resolved. A post that maps to no live worker changes nothing. Every answer
 but a held permission prompt's is `{}`: a `Stop` gets no decision that would keep the turn
 running, and a `SessionStart` gets no context for the model. A hook that times out, or
 finds no daemon, is an error that Claude Code reports and goes past; the session runs on,
@@ -811,7 +837,8 @@ comes back after a stop and a resume or a respawn. The session loads a copy of t
 in the state directory (`mod/`), which each launch brings up to date: Claude Code writes
 its API types and a `tsconfig.json` into the folder of a mod it loads, and the copy keeps
 them out of the installed package and the checkout. The launch settings tell it where the
-daemon is, in their `env`: the port and the token file, never the token. Without them it
+daemon is, in their `env`: the port and the session's own token file, never the token
+or the board's token file. Without them it
 posts nothing; it has no default port. It is the transport of the agent channel:
 
 - At the session start it says hello (`POST /channel/hello`), registers each tool of the
@@ -846,8 +873,9 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   session's rate-limit windows to `/channel/usage`; the session end posts
   `/channel/lifecycle/session_end`.
 
-Every post carries the session id and the working directory and maps to a worker as a
-hook does. A lifecycle post goes through the same transitions as the hook it matches, and
+Every post carries the session's own token, which says which worker posts; the session
+id and the working directory that it also carries only say which session of the worker
+speaks. The channel refuses the board's token. A lifecycle post goes through the same transitions as the hook it matches, and
 the settings hooks stay, because permission prompts and usage limits come only from them,
 so one turn end can arrive twice and the transitions take it once. The mod never answers
 a permission prompt and never submits text that the daemon did not hand it; the wake
@@ -969,7 +997,9 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   last tick listed, so a request runs no `claude agents`. Reads need no token. Every other
   method must carry `Authorization: Bearer <token>`, where the token is in the file
   `token_file`, which the daemon writes with mode 0600 when it is missing and refuses to
-  use when other users can read it. A request whose `Host` header is not
+  use when other users can read it. The routes of the sessions take a session's own token
+  instead: `/channel/` only that, `/hooks/` that or, from a session launched before
+  sessions had their own, the board's. A request whose `Host` header is not
   `127.0.0.1:<port>` or `localhost:<port>` is refused, so a web page that points its own
   name at 127.0.0.1 (DNS rebinding) cannot read the API. No response has a CORS header, so
   a page on another origin cannot read one either. A body is capped at 1 MiB and must come
