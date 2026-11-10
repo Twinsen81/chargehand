@@ -720,6 +720,8 @@ class Delivery:
         paused = self.ledger.update(
             worker, state=ledger_mod.PAUSED, last_error=f"wake refused: {fault}"[:500]
         )
+        # The stopped process took no wake; a continue gets a new one.
+        drop_open_outbox(self.ledger, paused, "the wake was refused", now=self._clock())
         result.faults.append((paused, fault))
         result.errors.append(f"{worker.handle}: wake refused: {fault}")
         return True

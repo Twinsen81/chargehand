@@ -940,3 +940,22 @@ def test_a_cancel_drops_the_wake_in_the_outbox(wired):
     dropped = wired.ledger.get_outbox(message.id)
     # The cancel drops it, not only the sweep of the delivery that follows.
     assert (dropped.state, dropped.reason) == (ledger_mod.OUTBOX_DROPPED, "the worker was cancelled")
+
+
+def test_a_wake_the_worktree_guard_refuses_drops_the_outbox_message(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+    wired.next_tick()
+    message = wired.ledger.outbox_message(reviewer)
+
+    result = delivery_mod.Delivery(
+        wired.ledger, max_concurrent=5, runtime=wired.runner.runtime,
+        policy=wired.runner._policy_of, guard=lambda worker: "the worktree changed",
+    ).run()
+
+    paused = wired.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED and result.faults
+    dropped = wired.ledger.get_outbox(message.id)
+    assert (dropped.state, dropped.reason) == (ledger_mod.OUTBOX_DROPPED, "the wake was refused")
+    assert pending(wired, paused) == pointers
