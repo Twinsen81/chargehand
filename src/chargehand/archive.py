@@ -415,7 +415,10 @@ class JobRunner:
 
         try:
             transcript = self._transcript(ledger, worker)
-            members = records(worker, ledger.sessions_of(worker), transcript=transcript)
+            members = records(
+                worker, ledger.sessions_of(worker), transcript=transcript,
+                handoff=worker.handoff_note,
+            )
             summary = write_archive(
                 dest, members=members, trees=trees, progress=progress,
                 stopping=self.stopping.is_set,

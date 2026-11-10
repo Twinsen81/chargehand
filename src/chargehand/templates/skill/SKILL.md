@@ -84,5 +84,5 @@ chargehand tick                             # run a tick now
 - A finished turn makes a worker `idle`, not `done`, for every role: it waits for
   events. `idle` does not mean "succeeded"; the user may look at what the turn left.
   `idle` and `queued` send no notification; `status` and the board show them.
-  A worker becomes `done` when its item is closed, or when a status file says
-  `complete`.
+  A worker becomes `done` when its item is closed, when its session reports `done`
+  with the `report` tool, or when a status file (deprecated) says `complete`.

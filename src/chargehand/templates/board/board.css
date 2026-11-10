@@ -47,7 +47,8 @@ header.top h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2
 .refresh.stale { color: var(--red); }
 
 main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; min-height: 0; }
-.column { flex: 1 1 0; min-width: 260px; max-width: 420px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; min-height: 0; }
+/* Six columns fit side by side from about 1420 px of width; a narrower page scrolls. */
+.column { flex: 1 1 0; min-width: 220px; max-width: 420px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; min-height: 0; }
 .column .head { display: flex; align-items: center; gap: 4px 8px; padding: 10px 12px 6px; flex-wrap: wrap; }
 .column h2 { font-size: 12px; margin: 0; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .column .count { background: var(--card); color: var(--text); border-radius: 10px; padding: 0 7px; font-size: 11px; font-weight: 600; }
@@ -67,7 +68,7 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .health.unknown .dot { background: var(--grey); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 
-.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; overflow-wrap: anywhere; }
 .card:hover { background: var(--card-hover); border-color: #3a4150; }
 .card .top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid transparent; white-space: nowrap; font-weight: 500; }
@@ -90,6 +91,12 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .card .prompt .answers { display: flex; gap: 5px; flex-wrap: wrap; margin: 4px 0; }
 .card .prompt button.answer.allow, .card .prompt button.answer.always { border-color: var(--green); }
 .card .prompt button.answer.deny { border-color: var(--red); color: var(--red); }
+.card .prompt .answer-line { display: flex; gap: 5px; margin: 4px 0; }
+.card .prompt .answer-line input { flex: 1; min-width: 0; }
+.card .report { font-size: 12px; color: var(--muted); margin: 4px 0; overflow-wrap: anywhere; }
+.card .report .who { color: var(--faint); }
+.card .report.done { color: var(--green); }
+.card .report.failed { color: var(--red); }
 .card .snippet { font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; white-space: pre-line; overflow-wrap: anywhere; }
 .card .snippet .who { color: var(--faint); }
 .card .snippet.prompt { color: var(--prompt); -webkit-line-clamp: 4; }

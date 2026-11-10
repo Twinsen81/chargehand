@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # chargehand notification hook.
 #
-# Called once when a worker needs you or ends: blocked, parked, failed, done through the
-# status file, and the watchdog states. A turn end that waits for events (idle) and a
+# Called once when a worker needs you or ends: blocked, parked, failed, done through a
+# report or the status file, and the watchdog states. A turn end that waits for events (idle) and a
 # worker whose item closed are not notified; `status` shows them. These variables are set:
 #
 #   CHARGEHAND_ITEM    the work item (an issue identifier); for a worker started on the

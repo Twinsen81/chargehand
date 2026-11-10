@@ -143,6 +143,27 @@ class _RowChanged(Exception):
 
 # The detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
+# The detail of a worker whose turn ended after it asked a question with the ask tool.
+ASKED = "asked a question; answer it on the board"
+
+# A report counts for the turn it was made in: from the last wake on, or from the launch.
+# The wake is recorded once its resume or its submit returned, a moment after the new
+# turn started, so a report this much earlier still counts.
+REPORT_TURN_MARGIN_SECS = 5.0
+
+# One notification per ask question. The question that a notification was about is kept
+# under this prefix and the worker id. While the worker stays blocked, another view of the
+# same turn end (`done` from the Stop hook or the listing, `blocked` from the listing,
+# before or after the answer) sends nothing more, as long as no permission prompt is open
+# and the question is the worker's newest. A permission prompt notified before or after
+# the question records no question, so it never covers one. A new turn, a turn end that
+# waits for events and the end of the worker drop the record.
+NOTIFIED_QUESTION_PREFIX = "notified-question:"
+# Records per worker that only a live worker needs: garbage collection drops them once the
+# worker has ended (cancelled, discarded, closed). Not in WORKER_STATE_PREFIXES, whose
+# records say that a worker has an item checkout.
+LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX,)
+QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
 
 # The worker states that are never notified. A worker that waits for events ends a turn
 # for each event it answers; `status` and the board show it. Blocked, parked, failed, done
@@ -1367,7 +1388,8 @@ class Runner:
 
         Delivery wakes the worker with it as with any event, under the same caps and the
         same usage reserve; a worker that delivery does not wake keeps it until it may. A
-        worker blocked by a question is woken by the reply, which answers it.
+        worker blocked by a question is woken by the reply, which answers it; a question
+        that it asked with its ask tool is resolved by the reply.
         """
         if worker.is_terminal:
             return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
@@ -1385,6 +1407,10 @@ class Runner:
             dedupe_id=f"reply:{args.get('request_id') or now}",
             pointer=text,
         ), now=now)
+        # The reply answers a question that the worker asked with its ask tool, so that
+        # question no longer holds the worker, and delivery wakes it with the reply.
+        if self.ledger.answer_questions(worker, by=ledger_mod.RESOLVED_BY_REPLY, now=now):
+            log.info("%s: the reply answers its question", worker.handle)
         log.info("%s: a reply from the board waits in its inbox", worker.handle)
         if worker.state in delivery_mod.WAKE_STATES:
             return True, "reply queued; delivery wakes the worker with it"
@@ -2444,8 +2470,10 @@ class Runner:
         current = self.ledger.update(current, **changes)
         if hook.kind == runtime_mod.HOOK_PERMISSION:
             # A session shows one permission dialog at a time; an older open prompt was
-            # answered in the session.
-            self.ledger.resolve_permission_prompts(current, now=stamp)
+            # answered in the session. A question that the ask tool recorded stays open.
+            self.ledger.resolve_permission_prompts(
+                current, now=stamp, kind=ledger_mod.PROMPT_PERMISSION
+            )
             self.ledger.record_permission_prompt(
                 current, tool_name=hook.tool_name or "unknown", tool_input=hook.tool_input or "",
                 now=stamp,
@@ -2482,6 +2510,7 @@ class Runner:
         context = self.context_for_worker(worker)
         detail: str | None = None
         target_state = worker.state
+        was_blocked = worker.state == ledger_mod.BLOCKED
 
         if worker.state == ledger_mod.PARKED and hook is None:
             return worker
@@ -2550,6 +2579,9 @@ class Runner:
             report.transitions.append(_transition_line(worker.handle, before, target_state, observed))
         self._sync_labels(worker, context, report)
 
+        question_key = f"{NOTIFIED_QUESTION_PREFIX}{worker.id}"
+        if target_state in QUIET_STATES or observed == runtime_mod.WORKING or worker.is_terminal:
+            self.ledger.delete_state(question_key)
         if target_state in QUIET_STATES:
             # No notification for a turn end that waits for events. The record is
             # cleared, so the next state that needs the operator is notified even when
@@ -2557,17 +2589,42 @@ class Runner:
             if worker.notified_state is not None:
                 worker = self.ledger.update(worker, notified_state=None)
         elif observed != worker.notified_state and observed != runtime_mod.WORKING:
+            question = self._question_to_notify(worker)
+            if (
+                was_blocked and target_state == ledger_mod.BLOCKED
+                and observed in QUESTION_TURN_ENDS and question is not None
+                and self.ledger.get_state(question_key) == str(question.id)
+            ):
+                # Another view of the turn end of a question that was notified: recorded,
+                # so that the next view compares with it, and not sent again.
+                worker = self.ledger.update(worker, notified_state=observed)
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
-            if self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
+            elif self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
                 worker = self.ledger.update(worker, notified_state=observed)
+                if target_state == ledger_mod.BLOCKED and question is not None and (
+                    question.state == ledger_mod.PROMPT_OPEN
+                ):
+                    self.ledger.set_state(question_key, str(question.id))
+                else:
+                    self.ledger.delete_state(question_key)
             elif worker.is_terminal:
                 # A finished worker leaves the live loop, so nothing would visit it again.
                 self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{worker.id}", detail or "")
         elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
         return worker
+
+    def _question_to_notify(self, worker: Worker) -> ledger_mod.PermissionPrompt | None:
+        """The worker's newest ask question, open or answered, while no permission prompt
+        is open; a permission prompt is what the worker waits for then."""
+        if any(
+            prompt.kind == ledger_mod.PROMPT_PERMISSION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        ):
+            return None
+        return self.ledger.latest_question(worker)
 
     def _failure_reset(self, worker: Worker, session: Session) -> float | None:
         """The reset time of a failure the listing shows, placed after the failure.
@@ -2623,12 +2680,26 @@ class Runner:
     def _resolve_done(
         self, worker: Worker, context: RepositoryContext | None
     ) -> tuple[str, str | None]:
-        """A `done` session ended its turn. The status file, when the role has one, says more.
+        """A `done` session ended its turn. Its report, its question or its status file say more.
 
-        Without a question in the status file, the worker is idle: it waits for events on
-        the items it follows, and the operator may look at what the turn left. A status
-        file that this worker did not write says nothing about this turn.
+        A report of `done` or `failed` from this turn ends the worker, as the status file's
+        `complete` and `aborted` do. A question that the ask tool recorded and that is still
+        open blocks it. Otherwise the status file decides, when the role has one (it is
+        deprecated, and goes away in a later release). Without any of them, the worker is
+        idle: it waits for events on the items it follows, and the operator may look at
+        what the turn left. A status file that this worker did not write says nothing about
+        this turn.
         """
+        reported = self._reported_outcome(worker)
+        if reported is not None:
+            return reported
+        if any(
+            prompt.kind == ledger_mod.PROMPT_QUESTION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        ):
+            # From now on a new turn, such as one the operator starts in the session, ends it.
+            self.ledger.settle_questions(worker)
+            return ledger_mod.BLOCKED, ASKED
         try:
             role = context.role(worker.role) if context and context.usable else None
         except ConfigError:
@@ -2660,6 +2731,42 @@ class Runner:
                 self.ledger.update(worker, last_error=f"aborted: {status.stop_reason}"[:500])
             return ledger_mod.FAILED, "aborted"
         return ledger_mod.BLOCKED, "status file did not name a known state — go look"
+
+    def _reported_outcome(self, worker: Worker) -> tuple[str, str] | None:
+        """The end that the worker's report of this turn asks for, or None."""
+        if worker.report_state not in (ledger_mod.REPORT_DONE, ledger_mod.REPORT_FAILED):
+            return None
+        turn_start = max(worker.last_wake_at or 0.0, worker.created_at) - REPORT_TURN_MARGIN_SECS
+        if worker.reported_at is None or worker.reported_at < turn_start:
+            return None
+        if worker.report_state == ledger_mod.REPORT_DONE:
+            return ledger_mod.DONE, "reported done"
+        # The summary is session text. It is kept on the card and in `status`, and left
+        # out of the notification, as the status file's stop reason is.
+        if worker.report_summary:
+            self.ledger.update(worker, last_error=f"failed: {worker.report_summary}"[:500])
+        return ledger_mod.FAILED, "reported failed"
+
+    def follow_reported_pull_request(self, worker: Worker, url: str) -> str | None:
+        """Make *url*, a pull request link that *worker* reported, its card's link, and
+        follow that pull request as :meth:`_follow_pull_requests` does. The item key that it
+        follows, or None when no configured source follows it."""
+        if url != worker.pr_url:
+            worker = self.ledger.update(worker, pr_url=url)
+        for config in self.config.sources:
+            source = self.source(config.name)
+            if source is None or not source.has_pull_requests:
+                continue
+            item = source.item_for(url)
+            if item is None:
+                continue
+            followed = {(s.source, s.item) for s in self.ledger.subscriptions_of(worker)}
+            with self.ledger.transaction():
+                if (item.source, item.key) not in followed:
+                    self.ledger.subscribe(worker, item, PULL_REQUEST_KINDS)
+                self.ledger.set_state(f"{FOLLOWS_PULL_REQUEST_PREFIX}{worker.id}", item.key)
+            return item.key
+        return None
 
     def _is_stopped(self, worker: Worker, session: Session) -> bool:
         try:
@@ -2738,7 +2845,8 @@ class Runner:
         """Whether blocked *worker* waits for the answer to a question, which a reply gives.
 
         No permission prompt is open, and this tick's listing shows the session's turn
-        ended: with a question, or `done` when the status file asked one. A turn that runs,
+        ended: with a question, or `done` when the ask tool or the status file asked one. A
+        question of the ask tool is resolved by the board's answer first. A turn that runs,
         a dialog that waits and a failed turn do not count. No new call.
         """
         if worker.state != ledger_mod.BLOCKED or not worker.session_id:
@@ -3714,14 +3822,16 @@ class Runner:
         log.info("%s: archived to %s; worktree and session removed", worker.handle, dest)
 
     def _forget_checkout_heads(self) -> None:
-        """Drop the records of each worker whose worktree is gone, by any path."""
+        """Drop the records of each worker whose worktree is gone, by any path, and the
+        records that only a live worker needs once it has ended."""
         for key in self.ledger.all_state():
-            prefix = next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            live_only = next((p for p in LIVE_WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            prefix = live_only or next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
             if prefix is None:
                 continue
             worker_id = key.removeprefix(prefix)
             worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
-            if worker is None or worker.gc_done:
+            if worker is None or worker.gc_done or (live_only and worker.is_terminal):
                 self.ledger.delete_state(key)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:

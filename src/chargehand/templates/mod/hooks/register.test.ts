@@ -174,6 +174,19 @@ test('an empty outbox submits nothing', async ($, on) => {
   expect(paths(posts).filter(path => path === '/channel/outbox').length).toBe(3)
 })
 
+test('the poll stops once the daemon says that the worker has ended', async ($, on) => {
+  const posts = daemon(on, {
+    '/channel/hello': { tools: TOOLS, outbox_poll_secs: 5 },
+    '/channel/outbox': { message: null, ended: true },
+  })
+  const clock = mock.clock(on)
+  await $.session.start({ cwd: CWD, surface: null, isInteractive: false })
+
+  await clock.advance(30_000)
+
+  expect(paths(posts).filter(path => path === '/channel/outbox').length).toBe(1)
+})
+
 test('a dropped submission is confirmed as not submitted', async ($, on) => {
   const posts = daemon(on, {
     '/channel/hello': { tools: TOOLS, outbox_poll_secs: 5 },

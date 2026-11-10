@@ -125,7 +125,7 @@ def test_the_role_allow_rules_come_first_and_stay(tmp_path):
     assert settings["env"] == {
         claude.MOD_PORT_ENV: "7979", claude.MOD_TOKEN_FILE_ENV: str(tmp_path / "t"),
     }
-    assert claude.launch_settings({}, ()) is None
+    assert claude.launch_settings({}, ()) == {"permissions": {"deny": ["AskUserQuestion"]}}
 
 
 def test_a_missing_mod_folder_is_not_passed(monkeypatch, tmp_path):

@@ -18,11 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `subscribe`, as `mcp__chargehand__<tool>`) and forwards each call to the daemon; the
   launch settings allow those tools in every permission mode. It polls the worker's outbox
   and submits the wake message as the session's next turn once the session is idle, so a
-  wake no longer stops and resumes a live process. It posts the session start, each turn
-  end and the session end, and after each turn the session's weekly usage window. It finds
-  the daemon through the launch settings, which name the port and the token file, and has
-  no default port. It never answers a permission prompt and never submits text that the
-  daemon did not hand it.
+  wake no longer stops and resumes a live process; once its worker has ended, it stops
+  polling. It posts the session start, each turn end and the session end, and after each
+  turn the session's weekly usage window. It finds the daemon through the launch
+  settings, which name the port and the token file, and has no default port. It never
+  answers a permission prompt and never submits text that the daemon did not hand it.
 - Delivery through the outbox. A worker whose session's mod said hello gets its wake as
   one outbox message: events that come in before the mod takes it join it, a stopped
   process is started again with `claude respawn` first, and the wake is recorded once,
@@ -49,6 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrapper does, and the newest reading is the one that counts.
 - The ledger keeps the outbox and, on each worker, the session whose mod said hello and the
   session's context window as the mod last read it (schema version 10).
+- `ask` and `report` on the board. The mod's `ask(question, options)` records the question
+  with its options in the same record as a permission prompt and returns at once, telling
+  the model to end its turn; at the end of that turn the worker is blocked, and its card in
+  Needs you shows the options as buttons and a one-line answer field. The first answer
+  resolves the question and reaches the worker as a reply, as its next turn; a second one
+  is refused with 409. `AskUserQuestion` is denied for every worker at launch.
+  `report(state, summary, links)` keeps the state, the summary and the links on the worker,
+  and the card shows them; a pull request link becomes the card's link and the worker
+  follows that pull request. A report of `done` or `failed` ends the worker at the end of
+  that turn, as the status file's `complete` and `aborted` do; a report from an earlier
+  turn does not count.
+- `handoff(note)` stores the worker's handoff note (16 KiB at most) for a later session of
+  the same work; it never reaches a log line or a notification. `request_wake(after_secs)`
+  puts a timer into the worker's inbox, which delivery takes once it is due, through the
+  same admission as any wake; the daily wake cap counts it. A later request replaces the
+  timer that waits.
+- The ledger keeps each worker's last report and its handoff note, and the due time of an
+  inbox entry (schema version 11).
+
+### Deprecated
+
+- The status-file protocol (a role's `status_file`). It still works in this release and is
+  removed in a later one; a worker reports with the mod's `report` and `ask` tools instead.
 
 ### Removed
 

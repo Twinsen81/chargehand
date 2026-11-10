@@ -1151,6 +1151,116 @@ def test_every_older_ledger_gains_the_outbox_and_the_mod_columns(tmp_path, versi
         assert ledger.put_outbox(updated, session_uuid="u", text="t", entries=[1]) is not None
 
 
+# ----- version 11: reports, handoff notes and timers -----------------------------------
+
+V10_SCHEMA = V9_SCHEMA.replace("PRAGMA user_version = 9;", "") + """
+ALTER TABLE workers ADD COLUMN mod_session TEXT;
+ALTER TABLE workers ADD COLUMN mod_seen_at REAL;
+ALTER TABLE workers ADD COLUMN context_tokens INTEGER;
+ALTER TABLE workers ADD COLUMN context_percent REAL;
+CREATE TABLE outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id INTEGER NOT NULL REFERENCES workers (id),
+    session_uuid TEXT NOT NULL, text TEXT NOT NULL, entries TEXT NOT NULL DEFAULT '[]',
+    state TEXT NOT NULL, reason TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    taken_at REAL, submitted_at REAL
+);
+PRAGMA user_version = 10;
+"""
+
+
+def test_a_version_ten_ledger_gains_the_report_the_handoff_and_the_due_time(tmp_path):
+    path = tmp_path / "v10.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V10_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at, mod_session) VALUES (7, 'implementer', 'ABC-1', "
+        "'i1', 'test', '/repo', '/w/ABC-1', 'b', 'idle', 4, 1.0, 2.0, 'uuid-7')"
+    )
+    conn.execute(
+        "INSERT INTO inbox (worker_id, source, kind, item, item_ref, actor, occurred_at, "
+        "dedupe_id, pointer, queued_at) VALUES (7, 'fake', 'comment', 'ABC-1', 'i1', 'x', 1.0, "
+        "'e1', 'https://example.invalid/1', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = ledger.get(7)
+        assert (worker.mod_session, worker.report_state, worker.handoff_note) == ("uuid-7", None, None)
+        (entry,) = ledger.inbox(worker)
+        assert entry.due_at is None
+        ledger.update(worker, report_state="done", report_summary="s", reported_at=3.0,
+                      handoff_note="n", handoff_at=3.0)
+        ledger.put_timer(worker, due_at=time.time() + 60, item="ABC-1", item_ref="i1")
+        assert len(ledger.inbox(worker)) == 1
+
+    with Ledger(path) as ledger:
+        assert (ledger.get(7).report_state, ledger.get(7).handoff_note) == ("done", "n")
+        assert ledger.pending_timer(ledger.get(7)) is not None
+
+
+@pytest.mark.parametrize(
+    "version_schema",
+    ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA", "V7_SCHEMA",
+     "V8_SCHEMA", "V9_SCHEMA"],
+)
+def test_every_older_ledger_gains_the_report_the_handoff_and_the_due_time(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        updated = ledger.update(worker, report_state="working", handoff_note="n")
+        assert (updated.report_state, updated.handoff_note) == ("working", "n")
+        ledger.put_timer(updated, due_at=time.time() - 1, item="ABC-9", item_ref="ABC-9")
+        assert [e.kind for e in ledger.inbox(updated)] == [ledger_mod.TIMER_KIND]
+
+
+# ----- timers and questions ---------------------------------------------------------
+
+
+def test_a_timer_waits_in_the_inbox_until_it_is_due(ledger):
+    worker = make(ledger)
+
+    ledger.put_timer(worker, due_at=100.0, item="ABC-1", item_ref="id-ABC-1", now=10.0)
+
+    assert ledger.inbox(worker, now=99.0) == []
+    (entry,) = ledger.inbox(worker, now=100.0)
+    assert (entry.source, entry.kind, entry.pointer, entry.due_at) == (
+        ledger_mod.TIMER_SOURCE, ledger_mod.TIMER_KIND, ledger_mod.TIMER_POINTER, 100.0,
+    )
+    # The whole inbox shows it too.
+    assert len(ledger.inbox(worker, pending_only=False)) == 1
+    # A new timer replaces the one that waits, and a delivered one stays as it was.
+    ledger.put_timer(worker, due_at=200.0, item="ABC-1", item_ref="id-ABC-1", now=11.0)
+    assert [e.due_at for e in ledger.inbox(worker, now=300.0)] == [200.0]
+    ledger.mark_delivered(ledger.inbox(worker, now=300.0), now=300.0)
+    ledger.put_timer(worker, due_at=400.0, item="ABC-1", item_ref="id-ABC-1", now=301.0)
+    assert len(ledger.inbox(worker, pending_only=False)) == 2
+
+
+def test_a_question_is_answered_once(ledger):
+    worker = make(ledger)
+    first = ledger.record_question(worker, "Which colour?", ["red", "blue"], now=1.0)
+    second = ledger.record_question(worker, "Which shade?", [], now=2.0)
+
+    assert ledger.get_permission_prompt(first).state == ledger_mod.PROMPT_CANCELLED
+    assert ledger.answer_question(second, by=ledger_mod.RESOLVED_BY_BOARD, now=3.0) is True
+    assert ledger.answer_question(second, by=ledger_mod.RESOLVED_BY_BOARD, now=4.0) is False
+    resolved = ledger.get_permission_prompt(second)
+    assert (resolved.state, resolved.resolved_by, resolved.resolved_at) == (
+        ledger_mod.PROMPT_RESOLVED, ledger_mod.RESOLVED_BY_BOARD, 3.0,
+    )
+    # A permission prompt is not a question.
+    prompt = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="ls")
+    assert ledger.answer_question(prompt, by=ledger_mod.RESOLVED_BY_BOARD) is False
+
+
 # ----- the outbox ------------------------------------------------------------------
 
 

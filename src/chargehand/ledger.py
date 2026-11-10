@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -101,6 +101,21 @@ REPLY_SOURCE = "board"
 REPLY_KIND = "reply"
 REPLY_LIMIT = 500
 
+# A wake that a worker asked for with request_wake waits in its inbox as an event of this
+# source and kind, due at the time it named. Its pointer is chargehand's own identifier.
+# One timer per worker waits at a time: a new request replaces the one that waits.
+TIMER_SOURCE = "timer"
+TIMER_KIND = "timer"
+TIMER_POINTER = "request_wake"
+
+# What a worker's session last reported with the report tool. `done` and `failed` end the
+# worker at the end of the turn that reported them; the other states are card text only.
+REPORT_WORKING = "working"
+REPORT_DONE = "done"
+REPORT_FAILED = "failed"
+REPORT_NEEDS_INPUT = "needs-input"
+REPORT_STATES = (REPORT_WORKING, REPORT_DONE, REPORT_FAILED, REPORT_NEEDS_INPUT)
+
 # What the board keeps per repository and per worker: names and icons the operator chose,
 # pins, and the folded and hidden repositories. The page reads it and nothing else does, so
 # the configured names, the handles and the session names never change with it.
@@ -142,7 +157,9 @@ ALLOW = "allow"
 DENY = "deny"
 # Who resolved or cancelled a prompt: a click on the board, a rule the operator recorded
 # from the board, or the session itself (answered in the terminal, superseded, or stopped).
+# A question is also resolved by a reply, from the board or the command line.
 RESOLVED_BY_BOARD = "board"
+RESOLVED_BY_REPLY = "reply"
 RESOLVED_BY_RULE = "rule"
 RESOLVED_BY_SESSION = "session"
 
@@ -222,6 +239,12 @@ _WORKER_COLUMNS = (
     "mod_seen_at",
     "context_tokens",
     "context_percent",
+    "report_state",
+    "report_summary",
+    "report_links",
+    "reported_at",
+    "handoff_note",
+    "handoff_at",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -288,7 +311,15 @@ CREATE TABLE IF NOT EXISTS workers (
     mod_session      TEXT,
     mod_seen_at      REAL,
     context_tokens   INTEGER,
-    context_percent  REAL
+    context_percent  REAL,
+    -- The last report of its session (REPORT_STATES, a summary, a JSON list of links), and
+    -- its handoff note. Untrusted session text, cleaned and capped when stored.
+    report_state     TEXT,
+    report_summary   TEXT,
+    report_links     TEXT,
+    reported_at      REAL,
+    handoff_note     TEXT,
+    handoff_at       REAL
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -367,6 +398,8 @@ CREATE TABLE IF NOT EXISTS inbox (
     pointer      TEXT    NOT NULL,
     queued_at    REAL    NOT NULL,
     delivered_at REAL,
+    -- An entry that waits for this time before a wake takes it, such as a timer.
+    due_at       REAL,
     UNIQUE (worker_id, source, dedupe_id)
 );
 
@@ -591,6 +624,28 @@ ALTER TABLE workers ADD COLUMN context_percent REAL;
 {_SCHEMA}
 """
 
+# Version 11 adds the worker's last report and its handoff note, and the due time of an
+# inbox entry. Every version from 2 on has a workers table without the new columns; only a
+# version 3 file or a later one has an inbox, which a version 2 file gets whole from the
+# schema of its step to version 3.
+_V11_WORKER_COLUMNS = """
+ALTER TABLE workers ADD COLUMN report_state TEXT;
+ALTER TABLE workers ADD COLUMN report_summary TEXT;
+ALTER TABLE workers ADD COLUMN report_links TEXT;
+ALTER TABLE workers ADD COLUMN reported_at REAL;
+ALTER TABLE workers ADD COLUMN handoff_note TEXT;
+ALTER TABLE workers ADD COLUMN handoff_at REAL;
+"""
+_MIGRATE_V10_TO_V11 = f"""
+{_V11_WORKER_COLUMNS}
+ALTER TABLE inbox ADD COLUMN due_at REAL;
+{_SCHEMA}
+"""
+_MIGRATE_V2_V10_TO_V11 = f"""
+{_V11_WORKER_COLUMNS}
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -641,6 +696,12 @@ class Worker:
     mod_seen_at: float | None = None
     context_tokens: int | None = None
     context_percent: float | None = None
+    report_state: str | None = None
+    report_summary: str | None = None
+    report_links: str | None = None
+    reported_at: float | None = None
+    handoff_note: str | None = None
+    handoff_at: float | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -814,6 +875,7 @@ class InboxEntry:
     pointer: str
     queued_at: float
     delivered_at: float | None
+    due_at: float | None = None
 
 
 def _row_to_subscription(row: Mapping[str, Any]) -> Subscription:
@@ -898,17 +960,19 @@ class Ledger:
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
-            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
             5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
-            + _MIGRATE_V9_TO_V10,
-            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
-            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
-            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
-            9: _MIGRATE_V9_TO_V10,
+            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10
+            + _MIGRATE_V10_TO_V11,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            10: _MIGRATE_V10_TO_V11,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1156,6 +1220,13 @@ class Ledger:
         ).fetchone()
         return _row_to_worker(row) if row else None
 
+    def latest_worker_by_session_uuid(self, session_uuid: str) -> Worker | None:
+        """The newest worker of the session, in any state."""
+        row = self._conn.execute(
+            "SELECT * FROM workers WHERE session_uuid = ? ORDER BY id DESC LIMIT 1", (session_uuid,)
+        ).fetchone()
+        return _row_to_worker(row) if row else None
+
     def worker_by_worktree(self, worktree: str) -> Worker | None:
         row = self._conn.execute(
             "SELECT * FROM workers WHERE worktree = ? ORDER BY id DESC LIMIT 1", (worktree,)
@@ -1210,14 +1281,26 @@ class Ledger:
         # stays open: a hook touches the row before it records a prompt, so a row read
         # later knows of it. The end of a launch (`launching` -> `running`) cancels
         # nothing: the first dialog of a session can come before the tick confirms it.
+        # A question that the ask tool recorded is no dialog of the session: a write of
+        # `running` cancels it only once the turn that asked it has ended (it is settled),
+        # because a permission prompt answered later in the same turn also writes `running`.
         if "state" not in changes:
             return
         state = changes["state"]
         if state == BLOCKED or (worker.state == LAUNCHING and state == RUNNING):
             return
+        if state != RUNNING:
+            self.resolve_permission_prompts(worker, now=changes["updated_at"])
+            return
         self.resolve_permission_prompts(
-            worker, now=changes["updated_at"],
-            recorded_by=worker.updated_at if state == RUNNING else None,
+            worker, now=changes["updated_at"], recorded_by=worker.updated_at,
+            kind=PROMPT_PERMISSION,
+        )
+        self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE worker_id = ? AND kind = ? AND state = ? AND released_at IS NOT NULL",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, changes["updated_at"], worker.id,
+             PROMPT_QUESTION, PROMPT_OPEN),
         )
 
     @staticmethod
@@ -1297,19 +1380,80 @@ class Ledger:
         return [PermissionPrompt(**dict(row)) for row in rows]
 
     def resolve_permission_prompts(
-        self, worker: Worker, *, now: float | None = None, recorded_by: float | None = None
+        self,
+        worker: Worker,
+        *,
+        now: float | None = None,
+        recorded_by: float | None = None,
+        kind: str | None = None,
     ) -> int:
-        """Cancel the worker's open prompts, or those recorded by *recorded_by*: its session
-        no longer shows them."""
+        """Cancel the worker's open prompts, or those recorded by *recorded_by*, or those of
+        *kind*: its session no longer shows them."""
         stamp = time.time() if now is None else now
         cursor = self._conn.execute(
             "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
             "released_at = COALESCE(released_at, ?) WHERE worker_id = ? AND state = ? "
-            "AND (? IS NULL OR created_at <= ?)",
+            "AND (? IS NULL OR created_at <= ?) AND (? IS NULL OR kind = ?)",
             (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN,
-             recorded_by, recorded_by),
+             recorded_by, recorded_by, kind, kind),
         )
         return cursor.rowcount
+
+    def record_question(
+        self, worker: Worker, question: str, options: Sequence[str], *, now: float | None = None
+    ) -> int:
+        """Record an open question of *worker* with its *options*; it replaces an older one.
+
+        The question is a prompt of kind `question`: the board shows it in the same card as
+        a permission prompt, and the operator's answer resolves it. No hook waits for it.
+        Its `released_at` says when the turn that asked it ended (:meth:`settle_questions`).
+        """
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            self.resolve_permission_prompts(worker, now=stamp, kind=PROMPT_QUESTION)
+            cursor = self._conn.execute(
+                "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
+                "kind, options) VALUES (?, ?, ?, ?, ?, ?)",
+                (worker.id, "ask", question, stamp, PROMPT_QUESTION, json.dumps(list(options))),
+            )
+        return int(cursor.lastrowid)
+
+    def latest_question(self, worker: Worker) -> PermissionPrompt | None:
+        """The worker's newest question, in any state."""
+        row = self._conn.execute(
+            "SELECT * FROM permission_prompts WHERE worker_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (worker.id, PROMPT_QUESTION),
+        ).fetchone()
+        return PermissionPrompt(**dict(row)) if row else None
+
+    def settle_questions(self, worker: Worker, *, now: float | None = None) -> None:
+        """Record that the turn which asked the worker's open questions has ended."""
+        self._conn.execute(
+            "UPDATE permission_prompts SET released_at = ? WHERE worker_id = ? AND kind = ? "
+            "AND state = ? AND released_at IS NULL",
+            (time.time() if now is None else now, worker.id, PROMPT_QUESTION, PROMPT_OPEN),
+        )
+
+    def answer_questions(self, worker: Worker, *, by: str, now: float | None = None) -> int:
+        """Resolve every open question of *worker*: a reply answers them."""
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE worker_id = ? AND kind = ? AND state = ?",
+            (PROMPT_RESOLVED, by, time.time() if now is None else now, worker.id,
+             PROMPT_QUESTION, PROMPT_OPEN),
+        )
+        return cursor.rowcount
+
+    def answer_question(self, prompt_id: int, *, by: str, now: float | None = None) -> bool:
+        """Resolve an open question. False when it was answered or cancelled before."""
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE id = ? AND kind = ? AND state = ?",
+            (PROMPT_RESOLVED, by, stamp, prompt_id, PROMPT_QUESTION, PROMPT_OPEN),
+        )
+        return cursor.rowcount == 1
 
     def cancel_permission_prompt(self, prompt_id: int, *, now: float | None = None) -> bool:
         """Cancel one open prompt that its session no longer shows. False when it was not open."""
@@ -1530,12 +1674,49 @@ class Ledger:
         )
         return cursor.rowcount > 0
 
-    def inbox(self, worker: Worker, *, pending_only: bool = True) -> list[InboxEntry]:
+    def inbox(
+        self, worker: Worker, *, pending_only: bool = True, now: float | None = None
+    ) -> list[InboxEntry]:
+        """The worker's inbox; with *pending_only*, the entries that a wake may take now:
+        not delivered, and due."""
         query = "SELECT * FROM inbox WHERE worker_id = ?"
+        params: list[object] = [worker.id]
         if pending_only:
-            query += " AND delivered_at IS NULL"
-        rows = self._conn.execute(query + " ORDER BY id", (worker.id,)).fetchall()
+            query += " AND delivered_at IS NULL AND (due_at IS NULL OR due_at <= ?)"
+            params.append(time.time() if now is None else now)
+        rows = self._conn.execute(query + " ORDER BY id", params).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
+
+    def put_timer(
+        self, worker: Worker, *, due_at: float, item: str, item_ref: str, now: float | None = None
+    ) -> int:
+        """Put a timer that is due at *due_at* into the worker's inbox, instead of the one
+        that waits."""
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            self._conn.execute(
+                "DELETE FROM inbox WHERE worker_id = ? AND source = ? AND kind = ? "
+                "AND delivered_at IS NULL",
+                (worker.id, TIMER_SOURCE, TIMER_KIND),
+            )
+            cursor = self._conn.execute(
+                """
+                INSERT INTO inbox (worker_id, source, kind, item, item_ref, actor, occurred_at,
+                                   dedupe_id, pointer, queued_at, due_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (worker.id, TIMER_SOURCE, TIMER_KIND, item, item_ref, TIMER_SOURCE, stamp,
+                 f"timer:{stamp!r}", TIMER_POINTER, stamp, due_at),
+            )
+        return int(cursor.lastrowid)
+
+    def pending_timer(self, worker: Worker) -> InboxEntry | None:
+        row = self._conn.execute(
+            "SELECT * FROM inbox WHERE worker_id = ? AND source = ? AND kind = ? "
+            "AND delivered_at IS NULL ORDER BY id DESC LIMIT 1",
+            (worker.id, TIMER_SOURCE, TIMER_KIND),
+        ).fetchone()
+        return InboxEntry(**dict(row)) if row else None
 
     def delivered_at(self, worker: Worker, at: float) -> list[InboxEntry]:
         """The inbox entries of *worker* that one wake delivered: those marked at *at*."""

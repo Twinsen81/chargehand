@@ -133,6 +133,17 @@ def test_a_handoff_note_is_a_member_only_when_there_is_one(harness):
     assert set(archive.records(worker, [], transcript=None)) == {"worker.json", "sessions.json"}
 
 
+def test_the_archive_of_a_worker_with_a_handoff_note_holds_the_note(harness):
+    worker = cancelled(harness)
+    harness.ledger.update(worker, handoff_note="next: the tests", handoff_at=1.0)
+
+    assert apply_request(harness, "archive", worker.target, force=True)["ok"] == 1
+    runner(harness, transcript=lambda ledger, w: None).run_queued(harness.ledger)
+
+    with zipfile.ZipFile(job_of(harness, worker).result_path) as zf:
+        assert zf.read("handoff.md").decode() == "next: the tests"
+
+
 def test_the_file_names_of_two_archives_of_one_day_differ(harness):
     worker = cancelled(harness)
     other = harness.ledger.create_worker(

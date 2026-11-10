@@ -154,6 +154,17 @@ waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and t
 its own dialog, which only `claude attach` can answer; so does a prompt that was open
 when the daemon stopped.
 
+A worker asks you a question with the `ask` tool of the chargehand mod; `AskUserQuestion`
+is denied for every worker. The question shows on its card in Needs you with its options
+as buttons and a one-line answer field. The worker ends its turn after it asks, and your
+answer reaches it as a reply, as its next turn. A worker reports its progress with the
+`report` tool: the card shows the state and the summary, a pull request link becomes the
+card's link and the worker follows that pull request, and `done` or `failed` ends the
+worker when its turn ends, which clears or keeps the label as a finished worker does. A
+worker that never reports is supervised by its hooks and its session state as before.
+The `status_file` key of a role is deprecated: it still works in this release and goes
+away in a later one; use `report` and `ask` in the role's prompt instead.
+
 The daemon reads your subscription's weekly usage window by itself. Every 5 minutes it
 starts a short `claude -p` process in an empty directory and sends it Claude Code's
 `get_usage` control request; Claude Code answers with the usage that it fetches with its
@@ -273,7 +284,8 @@ At `info` the log holds:
 `warning` keeps only warnings and errors.
 
 The log never holds what a worker said or did in its session: no last answer, waiting
-text, permission tool input, status file text, comment body or transcript path. It never
+text, permission tool input, question, report summary, handoff note, status file text,
+comment body or transcript path. It never
 holds a comment author either, which on Linear is an email address. Those stay in the
 ledger and on the board. Text from outside chargehand that may appear, such as a setup
 script's error or a command's stderr, is capped and cut to one line.
@@ -327,7 +339,8 @@ prompt before anything runs.
 ## Notifications
 
 The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or ends:
-blocked, parked, failed, done through the status file, or stopped by the watchdog. A
+blocked, parked, failed, done through a report or the status file, or stopped by the
+watchdog. A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
 are not notified; `chargehand status` shows them. As shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you

@@ -643,15 +643,26 @@ listing for all held hooks on a thread of its own, and cancels a record whose se
 showed the dialog and no longer does. After a timeout or a restart the record is
 *released*: it stays `open`, because the session still shows the dialog, with
 `released_at` set, so no hook holds it, and the card says to answer in the session. The
-record has a `kind` and an `options` list, so a question with its own options can use
-the same record and card.
+record has a `kind` and an `options` list, so a question with its own options uses the
+same record and card: the mod's `ask` tool records one as kind `question`, which no hook
+holds. The card shows its options as buttons and a one-line answer field. The first answer
+resolves the record (`resolved`, by the board) and is recorded as a `reply` request, so the
+tick puts it into the worker's inbox and delivery wakes the worker with it, through the
+exception for a blocked worker whose turn ended with a question; a second answer gets 409.
+Any reply, from the card's Reply or from `chargehand reply`, answers the question the same
+way. A question is cancelled when the worker leaves `blocked` by another path: a pause, an
+end, or a new turn once the turn that asked it has ended, such as one that the operator
+starts in `claude attach`. A permission prompt of the same turn, and its answer, leave it
+open. Every worker launches with
+`AskUserQuestion` denied in its launch settings, beside the configured deny rules, so no
+configuration drops it: the session asks through `ask` instead.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks
 existed is followed by the diff alone.
 
 | Post | Effect |
 |---|---|
 | `SessionStart` | the worker is `running` |
-| `Stop` | as a `done` session: the status file, then `idle` (or what the file says) |
+| `Stop` | as a `done` session: the worker's report or open question, then the status file, then `idle` |
 | `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one; a limit of one model family also sets the board's model-limit badge |
 | `StopFailure`, any other error | the worker is `blocked`, "session failed" |
 | `PermissionRequest` | the worker is `blocked`, the prompt is recorded with its tool and input, and the post waits for the board's answer; with a matching Always allow rule, it is allowed at once and nothing else changes |
@@ -691,7 +702,7 @@ window until 2026-11-03); such a message parks too.
 |---|---|---|
 | `working` | A turn is running | — |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
-| `done` | The turn finished | read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the status file says, which is |
+| `done` | The turn finished | a report of `done` or `failed` from this turn ends the worker; an open question from the `ask` tool blocks it; else read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the report, the question or the status file says, which is |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
 A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without a
@@ -729,7 +740,19 @@ told to write one file and stop has done it. `blocked` is therefore a reason to 
 look rather than proof that anything is waiting, and a bare `done` still says nothing
 about *how* a run finished. The runner stays conservative on both counts.
 
-A repository disambiguates that with the **status-file protocol**: whatever the prompt runs
+A worker disambiguates that with its **report**: the mod's `report(state, summary, links)`
+tool (see "The chargehand mod" below). A report of `done` or `failed` in a turn ends the
+worker at the end of that turn, as the status file's `complete` and `aborted` do: `done`
+clears the label, and `failed` keeps the summary as the worker's problem, out of the
+notification. A report counts for the turn it was made in, from the last wake on (with a
+margin of a few seconds, because the wake is recorded once its resume returned), or from
+the launch. `working` and `needs-input` are card text only. A plain https pull request
+link among the links becomes the card's link, and the worker follows that pull request as
+it follows the pull request of its own branch. A worker that never calls `report` is still
+supervised by the hooks and the state diff, as below.
+
+The **status-file protocol** is deprecated: it stays for one release, for repositories
+whose prompts still write it, and goes away in a later release. Whatever the prompt runs
 writes a small JSON file at its yield points and when it finishes.
 
 ```json
@@ -773,8 +796,8 @@ is paused with the reason, keeps its session and its events, and you are notifie
 The one exception is a reply from the board to a `blocked` worker whose turn ended with a
 question: the reply is the answer, so it wakes the worker, through the same admission,
 with every event that waits. The session then lists `state: blocked` with `status: idle`
-(or `blocked` without a process), or `done` when the status file asked the question, and
-no permission prompt is open in the ledger. After `claude stop` a question-blocked
+(or `blocked` without a process), or `done` when the `ask` tool or the status file asked
+the question, and no permission prompt is open in the ledger. After `claude stop` a question-blocked
 session lists `stopped`; the reply then waits, and `continue` respawns the session first.
 Another event does not wake it, because only the operator answers a question. A
 permission prompt and an `AskUserQuestion` dialog list `status: waiting`; a stop would
@@ -800,10 +823,25 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   `subscribe(item, kinds)`, which subscribes the worker to an item that a source names by
   its URL or identifier.
 - A tool call goes to `POST /channel/tool/<name>`, and the daemon's answer is the result.
+  `report` keeps the state, a one-line summary (300 characters) and up to ten plain
+  http(s) links on the worker (see "report" above). `ask(question, options)` records an
+  open question with up to ten options, in the same record as a permission prompt, and
+  returns at once with a result that tells the model to end its turn; at the end of that
+  turn the worker is `blocked`. A newer question replaces an older one. A blocking ask is
+  not built: a main-conversation tool call that runs over two minutes moves to a
+  background task, and the model would go on without the answer. `handoff(note)` stores
+  the note (16 KiB at most) and its time on the worker, for a later session of the same
+  work; it never reaches a log line or a notification. `request_wake(after_secs)` puts a
+  timer into the worker's inbox, due after 1 second to 7 days, one per worker: a later
+  call replaces the one that waits. Delivery takes it once it is due, as any event, with
+  the line `timer: request_wake`, through the same admission, and the daily cap counts
+  the wake.
 - A timer polls `POST /channel/outbox` every `outbox_poll_secs` (5). A message there is
   submitted as the session's next turn once the session is idle (`$.prompt.submit`), and
-  `POST /channel/outbox/confirm` says that the turn started. The poll is never held open:
-  a hook runs at most 10 seconds and one fetch at most 30.
+  `POST /channel/outbox/confirm` says that the turn started. Once the worker is done,
+  failed or cancelled, its session can live on; the poll then answers `ended`, which the
+  daemon logs once, and the mod stops polling. A paused worker's mod keeps polling. The
+  poll is never held open: a hook runs at most 10 seconds and one fetch at most 30.
 - Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
   session's rate-limit windows to `/channel/usage`; the session end posts
   `/channel/lifecycle/session_end`.
@@ -960,7 +998,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   (the first prompt before any wake, as the launch built it, else the wake message of the
   last wake, rebuilt from the inbox rows it delivered), the
   last answer, an open permission prompt with Allow, Deny and Always allow while its hook
-  waits (section 6), the wakes in the window of the daily wake cap, an approximate token
+  waits, or an open question with its options and an answer field (section 6), the last
+  report of its session (its state, summary and links), the wakes in the window of the daily wake cap, an approximate token
   count (the transcript's size over four) and the attach command.
 - **Board actions.** Every control command has a button, and each button records the
   same request as the command, with `origin` `board` where the CLI records `cli`; the
@@ -972,7 +1011,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   with `pause` (the CLI's `stop`), `continue` and `retry` (each with `force`), `cancel`,
   `discard` (with `force`), `archive` (with `force`), `reply` (`text`), `clone` (see
   below), `attach` (`terminal`) and `answer` (`prompt` and `answer`, for a permission
-  prompt; it answers at once, see section 6); `POST /api/repositories/<name>/pause` and
+  prompt, which it answers at once; `prompt` and `text`, for a question, which it answers
+  as a reply; see section 6); `POST /api/repositories/<name>/pause` and
   `/resume`, `/archive`
   (with `force`) and `/unarchive`; `POST /api/pause` and `/api/resume` for all
   repositories; `POST /api/token` only checks the token (204 when it is valid) and

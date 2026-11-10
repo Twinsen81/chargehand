@@ -427,7 +427,7 @@ class Delivery:
         answering: set[int] = set()
         for worker in self.ledger.workers_in_state([ledger_mod.BLOCKED]):
             # Only the operator answers a question, so only a reply wakes the worker.
-            if any(is_reply(entry) for entry in self.ledger.inbox(worker)) and (
+            if any(is_reply(entry) for entry in self.ledger.inbox(worker, now=now)) and (
                 self._awaits_answer(worker)
             ):
                 answering.add(worker.id)
@@ -463,7 +463,7 @@ class Delivery:
                 self._wake(worker, RESUME_MESSAGE, (), result)
 
     def _deliver(self, worker: Worker, result: DeliveryResult) -> None:
-        entries = self.ledger.inbox(worker)
+        entries = self.ledger.inbox(worker, now=self._clock())
         if not entries:
             if worker.state == ledger_mod.QUEUED:
                 self.ledger.update(worker, state=ledger_mod.IDLE)

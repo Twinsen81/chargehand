@@ -125,7 +125,9 @@ def test_the_hook_settings_are_in_a_private_file_and_not_on_the_command_line(har
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     # The deny rules travel in the same file.
-    assert json.loads(path.read_text())["permissions"]["deny"] == list(harness.config.deny_rules)
+    assert json.loads(path.read_text())["permissions"]["deny"] == [
+        *harness.config.deny_rules, "AskUserQuestion",
+    ]
 
 
 def _run_session_start_hook(harness, payload, *, timeout=10):

@@ -12,7 +12,9 @@
 // and when the daemon was restarted or unreachable, as a restart can bring a new token file.
 //
 // A permission prompt shows on its card with Allow, Deny and Always allow while the
-// session's hook waits in the daemon; after that only the session can answer it.
+// session's hook waits in the daemon; after that only the session can answer it. A question
+// that a worker asked with its ask tool shows with its options and a one-line answer field;
+// the answer reaches the worker as a reply, as its next turn.
 //
 // Within a column the cards are grouped by repository. The names, icons, pins and the
 // collapsed and hidden repositories are the board's own state in the ledger; the daemon
@@ -313,6 +315,16 @@ function cardChildren(c, now) {
   } else if (c.waiting_for) {
     nodes.push(el('div', 'alert', c.waiting_for));
   }
+  if (c.report) {
+    const report = el('div', 'report ' + c.report.state);
+    report.append(el('span', 'who', 'report ' + c.report.state + (c.report.summary ? ': ' : '')));
+    if (c.report.summary) report.append(c.report.summary);
+    for (const url of c.report.links || []) {
+      if (safeUrl(url)) report.append(' ', link(url, url));
+    }
+    if (c.report.summary) report.title = c.report.summary;
+    nodes.push(report);
+  }
   if (c.problem) nodes.push(el('div', 'note', c.problem));
   if (c.state === 'parked') {
     nodes.push(el('div', 'note', typeof c.reset_at === 'number'
@@ -352,8 +364,41 @@ function cardChildren(c, now) {
   return nodes;
 }
 
+function questionNode(c) {
+  const p = c.permission_prompt;
+  const box = el('div', 'prompt question');
+  box.append(el('div', 'alert', 'question: ' + p.tool_input));
+  const answer = (text) => send('/api/workers/' + encodeURIComponent(c.id) + '/answer',
+    { prompt: p.id, text }, 'answer ' + c.handle);
+  if (p.options && p.options.length) {
+    const row = el('div', 'answers');
+    for (const option of p.options) {
+      const button = boardButton(option, 'Answer with this option', () => answer(option));
+      button.className = 'answer option';
+      row.append(button);
+    }
+    box.append(row);
+  }
+  const line = el('div', 'answer-line');
+  const input = el('input');
+  input.type = 'text';
+  input.maxLength = REPLY_MAX;
+  input.placeholder = 'Or type the answer, one line';
+  const submit = () => {
+    const text = input.value.trim();
+    if (text) answer(text);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+  line.append(input, boardButton('Answer', 'Send this line as the answer', submit));
+  box.append(line);
+  return box;
+}
+
 function promptNode(c) {
   const p = c.permission_prompt;
+  if (p.kind === 'question') return questionNode(c);
   const box = el('div', 'prompt');
   box.append(el('div', 'alert', 'permission: ' + p.tool_name));
   if (p.tool_input) {
