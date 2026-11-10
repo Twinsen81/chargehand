@@ -847,6 +847,12 @@ def runs_statusline_wrapper(entry: object) -> bool:
     )
 
 
+# Denied in every worker session, beside the configured deny rules, so that no
+# configuration drops it: its dialog waits in the session, where no board answers it. A
+# worker asks with the chargehand mod's `ask` tool instead.
+ALWAYS_DENIED_TOOLS = ("AskUserQuestion",)
+
+
 def launch_settings(
     options: Mapping[str, Any],
     deny_rules: Sequence[str],
@@ -864,12 +870,14 @@ def launch_settings(
     paths hold content the operator did not write. Each of *protected_paths* gets `Edit`
     and `Write` deny rules (:func:`protected_path_rules`). With *mod*, the session loads
     the chargehand mod, and its tools get an allow rule, so that no permission mode asks
-    for them; *mod_env* tells the mod where the daemon is (:func:`mod_env`).
+    for them; *mod_env* tells the mod where the daemon is (:func:`mod_env`). The tools of
+    :data:`ALWAYS_DENIED_TOOLS` are denied in every session.
     """
     permissions: dict[str, list[str]] = {}
-    deny = [*deny_rules, *protected_path_rules(protected_paths)]
-    if deny:
-        permissions["deny"] = deny
+    deny = list(dict.fromkeys(
+        [*deny_rules, *ALWAYS_DENIED_TOOLS, *protected_path_rules(protected_paths)]
+    ))
+    permissions["deny"] = deny
     # `//` starts an absolute path in a Claude Code permission rule.
     allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
     if mod:

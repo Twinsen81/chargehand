@@ -62,9 +62,12 @@ def test_deny_rules_can_be_left_out_of_the_launch(harness):
     harness.tick()
 
     argv = harness.claude_state.launches[0]["argv"]
-    # Only the allow rule for the chargehand mod's tools is left.
+    # Only the deny of AskUserQuestion, which no configuration drops, and the allow rule
+    # for the chargehand mod's tools are left.
     settings = json.loads(argv[argv.index("--settings") + 1])
-    assert settings == {"permissions": {"allow": [claude_mod.MOD_TOOL_RULE]}}
+    assert settings == {
+        "permissions": {"deny": ["AskUserQuestion"], "allow": [claude_mod.MOD_TOOL_RULE]}
+    }
 
 
 def test_an_unlabelled_issue_is_not_picked_up(harness):
