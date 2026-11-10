@@ -174,11 +174,13 @@ public location.
   channel routes take only a worker's token, and the board's routes only the board's
   token. A token ends with its worker: the daemon refuses the token of a worker that ended,
   a new launch in the same worktree replaces it, and the file is deleted when the session
-  is removed. A post with a worker's token from another session than the worker's own,
-  such as a copy that a resume started with the same settings, changes nothing. Each
-  launch's settings deny `Read`, `Edit` and `Write` on the board's token file, on every
-  session settings file, and on the token files of the other sessions that exist at that
-  moment.
+  is removed. A tool call acts as the token's worker, whatever session id it names. A
+  hook, a hello, a lifecycle or usage post, or an outbox poll from a session that is not
+  the worker's current one, such as a copy that a resume started in the same worktree
+  with the same settings, is ignored: the post changes nothing, and the poll gets no
+  message. Every launch's settings deny `Read`, `Edit` and `Write` on the board's token
+  file, a launch without hooks too; a launch with hooks also denies them on every session
+  settings file and on the token files of the other sessions that exist at that moment.
 - **Session hooks.** Launched sessions post their start, turn ends, failures,
   notifications and permission prompts to `POST /hooks/<event>` on that port, with the
   session's token in the `Authorization` header; a post without a valid token changes

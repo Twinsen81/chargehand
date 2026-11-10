@@ -598,17 +598,19 @@ while the daemon was down, a process that died.
 **A token per session.** Each launch and each fork writes a new token for its session
 into `worker-tokens/` under the state directory (mode 0600, directory 0700, one file per
 worktree). The session's hooks and its mod send it, and the daemon maps the token to the
-worker: a post acts as the worker whose token it carries, whatever session id and working
-directory it names. The board's token never goes to a session. A token ends with its
+worker: the token, not the session id or the working directory that a post names, says
+which worker posts. The board's token never goes to a session. A token ends with its
 worker: the daemon refuses the token of a worker that ended (its mod's outbox poll is
 answered `ended`), a new launch in the same worktree replaces it, and the file is
-deleted with the settings file when the session is removed. A post with a worker's
-token that names another session than the worker's own, such as a copy that a resume
-started in the same worktree with the same settings, changes nothing: its hooks, hello,
-lifecycle and usage posts are ignored, and its outbox poll gets no message. Each launch's
-settings deny `Read`, `Edit` and `Write` on the board's token file, on every file in
-`session-settings/` (no tool of a session reads one: Claude Code loads its `--settings`
-itself), and on the token files of the other sessions that exist then. The token
+deleted with the settings file when the session is removed. A tool call acts as the
+token's worker, whatever session id it names. A hook, a hello, a lifecycle or usage post,
+or an outbox poll from a session that is not the worker's current one, such as a copy
+that a resume started in the same worktree with the same settings, is ignored: the post
+changes nothing, and the poll gets no message. Every launch's settings deny `Read`,
+`Edit` and `Write` on the board's token file, a launch without hooks too. A launch with
+hooks also denies them on every file in `session-settings/` (no tool of a session reads
+one: Claude Code loads its `--settings` itself) and on the token files of the other
+sessions that exist then. The token
 directory is not denied as a whole, because the mod reads its own token file with
 `$.fs.read`, and whether a `Read` deny rule also binds that read is not settled; so a
 session's rules do not cover the token files of sessions launched after it. Like the deny
@@ -881,9 +883,10 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   session's rate-limit windows to `/channel/usage`; the session end posts
   `/channel/lifecycle/session_end`.
 
-Every post carries the session's own token, which says which worker posts; the session
-id and the working directory that it also carries only say which session of the worker
-speaks. The channel refuses the board's token. A lifecycle post goes through the same transitions as the hook it matches, and
+Every post carries the session's own token, which says which worker posts. A tool call
+acts as that worker whatever session id it names; a hello, a lifecycle or usage post, or
+an outbox poll from a session that is not the worker's current one is ignored (see "A
+token per session"). The channel refuses the board's token. A lifecycle post goes through the same transitions as the hook it matches, and
 the settings hooks stay, because permission prompts and usage limits come only from them,
 so one turn end can arrive twice and the transitions take it once. The mod never answers
 a permission prompt and never submits text that the daemon did not hand it; the wake
