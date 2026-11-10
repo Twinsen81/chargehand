@@ -313,6 +313,27 @@ def status_line_windows(raw: bytes) -> dict[str, dict[str, Any]] | None:
     }
 
 
+def session_rate_windows(rate_limits: object) -> dict[str, dict[str, Any]] | None:
+    """The usage window of a session's rate limits, as the chargehand mod posts them.
+
+    The mod reads them with ``$.session.usage()``: a list of ``{kind, percentUsed,
+    resetsAt}``, ``resetsAt`` an ISO 8601 time. The ``seven_day`` entry comes back as
+    :func:`status_line_windows` returns it, with the values as given; checking them is the
+    caller's work. Every other kind, such as ``five_hour``, is skipped.
+    """
+    if not isinstance(rate_limits, list):
+        return None
+    for entry in rate_limits:
+        if isinstance(entry, Mapping) and entry.get("kind") == STATUS_LINE_WINDOW:
+            return {
+                STATUS_LINE_WINDOW: {
+                    "used_percent": entry.get("percentUsed"),
+                    "resets_at": entry.get("resetsAt"),
+                }
+            }
+    return None
+
+
 # The start of the refusal Claude Code prints when a background session would start in a
 # directory without a persisted trust entry. Observed in Claude Code 2.1.306:
 # "Workspace not trusted. Run `claude` in <path> once and accept the trust prompt, then
@@ -477,6 +498,7 @@ class ClaudeCLI:
         permission_mode: str,
         model: str | None = None,
         effort: str | None = None,
+        plugin_dirs: Sequence[Path | str] = (),
         settings: Mapping[str, Any] | Path | None = None,
         timeout_secs: float = 180.0,
     ) -> CommandResult:
@@ -487,10 +509,10 @@ class ClaudeCLI:
         the resume finds the conversation; the copy works in *worktree* under *name*, its
         transcript is kept for that directory, and the original is left as it was. The
         copy keeps the conversation, but falls back to the default effort and permission
-        mode, so those, the model and the settings are passed again. The job saves them,
-        and an in-place resume of the copy applies them again. stdin is /dev/null, as for
-        a resume, which reads piped text into the prompt; the copy still runs its
-        SessionStart hook.
+        mode, so those, the model, the plugin directories and the settings are passed
+        again. The job saves them, and an in-place resume of the copy applies them again.
+        stdin is /dev/null, as for a resume, which reads piped text into the prompt; the
+        copy still runs its SessionStart hook.
 
         Raises :class:`WorkspaceNotTrusted` as :meth:`launch` does. Any other failure
         names the session and the exit, never the prompt.
@@ -503,6 +525,8 @@ class ClaudeCLI:
             args += ["--model", model]
         if effort:
             args += ["--effort", effort]
+        for plugin_dir in plugin_dirs:
+            args += ["--plugin-dir", str(plugin_dir)]
         if isinstance(settings, Path):
             args += ["--settings", str(settings)]
         elif settings:
@@ -829,13 +853,18 @@ def launch_settings(
     read_paths: Sequence[Path] = (),
     hooks: Mapping[str, object] | None = None,
     protected_paths: Sequence[Path] = (),
+    *,
+    mod: bool = False,
+    mod_env: Mapping[str, str] | None = None,
 ) -> dict[str, object] | None:
-    """The per-launch settings payload: the deny rules, the allow rules and the hooks.
+    """The per-launch settings payload: the deny rules, the allow rules, the hooks and the env.
 
     Each of *read_paths* gets a `Read` allow rule, which also covers Grep and Glob. It is
     not passed as `--add-dir`: Claude Code loads skills from an added directory, and these
     paths hold content the operator did not write. Each of *protected_paths* gets `Edit`
-    and `Write` deny rules (:func:`protected_path_rules`).
+    and `Write` deny rules (:func:`protected_path_rules`). With *mod*, the session loads
+    the chargehand mod, and its tools get an allow rule, so that no permission mode asks
+    for them; *mod_env* tells the mod where the daemon is (:func:`mod_env`).
     """
     permissions: dict[str, list[str]] = {}
     deny = [*deny_rules, *protected_path_rules(protected_paths)]
@@ -843,6 +872,8 @@ def launch_settings(
         permissions["deny"] = deny
     # `//` starts an absolute path in a Claude Code permission rule.
     allow = [*(options.get("allow") or ()), *(f"Read(/{Path(p)}/**)" for p in read_paths)]
+    if mod:
+        allow.append(MOD_TOOL_RULE)
     if allow:
         permissions["allow"] = allow
     settings: dict[str, object] = {}
@@ -850,6 +881,8 @@ def launch_settings(
         settings["permissions"] = permissions
     if hooks:
         settings["hooks"] = dict(hooks)
+    if mod_env:
+        settings["env"] = dict(mod_env)
     return settings or None
 
 
@@ -868,6 +901,96 @@ def protected_path_rules(paths: Sequence[Path]) -> list[str]:
             # `//` starts an absolute path in a Claude Code permission rule.
             rules += [f"Edit(/{variant}/**)", f"Write(/{variant}/**)"]
     return rules
+
+
+# ----- the chargehand mod ----------------------------------------------------
+
+# The Claude Code plugin that every worker session loads with `--plugin-dir`: the worker
+# tools, the wake from the outbox, the lifecycle posts and the usage reading. It ships in
+# the package. Claude Code stores the flag with the job, so the mod comes back after a stop
+# and a resume or a respawn.
+MOD_DIR = Path(__file__).resolve().parent / "templates" / "mod"
+# What of the shipped folder a session loads. Its tests stay behind.
+MOD_FILES = (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.ts")
+MOD_NAME = "chargehand"
+# Claude Code lists a plugin's tool as `mcp__<plugin>__<tool>`.
+MOD_TOOL_RULE = f"mcp__{MOD_NAME}__*"
+# Where the mod finds the daemon: its port and the token file, set in the launch settings'
+# `env`. The mod has no default, so a session that chargehand did not start posts nowhere.
+MOD_PORT_ENV = "CHARGEHAND_MOD_PORT"
+MOD_TOKEN_FILE_ENV = "CHARGEHAND_MOD_TOKEN_FILE"
+# What the mod posts to `/channel/lifecycle/<event>`.
+MOD_SESSION_START = "session_start"
+MOD_TURN_COMPLETE = "turn_complete"
+MOD_SESSION_END = "session_end"
+MOD_EVENTS = (MOD_SESSION_START, MOD_TURN_COMPLETE, MOD_SESSION_END)
+
+
+def installed_mod_dir() -> Path:
+    """Where the sessions load the mod from: a copy under the state directory.
+
+    Claude Code writes its API types and a `tsconfig.json` into the folder of a mod it
+    loads. The copy takes them, so the installed package, or the checkout it runs from,
+    stays as it was shipped.
+    """
+    return paths.state_dir() / "mod"
+
+
+def install_mod(source: Path | None = None, target: Path | None = None) -> Path:
+    """Bring the copy of the mod up to date with *source*, and return its folder.
+
+    Only a file whose content differs is written, each in one step, so a session that
+    loads the copy meanwhile reads either version of a file. What Claude Code wrote into
+    the copy stays. Raises OSError when the copy cannot be written.
+    """
+    source = MOD_DIR if source is None else source
+    target = installed_mod_dir() if target is None else target
+    for name in MOD_FILES:
+        content = (source / name).read_bytes()
+        path = target / name
+        try:
+            if path.read_bytes() == content:
+                continue
+        except OSError:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    return target
+
+
+def mod_env(port: int, token_file: Path) -> dict[str, str]:
+    """The settings `env` that tells the mod where the daemon is. Names the token file, not the token."""
+    return {MOD_PORT_ENV: str(port), MOD_TOKEN_FILE_ENV: str(token_file)}
+
+
+def parse_mod_post(event: str, payload: Mapping[str, Any]) -> Hook | None:
+    """A lifecycle post of the chargehand mod, read into a :class:`~chargehand.runtime.Hook`.
+
+    Every post carries ``session_id`` and ``cwd``. The session start reads as the
+    SessionStart hook does. A turn end with ``reason`` ``answer`` reads as the Stop hook
+    does, with ``answer`` as the last answer; a turn that the model refused, that an error
+    ended or that was interrupted changes no state here, because the settings hooks report
+    those with what the mod does not see (the failure, the usage limit). The session end
+    changes no state: the listing shows what is left of the process. Each text is
+    untrusted, and is cleaned and capped here.
+    """
+    if event not in MOD_EVENTS or not isinstance(payload, Mapping):
+        return None
+    common: dict[str, Any] = {
+        "event": f"mod:{event}",
+        "session_uuid": _text(payload, "session_id", 100),
+        "cwd": _text(payload, "cwd", 1000),
+    }
+    if event == MOD_SESSION_START:
+        return Hook(kind=HOOK_SESSION_START, observed=WORKING, **common)
+    if event == MOD_TURN_COMPLETE:
+        if payload.get("reason") != "answer":
+            return Hook(kind=HOOK_NOTIFICATION, **common)
+        return Hook(kind=HOOK_TURN_END, observed=DONE,
+                    last_answer=_text(payload, "answer", LAST_ANSWER_LIMIT), **common)
+    return Hook(kind=HOOK_NOTIFICATION, **common)
 
 
 # ----- session hooks ---------------------------------------------------------
@@ -1312,6 +1435,12 @@ class ClaudeRuntime(Runtime):
     def parse_hook(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
         return parse_hook(event, payload)
 
+    channel_events = MOD_EVENTS
+
+    @classmethod
+    def parse_channel(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
+        return parse_mod_post(event, payload)
+
     @classmethod
     def permission_hold_secs(cls, worktree: Path) -> float | None:
         """From the permission hook timeout in the session's settings file.
@@ -1362,16 +1491,43 @@ class ClaudeRuntime(Runtime):
             self.hook_port, token, self.token_file, permission_timeout_secs=permission_timeout_secs
         )
 
+    def plugin_dirs(self) -> tuple[Path, ...]:
+        """The plugin directories of every session: the mod's copy, brought up to date.
+
+        A launch and a fork pass them; a resume and a respawn call this first, because the
+        job loads the mod again from the copy that its launch named.
+
+        None when the package has no mod or the copy cannot be written; the session then
+        takes its wakes by stop and resume.
+        """
+        if not all((MOD_DIR / name).is_file() for name in MOD_FILES):
+            return ()
+        try:
+            return (install_mod(),)
+        except OSError as exc:
+            log.warning("could not copy the chargehand mod to %s: %s; sessions start without it",
+                        installed_mod_dir(), exc)
+            return ()
+
     def _settings_for(
-        self, spec: LaunchSpec, warn: Callable[[str], None] | None
+        self, spec: LaunchSpec, warn: Callable[[str], None] | None, *, mod: bool = False
     ) -> dict[str, object] | Path | None:
-        """The launch settings, in a private file when they carry the hooks and their token."""
+        """The launch settings, in a private file when they carry the hooks and their token.
+
+        *mod*: the session loads the chargehand mod.
+        """
         hooks = self.hooks(
             spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
         )
+        # The mod posts only where the hooks post: the same daemon, the same token file.
+        env = (
+            mod_env(self.hook_port, self.token_file)
+            if mod and hooks and self.hook_port is not None and self.token_file is not None
+            else None
+        )
         settings = launch_settings(
             spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
-            protected_paths=spec.protected_paths,
+            protected_paths=spec.protected_paths, mod=mod, mod_env=env,
         )
         if not hooks or settings is None:
             return settings
@@ -1384,7 +1540,7 @@ class ClaudeRuntime(Runtime):
                 warn(f"{spec.name}: could not write {path} ({exc}); the session posts no hooks")
             return launch_settings(
                 spec.options, self.deny_rules, spec.read_paths,
-                protected_paths=spec.protected_paths,
+                protected_paths=spec.protected_paths, mod=mod,
             )
 
     @classmethod
@@ -1520,7 +1676,7 @@ class ClaudeRuntime(Runtime):
         return self._start(
             spec,
             warn,
-            lambda settings: self.cli.launch(
+            lambda settings, plugin_dirs: self.cli.launch(
                 worktree=spec.worktree,
                 name=spec.name,
                 prompt=spec.prompt,
@@ -1528,6 +1684,7 @@ class ClaudeRuntime(Runtime):
                 agent=spec.options.get("agent") or None,
                 model=spec.model,
                 effort=spec.effort,
+                plugin_dirs=plugin_dirs,
                 settings=settings,
             ),
         )
@@ -1542,14 +1699,14 @@ class ClaudeRuntime(Runtime):
     ) -> LaunchResult:
         """Start a copy of the session's conversation as a new session, as a launch would.
 
-        The copy gets the trust entry, its own settings file with the hooks, its name, and
-        the role's permission mode, model and effort, the same as a launch in
-        ``spec.worktree``; only the full session id finds the conversation.
+        The copy gets the trust entry, its own settings file with the hooks, its name, the
+        chargehand mod, and the role's permission mode, model and effort, the same as a
+        launch in ``spec.worktree``; only the full session id finds the conversation.
         """
         return self._start(
             spec,
             warn,
-            lambda settings: self.cli.fork(
+            lambda settings, plugin_dirs: self.cli.fork(
                 session_uuid or session_id,
                 spec.prompt,
                 worktree=spec.worktree,
@@ -1557,6 +1714,7 @@ class ClaudeRuntime(Runtime):
                 permission_mode=_permission_mode(spec),
                 model=spec.model,
                 effort=spec.effort,
+                plugin_dirs=plugin_dirs,
                 settings=settings,
             ),
         )
@@ -1565,16 +1723,18 @@ class ClaudeRuntime(Runtime):
         self,
         spec: LaunchSpec,
         warn: Callable[[str], None] | None,
-        start: Callable[[dict[str, object] | Path | None], CommandResult],
+        start: Callable[[dict[str, object] | Path | None, tuple[Path, ...]], CommandResult],
     ) -> LaunchResult:
         """Write the settings, record the trust entry, and run *start* until it is not refused
         for a trust entry that another process removed; see :meth:`launch`."""
         attempt = 1
-        settings = self._settings_for(spec, warn)
+        # Once, so that the settings and the flag agree on whether the session has the mod.
+        plugin_dirs = self.plugin_dirs()
+        settings = self._settings_for(spec, warn, mod=bool(plugin_dirs))
         while True:
             trusted = self._trust(spec, warn)
             try:
-                result = start(settings)
+                result = start(settings, plugin_dirs)
             except WorkspaceNotTrusted as exc:
                 if not trusted:
                     raise
@@ -1720,6 +1880,7 @@ class ClaudeRuntime(Runtime):
         uuid = session_uuid or session.uuid
         if not uuid:
             return WakeResult(False, f"session {session_id} has no full session id to resume by")
+        self.plugin_dirs()
         result = self.cli.resume(uuid, message)
         copy = copy_started_by(result)
         if copy is not None:
@@ -1739,6 +1900,9 @@ class ClaudeRuntime(Runtime):
         return self.cli.stop(session_id)
 
     def respawn(self, session_id: str) -> CommandResult:
+        # The job loads the mod again from the copy it names; after an upgrade of the
+        # package the copy must hold the mod of this version.
+        self.plugin_dirs()
         return self.cli.respawn(session_id)
 
     def failure_reset(self, session: Session, since: float) -> float | None:
@@ -1787,6 +1951,13 @@ __all__ = [
     "BLOCKED",
     "ClaudeCLI",
     "ClaudeRuntime",
+    "MOD_DIR",
+    "MOD_EVENTS",
+    "MOD_FILES",
+    "MOD_NAME",
+    "MOD_PORT_ENV",
+    "MOD_TOKEN_FILE_ENV",
+    "MOD_TOOL_RULE",
     "CommandResult",
     "DONE",
     "FAILED",
@@ -1802,8 +1973,12 @@ __all__ = [
     "hook_settings",
     "input_digest",
     "permission_timeout_of",
+    "install_mod",
+    "installed_mod_dir",
     "launch_settings",
+    "mod_env",
     "parse_hook",
+    "parse_mod_post",
     "reset_time",
     "parse_session",
     "parse_sessions",
@@ -1811,6 +1986,7 @@ __all__ = [
     "repo_agent_file",
     "runs_statusline_wrapper",
     "session_failure",
+    "session_rate_windows",
     "status_line_entry",
     "status_line_settings",
     "status_line_windows",

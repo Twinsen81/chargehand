@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The chargehand mod, a Claude Code plugin that ships in the package and that every worker
+  session loads with `--plugin-dir` at launch and at a full-mode clone. Claude Code stores
+  the flag with the job, so the mod comes back after a stop and a resume or a respawn. The
+  sessions load a copy of it in the state directory, so the files that Claude Code writes
+  beside a mod it loads stay out of the package. It registers the worker tools that the
+  daemon lists in one registry (`report`, `ask`, `handoff`, `request_wake` and
+  `subscribe`, as `mcp__chargehand__<tool>`) and forwards each call to the daemon; the
+  launch settings allow those tools in every permission mode. It polls the worker's outbox
+  and submits the wake message as the session's next turn once the session is idle, so a
+  wake no longer stops and resumes a live process. It posts the session start, each turn
+  end and the session end, and after each turn the session's weekly usage window. It finds
+  the daemon through the launch settings, which name the port and the token file, and has
+  no default port. It never answers a permission prompt and never submits text that the
+  daemon did not hand it.
+- Delivery through the outbox. A worker whose session's mod said hello gets its wake as
+  one outbox message: events that come in before the mod takes it join it, a stopped
+  process is started again with `claude respawn` first, and the wake is recorded once,
+  when the mod confirms that its submit started the turn. The global cap of wakes and the
+  launch throttle count a wake in an outbox as a working turn; a stopped, paused or
+  cancelled worker's message is dropped, and its events wait. A message that the mod does
+  not take within a minute, or that the session refuses, falls back to the stop and the
+  resume. A session without the mod keeps the stop and the resume.
+- Usage readings from worker sessions. The usage file now names its source (`statusline`
+  or `session`), and the `usage` object of `/api/board`, `/api/state` and `status --json`
+  carries it as `source`. A session reading keeps only the `seven_day` window, as the
+  wrapper does, and the newest reading is the one that counts.
+- The ledger keeps the outbox and, on each worker, the session whose mod said hello and the
+  session's context window as the mod last read it (schema version 10).
+
 ### Removed
 
 - chargehand no longer runs banksman. The pool module, the reap at the start of every tick,

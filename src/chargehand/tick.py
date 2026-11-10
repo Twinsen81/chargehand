@@ -1427,6 +1427,7 @@ class Runner:
                 f"Check it with `{self._attach_command(worker)}`."
             )
         worker = self.ledger.update(worker, state=ledger_mod.CANCELLED, session_state=None)
+        delivery_mod.drop_open_outbox(self.ledger, worker, "the worker was cancelled")
         self._sync_labels(worker, context, report)
         self._notify(report, worker.name, "cancelled", worker.url, worker.repository, role=worker.role,
                      detail="cancelled by operator")
@@ -1442,6 +1443,8 @@ class Runner:
         if not self._stop_session(worker):
             return False, f"{worker.name}: the session did not stop; it is still working"
         worker = self.ledger.update(worker, state=ledger_mod.PAUSED)
+        # The stopped process took its wake with it; a continue gets a new one.
+        delivery_mod.drop_open_outbox(self.ledger, worker, "the worker was stopped")
         self._sync_labels(worker, context, report)
         return True, "session stopped; `chargehand continue` respawns it"
 
@@ -3000,9 +3003,13 @@ class Runner:
         working = 0
         open_workers = 0
         per_route: dict[str, int] = {}
+        # A wake in a session's outbox is a turn about to start.
+        sending = self.ledger.outbox_workers()
         for worker in self.ledger.live_workers():
             open_workers += 1
-            is_working = worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
+            is_working = (
+                worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING) or worker.id in sending
+            )
             if is_working:
                 working += 1
                 per_route[worker.repository] = per_route.get(worker.repository, 0) + 1

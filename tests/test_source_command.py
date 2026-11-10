@@ -618,3 +618,13 @@ def test_a_failing_poll_is_one_line_per_tick_without_a_traceback(
     # The tick prints the report's error line; this record shows only at debug level.
     assert all(r.levelno < logging.INFO and r.exc_info is None for r in records)
     ledger.close()
+
+
+def test_a_plain_identifier_names_an_item_of_the_command_source(tmp_path):
+    built = source(tmp_path / "events")
+
+    item = built.item_for("DEMO-2")
+
+    assert (item.source, item.key, item.ref) == ("cmd", "DEMO-2", "DEMO-2")
+    assert built.item_for("https://tracker.invalid/DEMO-2") is None
+    assert built.item_for("../DEMO-2") is None

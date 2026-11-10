@@ -50,6 +50,9 @@ public location.
   not leave the source. The marker filter is a convenience against workers waking each
   other, not a defense: anyone can quote the marker, and it only drops comments by the
   signed-in account.
+- **Posts of the chargehand mod.** The mod runs in the worker's session, so what it posts
+  (tool arguments, the last answer, the rate limits) is session output. The daemon cleans
+  and caps it like a hook post, and it changes a worker only through the hook transitions.
 - **Command source output.** The commands of a `command` source are the operator's own,
   but what they print comes from the system they poll. chargehand runs them without a
   shell, with a timeout and a cap on the output, and checks every line against a closed
@@ -325,6 +328,17 @@ public location.
   with the guard of discard applied again.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
+- **The chargehand mod does only what it says.** Every worker session loads it, so what it
+  may do is checked in the test suite against its source, and against `claude plugin
+  validate` where Claude Code is installed: it hooks the session start, the turn end, the
+  session end and the calls of its own tools; it reads two environment variables, the
+  token file and the session's id, working directory and usage; it posts to the daemon,
+  registers tools and submits a prompt. It never answers a permission prompt, never
+  writes a file or the environment and runs no process. The only text it submits is the
+  outbox message the daemon handed it, which is chargehand's wake message of kinds and
+  pointers. It posts only to the port that the launch settings name, with the token from
+  the token file that they name; the settings name the file, not the token.
+
 ### Known limits
 
 - Sessions run as the operator's macOS user. Deny rules are a guardrail, not a sandbox: a
@@ -344,7 +358,10 @@ public location.
   that reads the token and reaches the port another way can send what the CLI can. The
   token is also in each session's own hook settings, so a session can read it there too,
   and post hooks in the name of another worker's session. That can move another worker's
-  state and its label, but it runs no command and answers no prompt.
+  state and its label, but it runs no command and answers no prompt. The same holds for
+  the agent channel: with the token, a session can post as another worker's mod, take that
+  worker's outbox message or call a tool for it. The launch settings put the token file's
+  path in the session's environment, where every command of the session can read it.
 - A session can read any credential that the runner or a notification hook reads from the
   login keychain, because it runs as the same user. Give a hook a credential that protects
   nothing else, such as the password of a mailbox that exists only to send alerts.

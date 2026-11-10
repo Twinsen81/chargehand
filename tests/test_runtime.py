@@ -180,7 +180,7 @@ def test_a_claude_launch_passes_the_roles_keys_and_the_settings(claude_runtime, 
     assert argv[argv.index("--agent") + 1] == "reviewer"
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "high"
-    assert '"allow": ["Bash(gh pr *)"]' in argv[argv.index("--settings") + 1]
+    assert '"allow": ["Bash(gh pr *)", "mcp__chargehand__*"]' in argv[argv.index("--settings") + 1]
     assert claude_runtime.list_sessions()[0].name == "pr-reviewer/ABC-1"
 
 
@@ -444,9 +444,10 @@ def test_a_fork_resumes_a_copy_in_its_own_worktree_with_the_new_model_and_effort
         "-n", "implementer/ABC-1#2", "--permission-mode", "manual",
         "--model", "sonnet", "--effort", "low",
     ]
-    # The launch settings come again: here the deny rules, as a launch passes them.
-    assert argv[12] == "--settings" and "deny" in argv[13]
-    assert argv[14:] == ["carry on"]
+    # The mod and the launch settings come again: here the deny rules, as a launch passes them.
+    assert argv[12:14] == ["--plugin-dir", str(claude_mod.installed_mod_dir())]
+    assert argv[14] == "--settings" and "deny" in argv[15]
+    assert argv[16:] == ["carry on"]
     assert fork["cwd"] == os.path.realpath(worktree)
     assert fork["stdin"] == "devnull"
     copy = claude_runtime.list_sessions()[-1]

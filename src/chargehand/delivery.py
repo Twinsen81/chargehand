@@ -13,12 +13,24 @@ events in its inbox goes through these steps:
 3. Check and prepare, through the caller: a worker whose worktree must not host its
    session again is paused with a fault, and one whose item checkout cannot be brought
    up to date waits like one a cap holds.
-4. Wake, through the worker's runtime, so that the same session continues.
+4. Wake, so that the same session continues. A session whose chargehand mod said hello
+   takes the message from its outbox (see below); any other session is stopped and
+   resumed with it, through the worker's runtime.
 5. Record. One ledger transaction marks the events delivered and records the wake on the
    worker and in the sessions table. It comes after the wake: a crash between the two
    leaves the events in the inbox, and a later tick wakes the worker with them again.
    A second wake costs one turn and is otherwise harmless, because the message carries
    kinds and pointers only.
+
+The wake through the outbox. For a runtime with ``in_place_wake`` and a session whose
+mod said hello (:func:`record_mod_hello`), the message goes into the worker's outbox, one
+open message per worker: events that come in before the mod takes it join it. A live
+process keeps running; a stopped one is started again with the runtime's respawn first.
+The mod polls the outbox, submits the text as the session's next turn once it is idle,
+and confirms (:func:`confirm_outbox`); the confirm records the wake as step 5 does,
+once. Until then the events stay in the inbox. A message that the mod does not take
+within :data:`OUTBOX_TAKE_SECS` is dropped, the session no longer counts as having the
+mod, and the wake goes the stop-and-resume way.
 
 The state write of step 5 is conditional: a hook of the new turn, such as a permission
 prompt, can come in while the wake runs, and the state it wrote is newer. Then only the
@@ -68,6 +80,16 @@ WEEKLY_WINDOW = "seven_day"
 # Why a held worker waits, as the board shows it: this prefix and the worker id, in the
 # ledger's state table. Written where delivery holds a wake, removed once it goes.
 QUEUE_REASON_PREFIX = "queue-reason:"
+
+# How often a session's chargehand mod polls its outbox; its hello answer says so.
+OUTBOX_POLL_SECS = 5
+# A pending outbox message that the mod has not taken in this time: the mod does not run in
+# the session, and the wake falls back to a stop and a resume.
+OUTBOX_TAKE_SECS = 60
+# A taken message without a confirm for this long is handed out again: the mod that took it
+# may have been reloaded before its submit. A submit that waits for the session to be idle
+# confirms later than this only when the session's turn ran that long.
+OUTBOX_RETAKE_SECS = 120
 
 # The message that resumes a worker that a usage limit parked, once the limit has reset.
 # chargehand's own text.
@@ -205,6 +227,130 @@ def wake_message(entries: Sequence[InboxEntry]) -> tuple[str | None, int]:
     return "\n".join([MESSAGE_HEADER, *lines]), left_out
 
 
+def _record_wake(
+    ledger: Ledger, worker: Worker, entries: Sequence[InboxEntry], now: float, *, start_turn: bool
+) -> Worker:
+    """Mark *entries* delivered and record one wake of *worker*. The caller holds a transaction.
+
+    With *start_turn* the worker becomes ``running``, unless a hook of the new turn wrote
+    the state the session shows since *worker* was read; then, and without it, only the
+    record of the wake is added.
+    """
+    wake_fields: dict[str, object] = {"wakes": worker.wakes + 1, "last_wake_at": now}
+    ledger.mark_delivered(entries, now=now)
+    ledger.record_wake(
+        worker, session_id=worker.session_id, session_uuid=worker.session_uuid, now=now
+    )
+    written = None
+    if start_turn:
+        # The state write drops the reset time of a resumed worker.
+        written = ledger.update_if_unchanged(
+            worker,
+            state=ledger_mod.RUNNING,
+            session_state=runtime_mod.WORKING,
+            notified_state=runtime_mod.WORKING,
+            working_since=now,
+            watchdog_notified=0,
+            last_error=None,
+            **wake_fields,
+        )
+    if written is None:
+        # A hook of the new turn came in during the wake, such as a permission prompt,
+        # and wrote the state that the session shows. That is newer than this write, so
+        # only the record of the wake is added. A new limit that parked the worker again
+        # keeps its own reset time.
+        written = ledger.update(ledger.get(worker.id) or worker, **wake_fields)
+    ledger.delete_state(f"{QUEUE_REASON_PREFIX}{worker.id}")
+    return written
+
+
+def has_mod(worker: Worker) -> bool:
+    """Whether *worker*'s current session takes its wakes from the outbox."""
+    return bool(worker.session_uuid) and worker.mod_session == worker.session_uuid
+
+
+def record_mod_hello(ledger: Ledger, worker: Worker, session_uuid: str, *, now: float | None = None) -> Worker:
+    """Record that the chargehand mod of *session_uuid* runs in *worker*'s session.
+
+    The hello can come before the tick records the session's id, in the middle of the
+    launch; the comparison with the worker's session waits until it does.
+    """
+    return ledger.update(
+        worker, mod_session=session_uuid, mod_seen_at=time.time() if now is None else now
+    )
+
+
+def drop_open_outbox(ledger: Ledger, worker: Worker, reason: str, *, now: float | None = None) -> bool:
+    """Drop *worker*'s open outbox message, so that it never goes out; False when there is none.
+
+    Its events stay in the inbox for the next wake.
+    """
+    message = ledger.outbox_message(worker)
+    return message is not None and ledger.drop_outbox(
+        message.id, reason, time.time() if now is None else now
+    )
+
+
+def take_outbox(
+    ledger: Ledger, worker: Worker, session_uuid: str, *, now: float | None = None
+) -> ledger_mod.OutboxMessage | None:
+    """The message the mod of *session_uuid* submits next, or None. See :meth:`Ledger.take_outbox`."""
+    if not session_uuid or (worker.session_uuid and worker.session_uuid != session_uuid):
+        return None
+    return ledger.take_outbox(
+        worker, session_uuid=session_uuid, retake_after=OUTBOX_RETAKE_SECS,
+        now=time.time() if now is None else now,
+    )
+
+
+# What a confirm did, for the mod's answer and the log.
+CONFIRM_RECORDED = "recorded"
+CONFIRM_ALREADY = "already recorded"
+CONFIRM_DROPPED = "dropped"
+CONFIRM_UNKNOWN = "unknown message"
+
+
+def confirm_outbox(
+    ledger: Ledger,
+    worker: Worker,
+    message_id: int,
+    *,
+    submitted: bool,
+    now: float | None = None,
+) -> tuple[str, Worker | None]:
+    """Record the wake that the mod's submit of a taken message started.
+
+    Once per message: a second confirm changes nothing. The events the message carried
+    that are still in the inbox are delivered, and an idle, queued, parked or blocked
+    worker becomes ``running``. A message the session did not submit (a hook refused it)
+    is dropped, its events wait, and the session no longer counts as having the mod, so
+    the next wake stops and resumes it.
+    """
+    stamp = time.time() if now is None else now
+    message = ledger.get_outbox(message_id)
+    if message is None or message.worker_id != worker.id:
+        return CONFIRM_UNKNOWN, None
+    if not submitted:
+        if ledger.drop_outbox(message_id, "the session did not submit it", stamp):
+            worker = ledger.update(worker, mod_session=None)
+            log.warning("%s: the session did not submit the wake message; the next wake stops "
+                        "and resumes it", worker.handle)
+        return CONFIRM_DROPPED, worker
+    start_turn = worker.state in (*WAKE_STATES, ledger_mod.PARKED, ledger_mod.BLOCKED)
+    with ledger.transaction():
+        if ledger.submit_outbox(message_id, stamp) is None:
+            # Dropped meanwhile, such as by a stop: its events wait, and no wake is recorded.
+            dropped = ledger.get_outbox(message_id)
+            if dropped is not None and dropped.state == ledger_mod.OUTBOX_DROPPED:
+                return CONFIRM_DROPPED, worker
+            return CONFIRM_ALREADY, worker
+        entries = ledger.inbox_entries(worker, message.entries)
+        written = _record_wake(ledger, worker, entries, stamp, start_turn=start_turn)
+    log.info("%s: session %s started the wake's turn from its outbox (%d event(s))",
+             written.handle, written.session_id, len(entries))
+    return CONFIRM_RECORDED, written
+
+
 @dataclass
 class DeliveryResult:
     woken: list[Worker] = field(default_factory=list)
@@ -263,9 +409,16 @@ class Delivery:
         # prompt is open, and the tick's listing shows no turn and no dialog. A first
         # look, as above.
         self._awaits_answer = awaits_answer
+        # One fresh listing per runtime and run, for the wakes through the outbox.
+        self._listings: dict[str, list[runtime_mod.Session]] = {}
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
+        # A worker that was stopped, paused or cancelled with a wake in its outbox: the
+        # wake does not go out, and its events wait for a wake after a continue.
+        now = self._clock()
+        for message in self.ledger.stale_outbox():
+            self.ledger.drop_outbox(message.id, "the worker was stopped or ended", now)
         # Before the inboxes: a parked worker has waited since its turn failed.
         self._resume_parked(result)
         for worker in self.ledger.workers_in_state(WAKE_STATES):
@@ -382,6 +535,9 @@ class Delivery:
         if read is None or read.state != worker.state or read.session_id != worker.session_id:
             return
         worker = read
+        # A wake through the outbox starts no turn here, so the state stays as it is.
+        if self._wake_in_place(worker, message, entries, result):
+            return
         resume = worker.state == ledger_mod.PARKED
         # A reply answers a question that the session asked after this tick's listing too.
         answer = not resume and any(is_reply(entry) for entry in entries)
@@ -450,31 +606,8 @@ class Delivery:
         if self.crash_after_wake:
             raise DeliveryAborted("delivery aborted after the wake")
         now = self._clock()
-        wake_fields: dict[str, object] = {"wakes": worker.wakes + 1, "last_wake_at": now}
         with self.ledger.transaction():
-            self.ledger.mark_delivered(entries, now=now)
-            self.ledger.record_wake(
-                worker, session_id=worker.session_id, session_uuid=worker.session_uuid, now=now
-            )
-            # The state write drops the reset time of a resumed worker.
-            written = self.ledger.update_if_unchanged(
-                worker,
-                state=ledger_mod.RUNNING,
-                session_state=runtime_mod.WORKING,
-                notified_state=runtime_mod.WORKING,
-                working_since=now,
-                watchdog_notified=0,
-                last_error=None,
-                **wake_fields,
-            )
-            if written is None:
-                # A hook of the new turn came in during the wake, such as a permission
-                # prompt, and wrote the state that the session shows. That is newer than
-                # this write, so only the record of the wake is added. A new limit that
-                # parked the worker again keeps its own reset time.
-                written = self.ledger.update(self.ledger.get(worker.id) or worker, **wake_fields)
-            self.ledger.delete_state(reason_key)
-        worker = written
+            worker = _record_wake(self.ledger, worker, entries, now, start_turn=True)
         if resume:
             log.info("%s: resumed session %s after the usage limit reset", worker.handle,
                      worker.session_id)
@@ -484,6 +617,91 @@ class Delivery:
             log.info("%s: woke session %s with %s", worker.handle, worker.session_id,
                      "; ".join(message.splitlines()[1:]))
         result.woken.append(worker)
+
+    def _wake_in_place(
+        self, worker: Worker, message: str, entries: Sequence[InboxEntry], result: DeliveryResult
+    ) -> bool:
+        """Put *message* into the outbox of a session with the mod; False to stop and resume instead.
+
+        A stopped process is respawned first. The wake is recorded when the mod confirms
+        its submit, not here.
+        """
+        try:
+            runtime = self._runtime(worker.runtime)
+        except ConfigError:
+            return False
+        if not runtime.capabilities.in_place_wake or not has_mod(worker):
+            return False
+        assert worker.session_id is not None and worker.session_uuid is not None
+        now = self._clock()
+        reason_key = f"{QUEUE_REASON_PREFIX}{worker.id}"
+        current = self.ledger.outbox_message(worker)
+        if current is not None and current.session_uuid != worker.session_uuid:
+            self.ledger.drop_outbox(current.id, "the session changed", now)
+            current = None
+        if (
+            current is not None
+            and current.state == ledger_mod.OUTBOX_PENDING
+            and now - current.created_at >= OUTBOX_TAKE_SECS
+        ):
+            self.ledger.drop_outbox(current.id, "the session's mod did not take it", now)
+            self.ledger.update(worker, mod_session=None)
+            result.warnings.append(
+                f"{worker.handle}: the session did not take its wake from the outbox within "
+                f"{OUTBOX_TAKE_SECS}s; it is stopped and resumed instead"
+            )
+            return False
+        try:
+            session = self._listed(runtime, worker)
+            stopped = session is not None and runtime.is_stopped(session)
+            if session is None:
+                problem = f"session {worker.session_id} is not in the listing"
+            elif not stopped and current is not None and current.state == ledger_mod.OUTBOX_TAKEN:
+                # The mod submitted the message, or is about to; the session starts its
+                # turn once it is idle.
+                result.held.append(f"{worker.handle}: wake held, the session took its wake "
+                                   f"message and has not started the turn yet")
+                return True
+            elif stopped:
+                if current is not None:
+                    # The process that took it is gone, and its submit with it.
+                    self.ledger.drop_outbox(current.id, "the session's process stopped", now)
+                respawned = runtime.respawn(worker.session_id)
+                problem = (
+                    f"the respawn of session {worker.session_id} exited {respawned.returncode}: "
+                    f"{sanitize.one_line(respawned.stderr or respawned.stdout, limit=200)}"
+                    if respawned.returncode != 0 else None
+                )
+                self._listings.pop(worker.runtime, None)
+            else:
+                problem = None
+        except (AgentRuntimeError, ConfigError) as exc:
+            problem = f"{exc}"
+        if problem is not None:
+            self.ledger.update(worker, last_error=f"wake failed: {problem}"[:500])
+            self.ledger.set_state(reason_key, f"wake failed: {problem}"[:300])
+            result.errors.append(f"{worker.handle}: wake failed: {problem}")
+            return True
+        put = self.ledger.put_outbox(
+            worker, session_uuid=worker.session_uuid, text=message,
+            entries=[entry.id for entry in entries], now=now,
+        )
+        if put is None:
+            result.held.append(f"{worker.handle}: wake held, the session took its wake message "
+                               f"and has not started the turn yet")
+            return True
+        self.ledger.delete_state(reason_key)
+        # The message holds only kinds and pointers that passed the checks of wake_message.
+        log.info("%s: wake for session %s is in its outbox%s: %s", worker.handle,
+                 worker.session_id, " after a respawn" if stopped else "",
+                 "; ".join(message.splitlines()[1:]) or message)
+        return True
+
+    def _listed(self, runtime: Runtime, worker: Worker) -> runtime_mod.Session | None:
+        """*worker*'s session in a fresh listing, read once per run. AgentRuntimeError when it fails."""
+        if worker.runtime not in self._listings:
+            self._listings[worker.runtime] = runtime.list_sessions()
+        return next((s for s in self._listings[worker.runtime] if s.id == worker.session_id), None)
 
     def _refuse_faulted(self, worker: Worker, result: DeliveryResult) -> bool:
         """Pause *worker* when the guard refuses its worktree; True when it did.
@@ -502,13 +720,19 @@ class Delivery:
         paused = self.ledger.update(
             worker, state=ledger_mod.PAUSED, last_error=f"wake refused: {fault}"[:500]
         )
+        # The stopped process took no wake; a continue gets a new one.
+        drop_open_outbox(self.ledger, paused, "the wake was refused", now=self._clock())
         result.faults.append((paused, fault))
         result.errors.append(f"{worker.handle}: wake refused: {fault}")
         return True
 
     def _refusal(self, worker: Worker, result: DeliveryResult) -> str | None:
         """Why admission holds this wake back now, or None when it may go."""
-        working = sum(w.state in WORKING_STATES for w in self.ledger.live_workers())
+        # A wake in an outbox is a turn about to start.
+        sending = self.ledger.outbox_workers() - {worker.id}
+        working = sum(
+            w.state in WORKING_STATES or w.id in sending for w in self.ledger.live_workers()
+        )
         if working >= self.max_concurrent:
             return f"wake held by the global cap ({working}/{self.max_concurrent} working)"
         try:
@@ -538,11 +762,18 @@ class Delivery:
 
 
 __all__ = [
+    "CONFIRM_ALREADY",
+    "CONFIRM_DROPPED",
+    "CONFIRM_RECORDED",
+    "CONFIRM_UNKNOWN",
     "DEFAULT_NEW_WORKER_RESERVE_PERCENT",
     "DEFAULT_WAKE_RESERVE_PERCENT",
     "Delivery",
     "DeliveryResult",
     "MESSAGE_HEADER",
+    "OUTBOX_POLL_SECS",
+    "OUTBOX_RETAKE_SECS",
+    "OUTBOX_TAKE_SECS",
     "QUEUE_REASON_PREFIX",
     "RESUME_MESSAGE",
     "UsageReading",
@@ -550,10 +781,15 @@ __all__ = [
     "UNKNOWN_KIND",
     "WAKE_STATES",
     "WEEKLY_WINDOW",
+    "confirm_outbox",
+    "drop_open_outbox",
+    "has_mod",
     "is_reply",
     "new_worker_admits",
     "safe_kind",
+    "record_mod_hello",
     "safe_pointer",
+    "take_outbox",
     "usage_admits",
     "wake_message",
     "weekly_window",

@@ -13,8 +13,9 @@ host is refused, which stops a web page that rebinds its own name to 127.0.0.1 f
 reading the API, and no response carries a CORS header. Other modules add their
 handlers to the route table, and their part of `/api/state`; each handler thread opens
 its own ledger connection, because a SQLite connection belongs to the thread that opened
-it. :mod:`chargehand.hooks` receives the posts of the worker sessions there, and
-:mod:`chargehand.board` serves the read-only board.
+it. :mod:`chargehand.hooks` receives the posts of the worker sessions there,
+:mod:`chargehand.channel` the posts of their chargehand mod, and :mod:`chargehand.board`
+serves the read-only board.
 
 A third thread runs the slow jobs that the tick records, such as an archive (see
 :mod:`chargehand.archive`), so that neither the tick nor the board waits for them. It
@@ -73,7 +74,7 @@ CONNECTION_TIMEOUT_SECS = 10.0
 SAFE_METHODS = ("GET", "HEAD")
 
 # Modules that add routes, each through a `register_routes(routes)` function.
-ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks", "chargehand.board")
+ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks", "chargehand.board", "chargehand.channel")
 
 # What `/api/state` says about sessions before the first tick has listed them.
 NO_SESSIONS_YET = "the daemon has not listed the sessions yet"

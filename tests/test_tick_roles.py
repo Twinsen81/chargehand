@@ -68,7 +68,7 @@ on = "labeled"
     assert argv[argv.index("--effort") + 1] == "low"
     assert argv[-1] == "/work ABC-1 at https://tracker.invalid/ABC-1"
     settings = json.loads(argv[argv.index("--settings") + 1])
-    assert settings["permissions"]["allow"] == ["Bash(gh pr *)"]
+    assert settings["permissions"]["allow"] == ["Bash(gh pr *)", "mcp__chargehand__*"]
     assert set(DEFAULT_DENY_RULES) <= set(settings["permissions"]["deny"])
     worker = harness.worker("ABC-1")
     assert worker.role == "implementer"
