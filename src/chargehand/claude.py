@@ -1492,7 +1492,10 @@ class ClaudeRuntime(Runtime):
         )
 
     def plugin_dirs(self) -> tuple[Path, ...]:
-        """The plugin directories of every session: the copy of the chargehand mod.
+        """The plugin directories of every session: the mod's copy, brought up to date.
+
+        A launch and a fork pass them; a resume and a respawn call this first, because the
+        job loads the mod again from the copy that its launch named.
 
         None when the package has no mod or the copy cannot be written; the session then
         takes its wakes by stop and resume.
@@ -1507,13 +1510,15 @@ class ClaudeRuntime(Runtime):
             return ()
 
     def _settings_for(
-        self, spec: LaunchSpec, warn: Callable[[str], None] | None
+        self, spec: LaunchSpec, warn: Callable[[str], None] | None, *, mod: bool
     ) -> dict[str, object] | Path | None:
-        """The launch settings, in a private file when they carry the hooks and their token."""
+        """The launch settings, in a private file when they carry the hooks and their token.
+
+        *mod*: the session loads the chargehand mod.
+        """
         hooks = self.hooks(
             spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
         )
-        mod = bool(self.plugin_dirs())
         # The mod posts only where the hooks post: the same daemon, the same token file.
         env = (
             mod_env(self.hook_port, self.token_file)
@@ -1671,7 +1676,7 @@ class ClaudeRuntime(Runtime):
         return self._start(
             spec,
             warn,
-            lambda settings: self.cli.launch(
+            lambda settings, plugin_dirs: self.cli.launch(
                 worktree=spec.worktree,
                 name=spec.name,
                 prompt=spec.prompt,
@@ -1679,7 +1684,7 @@ class ClaudeRuntime(Runtime):
                 agent=spec.options.get("agent") or None,
                 model=spec.model,
                 effort=spec.effort,
-                plugin_dirs=self.plugin_dirs(),
+                plugin_dirs=plugin_dirs,
                 settings=settings,
             ),
         )
@@ -1701,7 +1706,7 @@ class ClaudeRuntime(Runtime):
         return self._start(
             spec,
             warn,
-            lambda settings: self.cli.fork(
+            lambda settings, plugin_dirs: self.cli.fork(
                 session_uuid or session_id,
                 spec.prompt,
                 worktree=spec.worktree,
@@ -1709,7 +1714,7 @@ class ClaudeRuntime(Runtime):
                 permission_mode=_permission_mode(spec),
                 model=spec.model,
                 effort=spec.effort,
-                plugin_dirs=self.plugin_dirs(),
+                plugin_dirs=plugin_dirs,
                 settings=settings,
             ),
         )
@@ -1718,16 +1723,18 @@ class ClaudeRuntime(Runtime):
         self,
         spec: LaunchSpec,
         warn: Callable[[str], None] | None,
-        start: Callable[[dict[str, object] | Path | None], CommandResult],
+        start: Callable[[dict[str, object] | Path | None, tuple[Path, ...]], CommandResult],
     ) -> LaunchResult:
         """Write the settings, record the trust entry, and run *start* until it is not refused
         for a trust entry that another process removed; see :meth:`launch`."""
         attempt = 1
-        settings = self._settings_for(spec, warn)
+        # Once, so that the settings and the flag agree on whether the session has the mod.
+        plugin_dirs = self.plugin_dirs()
+        settings = self._settings_for(spec, warn, mod=bool(plugin_dirs))
         while True:
             trusted = self._trust(spec, warn)
             try:
-                result = start(settings)
+                result = start(settings, plugin_dirs)
             except WorkspaceNotTrusted as exc:
                 if not trusted:
                     raise
@@ -1873,6 +1880,7 @@ class ClaudeRuntime(Runtime):
         uuid = session_uuid or session.uuid
         if not uuid:
             return WakeResult(False, f"session {session_id} has no full session id to resume by")
+        self.plugin_dirs()
         result = self.cli.resume(uuid, message)
         copy = copy_started_by(result)
         if copy is not None:
@@ -1892,6 +1900,9 @@ class ClaudeRuntime(Runtime):
         return self.cli.stop(session_id)
 
     def respawn(self, session_id: str) -> CommandResult:
+        # The job loads the mod again from the copy it names; after an upgrade of the
+        # package the copy must hold the mod of this version.
+        self.plugin_dirs()
         return self.cli.respawn(session_id)
 
     def failure_reset(self, session: Session, since: float) -> float | None:

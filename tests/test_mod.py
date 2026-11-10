@@ -18,6 +18,7 @@ import pytest
 
 from chargehand import claude, ledger as ledger_mod, runtime as runtime_mod
 from chargehand.config import ServeConfig
+from conftest import FAKE_CLAUDE
 
 MODULE = claude.MOD_DIR / "hooks" / "register.ts"
 
@@ -255,3 +256,60 @@ def test_claude_plugin_validate_lists_only_the_expected_hooks_and_calls():
     assert {re.sub(r" \(via .*\)$", "", c.strip()) for c in called.split(": ", 1)[1].split(", ")} == EXPECTED_CALLS
     assert next(n for n in notes if n.startswith("./register.ts env writes: ")).endswith("nothing")
     assert [gate["hasCatch"] for gate in module["gatingHooks"]] == [True]
+
+
+# ----- the copy a session loads -------------------------------------------------------
+
+
+def _shipped(tmp_path, version: str) -> Path:
+    source = tmp_path / "shipped"
+    for name in claude.MOD_FILES:
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        (source / name).write_text(f"{version} {name}\n")
+    return source
+
+
+def _stopped_session(claude_state) -> None:
+    claude_state.set(sessions=[{"id": "s1", "sessionId": "u1", "name": "implementer/ABC-1",
+                                "state": "done"}])
+
+
+def test_a_respawn_and_a_resume_load_the_mod_of_the_current_version(monkeypatch, tmp_path, claude_state):
+    runtime = claude.ClaudeRuntime(claude.ClaudeCLI(str(FAKE_CLAUDE)), stop_wait_secs=0.3,
+                                   stop_poll_secs=0.05)
+    monkeypatch.setattr(claude, "MOD_DIR", _shipped(tmp_path, "v1"))
+    (copy,) = runtime.plugin_dirs()
+    module = copy / "hooks" / "register.ts"
+    assert module.read_text() == "v1 hooks/register.ts\n"
+    _stopped_session(claude_state)
+
+    # The package is upgraded while the session's process is stopped.
+    _shipped(tmp_path, "v2")
+    runtime.respawn("s1")
+    assert module.read_text() == "v2 hooks/register.ts\n"
+    assert ["respawn", "s1"] in claude_state.commands
+
+    _shipped(tmp_path, "v3")
+    _stopped_session(claude_state)
+    assert runtime.wake("s1", "comment: ABC-1", session_uuid="u1").ok
+    assert module.read_text() == "v3 hooks/register.ts\n"
+
+
+def test_a_launch_decides_once_whether_the_session_has_the_mod(monkeypatch, tmp_path, claude_state):
+    answers = iter([(), (claude.installed_mod_dir(),)])
+    calls = []
+
+    def plugin_dirs(self):
+        calls.append(1)
+        return next(answers)
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "plugin_dirs", plugin_dirs)
+    runtime = claude.ClaudeRuntime(claude.ClaudeCLI(str(FAKE_CLAUDE)))
+
+    runtime.launch(runtime_mod.LaunchSpec(worktree=tmp_path, name="implementer/ABC-1", prompt="go"))
+
+    assert calls == [1]
+    argv = claude_state.launches[-1]["argv"]
+    # No mod: neither the flag nor the allow rule for its tools.
+    assert "--plugin-dir" not in argv
+    assert claude.MOD_TOOL_RULE not in " ".join(argv)
