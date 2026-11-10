@@ -1093,3 +1093,120 @@ def test_every_older_ledger_gains_the_clone_columns(tmp_path, version_schema):
         worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
         updated = ledger.update(worker, parent_id=1, clone_mode="fresh", prompt="p", model="m", effort="low")
         assert (updated.parent_id, updated.clone_mode, updated.prompt) == (1, "fresh", "p")
+
+
+V9_SCHEMA = V8_SCHEMA.replace("PRAGMA user_version = 8;", "") + """
+ALTER TABLE workers ADD COLUMN parent_id INTEGER;
+ALTER TABLE workers ADD COLUMN clone_mode TEXT;
+ALTER TABLE workers ADD COLUMN prompt TEXT;
+ALTER TABLE workers ADD COLUMN model TEXT;
+ALTER TABLE workers ADD COLUMN effort TEXT;
+PRAGMA user_version = 9;
+"""
+
+
+def test_a_version_nine_ledger_gains_the_outbox_and_the_mod_columns(tmp_path):
+    path = tmp_path / "v9.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V9_SCHEMA)
+    conn.execute(
+        "INSERT INTO workers (id, role, item, item_id, repository, repo, worktree, branch, "
+        "state, step, created_at, updated_at, model) VALUES (7, 'implementer', 'ABC-1', "
+        "'i1', 'test', '/repo', '/w/ABC-1', 'b', 'idle', 4, 1.0, 2.0, 'sonnet')"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = ledger.get(7)
+        assert (worker.model, worker.mod_session, worker.mod_seen_at) == ("sonnet", None, None)
+        assert (worker.context_tokens, worker.context_percent) == (None, None)
+        worker = ledger.update(worker, mod_session="uuid-7", mod_seen_at=3.0, context_tokens=1200,
+                               context_percent=1.5)
+        message = ledger.put_outbox(worker, session_uuid="uuid-7", text="wake", entries=[], now=4.0)
+        assert message is not None and message.state == ledger_mod.OUTBOX_PENDING
+
+    with Ledger(path) as ledger:
+        assert ledger.get(7).mod_session == "uuid-7"
+        assert ledger.outbox_message(ledger.get(7)).text == "wake"
+
+
+@pytest.mark.parametrize(
+    "version_schema",
+    ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA", "V7_SCHEMA",
+     "V8_SCHEMA"],
+)
+def test_every_older_ledger_gains_the_outbox_and_the_mod_columns(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        worker = make(ledger, item="ABC-9", worktree="/w/ABC-9")
+        updated = ledger.update(worker, mod_session="u", context_tokens=5)
+        assert (updated.mod_session, updated.context_tokens) == ("u", 5)
+        assert ledger.put_outbox(updated, session_uuid="u", text="t", entries=[1]) is not None
+
+
+# ----- the outbox ------------------------------------------------------------------
+
+
+def test_one_open_outbox_message_per_worker_takes_the_new_events(ledger):
+    worker = make(ledger)
+
+    first = ledger.put_outbox(worker, session_uuid="u1", text="one", entries=[1], now=10.0)
+    again = ledger.put_outbox(worker, session_uuid="u1", text="two", entries=[1, 2], now=11.0)
+
+    assert again.id == first.id
+    assert (again.text, again.entries, again.state) == ("two", (1, 2), ledger_mod.OUTBOX_PENDING)
+    assert again.created_at == 10.0 and again.updated_at == 11.0
+    assert ledger.outbox_workers() == {worker.id}
+
+
+def test_a_taken_message_is_not_rewritten_and_is_handed_out_once(ledger):
+    worker = make(ledger)
+    ledger.put_outbox(worker, session_uuid="u1", text="one", entries=[1], now=10.0)
+
+    taken = ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=12.0)
+
+    assert (taken.state, taken.taken_at, taken.text) == (ledger_mod.OUTBOX_TAKEN, 12.0, "one")
+    assert ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=13.0) is None
+    # New events wait for the next wake.
+    assert ledger.put_outbox(worker, session_uuid="u1", text="two", entries=[2], now=14.0) is None
+    assert ledger.outbox_message(worker).text == "one"
+    # A mod that was reloaded before its submit gets it again, but only after a while.
+    again = ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=72.0)
+    assert again.id == taken.id and again.taken_at == 72.0
+
+
+def test_only_the_session_of_the_message_takes_it(ledger):
+    worker = make(ledger)
+    ledger.put_outbox(worker, session_uuid="u1", text="one", entries=[], now=10.0)
+
+    assert ledger.take_outbox(worker, session_uuid="u2", retake_after=60, now=11.0) is None
+    # A message for a new session replaces the old session's.
+    newer = ledger.put_outbox(worker, session_uuid="u2", text="two", entries=[], now=12.0)
+    assert newer.session_uuid == "u2"
+    assert ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=13.0) is None
+
+
+def test_a_submit_counts_once_and_a_drop_frees_the_worker(ledger):
+    worker = make(ledger)
+    message = ledger.put_outbox(worker, session_uuid="u1", text="one", entries=[], now=10.0)
+
+    assert ledger.submit_outbox(message.id, now=11.0) is None  # not taken yet
+    ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=11.0)
+    submitted = ledger.submit_outbox(message.id, now=12.0)
+    assert (submitted.state, submitted.submitted_at) == (ledger_mod.OUTBOX_SUBMITTED, 12.0)
+    assert ledger.submit_outbox(message.id, now=13.0) is None
+    assert ledger.outbox_message(worker) is None and ledger.outbox_workers() == set()
+
+    second = ledger.put_outbox(worker, session_uuid="u1", text="two", entries=[], now=14.0)
+    assert second.id != message.id
+    assert ledger.drop_outbox(second.id, "the session changed", now=15.0)
+    assert not ledger.drop_outbox(second.id, "again", now=16.0)
+    assert ledger.get_outbox(second.id).reason == "the session changed"
+    assert ledger.outbox_message(worker) is None

@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -110,6 +110,20 @@ BOARD_FIELDS: dict[str, tuple[str, ...]] = {
     BOARD_REPOSITORY: ("name", "icon", "pinned", "collapsed", "hidden"),
     BOARD_WORKER: ("name", "icon", "pinned"),
 }
+
+# A message for a live session, which the session's chargehand mod takes and submits as its
+# next turn once it is idle: the wake into a live process. One open message per worker, at
+# most: a new event while one is `pending` goes into it; once the mod has `taken` it, new
+# events wait for the next wake. `submitted`: the mod's submit started the turn, and that
+# is when the wake is recorded and its inbox entries are delivered. `dropped`: the message
+# no longer goes out (its session changed, the mod refused it or never took it), and its
+# entries wait in the inbox for the next wake.
+OUTBOX_PENDING = "pending"
+OUTBOX_TAKEN = "taken"
+OUTBOX_SUBMITTED = "submitted"
+OUTBOX_DROPPED = "dropped"
+OUTBOX_OPEN = (OUTBOX_PENDING, OUTBOX_TAKEN)
+OUTBOX_STATES = OUTBOX_OPEN + (OUTBOX_SUBMITTED, OUTBOX_DROPPED)
 
 # A prompt a session shows the operator. A permission prompt is answered allow or deny; the
 # record also holds a question with its own options, so that both use one card. A prompt is
@@ -204,6 +218,10 @@ _WORKER_COLUMNS = (
     "prompt",
     "model",
     "effort",
+    "mod_session",
+    "mod_seen_at",
+    "context_tokens",
+    "context_percent",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -264,7 +282,13 @@ CREATE TABLE IF NOT EXISTS workers (
     clone_mode       TEXT,
     prompt           TEXT,
     model            TEXT,
-    effort           TEXT
+    effort           TEXT,
+    -- The session whose chargehand mod said hello last, and when: only that session takes
+    -- its wakes from the outbox. And the session's context window as the mod last read it.
+    mod_session      TEXT,
+    mod_seen_at      REAL,
+    context_tokens   INTEGER,
+    context_percent  REAL
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -403,6 +427,26 @@ CREATE TABLE IF NOT EXISTS permission_rules (
     PRIMARY KEY (worker_id, tool_name, input_digest)
 );
 
+-- The wake of a live session: a message its chargehand mod takes and submits; see
+-- OUTBOX_STATES. `entries` is a JSON list of the inbox rows it delivers. The text is
+-- chargehand's own wake message, built from kinds and checked pointers.
+CREATE TABLE IF NOT EXISTS outbox (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    session_uuid TEXT    NOT NULL,
+    text         TEXT    NOT NULL,
+    entries      TEXT    NOT NULL DEFAULT '[]',
+    state        TEXT    NOT NULL,
+    reason       TEXT,
+    created_at   REAL    NOT NULL,
+    updated_at   REAL    NOT NULL,
+    taken_at     REAL,
+    submitted_at REAL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_one_open ON outbox (worker_id)
+    WHERE state IN ('pending', 'taken');
+
 -- Where each source's last poll stopped.
 CREATE TABLE IF NOT EXISTS cursors (
     source     TEXT PRIMARY KEY,
@@ -537,6 +581,16 @@ ALTER TABLE workers ADD COLUMN effort TEXT;
 {_SCHEMA}
 """
 
+# Version 10 adds the outbox, which the schema creates, and what the chargehand mod reports
+# on the worker. Like version 8, the version 1 copy creates the table with them.
+_MIGRATE_V9_TO_V10 = f"""
+ALTER TABLE workers ADD COLUMN mod_session TEXT;
+ALTER TABLE workers ADD COLUMN mod_seen_at REAL;
+ALTER TABLE workers ADD COLUMN context_tokens INTEGER;
+ALTER TABLE workers ADD COLUMN context_percent REAL;
+{_SCHEMA}
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -583,6 +637,10 @@ class Worker:
     prompt: str | None = None
     model: str | None = None
     effort: str | None = None
+    mod_session: str | None = None
+    mod_seen_at: float | None = None
+    context_tokens: int | None = None
+    context_percent: float | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -712,6 +770,37 @@ class Subscription:
 
 
 @dataclass(frozen=True)
+class OutboxMessage:
+    id: int
+    worker_id: int
+    session_uuid: str
+    text: str
+    entries: tuple[int, ...]
+    state: str
+    reason: str | None
+    created_at: float
+    updated_at: float
+    taken_at: float | None
+    submitted_at: float | None
+
+    @property
+    def is_open(self) -> bool:
+        return self.state in OUTBOX_OPEN
+
+
+def _row_to_outbox(row: sqlite3.Row) -> OutboxMessage:
+    data = dict(row)
+    try:
+        entries = json.loads(data["entries"])
+    except (TypeError, ValueError):
+        entries = []
+    if not isinstance(entries, list):
+        entries = []
+    data["entries"] = tuple(e for e in entries if isinstance(e, int) and not isinstance(e, bool))
+    return OutboxMessage(**data)
+
+
+@dataclass(frozen=True)
 class InboxEntry:
     id: int
     worker_id: int
@@ -809,15 +898,17 @@ class Ledger:
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
-            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9,
-            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
-            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
-            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
-            8: _MIGRATE_V8_TO_V9,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
+            + _MIGRATE_V9_TO_V10,
+            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10,
+            9: _MIGRATE_V9_TO_V10,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1464,6 +1555,126 @@ class Ledger:
             (time.time() if now is None else now, *ids),
         )
 
+    # ----- the outbox ----------------------------------------------------------
+
+    def outbox_message(self, worker: Worker) -> OutboxMessage | None:
+        """The open outbox message of *worker*, pending or taken, or None."""
+        row = self._conn.execute(
+            "SELECT * FROM outbox WHERE worker_id = ? AND state IN (?, ?) ORDER BY id DESC LIMIT 1",
+            (worker.id, *OUTBOX_OPEN),
+        ).fetchone()
+        return _row_to_outbox(row) if row else None
+
+    def get_outbox(self, message_id: int) -> OutboxMessage | None:
+        row = self._conn.execute("SELECT * FROM outbox WHERE id = ?", (message_id,)).fetchone()
+        return _row_to_outbox(row) if row else None
+
+    def put_outbox(
+        self,
+        worker: Worker,
+        *,
+        session_uuid: str,
+        text: str,
+        entries: Iterable[int],
+        now: float | None = None,
+    ) -> OutboxMessage | None:
+        """The pending message for *worker*'s session, with *text* and *entries*.
+
+        A pending message gets the new text and entries; an open message of another
+        session is dropped first. None while the session's mod holds a taken one: new
+        events wait for the next wake.
+        """
+        stamp = time.time() if now is None else now
+        ids = json.dumps(sorted(set(entries)))
+        with self.transaction():
+            current = self.outbox_message(worker)
+            if current is not None and current.session_uuid != session_uuid:
+                self._drop(current.id, "the session changed", stamp)
+                current = None
+            if current is not None and current.state == OUTBOX_TAKEN:
+                return None
+            if current is not None:
+                self._conn.execute(
+                    "UPDATE outbox SET text = ?, entries = ?, updated_at = ? WHERE id = ?",
+                    (text, ids, stamp, current.id),
+                )
+                message_id = current.id
+            else:
+                message_id = self._conn.execute(
+                    "INSERT INTO outbox (worker_id, session_uuid, text, entries, state, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (worker.id, session_uuid, text, ids, OUTBOX_PENDING, stamp, stamp),
+                ).lastrowid
+        return self.get_outbox(int(message_id))
+
+    def take_outbox(
+        self,
+        worker: Worker,
+        *,
+        session_uuid: str,
+        retake_after: float,
+        now: float | None = None,
+    ) -> OutboxMessage | None:
+        """Hand the open message of *session_uuid* to its mod, or None when there is none.
+
+        A pending message becomes taken. A taken one is handed out again once
+        *retake_after* seconds have passed without a confirm: the mod that took it may have
+        been reloaded before it submitted the text.
+        """
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            current = self.outbox_message(worker)
+            if current is None or current.session_uuid != session_uuid:
+                return None
+            if current.state == OUTBOX_TAKEN and (current.taken_at or 0.0) > stamp - retake_after:
+                return None
+            self._conn.execute(
+                "UPDATE outbox SET state = ?, taken_at = ?, updated_at = ? WHERE id = ?",
+                (OUTBOX_TAKEN, stamp, stamp, current.id),
+            )
+        return self.get_outbox(current.id)
+
+    def submit_outbox(self, message_id: int, now: float | None = None) -> OutboxMessage | None:
+        """Mark a taken message submitted. The message when this call did it, else None."""
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "UPDATE outbox SET state = ?, submitted_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = ?",
+            (OUTBOX_SUBMITTED, stamp, stamp, message_id, OUTBOX_TAKEN),
+        )
+        return self.get_outbox(message_id) if cursor.rowcount else None
+
+    def drop_outbox(self, message_id: int, reason: str, now: float | None = None) -> bool:
+        """Drop an open message, so its entries wait for the next wake; False when it was not open."""
+        return self._drop(message_id, reason, time.time() if now is None else now)
+
+    def _drop(self, message_id: int, reason: str, now: float) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE outbox SET state = ?, reason = ?, updated_at = ? "
+            "WHERE id = ? AND state IN (?, ?)",
+            (OUTBOX_DROPPED, reason[:300], now, message_id, *OUTBOX_OPEN),
+        )
+        return bool(cursor.rowcount)
+
+    def outbox_workers(self) -> set[int]:
+        """The ids of the workers with an open outbox message."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT worker_id FROM outbox WHERE state IN (?, ?)", OUTBOX_OPEN
+        ).fetchall()
+        return {int(row["worker_id"]) for row in rows}
+
+    def inbox_entries(self, worker: Worker, ids: Iterable[int]) -> list[InboxEntry]:
+        """The inbox rows of *worker* with *ids* that are not delivered yet."""
+        wanted = list(ids)
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            f"SELECT * FROM inbox WHERE worker_id = ? AND delivered_at IS NULL AND id IN "
+            f"({', '.join('?' * len(wanted))}) ORDER BY id",
+            (worker.id, *wanted),
+        ).fetchall()
+        return [InboxEntry(**dict(row)) for row in rows]
+
     # ----- seen events and cursors ------------------------------------------
 
     def event_seen(self, source: str, dedupe_id: str) -> bool:
@@ -1770,6 +1981,7 @@ __all__ = [
     "SessionRecord",
     "Subscription",
     "InboxEntry",
+    "OutboxMessage",
     "PermissionPrompt",
     "Job",
     "Ledger",
