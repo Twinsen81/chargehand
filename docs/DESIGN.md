@@ -840,8 +840,8 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   submitted as the session's next turn once the session is idle (`$.prompt.submit`), and
   `POST /channel/outbox/confirm` says that the turn started. Once the worker is done,
   failed or cancelled, its session can live on; the poll then answers `ended`, which the
-  daemon logs once, and the mod stops polling. A paused worker's mod keeps polling. The poll is never held open:
-  a hook runs at most 10 seconds and one fetch at most 30.
+  daemon logs once, and the mod stops polling. A paused worker's mod keeps polling. The
+  poll is never held open: a hook runs at most 10 seconds and one fetch at most 30.
 - Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
   session's rate-limit windows to `/channel/usage`; the session end posts
   `/channel/lifecycle/session_end`.

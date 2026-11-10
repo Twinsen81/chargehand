@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launch settings allow those tools in every permission mode. It polls the worker's outbox
   and submits the wake message as the session's next turn once the session is idle, so a
   wake no longer stops and resumes a live process; once its worker has ended, it stops
-  polling. It posts the session start, each turn
-  end and the session end, and after each turn the session's weekly usage window. It finds
+  polling. It posts the session start, each turn end and the session end, and after each
+  turn the session's weekly usage window. It finds
   the daemon through the launch settings, which name the port and the token file, and has
   no default port. It never answers a permission prompt and never submits text that the
   daemon did not hand it.
