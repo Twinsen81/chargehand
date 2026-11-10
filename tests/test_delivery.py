@@ -899,3 +899,42 @@ def test_a_paused_worker_with_a_wake_in_its_outbox_holds_no_working_slot(
     assert harness.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED
     assert len(pending(harness, harness.ledger.get(first.id))) == 3
     harness.ledger.close()
+
+
+def test_a_stop_and_a_continue_in_one_tick_drop_the_taken_wake(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+    wired.next_tick()
+    taken = mod_takes(wired, reviewer)
+    wired.ledger.record_request("stop", "reviewer/PR-7")
+    wired.ledger.record_request("continue", "reviewer/PR-7")
+
+    wired.next_tick()
+
+    assert ["respawn", reviewer.session_id] in wired.claude_state.commands
+    assert wired.ledger.get_outbox(taken.id).state == ledger_mod.OUTBOX_DROPPED
+    # The stopped process's submit, if its confirm still comes, records no wake.
+    outcome, after = mod_confirms(wired, taken)
+    assert outcome == delivery_mod.CONFIRM_DROPPED and after.wakes == 0
+    assert pending(wired, after) == pointers
+
+    # The next turn end gets the events in a new message, without the retake wait.
+    end_turn(wired)
+    wired.next_tick()
+    fresh = wired.ledger.outbox_message(reviewer)
+    assert fresh is not None and fresh.id != taken.id and fresh.state == ledger_mod.OUTBOX_PENDING
+
+
+def test_a_cancel_drops_the_wake_in_the_outbox(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    emit_three()
+    wired.next_tick()
+    message = wired.ledger.outbox_message(reviewer)
+    wired.ledger.record_request("cancel", "reviewer/PR-7")
+
+    wired.next_tick()
+
+    assert wired.ledger.get(reviewer.id).state == ledger_mod.CANCELLED
+    assert wired.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED

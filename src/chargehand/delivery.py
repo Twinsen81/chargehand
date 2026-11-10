@@ -280,6 +280,17 @@ def record_mod_hello(ledger: Ledger, worker: Worker, session_uuid: str, *, now: 
     )
 
 
+def drop_open_outbox(ledger: Ledger, worker: Worker, reason: str, *, now: float | None = None) -> bool:
+    """Drop *worker*'s open outbox message, so that it never goes out; False when there is none.
+
+    Its events stay in the inbox for the next wake.
+    """
+    message = ledger.outbox_message(worker)
+    return message is not None and ledger.drop_outbox(
+        message.id, reason, time.time() if now is None else now
+    )
+
+
 def take_outbox(
     ledger: Ledger, worker: Worker, session_uuid: str, *, now: float | None = None
 ) -> ledger_mod.OutboxMessage | None:
@@ -328,6 +339,10 @@ def confirm_outbox(
     start_turn = worker.state in (*WAKE_STATES, ledger_mod.PARKED, ledger_mod.BLOCKED)
     with ledger.transaction():
         if ledger.submit_outbox(message_id, stamp) is None:
+            # Dropped meanwhile, such as by a stop: its events wait, and no wake is recorded.
+            dropped = ledger.get_outbox(message_id)
+            if dropped is not None and dropped.state == ledger_mod.OUTBOX_DROPPED:
+                return CONFIRM_DROPPED, worker
             return CONFIRM_ALREADY, worker
         entries = ledger.inbox_entries(worker, message.entries)
         written = _record_wake(ledger, worker, entries, stamp, start_turn=start_turn)
@@ -765,6 +780,7 @@ __all__ = [
     "WAKE_STATES",
     "WEEKLY_WINDOW",
     "confirm_outbox",
+    "drop_open_outbox",
     "has_mod",
     "is_reply",
     "new_worker_admits",
