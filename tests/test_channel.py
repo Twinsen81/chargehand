@@ -221,21 +221,25 @@ def test_the_board_answers_a_question_once_and_the_answer_wakes_the_worker(
 PERMISSION, ANSWER_PERMISSION, ASK, STOP = "permission", "answer permission", "ask", "stop"
 LISTED_BLOCKED, LISTED_DONE, ANSWER_QUESTION = "listed blocked", "listed done", "answer question"
 STATUS_NEEDS_INPUT = "status file needs-input"
+# The details of the "blocked" notifications: a prompt or a question that the listing shows
+# first, and a question that the ask tool asked.
+NEEDS_INPUT, ASKED = "needs input", tick_mod.ASKED
 
 
 @pytest.mark.parametrize("status_file, steps, notified", [
     # The duplicate first seen: the Stop hook, then the listing's views of the same turn end.
-    (False, [ASK, STOP, LISTED_BLOCKED, LISTED_DONE, LISTED_BLOCKED], 1),
+    (False, [ASK, STOP, LISTED_BLOCKED, LISTED_DONE, LISTED_BLOCKED], [ASKED]),
     # The listing sees the question before the Stop hook comes in.
-    (False, [ASK, LISTED_BLOCKED, STOP, LISTED_BLOCKED], 1),
+    (False, [ASK, LISTED_BLOCKED, STOP, LISTED_BLOCKED], [NEEDS_INPUT]),
     # The answer resolves the question; the tick that applies it still lists it blocked.
-    (False, [ASK, STOP, LISTED_BLOCKED, ANSWER_QUESTION, LISTED_BLOCKED], 1),
+    (False, [ASK, STOP, LISTED_BLOCKED, ANSWER_QUESTION, LISTED_BLOCKED], [ASKED]),
     # A permission prompt, answered before the next tick, then the question: two of them.
-    (False, [PERMISSION, ANSWER_PERMISSION, ASK, STOP, LISTED_BLOCKED], 2),
+    (False, [PERMISSION, ANSWER_PERMISSION, ASK, STOP, LISTED_BLOCKED], [NEEDS_INPUT, ASKED]),
     # The question, then a permission prompt of the same turn, answered before the Stop.
-    (False, [ASK, PERMISSION, ANSWER_PERMISSION, STOP, LISTED_BLOCKED], 2),
+    (False, [ASK, PERMISSION, ANSWER_PERMISSION, STOP, LISTED_BLOCKED], [NEEDS_INPUT, ASKED]),
     # A status-file question after an answered permission prompt.
-    (True, [PERMISSION, ANSWER_PERMISSION, STATUS_NEEDS_INPUT, LISTED_DONE], 2),
+    (True, [PERMISSION, ANSWER_PERMISSION, STATUS_NEEDS_INPUT, LISTED_DONE],
+     [NEEDS_INPUT, NEEDS_INPUT]),
 ])
 def test_each_question_and_each_prompt_is_notified_once(
     daemon, harness, monkeypatch, tmp_path, status_file, steps, notified
@@ -280,7 +284,7 @@ def test_each_question_and_each_prompt_is_notified_once(
         elif step == STATUS_NEEDS_INPUT:
             (status_dir / "ABC-1.json").write_text(json.dumps({"state": "needs-input"}))
 
-    assert harness.notifications().count(("ABC-1", "blocked")) == notified
+    assert [n.detail for n in harness.notifier.sent if n.state == "blocked"] == notified
 
 
 @pytest.mark.parametrize("kind, args", [("cancel", {}), ("discard", {"force": True})])
