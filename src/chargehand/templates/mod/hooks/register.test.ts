@@ -93,6 +93,23 @@ test('a tool call goes to the daemon and returns its answer', async ($, on) => {
   expect(call?.body.input).toEqual({ item: 'DEMO-2' })
 })
 
+test('the engine keys of a tool call are not sent as its input', async ($, on) => {
+  const posts = daemon(on, {
+    '/channel/hello': { tools: TOOLS },
+    '/channel/tool/subscribe': { result: 'subscribed' },
+  })
+  mock.clock(on)
+  await $.session.start({ cwd: CWD, surface: null, isInteractive: false })
+
+  await $.tool.call({
+    tool: 'mcp__chargehand__subscribe', tool_use_id: 'toolu_1', consent: 'granted', agentId: 'a1',
+    item: 'DEMO-2',
+  } as never)
+
+  const call = posts.find(post => post.path === '/channel/tool/subscribe')
+  expect(call?.body.input).toEqual({ item: 'DEMO-2' })
+})
+
 test('a refused tool call is an error for the model', async ($, on) => {
   daemon(on, {
     '/channel/hello': { tools: TOOLS },
