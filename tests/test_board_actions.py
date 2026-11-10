@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import re
 import subprocess
 import time
 
@@ -91,6 +92,62 @@ def test_every_action_needs_the_token_and_a_loopback_host(daemon, harness, path,
     assert post(daemon, path, body, headers=wrong)[0] == 401
     assert post(daemon, path, body, host="evil.example:80")[0] == 403
     assert harness.ledger.pending_requests() == []
+
+
+def request_rows(harness):
+    return harness.ledger._conn.execute("SELECT count(*) FROM requests").fetchone()[0]
+
+
+def test_the_token_check_answers_whether_the_token_is_valid_and_records_nothing(daemon, harness):
+    before = request_rows(harness)
+
+    status, body = support.request(daemon.port, "POST", "/api/token", body=b"{}", headers=AUTH)
+    assert (status, body) == (204, b"")
+    assert post(daemon, "/api/token", headers={"Content-Type": "application/json"})[0] == 401
+    wrong = {"Authorization": "Bearer not-the-token", "Content-Type": "application/json"}
+    assert post(daemon, "/api/token", headers=wrong)[0] == 401
+    assert post(daemon, "/api/token", host="evil.example:80")[0] == 403
+
+    assert request_rows(harness) == before
+
+
+def test_the_page_shows_the_state_of_its_token(daemon):
+    script = (board.asset_dir() / "board.js").read_text()
+    page = (board.asset_dir() / "index.html").read_text()
+    for label in ("no token", "checking", "token accepted", "token not valid"):
+        assert f"'{label}'" in script, label
+    assert 'id="token-state"' in page
+    assert "post('/api/token'" in script
+    controls = script[script.index("function setupControls("):script.index("async function poll(")]
+
+    def listener(target, event):
+        start = controls.index(f"{target}.addEventListener('{event}'")
+        return controls[start:controls.index("});", start)]
+
+    assert "event.key !== 'Enter'" in listener("input", "keydown")
+    assert "save();" in listener("input", "keydown") and "save();" in listener("input", "change")
+    assert "checkToken();" in listener("$('token-forget')", "click")
+    forget = listener("$('token-forget')", "click")
+    on_load = controls[controls.index(forget) + len(forget):controls.index("$('terminal')")]
+    assert "checkToken();" in on_load
+    # A restart can bring a new token file, and an answer to an older token says nothing
+    # about the one stored now.
+    poll = script[script.index("async function poll("):]
+    assert "model.health.started_at" in poll and "if (tokenRecheck) checkToken();" in poll
+    sender = script[script.index("async function send("):script.index("function workerAction(")]
+    assert "const sent = token();" in sender and "sent === token()" in sender
+
+
+def test_an_accepted_token_clears_the_notice_that_asked_for_it():
+    script = (board.asset_dir() / "board.js").read_text()
+    sender = script[script.index("async function send("):script.index("function workerAction(")]
+    for asked in ("Paste the token first", "The token is not valid"):
+        assert re.search(rf"notice\('{asked}[^\n]*\n\s*tokenNoticeShown = true;", sender), asked
+    shown = script[script.index("function showTokenState("):script.index("// True while the notice")]
+    assert "if (name === 'accepted' && tokenNoticeShown) notice('');" in shown
+    notices = script[script.index("function notice("):script.index("function describe(")]
+    # Any other notice replaces the one about the token, so the check leaves it alone.
+    assert "tokenNoticeShown = false;" in notices
 
 
 def test_the_page_sends_the_token_only_in_a_header(daemon):

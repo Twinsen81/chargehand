@@ -209,10 +209,12 @@ public location.
   `localStorage` for `http://127.0.0.1:<port>` and sends it only in the `Authorization`
   header. It is never in a URL, in `GET /`, or in any answer. Anything that can run
   script in that origin, or read that browser profile, can therefore read the token, so
-  use the board in your own browser profile; "Forget token" removes it. Another origin
-  cannot read it, and the `Host` check and the missing CORS headers still apply. The
-  token is the same one every client uses: a board action can do what any CLI command can,
-  and no more.
+  use the board in your own browser profile; "Forget token" removes it. The page checks
+  the token with `POST /api/token`, which passes the same `Host` and token checks as
+  every action and then answers 204: it records nothing and tells a caller nothing that
+  a refused action does not tell already. Another origin cannot read the token, and the
+  `Host` check and the missing CORS headers still apply. The token is the same one every
+  client uses: a board action can do what any CLI command can, and no more.
 - **Operator text from the board.** A reply is trusted operator text: it reaches the
   session's next turn as written. It is one line, cleaned of control sequences and
   direction overrides, capped at 500 characters, and carried in the inbox under the

@@ -7,6 +7,9 @@
 // An action is a POST with the daemon's token, which the operator pastes once and this
 // browser keeps in localStorage for this origin. It is sent only in the Authorization
 // header, never in a URL. The board has no chat: a conversation goes through attach.
+// The field next to it shows whether the daemon accepts the stored token: the page checks
+// it with POST /api/token on load, on Enter, when the field loses focus with a new value,
+// and when the daemon was restarted or unreachable, as a restart can bring a new token file.
 //
 // A permission prompt shows on its card with Allow, Deny and Always allow while the
 // session's hook waits in the daemon; after that only the session can answer it.
@@ -28,6 +31,9 @@ const STALE_AFTER_MS = 5000;
 // How long the page follows a request that the daemon has not applied yet.
 const FOLLOW_MS = 15 * 60 * 1000;
 const TOKEN_KEY = 'chargehand.token';
+const TOKEN_STATES = {
+  none: 'no token', checking: 'checking', accepted: 'token accepted', invalid: 'token not valid',
+};
 const TERMINAL_KEY = 'chargehand.terminal';
 const REPLY_MAX = 500;
 const SHOW_HIDDEN_KEY = 'chargehand.showHidden';
@@ -560,7 +566,56 @@ function token() {
   return localStorage.getItem(TOKEN_KEY) || '';
 }
 
+function showTokenState(name) {
+  const state = $('token-state');
+  state.className = 'token-state ' + name;
+  state.textContent = TOKEN_STATES[name];
+  $('token').className = 'token-' + name;
+  // A notice that asked for the token is out of date once the daemon accepts it.
+  if (name === 'accepted' && tokenNoticeShown) notice('');
+}
+
+// True while the notice asks for a valid token; any later notice replaces that one.
+let tokenNoticeShown = false;
+// Each check gets a number, so the answer to an older check cannot replace a newer state.
+let tokenCheck = 0;
+// Set when the daemon did not answer, so the next good poll checks the token again.
+let tokenRecheck = false;
+// When the daemon that answered the last poll started; a new value is a restart.
+let daemonStartedAt = null;
+
+async function checkToken() {
+  const check = ++tokenCheck;
+  tokenRecheck = false;
+  if (!token()) {
+    showTokenState('none');
+    return;
+  }
+  showTokenState('checking');
+  let status = 0;
+  try {
+    status = (await post('/api/token', {})).status;
+  } catch (error) {
+    status = 0;
+  }
+  if (check !== tokenCheck) return;
+  if (status === 204) showTokenState('accepted');
+  else if (status === 401) showTokenState('invalid');
+  else tokenRecheck = true;
+}
+
+function post(path, body) {
+  return fetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    credentials: 'omit',
+    headers: { 'Authorization': 'Bearer ' + token(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
 function notice(text, kind) {
+  tokenNoticeShown = false;
   const box = $('notice');
   box.className = 'notice ' + (kind || '');
   box.textContent = text;
@@ -592,19 +647,16 @@ async function follow(outcome) {
 async function send(path, body, what) {
   if (!token()) {
     notice('Paste the token first: the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    tokenNoticeShown = true;
     $('token').focus();
     return;
   }
   notice(what + ': sending', 'pending');
+  // The operator can save another token while the action waits for its answer.
+  const sent = token();
   let response;
   try {
-    response = await fetch(path, {
-      method: 'POST',
-      cache: 'no-store',
-      credentials: 'omit',
-      headers: { 'Authorization': 'Bearer ' + token(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-    });
+    response = await post(path, body);
   } catch (error) {
     notice(what + ': the daemon is unreachable', 'bad');
     return;
@@ -615,9 +667,20 @@ async function send(path, body, what) {
   } catch (error) {
     payload = {};
   }
+  const current = sent === token();
   if (response.status === 401) {
+    if (current) {
+      tokenCheck++;
+      showTokenState('invalid');
+    }
     notice('The token is not valid. Paste the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    tokenNoticeShown = true;
     return;
+  }
+  // The daemon checks the Host (403) before the token, and every later answer passed both.
+  if (response.status !== 403 && current) {
+    tokenCheck++;
+    showTokenState('accepted');
   }
   if (!response.ok) {
     notice(what + ': ' + (payload.error || 'HTTP ' + response.status), 'bad');
@@ -924,15 +987,28 @@ function openNewWorker() {
 function setupControls() {
   const input = $('token');
   input.value = token();
-  input.addEventListener('change', () => {
+  const save = () => {
     const value = input.value.trim();
     if (value) localStorage.setItem(TOKEN_KEY, value);
     else localStorage.removeItem(TOKEN_KEY);
+    checkToken();
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    save();
+  });
+  // Enter has saved the value already; a change that is not saved yet comes from leaving
+  // the field.
+  input.addEventListener('change', () => {
+    if (input.value.trim() !== token()) save();
   });
   $('token-forget').addEventListener('click', () => {
     localStorage.removeItem(TOKEN_KEY);
     input.value = '';
+    checkToken();
   });
+  checkToken();
   $('terminal').addEventListener('change', () => localStorage.setItem(TERMINAL_KEY, $('terminal').value));
   const showHidden = $('show-hidden');
   showHidden.checked = localStorage.getItem(SHOW_HIDDEN_KEY) === '1';
@@ -956,7 +1032,12 @@ async function poll() {
     const refresh = $('refresh');
     refresh.textContent = 'updated ' + new Date(model.generated_at * 1000).toLocaleTimeString();
     refresh.classList.remove('stale');
+    const started = model.health && model.health.started_at;
+    if (daemonStartedAt !== null && started !== daemonStartedAt && token()) tokenRecheck = true;
+    daemonStartedAt = started;
+    if (tokenRecheck) checkToken();
   } catch (error) {
+    if (token()) tokenRecheck = true;
     if (Date.now() - lastOk > STALE_AFTER_MS) {
       $('refresh').textContent = 'daemon unreachable';
       $('refresh').classList.add('stale');
