@@ -637,3 +637,208 @@ def test_a_permission_prompt_of_the_woken_turn_stays_open(wired, monkeypatch):
     assert report.woken == ["reviewer/PR-7"]
     [prompt] = wired.ledger.open_permission_prompts(wired.ledger.get(reviewer.id))
     assert prompt.tool_name == "Bash"
+
+
+# ----- the wake through the outbox ---------------------------------------------------
+
+
+def with_mod(harness, worker):
+    """The worker's session says hello from its chargehand mod, as the mod's session start does."""
+    return delivery_mod.record_mod_hello(harness.ledger, harness.ledger.get(worker.id), worker.session_uuid)
+
+
+def mod_takes(harness, worker):
+    """What the mod's outbox poll does: it takes the message for its session."""
+    current = harness.ledger.get(worker.id)
+    return delivery_mod.take_outbox(harness.ledger, current, current.session_uuid)
+
+
+def mod_confirms(harness, message, *, submitted=True):
+    current = harness.ledger.get(message.worker_id)
+    return delivery_mod.confirm_outbox(harness.ledger, current, message.id, submitted=submitted)
+
+
+def wake_rows(harness, worker) -> list[str]:
+    return [s.kind for s in harness.ledger.sessions_of(worker)]
+
+
+def test_a_live_session_with_the_mod_takes_its_wake_from_the_outbox(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+
+    report = wired.next_tick()
+
+    assert report.errors == [] and report.woken == []
+    # No stop and no resume: the process goes on.
+    assert resumes(wired) == []
+    assert ["stop", reviewer.session_id] not in wired.claude_state.commands
+    message = wired.ledger.outbox_message(reviewer)
+    assert message.state == ledger_mod.OUTBOX_PENDING
+    assert message.session_uuid == reviewer.session_uuid
+    assert message.text.splitlines() == [
+        MESSAGE_HEADER, *(f"{kind}: {p}" for kind, p in zip(THREE_KINDS, pointers)),
+    ]
+    waiting = wired.ledger.get(reviewer.id)
+    # Until the mod confirms, the events wait and no wake is recorded.
+    assert waiting.state == ledger_mod.IDLE and waiting.wakes == 0
+    assert pending(wired, waiting) == pointers
+    assert sorted(message.entries) == sorted(e.id for e in wired.ledger.inbox(waiting))
+
+    taken = mod_takes(wired, reviewer)
+    assert (taken.id, taken.text) == (message.id, message.text)
+    outcome, woken = mod_confirms(wired, taken)
+
+    assert outcome == delivery_mod.CONFIRM_RECORDED
+    assert woken.state == ledger_mod.RUNNING and woken.wakes == 1
+    assert woken.session_id == reviewer.session_id
+    assert wake_rows(wired, woken) == ["initial", "wake"]
+    assert pending(wired, woken) == []
+    # A second confirm of the same submit records nothing.
+    assert mod_confirms(wired, taken)[0] == delivery_mod.CONFIRM_ALREADY
+    assert wake_rows(wired, woken) == ["initial", "wake"]
+    assert resumes(wired) == []
+
+
+def test_ten_events_in_one_poll_give_one_outbox_message_and_one_wake(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    feed = fake_source.feed()
+    for _ in range(10):
+        feed.emit("comment", "PR-7")
+
+    wired.next_tick()
+    wired.next_tick()
+
+    (message,) = wired.ledger._conn.execute("SELECT id FROM outbox").fetchall()
+    taken = mod_takes(wired, reviewer)
+    assert len(taken.text.splitlines()) == 11
+    mod_confirms(wired, taken)
+    woken = wired.ledger.get(reviewer.id)
+    assert wake_rows(wired, woken) == ["initial", "wake"]
+    assert woken.wakes == 1 and pending(wired, woken) == []
+    assert resumes(wired) == [] and ["stop", reviewer.session_id] not in wired.claude_state.commands
+
+
+def test_events_join_a_pending_message_and_wait_once_the_mod_took_it(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    feed = fake_source.feed()
+    feed.emit("comment", "PR-7")
+    wired.next_tick()
+    first = wired.ledger.outbox_message(reviewer)
+
+    feed.emit("ci_status", "PR-7")
+    wired.next_tick()
+    joined = wired.ledger.outbox_message(reviewer)
+    assert joined.id == first.id and len(joined.entries) == 2
+
+    taken = mod_takes(wired, reviewer)
+    late = feed.emit("comment", "PR-7")
+    report = wired.next_tick()
+    assert any("took its wake message" in line for line in report.skipped)
+    assert wired.ledger.outbox_message(reviewer).entries == taken.entries
+
+    mod_confirms(wired, taken)
+    woken = wired.ledger.get(reviewer.id)
+    # The late event was not in the submitted message, so it waits for the next wake.
+    assert pending(wired, woken) == [f"https://tracker.invalid/PR-7#{late}"]
+
+
+def test_a_stopped_session_with_the_mod_is_respawned_and_then_takes_the_wake(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    stop_process(wired)
+    wired.claude_state.set(respawn_state="done")
+    emit_three()
+
+    report = wired.next_tick()
+
+    assert report.errors == []
+    assert ["respawn", reviewer.session_id] in wired.claude_state.commands
+    assert resumes(wired) == []
+    assert wired.ledger.outbox_message(reviewer).state == ledger_mod.OUTBOX_PENDING
+
+
+def test_a_failed_respawn_keeps_the_events_and_reports_it(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    stop_process(wired)
+    wired.claude_state.set(respawn_returncode=3)
+    pointers = emit_three()
+
+    report = wired.next_tick()
+
+    assert any("respawn of session" in line and "exited 3" in line for line in report.errors)
+    assert wired.ledger.outbox_message(reviewer) is None
+    assert pending(wired, wired.ledger.get(reviewer.id)) == pointers
+
+
+def test_a_session_whose_mod_said_no_hello_keeps_the_stop_and_the_resume(wired):
+    reviewer = start_reviewer(wired)
+    # The hello came from another session, such as the one before a retry.
+    wired.ledger.update(wired.ledger.get(reviewer.id), mod_session="an-older-session")
+    end_turn(wired)
+    emit_three()
+
+    report = wired.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert ["stop", reviewer.session_id] in wired.claude_state.commands
+    assert len(resumes(wired)) == 1
+    assert wired.ledger.outbox_message(reviewer) is None
+
+
+def test_a_message_the_mod_never_takes_falls_back_to_the_stop_and_the_resume(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    emit_three()
+    wired.next_tick()
+    message = wired.ledger.outbox_message(reviewer)
+    wired.ledger._conn.execute(
+        "UPDATE outbox SET created_at = created_at - ?", (delivery_mod.OUTBOX_TAKE_SECS + 1,)
+    )
+
+    report = wired.next_tick()
+
+    assert any("did not take its wake from the outbox" in line for line in report.warnings)
+    assert report.woken == ["reviewer/PR-7"] and len(resumes(wired)) == 1
+    assert wired.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED
+    woken = wired.ledger.get(reviewer.id)
+    assert woken.mod_session is None and woken.wakes == 1 and pending(wired, woken) == []
+
+
+def test_a_submit_the_session_refused_drops_the_message_and_the_mod(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+    wired.next_tick()
+    taken = mod_takes(wired, reviewer)
+
+    outcome, after = mod_confirms(wired, taken, submitted=False)
+
+    assert outcome == delivery_mod.CONFIRM_DROPPED
+    assert after.mod_session is None and after.wakes == 0
+    assert pending(wired, after) == pointers
+    assert wired.ledger.get_outbox(taken.id).state == ledger_mod.OUTBOX_DROPPED
+    # The next wake stops and resumes the session.
+    wired.next_tick()
+    assert len(resumes(wired)) == 1
+
+
+def test_a_wake_in_an_outbox_counts_against_the_global_cap(tmp_path, repo, claude_state, board):
+    write_role(repo, "reviewer", REVIEWER)
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=3)
+    first = with_mod(harness, start_reviewer(harness, "PR-7"))
+    end_turn(harness, "PR-7")
+    harness.next_tick()
+    second = start_reviewer(harness, "PR-8")
+    end_turn(harness, "PR-8")
+    harness.next_tick()
+    emit_three("PR-7")
+    emit_three("PR-8")
+
+    report = harness.next_tick()
+
+    assert harness.ledger.outbox_message(first) is not None
+    assert harness.ledger.get(second.id).state == ledger_mod.QUEUED
+    assert any("reviewer/PR-8" in line and "global cap (1/1 working)" in line for line in report.skipped)
+    harness.ledger.close()
