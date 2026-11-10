@@ -1054,6 +1054,7 @@ def launch_settings(
     mod: bool = False,
     mod_env: Mapping[str, str] | None = None,
     secret_files: Sequence[Path] = (),
+    secret_dirs: Sequence[Path] = (),
 ) -> dict[str, object]:
     """The per-launch settings payload: the deny rules, the allow rules, the hooks and the env.
 
@@ -1064,13 +1065,13 @@ def launch_settings(
     the chargehand mod, and its tools get an allow rule, so that no permission mode asks
     for them; *mod_env* tells the mod where the daemon is (:func:`mod_env`). The tools of
     :data:`ALWAYS_DENIED_TOOLS` are denied in every session. Each of *secret_files*, such
-    as another session's token file, gets `Read`, `Edit` and `Write` deny rules
-    (:func:`secret_file_rules`).
+    as another session's token file, and everything under each of *secret_dirs* gets
+    `Read`, `Edit` and `Write` deny rules (:func:`secret_file_rules`).
     """
     permissions: dict[str, list[str]] = {}
     deny = list(dict.fromkeys([
         *deny_rules, *ALWAYS_DENIED_TOOLS, *protected_path_rules(protected_paths),
-        *secret_file_rules(secret_files),
+        *secret_file_rules(secret_files), *secret_file_rules(secret_dirs, below=True),
     ]))
     permissions["deny"] = deny
     # `//` starts an absolute path in a Claude Code permission rule.
@@ -1106,15 +1107,17 @@ def protected_path_rules(paths: Sequence[Path]) -> list[str]:
     return rules
 
 
-def secret_file_rules(files: Sequence[Path]) -> list[str]:
+def secret_file_rules(files: Sequence[Path], *, below: bool = False) -> list[str]:
     """Deny rules that keep the file tools from reading or changing each of *files*.
 
-    As for :func:`protected_path_rules`, the Bash tool is not covered.
+    With *below*, each is a directory, and the rules cover everything under it. As for
+    :func:`protected_path_rules`, the Bash tool is not covered.
     """
     rules: list[str] = []
     for path in files:
         for variant in dict.fromkeys((str(Path(path)), os.path.realpath(path))):
-            rules += [f"Read(/{variant})", f"Edit(/{variant})", f"Write(/{variant})"]
+            target = f"/{variant}/**" if below else f"/{variant}"
+            rules += [f"Read({target})", f"Edit({target})", f"Write({target})"]
     return rules
 
 
@@ -1326,6 +1329,10 @@ def _permission_mode(spec: LaunchSpec) -> str:
     return str(spec.options.get("permission_mode") or DEFAULT_PERMISSION_MODE)
 
 
+def settings_dir() -> Path:
+    return paths.state_dir() / "session-settings"
+
+
 def settings_file_for(worktree: Path) -> Path:
     """Where the settings of the session in *worktree* are kept, under the state directory.
 
@@ -1333,18 +1340,7 @@ def settings_file_for(worktree: Path) -> Path:
     `--settings` again, which reads it again.
     """
     digest = hashlib.sha256(str(worktree).encode("utf-8")).hexdigest()[:24]
-    return paths.state_dir() / "session-settings" / f"{digest}.json"
-
-
-def settings_files() -> list[Path]:
-    """Every session settings file there is now."""
-    try:
-        return sorted(
-            entry for entry in (paths.state_dir() / "session-settings").iterdir()
-            if entry.suffix == ".json" and not entry.name.startswith(".")
-        )
-    except OSError:
-        return []
+    return settings_dir() / f"{digest}.json"
 
 
 def write_settings_file(path: Path, settings: Mapping[str, Any]) -> Path:
@@ -1742,8 +1738,14 @@ class ClaudeRuntime(Runtime):
 
         Each call writes a new token for the session (:mod:`chargehand.worker_tokens`): a
         launch and a fork get their own, and a resume or a respawn keeps the one of the
-        launch, as it keeps the settings. The other sessions' token and settings files get
-        deny rules. *mod*: the session loads the chargehand mod.
+        launch, as it keeps the settings. The file tools are denied the board's token file,
+        every settings file, and the token files of the other sessions that exist now.
+
+        The token files of later sessions are not covered: the mod reads its own token
+        file with `$.fs.read`, and whether a `Read` deny rule also binds that read is not
+        known, so the token directory is not denied as a whole. No tool of the session
+        reads a settings file: Claude Code loads its own `--settings` itself. *mod*: the
+        session loads the chargehand mod.
         """
         if self.hook_port is None or not self.has_daemon():
             return launch_settings(
@@ -1760,16 +1762,16 @@ class ClaudeRuntime(Runtime):
                     spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
                 ),
             )
-            others = [
-                *(p for p in worker_tokens.token_files() if p != token_file),
-                *(p for p in settings_files() if p != path),
-            ]
+            others = [p for p in worker_tokens.token_files() if p != token_file]
+            if self.token_file is not None:
+                others.append(self.token_file)
             settings = launch_settings(
                 spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
                 protected_paths=spec.protected_paths, mod=mod,
                 # The mod posts only where the hooks post: the same daemon, the same token.
                 mod_env=mod_env(self.hook_port, token_file) if mod else None,
                 secret_files=others,
+                secret_dirs=(settings_dir(),),
             )
             return write_settings_file(path, settings)
         except OSError as exc:

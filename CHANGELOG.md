@@ -72,9 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hooks and its mod send it. The daemon maps the token, not the session id or the working
   directory that a post names, to the worker, so one worker cannot speak for another by
   naming its session. The token ends with its worker: the daemon refuses it once the
-  worker ended, and the file is deleted with the session's settings file. Each launch's
-  settings deny `Read`, `Edit` and `Write` on the other sessions' token and settings
-  files.
+  worker ended, and the file is deleted with the session's settings file. A post with a
+  worker's token from another session than the worker's own, such as a copy that a resume
+  started in the same worktree, changes nothing, as before. Each launch's settings deny
+  `Read`, `Edit` and `Write` on the board's token file, on every session settings file,
+  and on the token files of the other sessions that exist then.
 
 ### Changed
 

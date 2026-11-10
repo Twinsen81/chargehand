@@ -174,8 +174,11 @@ public location.
   channel routes take only a worker's token, and the board's routes only the board's
   token. A token ends with its worker: the daemon refuses the token of a worker that ended,
   a new launch in the same worktree replaces it, and the file is deleted when the session
-  is removed. Each launch's settings deny `Read`, `Edit` and `Write` on the token and
-  settings files of the other sessions that exist at that moment.
+  is removed. A post with a worker's token from another session than the worker's own,
+  such as a copy that a resume started with the same settings, changes nothing. Each
+  launch's settings deny `Read`, `Edit` and `Write` on the board's token file, on every
+  session settings file, and on the token files of the other sessions that exist at that
+  moment.
 - **Session hooks.** Launched sessions post their start, turn ends, failures,
   notifications and permission prompts to `POST /hooks/<event>` on that port, with the
   session's token in the `Authorization` header; a post without a valid token changes
@@ -387,7 +390,8 @@ public location.
   path and a prompt-injected call that names another worker's session id: such a call acts
   as the worker whose token it carries. A process of the same user can still read another
   session's token file or settings file with a shell command, which the deny rules do not
-  cover, and a session launched after another one is not in that one's deny rules. With
+  cover, and the token file of a session launched after another one is not in that one's
+  deny rules. With
   another worker's token, a session can post as that worker's hooks and mod: move its
   state and its label, take its outbox message or call a tool for it, but run no command
   and answer no prompt. Sessions launched before sessions had their own token still post

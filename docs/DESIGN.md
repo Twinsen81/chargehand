@@ -602,10 +602,18 @@ worker: a post acts as the worker whose token it carries, whatever session id an
 directory it names. The board's token never goes to a session. A token ends with its
 worker: the daemon refuses the token of a worker that ended (its mod's outbox poll is
 answered `ended`), a new launch in the same worktree replaces it, and the file is
-deleted with the settings file when the session is removed. Each launch's settings deny
-`Read`, `Edit` and `Write` on the token and settings files of the other sessions that
-exist then. Like the deny rules, this is a guardrail: a shell command of the same user
-can still read another session's file. The token is not kept in the ledger: the launch
+deleted with the settings file when the session is removed. A post with a worker's
+token that names another session than the worker's own, such as a copy that a resume
+started in the same worktree with the same settings, changes nothing: its hooks, hello,
+lifecycle and usage posts are ignored, and its outbox poll gets no message. Each launch's
+settings deny `Read`, `Edit` and `Write` on the board's token file, on every file in
+`session-settings/` (no tool of a session reads one: Claude Code loads its `--settings`
+itself), and on the token files of the other sessions that exist then. The token
+directory is not denied as a whole, because the mod reads its own token file with
+`$.fs.read`, and whether a `Read` deny rule also binds that read is not settled; so a
+session's rules do not cover the token files of sessions launched after it. Like the deny
+rules, this is a guardrail: a shell command of the same user can still read another
+session's file. The token is not kept in the ledger: the launch
 runs in the runtime, which has no ledger, and the daemon finds the file that holds a
 token and then the newest worker in that file's worktree, a live one first.
 
