@@ -101,6 +101,14 @@ and the browser keeps it for the page. Workers started on the board are named by
 with their id, such as `implementer/ABC-1#7`, which every command that takes an item also
 accepts.
 
+Attach in Terminal.app needs no macOS permission: the daemon writes a one-line script
+(`exec claude attach <session id>`) into a private directory under its state directory
+and opens it with `/usr/bin/open -a Terminal`; the script deletes itself before it runs
+the command. iTerm2 asks for confirmation before it runs any file it is asked to open, so
+attach in iTerm2 still goes through Apple events: macOS asks once whether the daemon's
+Python may control iTerm2 (System Settings, Privacy & Security, Automation). If you do not
+want to give that permission, choose Terminal on the page.
+
 Clone on a card starts a new worker from that one, in a worktree of its own branched from
 the worker's current branch, so its commits carry over and the two never write the same
 files; uncommitted changes stay with the original. The form starts with the worker's prompt
