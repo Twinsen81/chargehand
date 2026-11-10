@@ -649,8 +649,11 @@ holds. The card shows its options as buttons and a one-line answer field. The fi
 resolves the record (`resolved`, by the board) and is recorded as a `reply` request, so the
 tick puts it into the worker's inbox and delivery wakes the worker with it, through the
 exception for a blocked worker whose turn ended with a question; a second answer gets 409.
-A question is cancelled when the worker leaves `blocked` by another path, as a prompt is;
-a permission prompt of the same turn leaves it open. Every worker launches with
+Any reply, from the card's Reply or from `chargehand reply`, answers the question the same
+way. A question is cancelled when the worker leaves `blocked` by another path: a pause, an
+end, or a new turn once the turn that asked it has ended, such as one that the operator
+starts in `claude attach`. A permission prompt of the same turn, and its answer, leave it
+open. Every worker launches with
 `AskUserQuestion` denied in its launch settings, beside the configured deny rules, so no
 configuration drops it: the session asks through `ask` instead.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks

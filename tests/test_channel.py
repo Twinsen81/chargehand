@@ -242,6 +242,54 @@ def test_a_permission_prompt_leaves_an_open_question_open(daemon, harness):
     kinds = sorted(p.kind for p in harness.ledger.open_permission_prompts(worker))
     assert kinds == [ledger_mod.PROMPT_PERMISSION, ledger_mod.PROMPT_QUESTION]
 
+    # The prompt is answered and the same turn goes on: the question stays, and the end of
+    # that turn blocks the worker with it.
+    harness.claude_state.set_session_state(worker.session_id, "working", status="busy")
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+    (question,) = harness.ledger.open_permission_prompts(worker)
+    assert question.kind == ledger_mod.PROMPT_QUESTION
+    blocked = turn_end(daemon, harness, worker)
+    assert (blocked.state, harness.notifier.sent[-1].detail) == (ledger_mod.BLOCKED, tick_mod.ASKED)
+
+
+def test_a_new_turn_after_the_question_ended_its_turn_cancels_it(daemon, harness):
+    worker = launch(harness)
+    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
+    assert turn_end(daemon, harness, worker).state == ledger_mod.BLOCKED
+
+    # The operator answers in `claude attach`, which starts a new turn.
+    harness.claude_state.set_session_state(worker.session_id, "working", status="busy")
+    harness.next_tick()
+
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+    assert harness.ledger.open_permission_prompts(worker) == []
+    assert turn_end(daemon, harness, worker).state == ledger_mod.IDLE
+
+
+@pytest.mark.parametrize("listed", ["blocked", "done"])
+def test_a_reply_from_the_command_line_answers_an_ask_question(daemon, harness, listed):
+    worker = launch(harness)
+    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
+    turn_end(daemon, harness, worker)
+    harness.claude_state.set_session_state(worker.session_id, listed, status="idle")
+    harness.next_tick()
+    (question,) = harness.ledger.open_permission_prompts(worker)
+
+    request_id = harness.ledger.record_request("reply", worker.target, text="red")
+    harness.next_tick()
+
+    outcome = harness.ledger.get_request(request_id)
+    assert outcome["ok"] == 1 and "answers the worker's question" in outcome["message"]
+    resolved = harness.ledger.get_permission_prompt(question.id)
+    assert (resolved.state, resolved.resolved_by) == (
+        ledger_mod.PROMPT_RESOLVED, ledger_mod.RESOLVED_BY_REPLY,
+    )
+    woken = harness.ledger.get(worker.id)
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, 1)
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: red" in resume["prompt"].splitlines()
+
 
 def test_a_question_is_cancelled_when_the_worker_leaves_blocked_by_another_path(daemon, harness):
     worker = launch(harness)

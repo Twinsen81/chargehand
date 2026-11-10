@@ -252,8 +252,9 @@ def _allowed_by_rule(ledger: Ledger, worker: Worker, hook: Hook) -> bool:
     tool = hook.tool_name or "unknown"
     if not digest or not ledger.has_permission_rule(worker, tool, digest):
         return False
-    # A session shows one dialog at a time; an older open prompt was answered in it.
-    ledger.resolve_permission_prompts(worker)
+    # A session shows one dialog at a time; an older open prompt was answered in it. A
+    # question that the ask tool recorded stays open.
+    ledger.resolve_permission_prompts(worker, kind=ledger_mod.PROMPT_PERMISSION)
     ledger.record_permission_prompt(
         worker, tool_name=tool, tool_input=hook.tool_input or "", input_digest=digest,
         resolved_by=ledger_mod.RESOLVED_BY_RULE,

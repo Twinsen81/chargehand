@@ -180,6 +180,18 @@ def test_always_allow_answers_the_same_request_by_itself_next_time(daemon, harne
     assert other.answered() == (200, DENIED)
 
 
+def test_a_call_that_a_rule_allows_leaves_an_open_question_open(daemon, harness):
+    worker = launch(harness)
+    first = Held(daemon, worker)
+    assert answer(daemon, worker, held_prompt(daemon, harness, worker).id, "always")[0] == 200
+    assert first.answered() == (200, ALLOWED)
+    question = harness.ledger.record_question(harness.ledger.get(worker.id), "Which colour?", [])
+
+    assert Held(daemon, worker).answered(timeout=3) == (200, ALLOWED)
+
+    assert [p.id for p in harness.ledger.open_permission_prompts(worker)] == [question]
+
+
 def test_a_rule_belongs_to_one_worker(daemon, harness):
     worker = launch(harness, "ABC-1")
     other = launch(harness, "ABC-2")

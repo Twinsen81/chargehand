@@ -1374,7 +1374,8 @@ class Runner:
 
         Delivery wakes the worker with it as with any event, under the same caps and the
         same usage reserve; a worker that delivery does not wake keeps it until it may. A
-        worker blocked by a question is woken by the reply, which answers it.
+        worker blocked by a question is woken by the reply, which answers it; a question
+        that it asked with its ask tool is resolved by the reply.
         """
         if worker.is_terminal:
             return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
@@ -1392,6 +1393,10 @@ class Runner:
             dedupe_id=f"reply:{args.get('request_id') or now}",
             pointer=text,
         ), now=now)
+        # The reply answers a question that the worker asked with its ask tool, so that
+        # question no longer holds the worker, and delivery wakes it with the reply.
+        if self.ledger.answer_questions(worker, by=ledger_mod.RESOLVED_BY_REPLY, now=now):
+            log.info("%s: the reply answers its question", worker.handle)
         log.info("%s: a reply from the board waits in its inbox", worker.handle)
         if worker.state in delivery_mod.WAKE_STATES:
             return True, "reply queued; delivery wakes the worker with it"
@@ -2649,6 +2654,8 @@ class Runner:
             prompt.kind == ledger_mod.PROMPT_QUESTION
             for prompt in self.ledger.open_permission_prompts(worker)
         ):
+            # From now on a new turn, such as one the operator starts in the session, ends it.
+            self.ledger.settle_questions(worker)
             return ledger_mod.BLOCKED, ASKED
         try:
             role = context.role(worker.role) if context and context.usable else None

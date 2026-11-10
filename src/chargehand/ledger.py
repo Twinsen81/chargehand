@@ -157,7 +157,9 @@ ALLOW = "allow"
 DENY = "deny"
 # Who resolved or cancelled a prompt: a click on the board, a rule the operator recorded
 # from the board, or the session itself (answered in the terminal, superseded, or stopped).
+# A question is also resolved by a reply, from the board or the command line.
 RESOLVED_BY_BOARD = "board"
+RESOLVED_BY_REPLY = "reply"
 RESOLVED_BY_RULE = "rule"
 RESOLVED_BY_SESSION = "session"
 
@@ -1272,14 +1274,26 @@ class Ledger:
         # stays open: a hook touches the row before it records a prompt, so a row read
         # later knows of it. The end of a launch (`launching` -> `running`) cancels
         # nothing: the first dialog of a session can come before the tick confirms it.
+        # A question that the ask tool recorded is no dialog of the session: a write of
+        # `running` cancels it only once the turn that asked it has ended (it is settled),
+        # because a permission prompt answered later in the same turn also writes `running`.
         if "state" not in changes:
             return
         state = changes["state"]
         if state == BLOCKED or (worker.state == LAUNCHING and state == RUNNING):
             return
+        if state != RUNNING:
+            self.resolve_permission_prompts(worker, now=changes["updated_at"])
+            return
         self.resolve_permission_prompts(
-            worker, now=changes["updated_at"],
-            recorded_by=worker.updated_at if state == RUNNING else None,
+            worker, now=changes["updated_at"], recorded_by=worker.updated_at,
+            kind=PROMPT_PERMISSION,
+        )
+        self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE worker_id = ? AND kind = ? AND state = ? AND released_at IS NOT NULL",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, changes["updated_at"], worker.id,
+             PROMPT_QUESTION, PROMPT_OPEN),
         )
 
     @staticmethod
@@ -1384,19 +1398,36 @@ class Ledger:
         """Record an open question of *worker* with its *options*; it replaces an older one.
 
         The question is a prompt of kind `question`: the board shows it in the same card as
-        a permission prompt, and the operator's answer resolves it. No hook waits for it,
-        so it is released from the start.
+        a permission prompt, and the operator's answer resolves it. No hook waits for it.
+        Its `released_at` says when the turn that asked it ended (:meth:`settle_questions`).
         """
         stamp = time.time() if now is None else now
         with self.transaction():
             self.resolve_permission_prompts(worker, now=stamp, kind=PROMPT_QUESTION)
             cursor = self._conn.execute(
                 "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
-                "kind, options, released_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (worker.id, "ask", question, stamp, PROMPT_QUESTION, json.dumps(list(options)),
-                 stamp),
+                "kind, options) VALUES (?, ?, ?, ?, ?, ?)",
+                (worker.id, "ask", question, stamp, PROMPT_QUESTION, json.dumps(list(options))),
             )
         return int(cursor.lastrowid)
+
+    def settle_questions(self, worker: Worker, *, now: float | None = None) -> None:
+        """Record that the turn which asked the worker's open questions has ended."""
+        self._conn.execute(
+            "UPDATE permission_prompts SET released_at = ? WHERE worker_id = ? AND kind = ? "
+            "AND state = ? AND released_at IS NULL",
+            (time.time() if now is None else now, worker.id, PROMPT_QUESTION, PROMPT_OPEN),
+        )
+
+    def answer_questions(self, worker: Worker, *, by: str, now: float | None = None) -> int:
+        """Resolve every open question of *worker*: a reply answers them."""
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE worker_id = ? AND kind = ? AND state = ?",
+            (PROMPT_RESOLVED, by, time.time() if now is None else now, worker.id,
+             PROMPT_QUESTION, PROMPT_OPEN),
+        )
+        return cursor.rowcount
 
     def answer_question(self, prompt_id: int, *, by: str, now: float | None = None) -> bool:
         """Resolve an open question. False when it was answered or cancelled before."""
