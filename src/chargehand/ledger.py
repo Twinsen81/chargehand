@@ -1622,17 +1622,20 @@ class Ledger:
         been reloaded before it submitted the text.
         """
         stamp = time.time() if now is None else now
-        with self.transaction():
-            current = self.outbox_message(worker)
-            if current is None or current.session_uuid != session_uuid:
-                return None
-            if current.state == OUTBOX_TAKEN and (current.taken_at or 0.0) > stamp - retake_after:
-                return None
-            self._conn.execute(
-                "UPDATE outbox SET state = ?, taken_at = ?, updated_at = ? WHERE id = ?",
-                (OUTBOX_TAKEN, stamp, stamp, current.id),
-            )
-        return self.get_outbox(current.id)
+        # The mod of every live session polls; an empty outbox takes no write lock.
+        current = self.outbox_message(worker)
+        if current is None or current.session_uuid != session_uuid:
+            return None
+        if current.state == OUTBOX_TAKEN and (current.taken_at or 0.0) > stamp - retake_after:
+            return None
+        # Only as read: a delivery or a second poll that changed it in between wins.
+        cursor = self._conn.execute(
+            "UPDATE outbox SET state = ?, taken_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = ? AND taken_at IS ? AND updated_at = ?",
+            (OUTBOX_TAKEN, stamp, stamp, current.id, current.state, current.taken_at,
+             current.updated_at),
+        )
+        return self.get_outbox(current.id) if cursor.rowcount else None
 
     def submit_outbox(self, message_id: int, now: float | None = None) -> OutboxMessage | None:
         """Mark a taken message submitted. The message when this call did it, else None."""
@@ -1657,11 +1660,28 @@ class Ledger:
         return bool(cursor.rowcount)
 
     def outbox_workers(self) -> set[int]:
-        """The ids of the workers with an open outbox message."""
+        """The ids of the workers whose open outbox message may still start a turn.
+
+        A paused or ended worker gets no wake from its outbox, so its message holds no
+        working slot.
+        """
+        waking = [state for state in NON_TERMINAL if state != PAUSED]
         rows = self._conn.execute(
-            "SELECT DISTINCT worker_id FROM outbox WHERE state IN (?, ?)", OUTBOX_OPEN
+            f"SELECT DISTINCT o.worker_id FROM outbox o JOIN workers w ON w.id = o.worker_id "
+            f"WHERE o.state IN (?, ?) AND w.state IN ({', '.join('?' * len(waking))})",
+            (*OUTBOX_OPEN, *waking),
         ).fetchall()
         return {int(row["worker_id"]) for row in rows}
+
+    def stale_outbox(self) -> list[OutboxMessage]:
+        """The open messages of workers that are paused or ended: none of them goes out."""
+        rows = self._conn.execute(
+            f"SELECT o.* FROM outbox o JOIN workers w ON w.id = o.worker_id "
+            f"WHERE o.state IN (?, ?) AND w.state IN ({', '.join('?' * (1 + len(TERMINAL)))}) "
+            f"ORDER BY o.id",
+            (*OUTBOX_OPEN, PAUSED, *TERMINAL),
+        ).fetchall()
+        return [_row_to_outbox(row) for row in rows]
 
     def inbox_entries(self, worker: Worker, ids: Iterable[int]) -> list[InboxEntry]:
         """The inbox rows of *worker* with *ids* that are not delivered yet."""

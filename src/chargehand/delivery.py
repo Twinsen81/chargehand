@@ -399,6 +399,11 @@ class Delivery:
 
     def run(self) -> DeliveryResult:
         result = DeliveryResult()
+        # A worker that was stopped, paused or cancelled with a wake in its outbox: the
+        # wake does not go out, and its events wait for a wake after a continue.
+        now = self._clock()
+        for message in self.ledger.stale_outbox():
+            self.ledger.drop_outbox(message.id, "the worker was stopped or ended", now)
         # Before the inboxes: a parked worker has waited since its turn failed.
         self._resume_parked(result)
         for worker in self.ledger.workers_in_state(WAKE_STATES):

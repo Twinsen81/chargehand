@@ -1210,3 +1210,29 @@ def test_a_submit_counts_once_and_a_drop_frees_the_worker(ledger):
     assert not ledger.drop_outbox(second.id, "again", now=16.0)
     assert ledger.get_outbox(second.id).reason == "the session changed"
     assert ledger.outbox_message(worker) is None
+
+
+def test_a_poll_of_an_empty_outbox_writes_nothing(ledger):
+    worker = make(ledger)
+    changes = ledger._conn.total_changes
+
+    assert ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=10.0) is None
+    assert ledger._conn.total_changes == changes
+    assert not ledger._conn.in_transaction
+
+
+def test_a_take_loses_to_a_change_made_after_it_read_the_message(ledger, monkeypatch):
+    worker = make(ledger)
+    ledger.put_outbox(worker, session_uuid="u1", text="one", entries=[1], now=10.0)
+    real = ledger.outbox_message
+
+    def read_then_change(target):
+        read = real(target)
+        # New events join the pending message between the read and the take.
+        ledger._conn.execute("UPDATE outbox SET updated_at = 11.0, text = 'two'")
+        return read
+
+    monkeypatch.setattr(ledger, "outbox_message", read_then_change)
+    assert ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=12.0) is None
+    monkeypatch.undo()
+    assert ledger.take_outbox(worker, session_uuid="u1", retake_after=60, now=13.0).text == "two"

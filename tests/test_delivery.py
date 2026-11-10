@@ -866,3 +866,36 @@ def test_a_wake_in_an_outbox_counts_against_the_launch_throttle(tmp_path, repo, 
     harness.next_tick()
     assert harness.worker("ABC-1", "implementer") is not None
     harness.ledger.close()
+
+
+def test_a_paused_worker_with_a_wake_in_its_outbox_holds_no_working_slot(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER)
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=3)
+    first = with_mod(harness, start_reviewer(harness, "PR-7"))
+    end_turn(harness, "PR-7")
+    harness.next_tick()
+    emit_three("PR-7")
+    harness.next_tick()
+    message = harness.ledger.outbox_message(first)
+    assert message is not None
+    # The operator stops it before the mod took the wake.
+    harness.ledger.record_request("stop", "reviewer/PR-7")
+    harness.next_tick()
+    assert harness.ledger.get(first.id).state == ledger_mod.PAUSED
+    assert harness.ledger.outbox_workers() == set()
+    second = start_reviewer(harness, "PR-8")
+    end_turn(harness, "PR-8")
+    harness.next_tick()
+    emit_three("PR-8")
+
+    report = harness.next_tick()
+
+    assert not any("global cap" in line for line in report.skipped)
+    assert report.woken == ["reviewer/PR-8"]
+    assert harness.ledger.get(second.id).state == ledger_mod.RUNNING
+    # Its message does not go out; its events wait for a wake after a continue.
+    assert harness.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED
+    assert len(pending(harness, harness.ledger.get(first.id))) == 3
+    harness.ledger.close()

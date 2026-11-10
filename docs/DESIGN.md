@@ -758,8 +758,8 @@ reading means no reserve; a reading counts however old it is, until the window's
 time has passed (see "Admission" in section 5). A worker that is not admitted becomes `queued` and
 keeps its events, and the reason it waits is kept for the board. A session whose
 chargehand mod said hello gets the message in its outbox (see "The chargehand mod" below).
-Any other session is woken by the runtime: `claude` stops a live idle process, confirms that it
-stopped, and resumes it by the full session id. It reads the listing again first: a session
+Any other session is woken by the runtime: `claude` stops a live idle process, confirms
+that it stopped, and resumes it by the full session id. It reads the listing again first: a session
 that started a turn or opened a prompt since the tick's listing is left alone, and its
 events wait. After the wake, one ledger transaction marks
 the events delivered and records the wake on the worker and as a `wake` row in `sessions`.
@@ -817,9 +817,11 @@ there, with the inbox rows it carries; events that come in before the mod takes 
 and later ones wait for the next wake. A stopped process is started again with `claude
 respawn` first. The confirm marks the events delivered and records the wake, once, in the
 same transaction as a wake by resume; the daily cap counts it the same way, and the global
-cap and the launch throttle count a wake in an outbox as a working turn. A message that the mod does not take
-within a minute is dropped, the session no longer counts as having the mod, and the wake
-stops and resumes it; so does a message that the session refused to submit. A taken
+cap and the launch throttle count a wake in an outbox as a working turn. A worker that is
+stopped, paused or cancelled gets no wake from its outbox: its message is dropped, and its
+events wait. A message that the mod does not take within a minute is dropped, the session
+no longer counts as having the mod, and the wake stops and resumes it; so does a message
+that the session refused to submit. A taken
 message without a confirm is handed out again after two minutes, for a mod that was
 reloaded before its submit.
 
