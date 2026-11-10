@@ -1418,6 +1418,15 @@ class Ledger:
             )
         return int(cursor.lastrowid)
 
+    def latest_question(self, worker: Worker) -> PermissionPrompt | None:
+        """The worker's newest question, in any state."""
+        row = self._conn.execute(
+            "SELECT * FROM permission_prompts WHERE worker_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (worker.id, PROMPT_QUESTION),
+        ).fetchone()
+        return PermissionPrompt(**dict(row)) if row else None
+
     def settle_questions(self, worker: Worker, *, now: float | None = None) -> None:
         """Record that the turn which asked the worker's open questions has ended."""
         self._conn.execute(

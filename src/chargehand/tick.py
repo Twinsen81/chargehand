@@ -151,10 +151,14 @@ ASKED = "asked a question; answer it on the board"
 # turn started, so a report this much earlier still counts.
 REPORT_TURN_MARGIN_SECS = 5.0
 
-# The session states that a turn which ended with an ask question shows: `done` from the
-# Stop hook or the listing, `blocked` from the listing. A blocked worker notified for one of
-# them is not notified again for the other while the question is open. The ask clears the
-# record of what was notified, so an earlier notification never covers a new question.
+# One notification per ask question. The question that a notification was about is kept
+# under this prefix and the worker id. While the worker stays blocked, another view of the
+# same turn end (`done` from the Stop hook or the listing, `blocked` from the listing,
+# before or after the answer) sends nothing more, as long as no permission prompt is open
+# and the question is the worker's newest. A permission prompt notified before or after
+# the question records no question, so it never covers one. A new turn, a turn end that
+# waits for events and the end of the worker drop the record.
+NOTIFIED_QUESTION_PREFIX = "notified-question:"
 QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
 
 # The worker states that are never notified. A worker that waits for events ends a turn
@@ -2571,37 +2575,52 @@ class Runner:
             report.transitions.append(_transition_line(worker.handle, before, target_state, observed))
         self._sync_labels(worker, context, report)
 
+        question_key = f"{NOTIFIED_QUESTION_PREFIX}{worker.id}"
+        if target_state in QUIET_STATES or observed == runtime_mod.WORKING or worker.is_terminal:
+            self.ledger.delete_state(question_key)
         if target_state in QUIET_STATES:
             # No notification for a turn end that waits for events. The record is
             # cleared, so the next state that needs the operator is notified even when
             # its session state is the one notified before this turn end.
             if worker.notified_state is not None:
                 worker = self.ledger.update(worker, notified_state=None)
-        elif (
-            observed != worker.notified_state and observed != runtime_mod.WORKING
-            and not (
-                # One question, two views of its turn end: the Stop hook says `done` and the
-                # ask tool's question blocks the worker, then the listing says `blocked`
-                # (or the other way round). The operator was told once.
+        elif observed != worker.notified_state and observed != runtime_mod.WORKING:
+            question = self._question_to_notify(worker)
+            if (
                 was_blocked and target_state == ledger_mod.BLOCKED
-                and {observed, worker.notified_state} <= QUESTION_TURN_ENDS
-                and any(
-                    prompt.kind == ledger_mod.PROMPT_QUESTION
-                    for prompt in self.ledger.open_permission_prompts(worker)
-                )
-            )
-        ):
+                and observed in QUESTION_TURN_ENDS and question is not None
+                and self.ledger.get_state(question_key) == str(question.id)
+            ):
+                # Another view of the turn end of a question that was notified: recorded,
+                # so that the next view compares with it, and not sent again.
+                worker = self.ledger.update(worker, notified_state=observed)
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
-            if self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
+            elif self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
                 worker = self.ledger.update(worker, notified_state=observed)
+                if target_state == ledger_mod.BLOCKED and question is not None and (
+                    question.state == ledger_mod.PROMPT_OPEN
+                ):
+                    self.ledger.set_state(question_key, str(question.id))
+                else:
+                    self.ledger.delete_state(question_key)
             elif worker.is_terminal:
                 # A finished worker leaves the live loop, so nothing would visit it again.
                 self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{worker.id}", detail or "")
         elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
         return worker
+
+    def _question_to_notify(self, worker: Worker) -> ledger_mod.PermissionPrompt | None:
+        """The worker's newest ask question, open or answered, while no permission prompt
+        is open; a permission prompt is what the worker waits for then."""
+        if any(
+            prompt.kind == ledger_mod.PROMPT_PERMISSION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        ):
+            return None
+        return self.ledger.latest_question(worker)
 
     def _failure_reset(self, worker: Worker, session: Session) -> float | None:
         """The reset time of a failure the listing shows, placed after the failure.

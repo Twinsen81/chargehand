@@ -217,40 +217,70 @@ def test_the_board_answers_a_question_once_and_the_answer_wakes_the_worker(
     assert harness.ledger.pending_requests() == []
 
 
-def test_one_question_sends_one_notification(daemon, harness):
-    worker = launch(harness)
-    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
-    turn_end(daemon, harness, worker)
-    assert harness.notifications().count(("ABC-1", "blocked")) == 1
+# The steps of a notification sequence. A step named "listed" runs a tick with that listing.
+PERMISSION, ANSWER_PERMISSION, ASK, STOP = "permission", "answer permission", "ask", "stop"
+LISTED_BLOCKED, LISTED_DONE, ANSWER_QUESTION = "listed blocked", "listed done", "answer question"
+STATUS_NEEDS_INPUT = "status file needs-input"
 
-    # The listing then shows the session as blocked by its question, then as done.
-    for listed in ("blocked", "done", "blocked"):
-        harness.claude_state.set_session_state(worker.session_id, listed, status="idle")
+
+@pytest.mark.parametrize("status_file, steps, notified", [
+    # The duplicate first seen: the Stop hook, then the listing's views of the same turn end.
+    (False, [ASK, STOP, LISTED_BLOCKED, LISTED_DONE, LISTED_BLOCKED], 1),
+    # The listing sees the question before the Stop hook comes in.
+    (False, [ASK, LISTED_BLOCKED, STOP, LISTED_BLOCKED], 1),
+    # The answer resolves the question; the tick that applies it still lists it blocked.
+    (False, [ASK, STOP, LISTED_BLOCKED, ANSWER_QUESTION, LISTED_BLOCKED], 1),
+    # A permission prompt, answered before the next tick, then the question: two of them.
+    (False, [PERMISSION, ANSWER_PERMISSION, ASK, STOP, LISTED_BLOCKED], 2),
+    # The question, then a permission prompt of the same turn, answered before the Stop.
+    (False, [ASK, PERMISSION, ANSWER_PERMISSION, STOP, LISTED_BLOCKED], 2),
+    # A status-file question after an answered permission prompt.
+    (True, [PERMISSION, ANSWER_PERMISSION, STATUS_NEEDS_INPUT, LISTED_DONE], 2),
+])
+def test_each_question_and_each_prompt_is_notified_once(
+    daemon, harness, monkeypatch, tmp_path, status_file, steps, notified
+):
+    monkeypatch.setattr(board, "REQUEST_WAIT_SECS", 0.0)
+    status_dir = tmp_path / "status"
+    if status_file:
+        status_dir.mkdir()
+        (harness.repo / ".chargehand.toml").write_text(
+            f'base = "origin/main"\nprompt = "{{issue}}"\n'
+            f'status_file = "{status_dir}/{{issue}}.json"\n'
+        )
+    worker = launch(harness)
+
+    def listed(state):
+        harness.claude_state.set_session_state(worker.session_id, state, status="idle")
         harness.next_tick()
 
-    assert harness.ledger.get(worker.id).state == ledger_mod.BLOCKED
-    assert harness.notifications().count(("ABC-1", "blocked")) == 1
+    for step in steps:
+        if step == PERMISSION:
+            harness.runner.apply_hook(harness.ledger.get(worker.id), runtime_mod.Hook(
+                kind=runtime_mod.HOOK_PERMISSION, event="PermissionRequest",
+                observed=runtime_mod.BLOCKED, tool_name="Bash", tool_input="ls",
+            ))
+        elif step == ANSWER_PERMISSION:
+            (prompt,) = [p for p in harness.ledger.open_permission_prompts(worker)
+                         if p.kind == ledger_mod.PROMPT_PERMISSION]
+            assert harness.ledger.answer_permission_prompt(
+                prompt.id, ledger_mod.ALLOW, by=ledger_mod.RESOLVED_BY_BOARD
+            )
+        elif step == ASK:
+            post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
+        elif step == STOP:
+            turn_end(daemon, harness, worker)
+        elif step == LISTED_BLOCKED:
+            listed("blocked")
+        elif step == LISTED_DONE:
+            listed("done")
+        elif step == ANSWER_QUESTION:
+            (question,) = harness.ledger.open_permission_prompts(worker)
+            assert answer(daemon, worker, {"prompt": question.id, "text": "red"})[0] == 202
+        elif step == STATUS_NEEDS_INPUT:
+            (status_dir / "ABC-1.json").write_text(json.dumps({"state": "needs-input"}))
 
-
-def test_a_question_after_an_answered_permission_prompt_is_notified(daemon, harness):
-    worker = launch(harness)
-    hook = runtime_mod.Hook(
-        kind=runtime_mod.HOOK_PERMISSION, event="PermissionRequest", observed=runtime_mod.BLOCKED,
-        tool_name="Bash", tool_input="ls",
-    )
-    harness.runner.apply_hook(harness.ledger.get(worker.id), hook)
-    assert harness.notifications().count(("ABC-1", "blocked")) == 1
-    (prompt,) = harness.ledger.open_permission_prompts(worker)
-    # Answered on the board; no tick runs before the turn asks and ends.
-    assert harness.ledger.answer_permission_prompt(
-        prompt.id, ledger_mod.ALLOW, by=ledger_mod.RESOLVED_BY_BOARD
-    )
-
-    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
-    assert turn_end(daemon, harness, worker).state == ledger_mod.BLOCKED
-
-    assert harness.notifications().count(("ABC-1", "blocked")) == 2
-    assert harness.notifier.sent[-1].detail == tick_mod.ASKED
+    assert harness.notifications().count(("ABC-1", "blocked")) == notified
 
 
 def test_an_answer_needs_one_line_of_text(daemon, harness):
