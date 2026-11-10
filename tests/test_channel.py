@@ -100,16 +100,36 @@ def test_the_token_not_the_session_id_says_which_worker_calls(daemon, harness):
     # The token of the first worker, with the session id and the worktree of the second.
     as_first = {**of(second), _TOKEN: worker_tokens.read(first.worktree_path)}
 
-    assert post(daemon, "hello", as_first)[0] == 200
     status, answer = post(daemon, "tool/report", {
         **as_first, "input": {"state": "working", "summary": "from the first"},
     })
 
     assert (status, answer["is_error"]) == (200, False)
     assert harness.ledger.get(first.id).report_summary == "from the first"
-    assert harness.ledger.get(first.id).mod_session == second.session_uuid
-    after = harness.ledger.get(second.id)
-    assert (after.report_summary, after.mod_session) == (None, None)
+    assert harness.ledger.get(second.id).report_summary is None
+
+
+@pytest.mark.parametrize("session", ["second", "a copy"])
+def test_the_session_posts_of_another_session_with_a_workers_token_change_nothing(
+    daemon, harness, session
+):
+    first = launch(harness, "ABC-1")
+    second = launch(harness, "ABC-2")
+    # The second worker's session, or a copy that a resume started in the first worktree
+    # with the same settings and so the same token.
+    session_id = second.session_uuid if session == "second" else "copy-of-the-first"
+    elsewhere = {**of(first), "session_id": session_id}
+    before = (harness.ledger.get(first.id), harness.ledger.get(second.id))
+
+    for path, extra in (
+        ("hello", {}),
+        ("lifecycle/turn_complete", {"reason": "answer", "answer": "from elsewhere"}),
+        ("usage", {"context": {"tokens": 5, "percent": 1}}),
+    ):
+        assert post(daemon, path, {**elsewhere, **extra})[0] == 404, path
+    assert post(daemon, "outbox", elsewhere) == (200, {"message": None})
+
+    assert (harness.ledger.get(first.id), harness.ledger.get(second.id)) == before
 
 
 def test_the_token_of_a_worker_that_ended_is_refused(daemon, harness):

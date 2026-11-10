@@ -468,7 +468,8 @@ class Daemon:
         needs_token = method not in SAFE_METHODS
         # Without a route, the board's token decides between 401 and 404, as before routes
         # took other tokens.
-        if needs_token and (handler is None or auth == AUTH_BOARD) and not self._authorized(headers):
+        board_only = handler is None or auth == AUTH_BOARD
+        if needs_token and board_only and not self._authorized(headers):
             raise HTTPError(401, "a valid bearer token is required")
         if handler is None:
             self._read_body(headers, body)

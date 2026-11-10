@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from chargehand import delivery as delivery_mod
+from chargehand import hooks
 from chargehand import ledger as ledger_mod
 from chargehand import runtime as runtime_mod
 from chargehand import sanitize, usage
@@ -357,8 +358,14 @@ def _text(payload: Mapping[str, Any], key: str, limit: int) -> str | None:
     return sanitize.one_line(value, limit=limit) or None
 
 
-def _worker(request: Request) -> tuple[Ledger, Worker, type[Runtime]]:
-    """The live worker whose token the post carries; 401 when it ended."""
+def _worker(
+    request: Request, payload: Mapping[str, Any] | None = None
+) -> tuple[Ledger, Worker, type[Runtime]]:
+    """The live worker whose token the post carries; 401 when it ended.
+
+    With *payload*, the post must also come from the worker's own session (see
+    :func:`chargehand.hooks.is_own_session`), else 404, as for a session no worker has.
+    """
     ledger = request.ledger()
     caller = request.caller
     if caller is None:
@@ -369,6 +376,13 @@ def _worker(request: Request) -> tuple[Ledger, Worker, type[Runtime]]:
     runtime = next((r for r in _runtimes() if r.name == worker.runtime), None)
     if runtime is None:
         raise HTTPError(404, "this worker's runtime has no channel")
+    if payload is not None:
+        session = _text(payload, "session_id", 100)
+        if not hooks.is_own_session(worker, session):
+            log.info("%s: channel %s from session %s, which is not the worker's session",
+                     worker.handle, sanitize.one_line(request.path, limit=80),
+                     (session or "-")[:hooks.SESSION_PREFIX])
+            raise HTTPError(404, "this is not the worker's session")
     return ledger, worker, runtime
 
 
@@ -386,7 +400,7 @@ def hello(request: Request) -> Response:
     """Record that the session's mod runs, and give it the tools and the poll interval."""
     payload = _payload(request)
     session = _session(payload)
-    ledger, worker, _ = _worker(request)
+    ledger, worker, _ = _worker(request, payload)
     worker = delivery_mod.record_mod_hello(ledger, worker, session)
     log.info("%s: the chargehand mod of session %s said hello", worker.handle, session[:8])
     return Response.json({
@@ -463,7 +477,7 @@ def confirm(request: Request) -> Response:
 def lifecycle(request: Request) -> Response:
     event = request.path[len(f"{PREFIX}/lifecycle"):].strip("/")
     payload = _payload(request)
-    ledger, worker, runtime = _worker(request)
+    ledger, worker, runtime = _worker(request, payload)
     hook = runtime.parse_channel(event, payload) if event in runtime.channel_events else None
     if hook is None:
         raise HTTPError(404, "not found")
@@ -481,7 +495,7 @@ def lifecycle(request: Request) -> Response:
 def record_usage(request: Request) -> Response:
     """Write the session's weekly window to the usage file, and keep its context window."""
     payload = _payload(request)
-    ledger, worker, runtime = _worker(request)
+    ledger, worker, runtime = _worker(request, payload)
     written = False
     if runtime.capabilities.usage_readings:
         written = usage.record_session_usage(

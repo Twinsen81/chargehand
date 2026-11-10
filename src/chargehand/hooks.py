@@ -5,9 +5,12 @@ the session's own token (see :mod:`chargehand.worker_tokens`): its start, the en
 turn, a turn that failed, its notifications and its permission prompts. The token says
 which worker posts. A session launched before sessions had their own token posts with the
 board's token, and its post maps to a worker by its session id and working directory, as
-before. The runtime that owns the event reads the payload; this module finds the worker
-and hands the post to the tick's own transition code, so a hook and the session diff move a worker the same way and send the same
-notification. The diff of each tick stays as the fallback for a hook that never came.
+before. A post with a worker's token that names another session than the worker's own,
+such as a copy that a resume started in the same worktree, changes nothing. The runtime
+that owns the event reads the payload; this module finds the worker and hands the post to
+the tick's own transition code, so a hook and the session diff move a worker the same way
+and send the same notification. The diff of each tick stays as the fallback for a hook
+that never came.
 
 Almost every answer is an empty JSON object. A turn end gets no decision that would keep
 the turn running, and a session start gets no context for the model. A post that maps to
@@ -221,7 +224,10 @@ def receive(request: Request) -> Response:
     session = session_prefix(hook)
     if request.caller is not None:
         worker = ledger.get(request.caller.id)
-        if worker is not None and (worker.is_terminal or worker.runtime != runtime.name):
+        if worker is not None and (
+            worker.is_terminal or worker.runtime != runtime.name
+            or not is_own_session(worker, hook.session_uuid)
+        ):
             worker = None
     else:
         worker = find_worker(ledger, hook, runtime.name)
@@ -469,6 +475,16 @@ def _note_board_token(worker: Worker, hook: Hook) -> None:
     log.info("%s: session %s posts its hooks with the board's token; it was launched before "
              "sessions had their own token, and its next launch gets one", worker.handle,
              session_prefix(hook))
+
+
+def is_own_session(worker: Worker, session_uuid: str | None) -> bool:
+    """Whether a post that names *session_uuid* comes from *worker*'s own session.
+
+    A worker without a session id yet, in the middle of its launch, takes the post. The
+    token says which worker posts; this says that the session is the one the worker has,
+    and not a copy that a resume started in the same worktree with the same settings.
+    """
+    return not (worker.session_uuid and session_uuid and session_uuid != worker.session_uuid)
 
 
 def session_prefix(hook: Hook) -> str:

@@ -101,7 +101,8 @@ def _matching_file(token: str) -> Path | None:
     # Every file is compared, in constant time each, so the time does not tell which matched.
     for path in token_files():
         known = _read(path)
-        if known is not None and hmac.compare_digest(given, known.encode("utf-8")) and found is None:
+        matches = known is not None and hmac.compare_digest(given, known.encode("utf-8"))
+        if matches and found is None:
             found = path
     return found
 

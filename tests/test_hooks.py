@@ -131,31 +131,39 @@ def test_the_hook_settings_are_in_a_private_file_and_not_on_the_command_line(har
     assert path == claude.settings_file_for(Path(harness.worker("ABC-1").worktree))
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-    # The deny rules travel in the same file.
-    assert json.loads(path.read_text())["permissions"]["deny"] == [
+    # The deny rules travel in the same file, with the ones for chargehand's own secrets.
+    deny = json.loads(path.read_text())["permissions"]["deny"]
+    assert deny[:len(harness.config.deny_rules) + 1] == [
         *harness.config.deny_rules, "AskUserQuestion",
     ]
+    assert all(rule.startswith(("Read(/", "Edit(/", "Write(/"))
+               for rule in deny[len(harness.config.deny_rules) + 1:])
     # The session gets its own token; the board's stays with the operator.
     assert "the-daemon-token" not in path.read_text()
 
 
-def test_each_session_is_denied_the_token_and_settings_files_of_the_others(harness, tmp_path):
-    _with_token(harness, tmp_path)
+def _denied(deny, path, *, below=False):
+    target = f"/{path}/**" if below else f"/{path}"
+    return {f"Read({target})", f"Edit({target})", f"Write({target})"} <= set(deny)
+
+
+def test_each_session_is_denied_the_board_token_the_settings_and_the_others_tokens(
+    harness, tmp_path
+):
+    board_token = _with_token(harness, tmp_path)
     first = launch(harness, "ABC-1")
 
     second = launch(harness, "ABC-2")
 
     deny = _settings_of_last_launch(harness)["permissions"]["deny"]
-    for other in (
-        worker_tokens.token_file_for(first.worktree_path),
-        claude.settings_file_for(first.worktree_path),
-    ):
-        assert {f"Read(/{other})", f"Edit(/{other})", f"Write(/{other})"} <= set(deny)
-    for own in (
-        worker_tokens.token_file_for(second.worktree_path),
-        claude.settings_file_for(second.worktree_path),
-    ):
-        assert not any(str(own) in rule for rule in deny)
+    assert _denied(deny, worker_tokens.token_file_for(first.worktree_path))
+    # Every settings file holds a session's token, its own included; no tool reads one.
+    assert _denied(deny, claude.settings_dir(), below=True)
+    # The session needs no board token any more.
+    assert _denied(deny, board_token)
+    # The mod reads its own token file.
+    own = worker_tokens.token_file_for(second.worktree_path)
+    assert not any(str(own) in rule for rule in deny)
     assert worker_tokens.read(first.worktree_path) != worker_tokens.read(second.worktree_path)
 
 
@@ -179,9 +187,9 @@ def test_a_hook_with_a_workers_token_acts_as_that_worker(daemon, harness):
     second = launch(harness, "ABC-2")
     token = worker_tokens.issue(first.worktree_path)
 
-    # The session id and the working directory of the second worker, the first one's token.
+    # The working directory of the second worker, the first one's token and session.
     status, answer = post(daemon, "Stop", {
-        "session_id": second.session_uuid, "cwd": second.worktree,
+        "session_id": first.session_uuid, "cwd": second.worktree,
         "last_assistant_message": "from the first",
     }, headers=_as(token))
 
@@ -189,6 +197,41 @@ def test_a_hook_with_a_workers_token_acts_as_that_worker(daemon, harness):
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
     assert harness.worker("ABC-1").last_answer == "from the first"
     assert harness.worker("ABC-2").state == ledger_mod.RUNNING
+
+
+@pytest.mark.parametrize("session", ["second", "a copy"])
+def test_a_hook_from_another_session_with_a_workers_token_changes_nothing(
+    daemon, harness, session
+):
+    first = launch(harness, "ABC-1")
+    second = launch(harness, "ABC-2")
+    token = worker_tokens.issue(first.worktree_path)
+    before = (harness.ledger.get(first.id), harness.ledger.get(second.id))
+    # The second worker's session, or a copy that a resume started in the first worktree
+    # with the same settings and so the same token.
+    session_id = second.session_uuid if session == "second" else "copy-of-the-first"
+
+    for event, extra in (
+        ("Stop", {"last_assistant_message": "from elsewhere", "transcript_path": "/t/x.jsonl"}),
+        ("PermissionRequest", {"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+    ):
+        status, answer = post(daemon, event, {
+            "session_id": session_id, "cwd": first.worktree, **extra,
+        }, headers=_as(token))
+        assert (status, answer) == (200, {})
+
+    assert (harness.ledger.get(first.id), harness.ledger.get(second.id)) == before
+    assert harness.ledger.open_permission_prompts() == []
+
+
+def test_a_hook_during_the_launch_is_taken_with_the_workers_token(daemon, harness):
+    worker = launch(harness)
+    token = worker_tokens.issue(worker.worktree_path)
+    harness.ledger.update(worker, session_uuid=None)
+
+    post(daemon, "Stop", {"session_id": "the-new-session"}, headers=_as(token))
+
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
 
 
 def test_a_hook_with_an_unknown_token_is_refused(daemon, harness):
