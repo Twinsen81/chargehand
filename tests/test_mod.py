@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude, ledger as ledger_mod, runtime as runtime_mod
+from chargehand import claude, ledger as ledger_mod, runtime as runtime_mod, worker_tokens
 from chargehand.config import ServeConfig
 from conftest import FAKE_CLAUDE
 
@@ -82,9 +82,9 @@ def test_the_wheel_takes_the_mod_with_its_dot_directory():
 
 
 def test_every_launch_loads_the_mod_and_allows_its_tools(harness, tmp_path):
-    token_file = with_token(harness, tmp_path)
+    with_token(harness, tmp_path)
 
-    launch(harness)
+    worker = launch(harness)
 
     argv = harness.claude_state.launches[-1]["argv"]
     # A copy under the state directory, so that what Claude Code writes into the folder of
@@ -96,11 +96,12 @@ def test_every_launch_loads_the_mod_and_allows_its_tools(harness, tmp_path):
     assert not (loaded / "hooks" / "register.test.ts").exists()
     settings = settings_of_last_launch(harness)
     assert claude.MOD_TOOL_RULE in settings["permissions"]["allow"]
-    # The mod finds the daemon where the hooks post; the file names the token file only.
-    assert settings["env"] == {
-        claude.MOD_PORT_ENV: "4567", claude.MOD_TOKEN_FILE_ENV: str(token_file),
-    }
-    assert "the-daemon-token" not in json.dumps(settings["env"])
+    # The mod finds the daemon where the hooks post, with the session's own token; the
+    # settings name its file only.
+    own = worker_tokens.token_file_for(Path(worker.worktree))
+    assert settings["env"] == {claude.MOD_PORT_ENV: "4567", claude.MOD_TOKEN_FILE_ENV: str(own)}
+    assert worker_tokens.read(Path(worker.worktree)) not in json.dumps(settings["env"])
+    assert "the-daemon-token" not in json.dumps(settings)
 
 
 def test_without_a_token_the_mod_gets_no_address(harness, tmp_path):

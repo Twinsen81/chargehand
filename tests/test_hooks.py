@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude, hooks, ledger as ledger_mod
+from chargehand import claude, hooks, ledger as ledger_mod, worker_tokens
 from chargehand.config import ServeConfig
 from chargehand.runtime import Hook
 from chargehand.sources import Event, WorkItem
@@ -82,11 +82,18 @@ def _with_token(harness, tmp_path, port=4567):
     return token_file
 
 
-def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_token(harness, tmp_path):
-    token_file = _with_token(harness, tmp_path)
+def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_sessions_own_token(
+    harness, tmp_path
+):
+    _with_token(harness, tmp_path)
 
-    launch(harness)
+    worker = launch(harness)
 
+    token_file = worker_tokens.token_file_for(worker.worktree_path)
+    token = worker_tokens.read(worker.worktree_path)
+    assert token and token != "the-daemon-token"
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(token_file.parent.stat().st_mode) == 0o700
     hooks_settings = _settings_of_last_launch(harness)["hooks"]
     assert set(hooks_settings) == {"SessionStart", "Stop", "StopFailure", "Notification", "PermissionRequest"}
     for event, groups in hooks_settings.items():
@@ -101,7 +108,7 @@ def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_token(harness, 
             continue
         assert hook["type"] == "http"
         assert hook["url"] == f"http://127.0.0.1:4567/hooks/{event}"
-        assert hook["headers"] == {"Authorization": "Bearer the-daemon-token"}
+        assert hook["headers"] == {"Authorization": f"Bearer {token}"}
     assert hooks_settings["PermissionRequest"][0]["matcher"] == "*"
     # Claude Code runs only command hooks on SessionStart. The command names the token
     # file, never the token.
@@ -128,6 +135,99 @@ def test_the_hook_settings_are_in_a_private_file_and_not_on_the_command_line(har
     assert json.loads(path.read_text())["permissions"]["deny"] == [
         *harness.config.deny_rules, "AskUserQuestion",
     ]
+    # The session gets its own token; the board's stays with the operator.
+    assert "the-daemon-token" not in path.read_text()
+
+
+def test_each_session_is_denied_the_token_and_settings_files_of_the_others(harness, tmp_path):
+    _with_token(harness, tmp_path)
+    first = launch(harness, "ABC-1")
+
+    second = launch(harness, "ABC-2")
+
+    deny = _settings_of_last_launch(harness)["permissions"]["deny"]
+    for other in (
+        worker_tokens.token_file_for(first.worktree_path),
+        claude.settings_file_for(first.worktree_path),
+    ):
+        assert {f"Read(/{other})", f"Edit(/{other})", f"Write(/{other})"} <= set(deny)
+    for own in (
+        worker_tokens.token_file_for(second.worktree_path),
+        claude.settings_file_for(second.worktree_path),
+    ):
+        assert not any(str(own) in rule for rule in deny)
+    assert worker_tokens.read(first.worktree_path) != worker_tokens.read(second.worktree_path)
+
+
+def test_a_release_ends_the_sessions_token(harness, tmp_path):
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    assert worker_tokens.read(worker.worktree_path)
+
+    claude.ClaudeRuntime().release(worker.worktree_path)
+
+    assert not worker_tokens.token_file_for(worker.worktree_path).exists()
+    assert not claude.settings_file_for(worker.worktree_path).exists()
+
+
+def _as(token):
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def test_a_hook_with_a_workers_token_acts_as_that_worker(daemon, harness):
+    first = launch(harness, "ABC-1")
+    second = launch(harness, "ABC-2")
+    token = worker_tokens.issue(first.worktree_path)
+
+    # The session id and the working directory of the second worker, the first one's token.
+    status, answer = post(daemon, "Stop", {
+        "session_id": second.session_uuid, "cwd": second.worktree,
+        "last_assistant_message": "from the first",
+    }, headers=_as(token))
+
+    assert (status, answer) == (200, {})
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    assert harness.worker("ABC-1").last_answer == "from the first"
+    assert harness.worker("ABC-2").state == ledger_mod.RUNNING
+
+
+def test_a_hook_with_an_unknown_token_is_refused(daemon, harness):
+    worker = launch(harness)
+    before = harness.ledger.get(worker.id)
+
+    status, _ = post(daemon, "Stop", {"session_id": worker.session_uuid}, headers=_as("not-one"))
+
+    assert status == 401
+    assert harness.ledger.get(worker.id) == before
+
+
+def test_the_token_of_a_worker_that_ended_changes_nothing(daemon, harness):
+    worker = launch(harness)
+    token = worker_tokens.issue(worker.worktree_path)
+    ended = harness.ledger.update(worker, state=ledger_mod.CANCELLED)
+
+    status, answer = post(daemon, "Stop", {"session_id": worker.session_uuid}, headers=_as(token))
+
+    assert (status, answer) == (200, {})
+    assert harness.ledger.get(worker.id) == ended
+
+
+def test_a_session_from_before_its_own_token_still_posts_with_the_boards(
+    daemon, harness, caplog, monkeypatch
+):
+    # The fake's session ids repeat across tests, and the daemon says it once per process.
+    monkeypatch.setattr(hooks, "_BOARD_TOKEN_SESSIONS", {})
+    worker = launch(harness)
+
+    with caplog.at_level(logging.INFO, logger="chargehand.hooks"):
+        for _ in range(2):
+            status, _ = post(daemon, "Notification", {"session_id": worker.session_uuid})
+            assert status == 200
+        post(daemon, "Stop", {"session_id": worker.session_uuid})
+
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    said = [r.getMessage() for r in caplog.records if "the board's token" in r.getMessage()]
+    assert len(said) == 1 and worker.session_uuid[:8] in said[0]
 
 
 def _run_session_start_hook(harness, payload, *, timeout=10):

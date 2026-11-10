@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from chargehand import board, claude as claude_mod, ledger as ledger_mod
-from chargehand import usage as usage_mod
+from chargehand import usage as usage_mod, worker_tokens
 from chargehand.cli import EXIT_ERROR, EXIT_OK, build_parser, build_status, main
 from chargehand.config import ServeConfig
 from chargehand.errors import LaunchAborted
@@ -221,8 +221,14 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
     assert settings != claude_mod.settings_file_for(original.worktree_path)
     written = json.loads(settings.read_text())
     assert "Stop" in written["hooks"] and "the-daemon-token" not in " ".join(argv)
+    # The copy gets a token of its own, and cannot speak as the original.
+    token = worker_tokens.read(clone.worktree_path)
+    assert token and token != worker_tokens.read(original.worktree_path)
+    assert written["hooks"]["Stop"][0]["hooks"][0]["headers"] == {"Authorization": f"Bearer {token}"}
+    assert "the-daemon-token" not in settings.read_text()
     # The file tools are denied in the original's worktree, in every permission mode.
     deny = written["permissions"]["deny"]
+    assert f"Read(/{worker_tokens.token_file_for(original.worktree_path)})" in deny
     for path in {str(original.worktree_path), os.path.realpath(original.worktree)}:
         assert f"Edit(/{path}/**)" in deny and f"Write(/{path}/**)" in deny
     assert not any(clone.worktree in rule for rule in deny)
