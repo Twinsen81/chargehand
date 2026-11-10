@@ -79,6 +79,8 @@ _REF = re.compile(r"([^/#\s]+)/([^/#\s]+)#([0-9]{1,10})")
 _PLAIN_OWNER = re.compile(r"[a-z0-9-]+")
 _API_PATH = re.compile(r"/repos/([^/]+)/([^/]+)/(pulls|issues)/([0-9]{1,10})$")
 _API_REPO = re.compile(r"/repos/([^/]+)/([^/]+)$")
+# A pull request or issue page, and anything past its number, such as a comment's anchor.
+_HTML_ITEM = re.compile(r"https://github\.com/([^/#?\s]+)/([^/#?\s]+)/(pull|issues)/([0-9]{1,10})(?:[/#?]\S*)?")
 # A branch name as it reaches a query string: plain characters only, no leading dash.
 _BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
 
@@ -508,6 +510,27 @@ class GithubSource(Source):
         return next(
             (r for r in repositories if r.github is not None and r.github.lower() == name), None
         )
+
+    def item_for(self, text: str) -> WorkItem | None:
+        """A pull request or issue URL on github.com, or ``owner/repo#number``.
+
+        The URL may go on past the number, as a comment's does. The repository must be a
+        configured one, once the tick has said which are.
+        """
+        match = _HTML_ITEM.fullmatch(text or "")
+        if match:
+            ref = make_ref(match.group(1), match.group(2), match.group(4))
+            pull = match.group(3) == "pull"
+        else:
+            ref, pull = parse_ref(text), False
+        if ref is None:
+            return None
+        if self.configured_repositories is not None and not any(
+            r.github is not None and r.github.lower() == ref.full_name.lower()
+            for r in self.configured_repositories
+        ):
+            return None
+        return self._work_item(ref, pull=pull)
 
     def pull_request_for(self, repository: Repository, branch: str) -> WorkItem | None:
         if repository.github is None or not _BRANCH.fullmatch(branch):
