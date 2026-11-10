@@ -937,4 +937,6 @@ def test_a_cancel_drops_the_wake_in_the_outbox(wired):
     wired.next_tick()
 
     assert wired.ledger.get(reviewer.id).state == ledger_mod.CANCELLED
-    assert wired.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED
+    dropped = wired.ledger.get_outbox(message.id)
+    # The cancel drops it, not only the sweep of the delivery that follows.
+    assert (dropped.state, dropped.reason) == (ledger_mod.OUTBOX_DROPPED, "the worker was cancelled")
