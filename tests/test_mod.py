@@ -261,6 +261,19 @@ def test_claude_plugin_validate_lists_only_the_expected_hooks_and_calls():
 # ----- the copy a session loads -------------------------------------------------------
 
 
+def test_the_shipped_files_are_the_files_a_session_loads():
+    shipped = {
+        path.relative_to(claude.MOD_DIR).as_posix()
+        for path in claude.MOD_DIR.rglob("*")
+        if path.is_file()
+        and "/types/" not in path.as_posix()
+        and not path.name.endswith((".test.ts", ".test.tsx"))
+    }
+
+    # A new file of the mod must be added to MOD_FILES, or the copy would lack it.
+    assert shipped == set(claude.MOD_FILES)
+
+
 def _shipped(tmp_path, version: str) -> Path:
     source = tmp_path / "shipped"
     for name in claude.MOD_FILES:
