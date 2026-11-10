@@ -43,7 +43,8 @@ launchd KeepAlive job ──► chargehand serve: a tick every tick_interval_sec
    5. poll the event sources, route: inboxes, then start rules
    6. diff session states, notify on change      ◄── claude agents --json --all
    7. poll each repository's tracker as a source, route: inboxes and closes
-   8. deliver: one wake per idle worker with events (stop, then claude --resume)
+   8. deliver: one wake per idle worker with events (the outbox of a session with the
+      mod; else stop, then claude --resume)
    9. sync the tracker labels and the status of source items
   10. admit the tracker's starts: the queue label is a start rule
       (repositories, roles' start rules, ledger, capacity)
@@ -452,7 +453,9 @@ one runtime does not start silently on another.
 
 `claude` is the only runtime that ships and the default. It wakes a session by stopping its
 process, confirming that it stopped, and resuming it by the full session id with stdin
-closed; a resume that starts a copy instead is reported as a fault. The test suite has a
+closed; a resume that starts a copy instead is reported as a fault. With the chargehand mod
+in the session, the wake goes into the session's outbox instead, and the process goes on
+(see "The chargehand mod" in section 6). The test suite has a
 second runtime with fewer capabilities, whose processes chargehand hosts, and the tick tests
 that must behave the same run on both.
 
@@ -753,8 +756,9 @@ wake must pass admission: the number of working turns below `max_concurrent`, th
 worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
 reading means no reserve; a reading counts however old it is, until the window's reset
 time has passed (see "Admission" in section 5). A worker that is not admitted becomes `queued` and
-keeps its events, and the reason it waits is kept for the board. The
-runtime then wakes the same session: `claude` stops a live idle process, confirms that it
+keeps its events, and the reason it waits is kept for the board. A session whose
+chargehand mod said hello gets the message in its outbox (see "The chargehand mod" below).
+Any other session is woken by the runtime: `claude` stops a live idle process, confirms that it
 stopped, and resumes it by the full session id. It reads the listing again first: a session
 that started a turn or opened a prompt since the tick's listing is left alone, and its
 events wait. After the wake, one ledger transaction marks
@@ -776,6 +780,48 @@ Another event does not wake it, because only the operator answers a question. A
 permission prompt and an `AskUserQuestion` dialog list `status: waiting`; a stop would
 discard them, so the reply waits until the turn ends. An answer that admission holds
 keeps the reason on the worker's card, as a queued worker does.
+
+**The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
+in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
+launch and at a full-mode clone; Claude Code stores the flag with the job, so the mod
+comes back after a stop and a resume or a respawn. The launch settings tell it where the
+daemon is, in their `env`: the port and the token file, never the token. Without them it
+posts nothing; it has no default port. It is the transport of the agent channel:
+
+- At the session start it says hello (`POST /channel/hello`), registers each tool of the
+  daemon's registry (name, description and input schema, defined once in the daemon, so a
+  new tool needs no change in the mod), and posts the session start. The hello is the
+  record that this session takes its wakes from the outbox. The model sees the tools as
+  `mcp__chargehand__<tool>`, and the launch settings allow them, so no permission mode
+  asks for them. In this release: `report`, `ask`, `handoff`, `request_wake` and
+  `subscribe(item, kinds)`, which subscribes the worker to an item that a source names by
+  its URL or identifier.
+- A tool call goes to `POST /channel/tool/<name>`, and the daemon's answer is the result.
+- A timer polls `POST /channel/outbox` every `outbox_poll_secs` (5). A message there is
+  submitted as the session's next turn once the session is idle (`$.prompt.submit`), and
+  `POST /channel/outbox/confirm` says that the turn started. The poll is never held open:
+  a hook runs at most 10 seconds and one fetch at most 30.
+- Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
+  session's rate-limit windows to `/channel/usage`; the session end posts
+  `/channel/lifecycle/session_end`.
+
+Every post carries the session id and the working directory and maps to a worker as a
+hook does. A lifecycle post goes through the same transitions as the hook it matches, and
+the settings hooks stay, because permission prompts and usage limits come only from them,
+so one turn end can arrive twice and the transitions take it once. The mod never answers
+a permission prompt and never submits text that the daemon did not hand it; the wake
+message carries kinds and pointers only.
+
+The outbox holds at most one open message per worker. Delivery puts the wake message
+there, with the inbox rows it carries; events that come in before the mod takes it join it,
+and later ones wait for the next wake. A stopped process is started again with `claude
+respawn` first. The confirm marks the events delivered and records the wake, once, in the
+same transaction as a wake by resume; the daily cap counts it the same way, and the global
+cap counts a wake in an outbox as a working turn. A message that the mod does not take
+within a minute is dropped, the session no longer counts as having the mod, and the wake
+stops and resumes it; so does a message that the session refused to submit. A taken
+message without a confirm is handed out again after two minutes, for a mod that was
+reloaded before its submit.
 
 When a worker's branch is on its remote and has an open pull request, the tick subscribes
 the worker to that pull request for `comment`, `review` and `ci_status`, once, so a review
@@ -885,7 +931,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   name at 127.0.0.1 (DNS rebinding) cannot read the API. No response has a CORS header, so
   a page on another origin cannot read one either. A body is capped at 1 MiB and must come
   with a `Content-Length`. Each request opens its own ledger connection.
-  `POST /hooks/<event>` receives the posts of the worker sessions (section 6); each
+  `POST /hooks/<event>` receives the posts of the worker sessions (section 6), and
+  `POST /channel/...` the posts of their chargehand mod (section 6); each
   worker in `/api/state` also carries its last hook, its last answer, the reset time of a
   usage limit and its open permission prompts.
 - **The board.** `GET /` is one static page with its script and style sheet
@@ -1074,7 +1121,12 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   one count per state (waiting, queued, written, archived), so that the archive of a whole
   repository stays readable; each card shows its worker's job and archive time. Restoring
   a worktree from a zip is a manual step (see the README), not a button.
-- **Usage readings.** Claude Code gives a status line command the subscription's
+- **Usage readings.** The usage file holds one reading: the weekly window, when it was
+  written and its source, `statusline` or `session`. Each source writes the same file, and
+  the newest write is the reading. The chargehand mod posts each worker session's
+  rate-limit windows after every turn, and the daemon writes the `seven_day` one with the
+  source `session`, so a machine whose status line is not wrapped still has a reading
+  while its workers run. Claude Code gives a status line command the subscription's
   `rate_limits`: a `seven_day` window with `used_percentage` and `resets_at`. It sends them
   on subscription plans only, and only after the session's first API response.
   `chargehand statusline -- '<command>'` reads that payload, writes the `seven_day` window
@@ -1339,6 +1391,8 @@ Done:
   several roles per repository, and a ledger of workers and their sessions.
 - The runtime interface, with Claude Code as the `claude` runtime behind it and declared
   capabilities.
+- The chargehand mod in every worker session: the worker tools from one registry, the wake
+  of a live process from its outbox, the lifecycle posts and the usage readings.
 
 Next:
 

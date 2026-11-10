@@ -163,8 +163,10 @@ ignored. chargehand does not edit the settings file for you:
 }
 ```
 
-`/api/state` then shows the window's percentage and reset time. The newest reading counts
-however old it is, until its reset time has passed.
+`/api/state` then shows the window's percentage and reset time. The daemon also writes
+the reading that each worker session posts after its turns, through the chargehand mod that
+every worker loads, so the file has a reading while workers run even without the wrapper; `source` says which wrote
+it. The newest reading counts however old it is, until its reset time has passed.
 
 The reading also keeps a part of the weekly window for your own sessions. No wake starts
 while the window is above 80 %, and no new worker starts while it is above 70 %; set other
