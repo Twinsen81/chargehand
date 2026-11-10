@@ -159,6 +159,10 @@ REPORT_TURN_MARGIN_SECS = 5.0
 # the question records no question, so it never covers one. A new turn, a turn end that
 # waits for events and the end of the worker drop the record.
 NOTIFIED_QUESTION_PREFIX = "notified-question:"
+# Records per worker that only a live worker needs: garbage collection drops them once the
+# worker has ended (cancelled, discarded, closed). Not in WORKER_STATE_PREFIXES, whose
+# records say that a worker has an item checkout.
+LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX,)
 QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
 
 # The worker states that are never notified. A worker that waits for events ends a turn
@@ -3818,14 +3822,16 @@ class Runner:
         log.info("%s: archived to %s; worktree and session removed", worker.handle, dest)
 
     def _forget_checkout_heads(self) -> None:
-        """Drop the records of each worker whose worktree is gone, by any path."""
+        """Drop the records of each worker whose worktree is gone, by any path, and the
+        records that only a live worker needs once it has ended."""
         for key in self.ledger.all_state():
-            prefix = next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            live_only = next((p for p in LIVE_WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            prefix = live_only or next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
             if prefix is None:
                 continue
             worker_id = key.removeprefix(prefix)
             worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
-            if worker is None or worker.gc_done:
+            if worker is None or worker.gc_done or (live_only and worker.is_terminal):
                 self.ledger.delete_state(key)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:

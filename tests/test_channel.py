@@ -283,6 +283,23 @@ def test_each_question_and_each_prompt_is_notified_once(
     assert harness.notifications().count(("ABC-1", "blocked")) == notified
 
 
+@pytest.mark.parametrize("kind, args", [("cancel", {}), ("discard", {"force": True})])
+def test_the_record_of_a_notified_question_goes_with_its_worker(daemon, harness, kind, args):
+    worker = launch(harness)
+    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
+    turn_end(daemon, harness, worker)
+    key = f"{tick_mod.NOTIFIED_QUESTION_PREFIX}{worker.id}"
+    assert harness.ledger.get_state(key) is not None
+
+    request_id = harness.ledger.record_request(kind, worker.target, **args)
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert harness.ledger.get(worker.id).is_terminal
+    assert harness.ledger.get_state(key) is None
+
+
 def test_an_answer_needs_one_line_of_text(daemon, harness):
     worker = launch(harness)
     post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
