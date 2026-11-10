@@ -842,3 +842,27 @@ def test_a_wake_in_an_outbox_counts_against_the_global_cap(tmp_path, repo, claud
     assert harness.ledger.get(second.id).state == ledger_mod.QUEUED
     assert any("reviewer/PR-8" in line and "global cap (1/1 working)" in line for line in report.skipped)
     harness.ledger.close()
+
+
+def test_a_wake_in_an_outbox_counts_against_the_launch_throttle(tmp_path, repo, claude_state, board):
+    write_role(repo, "reviewer", REVIEWER)
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=3)
+    reviewer = with_mod(harness, start_reviewer(harness))
+    end_turn(harness)
+    harness.next_tick()
+    emit_three()
+    harness.board.add("ABC-1")
+
+    report = harness.next_tick()
+
+    assert harness.ledger.outbox_message(reviewer) is not None
+    assert harness.worker("ABC-1", "implementer") is None
+    assert any("launch throttle (1/1)" in line for line in report.skipped)
+
+    # Once the turn ran and ended, the slot is free again.
+    mod_confirms(harness, mod_takes(harness, reviewer))
+    end_turn(harness)
+    harness.next_tick()
+    harness.next_tick()
+    assert harness.worker("ABC-1", "implementer") is not None
+    harness.ledger.close()

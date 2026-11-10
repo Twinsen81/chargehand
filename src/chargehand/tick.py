@@ -3000,9 +3000,13 @@ class Runner:
         working = 0
         open_workers = 0
         per_route: dict[str, int] = {}
+        # A wake in a session's outbox is a turn about to start.
+        sending = self.ledger.outbox_workers()
         for worker in self.ledger.live_workers():
             open_workers += 1
-            is_working = worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
+            is_working = (
+                worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING) or worker.id in sending
+            )
             if is_working:
                 working += 1
                 per_route[worker.repository] = per_route.get(worker.repository, 0) + 1
