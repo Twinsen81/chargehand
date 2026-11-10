@@ -930,8 +930,9 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   The page asks for the token once, keeps it in the browser's `localStorage` for this
   origin, and sends it only in the `Authorization` header, never in a URL. It checks the
   token on Enter, when the field loses focus with a new value, on load and when the
-  daemon was restarted (its `started_at` changed) or unreachable, and shows "no token", "checking", "token accepted" or "token
-  not valid" next to the field; an action that gets a 401 also shows "token not valid".
+  daemon was restarted (its `started_at` changed) or unreachable, and shows "no token",
+  "checking", "token accepted" or "token not valid" next to the field; an action that gets
+  a 401 also shows "token not valid", and an accepted token clears its notice.
   A worker started from the board has origin `board`. The one-worker-per-role-and-item
   rule of the start rules does not hold it, but a paused repository and every cap do.
   Its item, when given, becomes a work item through the repository's tracker, which
