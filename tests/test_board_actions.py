@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import re
 import subprocess
 import time
 
@@ -135,6 +136,18 @@ def test_the_page_shows_the_state_of_its_token(daemon):
     assert "model.health.started_at" in poll and "if (tokenRecheck) checkToken();" in poll
     sender = script[script.index("async function send("):script.index("function workerAction(")]
     assert "const sent = token();" in sender and "sent === token()" in sender
+
+
+def test_an_accepted_token_clears_the_notice_that_asked_for_it():
+    script = (board.asset_dir() / "board.js").read_text()
+    sender = script[script.index("async function send("):script.index("function workerAction(")]
+    for asked in ("Paste the token first", "The token is not valid"):
+        assert re.search(rf"notice\('{asked}[^\n]*\n\s*tokenNoticeShown = true;", sender), asked
+    shown = script[script.index("function showTokenState("):script.index("// True while the notice")]
+    assert "if (name === 'accepted' && tokenNoticeShown) notice('');" in shown
+    notices = script[script.index("function notice("):script.index("function describe(")]
+    # Any other notice replaces the one about the token, so the check leaves it alone.
+    assert "tokenNoticeShown = false;" in notices
 
 
 def test_the_page_sends_the_token_only_in_a_header(daemon):

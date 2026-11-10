@@ -571,8 +571,12 @@ function showTokenState(name) {
   state.className = 'token-state ' + name;
   state.textContent = TOKEN_STATES[name];
   $('token').className = 'token-' + name;
+  // A notice that asked for the token is out of date once the daemon accepts it.
+  if (name === 'accepted' && tokenNoticeShown) notice('');
 }
 
+// True while the notice asks for a valid token; any later notice replaces that one.
+let tokenNoticeShown = false;
 // Each check gets a number, so the answer to an older check cannot replace a newer state.
 let tokenCheck = 0;
 // Set when the daemon did not answer, so the next good poll checks the token again.
@@ -611,6 +615,7 @@ function post(path, body) {
 }
 
 function notice(text, kind) {
+  tokenNoticeShown = false;
   const box = $('notice');
   box.className = 'notice ' + (kind || '');
   box.textContent = text;
@@ -642,6 +647,7 @@ async function follow(outcome) {
 async function send(path, body, what) {
   if (!token()) {
     notice('Paste the token first: the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    tokenNoticeShown = true;
     $('token').focus();
     return;
   }
@@ -668,6 +674,7 @@ async function send(path, body, what) {
       showTokenState('invalid');
     }
     notice('The token is not valid. Paste the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    tokenNoticeShown = true;
     return;
   }
   // The daemon checks the Host (403) before the token, and every later answer passed both.
