@@ -509,10 +509,10 @@ class ClaudeCLI:
         the resume finds the conversation; the copy works in *worktree* under *name*, its
         transcript is kept for that directory, and the original is left as it was. The
         copy keeps the conversation, but falls back to the default effort and permission
-        mode, so those, the model, the plugin directories and the settings are passed again.
-        The job saves them, and an in-place resume of the copy applies them again. stdin is /dev/null, as for
-        a resume, which reads piped text into the prompt; the copy still runs its
-        SessionStart hook.
+        mode, so those, the model, the plugin directories and the settings are passed
+        again. The job saves them, and an in-place resume of the copy applies them again.
+        stdin is /dev/null, as for a resume, which reads piped text into the prompt; the
+        copy still runs its SessionStart hook.
 
         Raises :class:`WorkspaceNotTrusted` as :meth:`launch` does. Any other failure
         names the session and the exit, never the prompt.

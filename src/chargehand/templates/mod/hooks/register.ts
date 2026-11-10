@@ -156,7 +156,7 @@ export const register: Register = on => {
   // Serves the tools registered above, and only those.
   on('tool.call', { tool: /^mcp__chargehand__/ }, async ($, e) => {
     // The engine's own keys are not the tool's input.
-    const { tool, tool_use_id: _id, consent: _consent, ...input } = e as unknown as Reply
+    const { tool, tool_use_id: _id, consent: _consent, agentId: _agent, ...input } = e as unknown as Reply
     return callTool($, typeof tool === 'string' ? tool : '', input)
   }).catch(() => ({ deny: UNREACHABLE }))
 }

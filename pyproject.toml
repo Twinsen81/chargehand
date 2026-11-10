@@ -41,8 +41,6 @@ path = "src/chargehand/__init__.py"
 packages = ["src/chargehand"]
 # Claude Code writes its API types beside the mod's manifest when it loads the mod from a
 # checkout; they belong to that machine's Claude Code, not to the package.
-# Claude Code writes its API types beside the mod's manifest when it loads the mod from a
-# checkout; they belong to that machine's Claude Code, not to the package.
 artifacts = ["src/chargehand/templates/**", "!src/chargehand/templates/mod/.claude-plugin/types/**"]
 
 [tool.hatch.build.targets.sdist]

@@ -123,7 +123,7 @@ def _subscribe(call: ToolCall) -> ToolResult:
          if (s.source, s.item) == (item.source, item.key)),
         None,
     )
-    # Subscribing again replaces the kinds; the kinds already followed stay.
+    # A second subscribe to the same item adds its kinds to the ones already followed.
     wanted = list(dict.fromkeys([*(existing.kinds if existing else ()), *kinds]))
     call.ledger.subscribe(call.worker, item, wanted)
     log.info("%s: follows %s on %s (%s)", call.worker.handle, item.key, item.source,
