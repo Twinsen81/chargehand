@@ -27,6 +27,8 @@ let channel: Channel | null = null
 let hasTools = false
 // An outbox message is submitted and its turn has not started yet: no second one meanwhile.
 let isSubmitting = false
+// The daemon said that this session's worker has ended: nothing will be in its outbox again.
+let isEnded = false
 
 async function findChannel($: EngineInterface): Promise<Channel | null> {
   if (channel) return channel
@@ -90,11 +92,16 @@ async function confirm($: EngineInterface, id: number, submitted: boolean): Prom
 }
 
 async function poll($: EngineInterface): Promise<void> {
+  if (isEnded) return
   // A daemon that was down at the session start gets the hello from the first poll that
   // reaches it.
   if (!hasTools) await hello($)
   if (isSubmitting) return
   const reply = await post($, '/channel/outbox', {})
+  if (reply && reply.ended === true) {
+    isEnded = true
+    return
+  }
   const message = reply && reply.message
   if (!message || typeof message !== 'object') return
   const { id, text } = message as Reply

@@ -419,6 +419,14 @@ def take(request: Request) -> Response:
     """The worker's wake message for the mod to submit, or none."""
     payload = _payload(request)
     session = _session(payload)
+    ended = request.ledger().latest_worker_by_session_uuid(session)
+    if ended is not None and ended.is_terminal:
+        # The worker is done, failed or cancelled, and its session may live on. The answer
+        # tells the mod to stop polling, so this is said once per load of the mod, instead
+        # of a refusal every few seconds.
+        log.info("%s: its session %s polled its outbox after the worker ended (%s); the mod "
+                 "stops polling", ended.handle, session[:8], ended.state)
+        return Response.json({"message": None, "ended": True})
     ledger, worker, _ = _worker(request, payload)
     if worker.state in NO_WAKE_STATES:
         return Response.json({"message": None})

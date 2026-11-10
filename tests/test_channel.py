@@ -522,8 +522,23 @@ def test_another_session_or_a_paused_worker_takes_no_message(daemon, harness):
 
     assert post(daemon, "outbox", of(worker, session_id="someone-else"))[0] == 404
     harness.ledger.update(harness.ledger.get(worker.id), state=ledger_mod.PAUSED)
+    # A paused worker goes on after `continue`, so its mod keeps polling.
     assert post(daemon, "outbox", of(worker))[1] == {"message": None}
     assert harness.ledger.outbox_message(worker).state == ledger_mod.OUTBOX_PENDING
+
+
+@pytest.mark.parametrize("state", ["done", "failed"])
+def test_the_mod_of_an_ended_worker_is_told_to_stop_polling(daemon, harness, caplog, state):
+    worker = launch(harness)
+    post(daemon, "tool/report", of(worker, input={"state": state, "summary": "x"}))
+    assert turn_end(daemon, harness, worker).state == state
+
+    with caplog.at_level("INFO"):
+        status, answer = post(daemon, "outbox", of(worker))
+
+    assert (status, answer) == (200, {"message": None, "ended": True})
+    assert "refused" not in caplog.text and "no live worker" not in caplog.text
+    assert sum("the mod stops polling" in r.getMessage() for r in caplog.records) == 1
 
 
 # ----- lifecycle and usage ---------------------------------------------------------
