@@ -53,6 +53,14 @@ public location.
 - **Posts of the chargehand mod.** The mod runs in the worker's session, so what it posts
   (tool arguments, the last answer, the rate limits) is session output. The daemon cleans
   and caps it like a hook post, and it changes a worker only through the hook transitions.
+  The worker tools keep what they are given as untrusted text: a question and its options,
+  a report's summary and links (only plain http(s) URLs, and only a pull request link
+  becomes the card's link), and the handoff note. The board renders them as text, no log
+  line or notification carries them, and no prompt that chargehand writes includes them.
+  A report of `done` or `failed` can end the worker that the post maps to, as its status
+  file could (see the known limit of the shared token below). A timer from `request_wake` is a wake with
+  chargehand's own pointer, under the same caps as any wake. The answer to a question is
+  the operator's line, sent as a reply.
 - **Command source output.** The commands of a `command` source are the operator's own,
   but what they print comes from the system they poll. chargehand runs them without a
   shell, with a timeout and a cap on the output, and checks every line against a closed
