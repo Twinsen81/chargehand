@@ -24,8 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Delivery through the outbox. A worker whose session's mod said hello gets its wake as
   one outbox message: events that come in before the mod takes it join it, a stopped
   process is started again with `claude respawn` first, and the wake is recorded once,
-  when the mod confirms that its submit started the turn. The global cap counts a wake in
-  an outbox as a working turn. A message that the mod does not take within a minute, or
+  when the mod confirms that its submit started the turn. The global cap of wakes and the
+  launch throttle count a wake in an outbox as a working turn. A message that the mod does not take within a minute, or
   that the session refuses, falls back to the stop and the resume. A session without the
   mod keeps the stop and the resume.
 - Usage readings from worker sessions. The usage file now names its source (`statusline`

@@ -817,7 +817,7 @@ there, with the inbox rows it carries; events that come in before the mod takes 
 and later ones wait for the next wake. A stopped process is started again with `claude
 respawn` first. The confirm marks the events delivered and records the wake, once, in the
 same transaction as a wake by resume; the daily cap counts it the same way, and the global
-cap counts a wake in an outbox as a working turn. A message that the mod does not take
+cap and the launch throttle count a wake in an outbox as a working turn. A message that the mod does not take
 within a minute is dropped, the session no longer counts as having the mod, and the wake
 stops and resumes it; so does a message that the session refused to submit. A taken
 message without a confirm is handed out again after two minutes, for a mod that was
