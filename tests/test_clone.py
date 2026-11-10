@@ -228,7 +228,7 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
     assert "the-daemon-token" not in settings.read_text()
     # The file tools are denied in the original's worktree, in every permission mode.
     deny = written["permissions"]["deny"]
-    assert f"Read(/{worker_tokens.token_file_for(original.worktree_path)})" in deny
+    assert f"Read(/{worker_tokens.token_dir()}/**)" in deny
     for path in {str(original.worktree_path), os.path.realpath(original.worktree)}:
         assert f"Edit(/{path}/**)" in deny and f"Write(/{path}/**)" in deny
     assert not any(clone.worktree in rule for rule in deny)

@@ -8,9 +8,10 @@ A session never gets the board's token.
 
 A token ends with its worker: the daemon refuses the token of a worker that ended, and
 the file is deleted when the session is removed. A new launch in the same worktree
-replaces it. The other sessions' token files get deny rules in each launch's settings;
-like the deny rules, this is a guardrail, not a wall: a process of the same user can
-still read the files.
+replaces it. Every launch's settings deny the file tools the whole token directory; the
+mod still reads its own token file, because a `Read` deny rule does not bind the mod's
+own file reads. Like the deny rules, this is a guardrail, not a wall: a process of the
+same user can still read the files with a shell command.
 """
 
 from __future__ import annotations

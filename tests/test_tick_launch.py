@@ -6,6 +6,7 @@ import json
 
 from chargehand import claude as claude_mod
 from chargehand import ledger as ledger_mod
+from chargehand import worker_tokens
 from chargehand.config import DEFAULT_DENY_RULES, RepoConfig
 from chargehand.ledger import LAST_STEP
 
@@ -62,14 +63,17 @@ def test_deny_rules_can_be_left_out_of_the_launch(harness):
     harness.tick()
 
     argv = harness.claude_state.launches[0]["argv"]
-    # Only the denies that no configuration drops, of AskUserQuestion and of the board's
-    # token file (a launch without hooks too), and the allow rule for the chargehand mod's
-    # tools are left.
+    # Only the denies that no configuration drops, of AskUserQuestion, of the board's
+    # token file and of the token directory (a launch without hooks too), and the allow
+    # rule for the chargehand mod's tools are left.
     settings = json.loads(argv[argv.index("--settings") + 1])
     board_token = harness.config.serve.token_file
     assert settings == {
         "permissions": {
-            "deny": ["AskUserQuestion", *claude_mod.secret_file_rules([board_token])],
+            "deny": [
+                "AskUserQuestion", *claude_mod.secret_file_rules([board_token]),
+                *claude_mod.secret_file_rules([worker_tokens.token_dir()], below=True),
+            ],
             "allow": [claude_mod.MOD_TOOL_RULE],
         }
     }

@@ -1065,8 +1065,8 @@ def launch_settings(
     the chargehand mod, and its tools get an allow rule, so that no permission mode asks
     for them; *mod_env* tells the mod where the daemon is (:func:`mod_env`). The tools of
     :data:`ALWAYS_DENIED_TOOLS` are denied in every session. Each of *secret_files*, such
-    as another session's token file, and everything under each of *secret_dirs* gets
-    `Read`, `Edit` and `Write` deny rules (:func:`secret_file_rules`).
+    as the board's token file, and everything under each of *secret_dirs* gets `Read`
+    and `Edit` deny rules (:func:`secret_file_rules`).
     """
     permissions: dict[str, list[str]] = {}
     deny = list(dict.fromkeys([
@@ -1110,14 +1110,15 @@ def protected_path_rules(paths: Sequence[Path]) -> list[str]:
 def secret_file_rules(files: Sequence[Path], *, below: bool = False) -> list[str]:
     """Deny rules that keep the file tools from reading or changing each of *files*.
 
-    With *below*, each is a directory, and the rules cover everything under it. As for
-    :func:`protected_path_rules`, the Bash tool is not covered.
+    With *below*, each is a directory, and the rules cover everything under it. An `Edit`
+    rule covers Write too: Claude Code warns at the start that a `Write` deny rule never
+    matches. As for :func:`protected_path_rules`, the Bash tool is not covered.
     """
     rules: list[str] = []
     for path in files:
         for variant in dict.fromkeys((str(Path(path)), os.path.realpath(path))):
             target = f"/{variant}/**" if below else f"/{variant}"
-            rules += [f"Read({target})", f"Edit({target})", f"Write({target})"]
+            rules += [f"Read({target})", f"Edit({target})"]
     return rules
 
 
@@ -1739,20 +1740,22 @@ class ClaudeRuntime(Runtime):
         Each call writes a new token for the session (:mod:`chargehand.worker_tokens`): a
         launch and a fork get their own, and a resume or a respawn keeps the one of the
         launch, as it keeps the settings. The file tools are denied the board's token file,
-        every settings file, and the token files of the other sessions that exist now.
+        the whole token directory, and every settings file.
 
-        The token files of later sessions are not covered: the mod reads its own token
-        file with `$.fs.read`, and whether a `Read` deny rule also binds that read is not
-        known, so the token directory is not denied as a whole. No tool of the session
+        The token directory holds the session's own token file too, and of sessions
+        launched later. The mod still reads its own with `$.fs.read`, which a `Read` deny
+        rule does not bind (observed with Claude Code 2.1.322). No tool of the session
         reads a settings file: Claude Code loads its own `--settings` itself. *mod*: the
         session loads the chargehand mod.
         """
-        # Every session is denied the board's token file, with hooks or without.
+        # Every session, with hooks or without.
         board_token = (self.token_file,) if self.token_file is not None else ()
+        token_dir = worker_tokens.token_dir()
         if self.hook_port is None or not self.has_daemon():
             return launch_settings(
                 spec.options, self.deny_rules, spec.read_paths,
                 protected_paths=spec.protected_paths, mod=mod, secret_files=board_token,
+                secret_dirs=(token_dir,),
             )
         path = settings_file_for(spec.worktree)
         token_file = worker_tokens.token_file_for(spec.worktree)
@@ -1764,14 +1767,13 @@ class ClaudeRuntime(Runtime):
                     spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
                 ),
             )
-            others = [*(p for p in worker_tokens.token_files() if p != token_file), *board_token]
             settings = launch_settings(
                 spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
                 protected_paths=spec.protected_paths, mod=mod,
                 # The mod posts only where the hooks post: the same daemon, the same token.
                 mod_env=mod_env(self.hook_port, token_file) if mod else None,
-                secret_files=others,
-                secret_dirs=(settings_dir(),),
+                secret_files=board_token,
+                secret_dirs=(token_dir, settings_dir()),
             )
             return write_settings_file(path, settings)
         except OSError as exc:
@@ -1781,6 +1783,7 @@ class ClaudeRuntime(Runtime):
             return launch_settings(
                 spec.options, self.deny_rules, spec.read_paths,
                 protected_paths=spec.protected_paths, mod=mod, secret_files=board_token,
+                secret_dirs=(token_dir,),
             )
 
     @classmethod

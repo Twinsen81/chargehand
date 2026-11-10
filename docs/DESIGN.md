@@ -606,26 +606,30 @@ deleted with the settings file when the session is removed. A tool call acts as 
 token's worker, whatever session id it names. A hook, a hello, a lifecycle or usage post,
 or an outbox poll from a session that is not the worker's current one, such as a copy
 that a resume started in the same worktree with the same settings, is ignored: the post
-changes nothing, and the poll gets no message. Every launch's settings deny `Read`,
-`Edit` and `Write` on the board's token file, a launch without hooks too. A launch with
-hooks also denies them on every file in `session-settings/` (no tool of a session reads
-one: Claude Code loads its `--settings` itself) and on the token files of the other
-sessions that exist then. The token
-directory is not denied as a whole, because the mod reads its own token file with
-`$.fs.read`, and whether a `Read` deny rule also binds that read is not settled; so a
-session's rules do not cover the token files of sessions launched after it. Like the deny
-rules, this is a guardrail: a shell command of the same user can still read another
-session's file. The token is not kept in the ledger: the launch
+changes nothing, and the poll gets no message. Every launch's settings deny `Read` and
+`Edit` (which covers Write) on the board's token file and on the whole `worker-tokens/`
+directory, a launch without hooks too, so a session launched earlier is also denied the
+token files of sessions launched after it. A launch with hooks also denies them on every
+file in `session-settings/` (no tool of a session reads one: Claude Code loads its
+`--settings` itself). The session's own token file is under the denied directory as well:
+the mod reads it with `$.fs.read`, which a `Read` deny rule does not bind. No `Write` rule
+is written: Claude Code 2.1.322 warns at the start that a `Write` deny rule never matches
+and to use `Edit`. Like the deny rules, this is a guardrail: a shell command of the same
+user can still read another session's file. The token is not kept in the ledger: the launch
 runs in the runtime, which has no ledger, and the daemon finds the file that holds a
 token and then the newest worker in that file's worktree, a live one first.
 
-How a session gets the token: the settings `env` of the launch reaches the mod
-(`$.env.get`), as the port and the token file did before; the environment of the process
-that runs `claude --bg` is not a reliable way, because a session inherits the environment
-of the background service that hosts it, which the first launch started (see "Settled by
-launching a session through the scheduled job"). So the token goes into the settings
-file, in the http hooks' `Authorization` header, and into its token file, which the
-settings `env` names for the mod and the `SessionStart` command names for hook_post.py.
+How a session gets the token, observed with Claude Code 2.1.322 in `--bg` sessions that
+loaded the mod with `--plugin-dir`: a variable in the settings `env` of the launch reaches
+the mod (`$.env.get`) and the session's Bash tool. A variable in the environment of the
+process that runs `claude --bg` reaches the session only when that launch also starts the
+background service that hosts the sessions; a later launch's environment does not reach
+its session, which inherits the service's environment (see also "Settled by launching a
+session through the scheduled job"). The mod's `$.fs.read` read files that a `Read` deny
+rule named, by a file rule and by a `dir/**` rule, while the Read tool was refused on
+both. So the token goes into the settings file, in the http hooks' `Authorization`
+header, and into its token file, which the settings `env` names for the mod and the
+`SessionStart` command names for hook_post.py.
 
 **Hooks.** A post goes to `POST /hooks/<event>` with the session's token, which an http
 hook carries in its `Authorization` header and the `SessionStart` command reads from the

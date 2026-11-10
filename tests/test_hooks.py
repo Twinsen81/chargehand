@@ -136,18 +136,35 @@ def test_the_hook_settings_are_in_a_private_file_and_not_on_the_command_line(har
     assert deny[:len(harness.config.deny_rules) + 1] == [
         *harness.config.deny_rules, "AskUserQuestion",
     ]
-    assert all(rule.startswith(("Read(/", "Edit(/", "Write(/"))
+    assert all(rule.startswith(("Read(/", "Edit(/"))
                for rule in deny[len(harness.config.deny_rules) + 1:])
     # The session gets its own token; the board's stays with the operator.
     assert "the-daemon-token" not in path.read_text()
 
 
-def _denied(deny, path, *, below=False):
-    target = f"/{path}/**" if below else f"/{path}"
-    return {f"Read({target})", f"Edit({target})", f"Write({target})"} <= set(deny)
+def _denied(deny, path):
+    """Whether `Read` and `Edit` deny rules cover *path*, by its name or a directory's `/**`."""
+
+    def covered(tool):
+        for rule in deny:
+            if not rule.startswith(f"{tool}(/") or not rule.endswith(")"):
+                continue
+            target = rule[len(tool) + 2:-1]
+            if target == str(path) or (
+                target.endswith("/**") and str(path).startswith(target[:-2])
+            ):
+                return True
+        return False
+
+    return covered("Read") and covered("Edit")
 
 
-def test_each_session_is_denied_the_board_token_the_settings_and_the_others_tokens(
+def _deny_of(worker):
+    return json.loads(claude.settings_file_for(worker.worktree_path).read_text())[
+        "permissions"]["deny"]
+
+
+def test_each_session_is_denied_the_board_token_the_settings_and_every_token(
     harness, tmp_path
 ):
     board_token = _with_token(harness, tmp_path)
@@ -155,16 +172,32 @@ def test_each_session_is_denied_the_board_token_the_settings_and_the_others_toke
 
     second = launch(harness, "ABC-2")
 
-    deny = _settings_of_last_launch(harness)["permissions"]["deny"]
+    deny = _deny_of(second)
     assert _denied(deny, worker_tokens.token_file_for(first.worktree_path))
     # Every settings file holds a session's token, its own included; no tool reads one.
-    assert _denied(deny, claude.settings_dir(), below=True)
+    assert _denied(deny, claude.settings_file_for(first.worktree_path))
+    assert _denied(deny, claude.settings_file_for(second.worktree_path))
     # The session needs no board token any more.
     assert _denied(deny, board_token)
-    # The mod reads its own token file.
-    own = worker_tokens.token_file_for(second.worktree_path)
-    assert not any(str(own) in rule for rule in deny)
+    # A Write rule never matches in Claude Code: the Edit rule covers it.
+    assert not any(rule.startswith("Write(") and "worker-tokens" in rule for rule in deny)
     assert worker_tokens.read(first.worktree_path) != worker_tokens.read(second.worktree_path)
+
+
+def test_a_worker_launched_earlier_is_denied_the_token_file_of_a_worker_launched_later(
+    harness, tmp_path
+):
+    _with_token(harness, tmp_path)
+    first = launch(harness, "ABC-1")
+
+    second = launch(harness, "ABC-2")
+
+    later = worker_tokens.token_file_for(second.worktree_path)
+    assert later.exists()
+    assert _denied(_deny_of(first), later)
+    # The whole directory, its own file included: the mod reads its own token with its
+    # own file read, which a Read deny rule does not bind.
+    assert _denied(_deny_of(first), worker_tokens.token_file_for(first.worktree_path))
 
 
 def test_a_launch_whose_settings_file_cannot_be_written_still_denies_the_board_token(
@@ -177,11 +210,12 @@ def test_a_launch_whose_settings_file_cannot_be_written_still_denies_the_board_t
 
     monkeypatch.setattr(claude, "write_settings_file", refuse)
 
-    launch(harness)
+    worker = launch(harness)
 
-    settings = _settings_of_last_launch(harness)
-    assert "hooks" not in settings
-    assert _denied(settings["permissions"]["deny"], board_token)
+    deny = _settings_of_last_launch(harness)["permissions"]["deny"]
+    assert "hooks" not in _settings_of_last_launch(harness)
+    assert _denied(deny, board_token)
+    assert _denied(deny, worker_tokens.token_file_for(worker.worktree_path))
 
 
 def test_a_release_ends_the_sessions_token(harness, tmp_path):

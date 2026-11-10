@@ -178,9 +178,12 @@ public location.
   hook, a hello, a lifecycle or usage post, or an outbox poll from a session that is not
   the worker's current one, such as a copy that a resume started in the same worktree
   with the same settings, is ignored: the post changes nothing, and the poll gets no
-  message. Every launch's settings deny `Read`, `Edit` and `Write` on the board's token
-  file, a launch without hooks too; a launch with hooks also denies them on every session
-  settings file and on the token files of the other sessions that exist at that moment.
+  message. Every launch's settings deny `Read` and `Edit` (which covers Write) on the
+  board's token file and on the whole token directory, a launch without hooks too, so a
+  session launched earlier is also denied the token files of sessions launched after it; a
+  launch with hooks also denies them on every session settings file. The mod still reads
+  its own token file, because a `Read` deny rule does not bind the mod's own file reads
+  (observed with Claude Code 2.1.322).
 - **Session hooks.** Launched sessions post their start, turn ends, failures,
   notifications and permission prompts to `POST /hooks/<event>` on that port, with the
   session's token in the `Authorization` header; a post without a valid token changes
@@ -392,8 +395,7 @@ public location.
   path and a prompt-injected call that names another worker's session id: such a call acts
   as the worker whose token it carries. A process of the same user can still read another
   session's token file or settings file with a shell command, which the deny rules do not
-  cover, and the token file of a session launched after another one is not in that one's
-  deny rules. With
+  cover. With
   another worker's token, a session can post as that worker's hooks and mod: move its
   state and its label, take its outbox message or call a tool for it, but run no command
   and answer no prompt. Sessions launched before sessions had their own token still post

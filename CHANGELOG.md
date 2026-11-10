@@ -77,10 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that was not the worker's was refused. A hook, a hello, a lifecycle or usage post, or an
   outbox poll from a session that is not the worker's current one, such as a copy that a
   resume started in the same worktree with the same settings, is ignored: the post
-  changes nothing, and the poll gets no message. Every launch's settings deny `Read`,
-  `Edit` and `Write` on the board's token file, a launch without hooks too; a launch with
-  hooks also denies them on every session settings file and on the token files of the
-  other sessions that exist then.
+  changes nothing, and the poll gets no message. Every launch's settings deny `Read` and
+  `Edit` on the board's token file and on the whole token directory, a launch without
+  hooks too; a launch with hooks also denies them on every session settings file.
 
 ### Changed
 
