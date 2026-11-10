@@ -932,9 +932,7 @@ class Runner:
             # A worker started by hand has a worktree of its own and a handle with its id,
             # which name no `role/item` to adopt the session as. Its session is reported,
             # never adopted as a start rule's worker.
-            by_hand = by_id or (
-                self.ledger.worker_by_worktree(str(Path(session.cwd))) if session.cwd else None
-            )
+            by_hand = by_id or (self._worker_in_worktree(session.cwd) if session.cwd else None)
             if by_hand is not None and by_hand.origin != ledger_mod.ORIGIN_SOURCE:
                 key = f"orphan-notified:{session.id}"
                 working = by_hand.is_terminal and session.state == runtime_mod.WORKING
@@ -1167,6 +1165,22 @@ class Runner:
         worker = self._adopt(worker, session, report)
         report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
         return worker
+
+    def _worker_in_worktree(self, cwd: str) -> Worker | None:
+        """The newest worker whose worktree is *cwd*, compared by the real path.
+
+        A worktree is stored under the configured root, and the listing may name it by
+        the path that a linked root leads to, so that path is mapped back onto the root.
+        """
+        found = self.ledger.worker_by_worktree(str(Path(cwd)))
+        if found is not None:
+            return found
+        root = self.config.worktree_root
+        try:
+            relative = Path(os.path.realpath(cwd)).relative_to(os.path.realpath(root))
+        except ValueError:
+            return None
+        return self.ledger.worker_by_worktree(str(root / relative))
 
     @staticmethod
     def _queue_starts(context: RepositoryContext, role_name: str) -> bool:

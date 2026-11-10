@@ -3,6 +3,7 @@ the next wake starts a fresh session for the same worker, which keeps the old on
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -650,3 +651,50 @@ def test_a_post_of_the_old_session_while_it_stops_does_not_hold_the_fresh_turn(
     assert after.session_id != reviewer.session_id
     assert (after.state, after.session_state) == (ledger_mod.RUNNING, claude.WORKING)
     assert after.wakes == 3 and harness.ledger.inbox(after) == []
+
+
+@pytest.mark.parametrize("working", [False, True])
+def test_a_copy_in_the_worktree_of_an_ended_worker_under_a_linked_root_is_not_adopted(
+    tmp_path, repo, claude_state, board, working
+):
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    write_role(repo, REVIEWER)
+    worktree_root = tmp_path / "link" / "worktrees"
+    worktree_root.mkdir()
+    config = make_config(
+        repo, worktree_root, roles=("implementer", "reviewer"), sources=(FAKE_SOURCE,)
+    )
+    ledger = Ledger(tmp_path / "state" / "ledger.sqlite")
+    notifier = Notifier(config.notify)
+    harness = Harness(config, ledger, Runner(config, ledger, git=Git(), notifier=notifier),
+                      claude_state, board, repo, repo, worktree_root, notifier)
+    ledger.record_request("new_worker", "test", role="reviewer")
+    harness.next_tick()
+    (worker,) = ledger.live_workers()
+    ledger.record_request("cancel", ledger.target_for(worker))
+    harness.next_tick()
+    assert ledger.get(worker.id).is_terminal
+    # A copy that `claude --resume` started under a new id, which no session row names.
+    state = claude_state.read()
+    state["sessions"].append({
+        "id": "copy1", "uuid": "uuid-copy1", "name": worker.handle,
+        "cwd": os.path.realpath(worker.worktree), "state": "working" if working else "done",
+        **({"pid": 4242, "status": "busy"} if working else {}),
+    })
+    claude_state.write(state)
+
+    report = harness.next_tick()
+
+    assert report.adopted == []
+    assert ledger.live_workers() == []
+    said = [line for line in report.warnings if "copy1" in line]
+    if working:
+        assert said == [
+            f"session copy1 of {worker.handle}, which is cancelled, is still working; "
+            f"attach to it or stop it"
+        ]
+    else:
+        assert said == []
+    ledger.close()

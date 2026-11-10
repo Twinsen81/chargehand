@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the one worker. The daily wake cap counts a refresh as a wake. Discard, retry and
   garbage collection remove every session of a worker, and an archive holds the
   transcript of each one.
+- Reconciliation compares a session's working directory with the worktrees by real path,
+  so a worktree root reached through a link (such as `/tmp` on macOS) no longer makes a
+  worker's session look like an orphan, and it never adopts a session that a session row
+  names for a worker but that is not its current one, such as one a refresh replaced or a
+  removal left behind; one that works again is reported once.
 - The chargehand mod, a Claude Code plugin that ships in the package and that every worker
   session loads with `--plugin-dir` at launch and at a full-mode clone. Claude Code stores
   the flag with the job, so the mod comes back after a stop and a resume or a respawn. The
