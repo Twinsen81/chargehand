@@ -62,12 +62,18 @@ def test_deny_rules_can_be_left_out_of_the_launch(harness):
     harness.tick()
 
     argv = harness.claude_state.launches[0]["argv"]
-    # Only the deny of AskUserQuestion, which no configuration drops, and the allow rule
-    # for the chargehand mod's tools are left.
+    # Only the denies that no configuration drops, of AskUserQuestion and of the board's
+    # token file (a launch without hooks too), and the allow rule for the chargehand mod's
+    # tools are left.
     settings = json.loads(argv[argv.index("--settings") + 1])
+    board_token = harness.config.serve.token_file
     assert settings == {
-        "permissions": {"deny": ["AskUserQuestion"], "allow": [claude_mod.MOD_TOOL_RULE]}
+        "permissions": {
+            "deny": ["AskUserQuestion", *claude_mod.secret_file_rules([board_token])],
+            "allow": [claude_mod.MOD_TOOL_RULE],
+        }
     }
+    assert f"Read(/{board_token})" in settings["permissions"]["deny"]
 
 
 def test_an_unlabelled_issue_is_not_picked_up(harness):

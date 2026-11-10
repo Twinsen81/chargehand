@@ -1747,10 +1747,12 @@ class ClaudeRuntime(Runtime):
         reads a settings file: Claude Code loads its own `--settings` itself. *mod*: the
         session loads the chargehand mod.
         """
+        # Every session is denied the board's token file, with hooks or without.
+        board_token = (self.token_file,) if self.token_file is not None else ()
         if self.hook_port is None or not self.has_daemon():
             return launch_settings(
                 spec.options, self.deny_rules, spec.read_paths,
-                protected_paths=spec.protected_paths, mod=mod,
+                protected_paths=spec.protected_paths, mod=mod, secret_files=board_token,
             )
         path = settings_file_for(spec.worktree)
         token_file = worker_tokens.token_file_for(spec.worktree)
@@ -1762,9 +1764,7 @@ class ClaudeRuntime(Runtime):
                     spec.options.get("permission_timeout_secs") or PERMISSION_TIMEOUT_SECS
                 ),
             )
-            others = [p for p in worker_tokens.token_files() if p != token_file]
-            if self.token_file is not None:
-                others.append(self.token_file)
+            others = [*(p for p in worker_tokens.token_files() if p != token_file), *board_token]
             settings = launch_settings(
                 spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
                 protected_paths=spec.protected_paths, mod=mod,
@@ -1780,7 +1780,7 @@ class ClaudeRuntime(Runtime):
                 warn(f"{spec.name}: could not write {path} ({exc}); the session posts no hooks")
             return launch_settings(
                 spec.options, self.deny_rules, spec.read_paths,
-                protected_paths=spec.protected_paths, mod=mod,
+                protected_paths=spec.protected_paths, mod=mod, secret_files=board_token,
             )
 
     @classmethod

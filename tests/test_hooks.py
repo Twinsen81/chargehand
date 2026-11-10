@@ -167,6 +167,23 @@ def test_each_session_is_denied_the_board_token_the_settings_and_the_others_toke
     assert worker_tokens.read(first.worktree_path) != worker_tokens.read(second.worktree_path)
 
 
+def test_a_launch_whose_settings_file_cannot_be_written_still_denies_the_board_token(
+    harness, tmp_path, monkeypatch
+):
+    board_token = _with_token(harness, tmp_path)
+
+    def refuse(path, settings):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(claude, "write_settings_file", refuse)
+
+    launch(harness)
+
+    settings = _settings_of_last_launch(harness)
+    assert "hooks" not in settings
+    assert _denied(settings["permissions"]["deny"], board_token)
+
+
 def test_a_release_ends_the_sessions_token(harness, tmp_path):
     _with_token(harness, tmp_path)
     worker = launch(harness)
