@@ -327,16 +327,24 @@ class ServeConfig:
         )
 
 
+# How often the daemon asks Claude Code for the weekly usage window, and the shortest
+# interval allowed: each request starts a Claude Code process.
+USAGE_POLL_SECS = 300
+USAGE_POLL_MIN_SECS = 60
+
+
 @dataclass(frozen=True)
 class UsageConfig:
     """The `[usage]` table: how much of the provider's weekly usage window workers leave alone.
 
     A wake waits while the weekly window is above 100 minus ``wake_reserve_percent``; a new
-    worker waits while it is above 100 minus ``new_worker_reserve_percent``.
+    worker waits while it is above 100 minus ``new_worker_reserve_percent``. The daemon
+    asks Claude Code for the window every ``poll_secs`` seconds; 0 turns that off.
     """
 
     wake_reserve_percent: float = 20.0
     new_worker_reserve_percent: float = 30.0
+    poll_secs: int = USAGE_POLL_SECS
 
     @classmethod
     def parse(cls, table: Mapping[str, object] | None) -> "UsageConfig":
@@ -345,14 +353,18 @@ class UsageConfig:
         where = "usage"
         if not isinstance(table, Mapping):
             raise ConfigError(f"{where}: expected a table")
-        _unknown_keys(table, ("wake_reserve_percent", "new_worker_reserve_percent"), where)
-        values = {}
+        _unknown_keys(table, ("wake_reserve_percent", "new_worker_reserve_percent", "poll_secs"), where)
+        values: dict[str, object] = {}
         for key in ("wake_reserve_percent", "new_worker_reserve_percent"):
             value = _as_number(table.get(key, getattr(cls, key)), f"{where}.{key}")
             if value > 100:
                 raise ConfigError(f"{where}.{key}: must be <= 100")
             values[key] = value
-        return cls(**values)
+        poll = _as_int(table.get("poll_secs", USAGE_POLL_SECS), f"{where}.poll_secs")
+        if 0 < poll < USAGE_POLL_MIN_SECS:
+            raise ConfigError(f"{where}.poll_secs: must be 0 (off) or >= {USAGE_POLL_MIN_SECS}")
+        values["poll_secs"] = poll
+        return cls(**values)  # type: ignore[arg-type]
 
 
 DEFAULT_ROLES = ("implementer",)

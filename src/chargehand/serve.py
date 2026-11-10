@@ -17,7 +17,11 @@ it. :mod:`chargehand.hooks` receives the posts of the worker sessions there,
 :mod:`chargehand.channel` the posts of their chargehand mod, and :mod:`chargehand.board`
 serves the read-only board.
 
-A third thread runs the slow jobs that the tick records, such as an archive (see
+A thread of :mod:`chargehand.usage` asks Claude Code for the weekly usage window on its own
+interval, when ``chargehand serve`` gives the daemon one, so no tick and no request waits
+for it.
+
+Another thread runs the slow jobs that the tick records, such as an archive (see
 :mod:`chargehand.archive`), so that neither the tick nor the board waits for them. It
 writes only its files and the job rows; whatever a job leaves for the tick to remove, the
 tick removes.
@@ -48,7 +52,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import parse_qs, urlsplit
 
-from chargehand import __version__, archive, daemonlog, paths, sanitize
+from chargehand import __version__, archive, daemonlog, paths, sanitize, usage
 from chargehand.config import MachineConfig
 from chargehand.errors import ChargehandError, TickBusy
 from chargehand.ledger import Ledger, Worker
@@ -337,6 +341,7 @@ class Daemon:
         providers: Iterable[str] = ROUTE_PROVIDERS,
         clock: Callable[[], float] = time.monotonic,
         jobs: Callable[["Daemon"], archive.JobRunner | None] | None = None,
+        usage_poller: Callable[["Daemon"], usage.UsagePoller | None] | None = None,
     ) -> None:
         self.config = config
         self._load_config = load_config or (lambda: self.config)
@@ -372,6 +377,9 @@ class Daemon:
             daemon.ledger_path, transcript=daemon.transcript, written=daemon.tick_soon,
         ))
         self.jobs: archive.JobRunner | None = None
+        # None by default, so a daemon in a test never starts a Claude Code process for it.
+        self._usage_factory = usage_poller or (lambda daemon: None)
+        self.usage_poller: usage.UsagePoller | None = None
         # Set by a job that left work for the tick, so the loop does not wait an interval.
         self._tick_soon = threading.Event()
 
@@ -526,9 +534,12 @@ class Daemon:
             self.start()
         ledger = Ledger(self.ledger_path)
         self.jobs = self._jobs_factory(self)
+        self.usage_poller = self._usage_factory(self)
         try:
             if self.jobs is not None:
                 self.jobs.start()
+            if self.usage_poller is not None:
+                self.usage_poller.start()
             next_tick = self._clock()
             while not self.stop_requested():
                 soon = self._tick_soon.is_set()
@@ -540,6 +551,8 @@ class Daemon:
                         self._tick_soon.set()
                 self.stopping.wait(self._poll_secs)
         finally:
+            if self.usage_poller is not None:
+                self.usage_poller.close()
             if self.jobs is not None:
                 self.jobs.close()
             self.polls.flush()

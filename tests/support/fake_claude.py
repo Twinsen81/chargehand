@@ -13,6 +13,7 @@ import os
 import select
 import stat
 import sys
+import time
 from pathlib import Path
 
 HELP = """Usage: claude [options] [prompt]
@@ -26,6 +27,11 @@ Options:
   --effort <level>         effort level
   --plugin-dir <path>      load a plugin directory for the session
   --settings <json>        per-session settings
+  -p, --print              print mode; with --input-format stream-json it reads
+                           control requests (get_usage) from stdin
+  --input-format <format>  text | stream-json
+  --output-format <format> text | json | stream-json
+  --verbose
   --resume <id>            with --bg: wake a stopped session with a new prompt
   --fork-session           with --resume: continue a copy of the conversation
   --version
@@ -117,6 +123,63 @@ def next_serial(state: dict) -> int:
     return serial
 
 
+# What Claude Code 2.1.317 answered to get_usage, trimmed: the weekly window as a
+# percentage and an ISO reset time, beside windows that chargehand ignores.
+USAGE_RESPONSE = {
+    "subscription_type": "max",
+    "rate_limits_available": True,
+    "rate_limits": {
+        "five_hour": None,
+        "seven_day": {"utilization": 42, "resets_at": "2026-11-09T13:59:59Z"},
+        "seven_day_opus": None,
+    },
+    "limits": [],
+}
+
+
+def usage_exchange(state: dict, argv: list[str]) -> int:
+    """`claude -p --input-format stream-json ...`: answer get_usage control requests.
+
+    `usage_mode` in the state picks the behaviour: `ok` (default) answers with
+    `usage_response` (or USAGE_RESPONSE), `error` answers with an error, `hang` reads the
+    request and never answers, `exit` writes to stderr and exits 1 without an answer.
+    """
+    mode = state.get("usage_mode", "ok")
+    line = sys.stdin.readline()
+    record(state, "usage_requests", {
+        "argv": argv, "cwd": os.getcwd(), "line": line.strip(),
+        "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+    })
+    save(state)
+    if mode == "exit":
+        sys.stderr.write("fake claude: not signed in\n")
+        return 1
+    if mode == "hang":
+        time.sleep(60)
+        return 0
+    try:
+        request = json.loads(line)
+    except ValueError:
+        return 1
+    request_id = request.get("request_id")
+    # Lines the real process writes before the answer.
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": "fake"}), flush=True)
+    print(json.dumps({"type": "control_response", "response": {
+        "subtype": "success", "request_id": "someone-else", "response": {},
+    }}), flush=True)
+    if mode == "error":
+        answer = {"subtype": "error", "request_id": request_id, "error": "get_usage is not supported"}
+    else:
+        answer = {
+            "subtype": "success", "request_id": request_id,
+            "response": state.get("usage_response", USAGE_RESPONSE),
+        }
+    print(json.dumps({"type": "control_response", "response": answer}), flush=True)
+    # The real process waits for more input until stdin closes.
+    sys.stdin.read()
+    return 0
+
+
 def main(argv: list[str]) -> int:
     state = load()
     if state.get("fail_every_call"):
@@ -192,6 +255,9 @@ def main(argv: list[str]) -> int:
             state["sessions"] = [s for s in sessions if s.get("id") != session_id]
         save(state)
         return int(state.get(f"{action}_returncode", 0))
+
+    if argv[0] in ("-p", "--print") and "--input-format" in argv:
+        return usage_exchange(state, argv)
 
     if argv[0] == "logs" and len(argv) >= 2:
         record(state, "commands", ["logs", argv[1]])
