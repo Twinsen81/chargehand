@@ -380,7 +380,7 @@ def test_the_usage_gauge_takes_its_level_from_the_usage_file(harness, used, leve
     assert reading["known"] is True
     assert reading["seven_day"]["level"] == level
     assert reading["seven_day"]["resets_at"] == pytest.approx(now + 86400)
-    assert set(reading) == {"known", "written_at", "seven_day"}
+    assert set(reading) == {"known", "written_at", "source", "seven_day"}
 
 
 def test_the_usage_gauge_is_grey_without_a_reading_or_after_the_reset(harness):

@@ -58,6 +58,7 @@ def test_the_wrapper_writes_the_weekly_window_with_mode_0600(usage_file):
     data = json.loads(usage_file.read_text())
     assert data == {
         "seven_day": {"used_percent": 81.0, "resets_at": NOW + 86400},
+        "source": "statusline",
         "written_at": NOW,
     }
     assert stat.S_IMODE(os.stat(usage_file).st_mode) == 0o600
@@ -118,6 +119,7 @@ def test_an_old_five_hour_window_is_ignored_without_a_message(
         assert usage.run_statusline(stdin, None, usage_file, now=NOW) == 0
         assert json.loads(usage_file.read_text()) == {
             "seven_day": {"used_percent": 42.0, "resets_at": NOW + 86400},
+            "source": "statusline",
             "written_at": NOW,
         }
         only_old = json.dumps({"rate_limits": {
@@ -267,6 +269,7 @@ def test_a_fresh_reading_has_the_weekly_window_with_its_level(usage_file, used, 
     assert reading == {
         "known": True,
         "written_at": NOW,
+        "source": "statusline",
         "seven_day": {"used_percent": float(used), "resets_at": NOW + 86400, "level": level},
     }
 
@@ -394,7 +397,7 @@ def test_the_state_carries_the_reading_and_follows_the_file(harness, tmp_path, u
         reading = json.loads(body)["usage"]
         assert reading["known"] is True
         assert (reading["seven_day"]["used_percent"], reading["seven_day"]["level"]) == (62.0, "amber")
-        assert set(reading) == {"known", "written_at", "seven_day"}
+        assert set(reading) == {"known", "written_at", "source", "seven_day"}
 
         usage.write_usage(usage_file, {
             "seven_day": {"used_percent": 62.0, "resets_at": now - 1},
@@ -403,3 +406,71 @@ def test_the_state_carries_the_reading_and_follows_the_file(harness, tmp_path, u
         reading = json.loads(body)["usage"]
         assert reading["known"] is True
         assert reading["seven_day"]["level"] == "grey"
+
+
+# ----- readings from worker sessions ---------------------------------------------------
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+SESSION_LIMITS = [
+    {"kind": "five_hour", "percentUsed": 99, "resetsAt": _iso(NOW + 3600)},
+    {"kind": "seven_day", "percentUsed": 42.5, "resetsAt": _iso(NOW + 86400)},
+]
+
+
+def test_a_session_reading_keeps_the_weekly_window_and_names_its_source(usage_file):
+    assert claude.session_rate_windows(SESSION_LIMITS) == {
+        "seven_day": {"used_percent": 42.5, "resets_at": _iso(NOW + 86400)},
+    }
+
+    assert usage.record_session_usage(usage_file, SESSION_LIMITS, now=NOW) is True
+
+    assert json.loads(usage_file.read_text()) == {
+        "seven_day": {"used_percent": 42.5, "resets_at": NOW + 86400},
+        "source": "session",
+        "written_at": NOW,
+    }
+    reading = usage.read_usage(usage_file, now=NOW + 60)
+    assert (reading["known"], reading["source"]) == (True, "session")
+    assert "five_hour" not in reading
+    assert stat.S_IMODE(usage_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("limits", [
+    [], None, "seven_day", [{"kind": "five_hour", "percentUsed": 10, "resetsAt": _iso(NOW + 60)}],
+    [{"kind": "seven_day", "percentUsed": "a lot", "resetsAt": _iso(NOW + 60)}],
+    [{"kind": "seven_day", "percentUsed": 10}],
+])
+def test_a_session_reading_without_a_usable_weekly_window_leaves_the_file(usage_file, limits):
+    usage.run_statusline(_payload(42), None, usage_file, now=NOW)
+    before = usage_file.read_bytes()
+
+    assert usage.record_session_usage(usage_file, limits, now=NOW + 60) is False
+
+    assert usage_file.read_bytes() == before
+
+
+def test_the_newest_reading_wins_whoever_wrote_it(usage_file):
+    usage.record_session_usage(usage_file, SESSION_LIMITS, now=NOW)
+    usage.run_statusline(_payload(50), None, usage_file, now=NOW + 10)
+
+    reading = usage.read_usage(usage_file, now=NOW + 20)
+
+    assert (reading["source"], reading["seven_day"]["used_percent"]) == ("statusline", 50.0)
+    reserve = usage.provider_reading(usage_file, claude.USAGE_PROVIDER, now=NOW + 20)
+    assert reserve.windows[WEEKLY_WINDOW].used_percent == 50.0
+
+
+def test_a_file_without_a_known_source_reads_as_none(usage_file):
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    usage_file.write_text(json.dumps({
+        "seven_day": {"used_percent": 10, "resets_at": NOW + 60}, "written_at": NOW,
+        "source": "<b>made up</b>",
+    }))
+
+    assert usage.read_usage(usage_file, now=NOW)["source"] is None
+    with pytest.raises(ValueError):
+        usage.write_usage(usage_file, {}, source="made up")

@@ -1,11 +1,19 @@
 """Usage readings: the subscription's weekly window.
 
+The usage file holds one reading: the weekly window, the time it was written and its
+source. Every source writes it the same way, and the newest write is the reading.
+
 A status line command gets a JSON payload on stdin, and
 :func:`chargehand.claude.status_line_windows` finds the weekly window in it. The wrapper
 (``chargehand statusline -- '<your command>'``) writes that window to the usage file and
 then runs the user's own status line command with the same stdin, so the status line
 shows what it showed before. Other windows in a payload or in the file are skipped
 without a message, because older payloads and files can still carry them.
+
+The chargehand mod in each worker session posts the session's rate-limit windows after
+every turn, and the daemon writes the weekly one with the source ``session``
+(:func:`record_session_usage`). So a machine whose status line chargehand does not wrap
+still has a reading while its workers run.
 
 The wrapper runs on every status line refresh, so it does little: one read of stdin,
 one small atomic write, one subprocess. Nothing it does to the usage file can change
@@ -39,6 +47,13 @@ from chargehand.delivery import WEEKLY_WINDOW, UsageReading, UsageWindow
 
 # The windows the file holds and the board shows.
 WINDOWS = (WEEKLY_WINDOW,)
+
+# Who wrote the reading: the status line wrapper, a worker session's mod, or a usage
+# request to Claude Code. A file from before the source was written has none.
+SOURCE_STATUSLINE = "statusline"
+SOURCE_SESSION = "session"
+SOURCE_GET_USAGE = "get_usage"
+SOURCES = (SOURCE_STATUSLINE, SOURCE_SESSION, SOURCE_GET_USAGE)
 
 GREEN = "green"
 AMBER = "amber"
@@ -107,11 +122,44 @@ def windows_from_payload(raw: bytes) -> dict[str, dict[str, float]] | None:
     return windows or None
 
 
-def write_usage(path: Path, windows: Mapping[str, object], *, now: float | None = None) -> None:
-    """Write *windows* to *path* atomically, with mode 0600."""
+def windows_from_session(rate_limits: object) -> dict[str, dict[str, float]] | None:
+    """The windows of a session's rate limits with a percentage and a reset time, or None.
+
+    As for a status line payload: only the windows the file holds, and only with a reset
+    time.
+    """
+    windows: dict[str, dict[str, float]] = {}
+    for name, window in (claude.session_rate_windows(rate_limits) or {}).items():
+        used = percent(window.get("used_percent"))
+        reset = resets_at(window.get("resets_at"))
+        if name in WINDOWS and used is not None and reset is not None:
+            windows[name] = {"used_percent": used, "resets_at": reset}
+    return windows or None
+
+
+def record_session_usage(path: Path, rate_limits: object, *, now: float | None = None) -> bool:
+    """Write the weekly window of a session's rate limits to *path*; False when it has none."""
+    windows = windows_from_session(rate_limits)
+    if not windows:
+        return False
+    write_usage(path, windows, source=SOURCE_SESSION, now=now)
+    return True
+
+
+def write_usage(
+    path: Path,
+    windows: Mapping[str, object],
+    *,
+    source: str = SOURCE_STATUSLINE,
+    now: float | None = None,
+) -> None:
+    """Write *windows* to *path* atomically, with mode 0600, as the reading of *source*."""
+    if source not in SOURCES:
+        raise ValueError(f"unknown usage source {source!r}")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     body = json.dumps(
-        {**windows, "written_at": time.time() if now is None else now}, sort_keys=True
+        {**windows, "source": source, "written_at": time.time() if now is None else now},
+        sort_keys=True,
     )
     # mkstemp creates the file with mode 0600, in the same directory so the rename is atomic.
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -232,12 +280,13 @@ def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
 
     ``known`` is False when the file is missing or unreadable; then every window is grey.
     The reading counts however old it is; a window whose reset time has passed, or that
-    has none, is grey.
+    has none, is grey. ``source`` names who wrote it, one of SOURCES, or None.
     """
     current = time.time() if now is None else now
     result: dict[str, object] = {
         "known": False,
         "written_at": None,
+        "source": None,
         **{name: _unknown_window() for name in WINDOWS},
     }
     data = _load(path)
@@ -245,6 +294,8 @@ def read_usage(path: Path, now: float | None = None) -> dict[str, object]:
         return result
     result["written_at"] = float(data["written_at"])  # type: ignore[arg-type]
     result["known"] = True
+    source = data.get("source")
+    result["source"] = source if source in SOURCES else None
     for name, (used, reset) in _windows(data, current).items():
         result[name] = {"used_percent": used, "resets_at": reset, "level": level(used)}
     return result
@@ -281,14 +332,20 @@ __all__ = [
     "RED",
     "RED_FROM",
     "WINDOWS",
+    "SOURCES",
+    "SOURCE_GET_USAGE",
+    "SOURCE_SESSION",
+    "SOURCE_STATUSLINE",
     "configured_usage_file",
     "level",
     "percent",
     "provider_reading",
     "read_usage",
+    "record_session_usage",
     "resets_at",
     "run_statusline",
     "user_command",
     "windows_from_payload",
+    "windows_from_session",
     "write_usage",
 ]
