@@ -342,8 +342,8 @@ public location.
   sends Claude Code's `get_usage` control request to a short `claude -p` process. Claude
   Code fetches the usage with its own sign-in; chargehand reads no token and no Keychain
   item and makes no network call. The process runs in an empty private directory under
-  the state directory, with all hooks turned off, runs no turn, and is killed after a
-  timeout. Only the percentage and the reset time of its answer are kept.
+  the state directory, with all hooks and your MCP servers turned off and no session
+  file, runs no turn, and is killed after a timeout. Only the percentage and the reset time of its answer are kept.
 
 ### Known limits
 

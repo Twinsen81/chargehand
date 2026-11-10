@@ -293,7 +293,6 @@ class UsagePoller:
         self._wait = wait or self._stop.wait
         self._thread: threading.Thread | None = None
         self._problem: str | None = None
-        self.polls = 0
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run, name="chargehand-usage", daemon=True)
@@ -317,7 +316,6 @@ class UsagePoller:
 
     def poll_once(self) -> bool:
         """One request; True when it wrote a reading. Never raises."""
-        self.polls += 1
         config = self._config()
         try:
             workdir = self._workdir()

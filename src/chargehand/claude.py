@@ -343,7 +343,8 @@ def session_rate_windows(rate_limits: object) -> dict[str, dict[str, Any]] | Non
 # experimental, so every part of the answer is read defensively and any surprise is no
 # reading. Observed in Claude Code 2.1.317: the answer comes in about half a second, runs
 # no turn and writes no transcript; without ``disableAllHooks`` the user's SessionStart
-# hooks ran. ``--bare`` is no option: it skips the Keychain, where the sign-in is.
+# hooks ran. ``--strict-mcp-config`` and ``--no-session-persistence`` (both in 2.1.322)
+# keep the user's MCP servers and any session file out of it. ``--bare`` is no option: it skips the Keychain, where the sign-in is.
 USAGE_REQUEST_ID = "chargehand-usage"
 USAGE_SETTINGS = {"disableAllHooks": True}
 USAGE_TIMEOUT_SECS = 10.0
@@ -357,6 +358,8 @@ def usage_request_args() -> list[str]:
     return [
         "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
         "--settings", json.dumps(USAGE_SETTINGS, sort_keys=True),
+        # A poll every few minutes must not start the user's MCP servers or keep a session.
+        "--strict-mcp-config", "--no-session-persistence",
     ]
 
 

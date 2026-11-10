@@ -1137,7 +1137,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   `poll_secs` of `[usage]` (300 seconds by default, at least 60, 0 turns it off), on a
   thread of its own, so no tick and no request waits for it: it starts `claude -p
   --input-format stream-json --output-format stream-json --verbose --settings
-  '{"disableAllHooks": true}'` in an empty private directory under the state directory,
+  '{"disableAllHooks": true}' --strict-mcp-config --no-session-persistence` (no MCP
+  servers of yours, no session file) in an empty private directory under the state directory,
   writes one `control_request` line with the subtype `get_usage`, reads lines until the
   `control_response` with that request id, and closes stdin. Claude Code fetches the usage
   with its own sign-in, so chargehand reads no token and no Keychain item and makes

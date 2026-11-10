@@ -34,8 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The daemon's own usage reading. Every `poll_secs` of `[usage]` (300 seconds by default,
   at least 60, 0 turns it off) a thread of the daemon sends Claude Code's `get_usage`
   control request to a short `claude -p` process in an empty directory under the state
-  directory, with all hooks turned off, and writes the weekly window of the answer with the
-  source `get_usage`. Claude Code fetches the usage with its own sign-in: chargehand reads
+  directory, with all hooks and your MCP servers turned off and no session file, and writes
+  the weekly window of the answer with the source `get_usage`. Claude Code fetches the usage with its own sign-in: chargehand reads
   no token and makes no network call, and the request runs no turn. So the week bar and
   the reserves work without the status line wrapper and without a running worker. The
   request is experimental in Claude Code: an error, a timeout, an answer without the

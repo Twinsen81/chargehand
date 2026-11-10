@@ -539,8 +539,8 @@ def usage_check(config: MachineConfig, now: float | None = None) -> Check:
     if poll and age > 3 * poll:
         return Check(
             "usage", WARN,
-            f"{detail}; older than three poll intervals ({poll}s), so get_usage gives no "
-            "reading: see the daemon log",
+            f"{detail}; older than three poll intervals ({poll}s): get_usage gives no "
+            "reading, or the daemon does not run; see the daemon log",
         )
     return Check("usage", OK, detail)
 

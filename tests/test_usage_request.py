@@ -80,6 +80,8 @@ def test_the_request_uses_print_mode_stream_json_and_no_hooks_and_never_bare():
         "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
     ]
     assert json.loads(args[args.index("--settings") + 1]) == {"disableAllHooks": True}
+    assert "--strict-mcp-config" in args and "--mcp-config" not in args
+    assert "--no-session-persistence" in args
     assert "--bare" not in args
     assert json.loads(claude.usage_request_line()) == {
         "type": "control_request",
