@@ -38,10 +38,13 @@ import logging
 import os
 import re
 import hashlib
+import selectors
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -334,6 +337,145 @@ def session_rate_windows(rate_limits: object) -> dict[str, dict[str, Any]] | Non
     return None
 
 
+# The usage request. A print-mode process with stream-json input answers the control
+# request ``get_usage`` with the usage that Claude Code fetches with its own sign-in:
+# chargehand reads no token and makes no network call. The Agent SDK names the request
+# experimental, so every part of the answer is read defensively and any surprise is no
+# reading. Observed in Claude Code 2.1.317: the answer comes in about half a second, runs
+# no turn and writes no transcript; without ``disableAllHooks`` the user's SessionStart
+# hooks ran. ``--bare`` is no option: it skips the Keychain, where the sign-in is.
+USAGE_REQUEST_ID = "chargehand-usage"
+USAGE_SETTINGS = {"disableAllHooks": True}
+USAGE_TIMEOUT_SECS = 10.0
+# How long the process may take to exit after its stdin closed, before it is killed.
+USAGE_EXIT_SECS = 2.0
+# The answer is a few kilobytes. More output than this without it is no answer.
+USAGE_OUTPUT_LIMIT = 256 * 1024
+
+
+def usage_request_args() -> list[str]:
+    return [
+        "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--settings", json.dumps(USAGE_SETTINGS, sort_keys=True),
+    ]
+
+
+def usage_request_line(request_id: str = USAGE_REQUEST_ID) -> bytes:
+    request = {
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "get_usage", "skip_behaviors": True},
+    }
+    return (json.dumps(request, sort_keys=True) + "\n").encode("utf-8")
+
+
+def usage_answer(line: bytes, request_id: str = USAGE_REQUEST_ID) -> Mapping[str, Any] | None:
+    """The answer to the usage request in one output *line*, or None when it is another line.
+
+    The Agent SDK's shape is ``{"type": "control_response", "response": {"subtype":
+    "success", "request_id": ..., "response": {...}}}``, or ``"subtype": "error"`` with an
+    ``error`` text. Raises :class:`ClaudeError` for an error answer, or an answer whose
+    body is not an object.
+    """
+    try:
+        message = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(message, Mapping) or message.get("type") != "control_response":
+        return None
+    envelope = message.get("response")
+    if not isinstance(envelope, Mapping):
+        return None
+    if request_id not in (envelope.get("request_id"), message.get("request_id")):
+        return None
+    if envelope.get("subtype") == "error":
+        error = envelope.get("error")
+        raise ClaudeError(
+            "Claude Code refused the usage request: "
+            f"{sanitize.one_line(error if isinstance(error, str) else 'no reason given', limit=200)}"
+        )
+    body = envelope.get("response")
+    if not isinstance(body, Mapping):
+        raise ClaudeError("Claude Code answered the usage request without a usage object")
+    return body
+
+
+def usage_unavailable(response: Mapping[str, Any]) -> bool:
+    """Whether Claude Code says the sign-in has no rate limits, as with an API key."""
+    return response.get("rate_limits_available") is False
+
+
+def usage_response_windows(response: object) -> dict[str, dict[str, Any]] | None:
+    """The usage window of a ``get_usage`` answer, or None when it carries none.
+
+    ``rate_limits.seven_day`` has ``utilization``, a percentage, and ``resets_at``, an ISO
+    8601 time. It comes back as :func:`status_line_windows` returns it, with the values as
+    given; checking them is the caller's work. ``five_hour``, the per-model windows and
+    ``limits`` are skipped, and ``rate_limits_available: false`` is no window.
+    """
+    if not isinstance(response, Mapping) or usage_unavailable(response):
+        return None
+    limits = response.get("rate_limits")
+    window = limits.get(STATUS_LINE_WINDOW) if isinstance(limits, Mapping) else None
+    if not isinstance(window, Mapping):
+        return None
+    return {
+        STATUS_LINE_WINDOW: {
+            "used_percent": window.get("utilization"),
+            "resets_at": window.get("resets_at"),
+        }
+    }
+
+
+def _read_usage_answer(stdout: Any, deadline: float) -> Mapping[str, Any] | None:
+    """Read *stdout* until the answer line; None at the end of output or past the limit."""
+    pending = b""
+    seen = 0
+    fd = stdout.fileno()
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not selector.select(left):
+                raise ClaudeError("the usage request timed out")
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return usage_answer(pending) if pending.strip() else None
+            seen += len(chunk)
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                answer = usage_answer(line)
+                if answer is not None:
+                    return answer
+            if seen > USAGE_OUTPUT_LIMIT:
+                return None
+
+
+def _end_usage_process(process: subprocess.Popen, *, kill: bool = False) -> None:
+    """Close stdin, which ends a print-mode process; kill its process group if it stays.
+
+    With *kill*, after a timeout, the group is killed at once.
+    """
+    for stream in (process.stdin, process.stdout):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+    if not kill:
+        try:
+            process.wait(timeout=USAGE_EXIT_SECS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        process.kill()
+    process.wait()
+
+
 # The start of the refusal Claude Code prints when a background session would start in a
 # directory without a persisted trust entry. Observed in Claude Code 2.1.306:
 # "Workspace not trusted. Run `claude` in <path> once and accept the trust prompt, then
@@ -413,6 +555,52 @@ class ClaudeCLI:
             return flag in self.help_text()
         except ClaudeError:
             return False
+
+    def get_usage(self, cwd: Path, *, timeout: float = USAGE_TIMEOUT_SECS) -> Mapping[str, Any]:
+        """Ask a print-mode process in *cwd* for the subscription usage; the answer's usage object.
+
+        One request line goes in, output lines are read until the answer to it, then stdin
+        closes and the process exits. Raises :class:`ClaudeError` when the process cannot
+        start, exits or stops writing without the answer, refuses the request, or takes
+        longer than *timeout*; the process is killed then.
+        """
+        argv = (self.binary, *usage_request_args())
+        with tempfile.TemporaryFile() as errors:
+            try:
+                process = subprocess.Popen(
+                    argv, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=errors, env=dict(os.environ), start_new_session=True,
+                )
+            except FileNotFoundError as exc:
+                raise ClaudeError(f"'{self.binary}' not found on PATH") from exc
+            except OSError as exc:
+                raise ClaudeError(f"could not run `{self.binary}` for the usage request: {exc}") from exc
+            kill = False
+            try:
+                assert process.stdin is not None and process.stdout is not None
+                try:
+                    process.stdin.write(usage_request_line())
+                    process.stdin.flush()
+                except OSError:
+                    pass
+                try:
+                    answer = _read_usage_answer(process.stdout, time.monotonic() + timeout)
+                except ClaudeError:
+                    kill = True
+                    raise
+                if answer is None:
+                    _end_usage_process(process)
+                    errors.seek(0)
+                    detail = sanitize.one_line(
+                        errors.read(2000).decode("utf-8", "replace"), limit=200
+                    )
+                    raise ClaudeError(
+                        f"the usage request ended without an answer (exit code {process.returncode})"
+                        + (f": {detail}" if detail else "")
+                    )
+                return answer
+            finally:
+                _end_usage_process(process, kill=kill)
 
     # ----- the interface ----------------------------------------------------
 
@@ -1966,6 +2154,7 @@ __all__ = [
     "Session",
     "UNKNOWN",
     "USAGE_PROVIDER",
+    "USAGE_TIMEOUT_SECS",
     "WORKING",
     "STATUS_LINE_KEY",
     "agent_file_candidates",
@@ -1992,6 +2181,11 @@ __all__ = [
     "status_line_windows",
     "transcript_file",
     "transcript_text",
+    "usage_answer",
+    "usage_request_args",
+    "usage_request_line",
+    "usage_response_windows",
+    "usage_unavailable",
     "user_agent_file",
     "user_settings_file",
     "worker_from_session",
