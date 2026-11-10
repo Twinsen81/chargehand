@@ -22,7 +22,10 @@ capped, and no tool argument reaches a log line, a notification or a prompt.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -48,11 +51,25 @@ NO_WAKE_STATES = (ledger_mod.PAUSED, *ledger_mod.TERMINAL)
 # The most event kinds one subscribe names.
 MAX_KINDS = 20
 
-# What a tool answers whose effect a later release brings. chargehand's own text.
-NOT_AVAILABLE = (
-    "chargehand records nothing for this tool yet. Go on with your work; end your turn as "
-    "you would without it."
+# What a report keeps: one line of summary, and a few plain http(s) links.
+SUMMARY_LIMIT = 300
+MAX_LINKS = 10
+# A link that a report gives which names a pull request: it becomes the card's link, and
+# the worker follows the pull request.
+_PULL_REQUEST_URL = re.compile(
+    r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+/?"
 )
+
+# What a question keeps: one line, and up to MAX_OPTIONS options of one short line each.
+QUESTION_LIMIT = 1000
+OPTION_LIMIT = 100
+MAX_OPTIONS = 10
+
+# The largest handoff note, in characters.
+HANDOFF_LIMIT = 16 * 1024
+
+# How far ahead request_wake may set its timer.
+MAX_WAKE_AFTER_SECS = 7 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -89,8 +106,117 @@ class Tool:
         }
 
 
-def _not_available(call: ToolCall) -> ToolResult:
-    return ToolResult(NOT_AVAILABLE)
+def _report(call: ToolCall) -> ToolResult:
+    """Keep the worker's state, summary and links; a pull request link becomes its card's link."""
+    state = call.arguments.get("state")
+    summary = call.arguments.get("summary")
+    links = call.arguments.get("links", [])
+    if state not in ledger_mod.REPORT_STATES:
+        return ToolResult(
+            f"state must be one of {', '.join(ledger_mod.REPORT_STATES)}.", is_error=True
+        )
+    if not isinstance(summary, str):
+        return ToolResult("summary must be one short sentence.", is_error=True)
+    if not isinstance(links, list) or len(links) > MAX_LINKS or not all(
+        isinstance(link, str) for link in links
+    ):
+        return ToolResult(f"links must be a list of at most {MAX_LINKS} URLs.", is_error=True)
+    kept = list(dict.fromkeys(url for link in links if (url := sanitize.safe_url(link))))
+    worker = call.ledger.update(
+        call.worker,
+        report_state=state,
+        report_summary=sanitize.one_line(summary, limit=SUMMARY_LIMIT) or None,
+        report_links=json.dumps(kept) if kept else None,
+        reported_at=time.time(),
+    )
+    log.info("%s: reported %s", worker.handle, state)
+    said = [f"Reported {state}."]
+    if len(kept) < len(links):
+        said.append(
+            f"{len(links) - len(kept)} link(s) were left out: only plain http(s) URLs count."
+        )
+    pull = next((url for url in kept if _PULL_REQUEST_URL.fullmatch(url)), None)
+    if pull is not None:
+        runner = call.request.daemon.runner(call.ledger)
+        followed = runner.follow_reported_pull_request(worker, pull)
+        if followed is not None:
+            log.info("%s: follows its reported pull request %s", worker.handle, followed)
+            said.append(
+                "You follow this pull request now: its comments, reviews and CI results wake you."
+            )
+    if state in (ledger_mod.REPORT_DONE, ledger_mod.REPORT_FAILED):
+        said.append(
+            f"chargehand ends this worker as {state} when your turn ends. End your turn now."
+        )
+    return ToolResult(" ".join(said))
+
+
+def _ask(call: ToolCall) -> ToolResult:
+    """Put the question and its options on the board; the answer comes as the next wake."""
+    question = call.arguments.get("question")
+    options = call.arguments.get("options", [])
+    text = sanitize.one_line(question, limit=QUESTION_LIMIT) if isinstance(question, str) else ""
+    if not text:
+        return ToolResult("question must be a non-empty question.", is_error=True)
+    if not isinstance(options, list) or len(options) > MAX_OPTIONS or not all(
+        isinstance(option, str) for option in options
+    ):
+        return ToolResult(
+            f"options must be a list of at most {MAX_OPTIONS} short answers.", is_error=True
+        )
+    kept = list(dict.fromkeys(
+        line for option in options if (line := sanitize.one_line(option, limit=OPTION_LIMIT))
+    ))
+    call.ledger.record_question(call.worker, text, kept)
+    log.info("%s: asked a question with %d option(s)", call.worker.handle, len(kept))
+    return ToolResult(
+        "Your question is on the operator's board. End your turn now and do not wait for "
+        "the answer: it arrives as your next message, as a reply from the operator."
+    )
+
+
+def _handoff(call: ToolCall) -> ToolResult:
+    """Keep the note on the worker, for a later session of this work."""
+    note = call.arguments.get("note")
+    text = sanitize.clean(note).strip() if isinstance(note, str) else ""
+    if not text:
+        return ToolResult("note must be a non-empty text.", is_error=True)
+    cut = len(text) > HANDOFF_LIMIT
+    text = text[:HANDOFF_LIMIT]
+    call.ledger.update(call.worker, handoff_note=text, handoff_at=time.time())
+    # The note is session text: the log gives its length only.
+    log.info("%s: stored its handoff note (%d characters)", call.worker.handle, len(text))
+    if cut:
+        return ToolResult(
+            f"Your handoff note is stored, cut to its first {HANDOFF_LIMIT} characters."
+        )
+    return ToolResult("Your handoff note is stored. A later call replaces it.")
+
+
+def _request_wake(call: ToolCall) -> ToolResult:
+    """Put a timer into the worker's inbox; delivery wakes it once it is due, as for any event."""
+    after = call.arguments.get("after_secs")
+    if (
+        not isinstance(after, int) or isinstance(after, bool)
+        or not 0 < after <= MAX_WAKE_AFTER_SECS
+    ):
+        return ToolResult(
+            f"after_secs must be a whole number of seconds from 1 to {MAX_WAKE_AFTER_SECS}.",
+            is_error=True,
+        )
+    worker = call.worker
+    now = time.time()
+    key = worker.item or worker.handle
+    call.ledger.put_timer(
+        worker, due_at=now + after, item=key, item_ref=worker.item_id or key, now=now
+    )
+    log.info("%s: asked to be woken in %d s", worker.handle, after)
+    return ToolResult(
+        f"chargehand wakes you in {after} seconds or later, with the line "
+        f"'{ledger_mod.TIMER_KIND}: {ledger_mod.TIMER_POINTER}'. The wake counts against your "
+        f"daily wake cap, and the caps can delay it. A later request_wake replaces this one. "
+        f"Keep in mind what you want to do then, and end your turn when you are ready."
+    )
 
 
 def _subscribe(call: ToolCall) -> ToolResult:
@@ -148,36 +274,39 @@ _TEXTS = {"type": "array", "items": {"type": "string"}}
 REGISTRY: tuple[Tool, ...] = (
     Tool(
         "report",
-        "Report your progress to the operator. state is one of working, done, failed or "
-        "needs-input; summary is one short sentence; links is an optional list of URLs, such "
-        "as your pull request.",
+        "Report your progress to the operator, and call it when you finish. state is one of "
+        "working, done, failed or needs-input; summary is one short sentence; links is an "
+        "optional list of URLs, such as your pull request, which you then follow. done and "
+        "failed end your work when your turn ends.",
         _schema({
             "state": {"type": "string", "enum": ["working", "done", "failed", "needs-input"]},
             "summary": _TEXT,
             "links": _TEXTS,
         }, ("state", "summary")),
-        _not_available,
+        _report,
     ),
     Tool(
         "ask",
-        "Ask the operator a question, with optional answer options. It returns at once. End "
-        "your turn after it; the answer arrives later as a new message.",
+        "Ask the operator a question, with optional answer options. Use it instead of "
+        "AskUserQuestion. It returns at once. End your turn right after it; the answer "
+        "arrives later as your next message.",
         _schema({"question": _TEXT, "options": _TEXTS}, ("question",)),
-        _not_available,
+        _ask,
     ),
     Tool(
         "handoff",
         "Write your handoff note: what you did, what is left, and where things are, so that a "
-        "later session can go on from it.",
+        "later session can go on from it. A later call replaces it.",
         _schema({"note": _TEXT}, ("note",)),
-        _not_available,
+        _handoff,
     ),
     Tool(
         "request_wake",
-        "Ask to be woken later, after after_secs seconds, with a short reason.",
-        _schema({"after_secs": {"type": "integer", "minimum": 1}, "reason": _TEXT},
-                ("after_secs",)),
-        _not_available,
+        "Ask to be woken later, after after_secs seconds, for example to look at a slow CI "
+        "run again. The wake message does not say why, so keep that in mind yourself.",
+        _schema({"after_secs": {"type": "integer", "minimum": 1,
+                                "maximum": MAX_WAKE_AFTER_SECS}}, ("after_secs",)),
+        _request_wake,
     ),
     Tool(
         "subscribe",
@@ -367,7 +496,6 @@ def record_usage(request: Request) -> Response:
 
 
 __all__ = [
-    "NOT_AVAILABLE",
     "PREFIX",
     "REGISTRY",
     "TOOLS",

@@ -355,11 +355,14 @@ def worker_action(request: Request) -> Response:
         raise HTTPError(404, f"no worker {parts[0]}")
     if action == PERSONALISE:
         return personalise(request, ledger_mod.BOARD_WORKER, str(worker.id), body, name=worker.target)
+    target = target_of(worker)
     if action == ANSWER:
+        question = _question_of(ledger, worker, body.get("prompt"))
+        if question is not None:
+            return _answer_question(request, ledger, worker, target, question, body)
         return Response.json(
             hooks_mod.answer_prompt(request, ledger, worker, body.get("prompt"), body.get("answer"))
         )
-    target = target_of(worker)
     if action == ATTACH:
         return _attach(request, ledger, worker, target, body)
     if action == CLONE:
@@ -370,6 +373,39 @@ def worker_action(request: Request) -> Response:
     if takes_force:
         return _record(request, kind, target, force=_flag(body, "force"))
     return _record(request, kind, target)
+
+
+def _question_of(
+    ledger: Ledger, worker: Worker, prompt_id: object
+) -> ledger_mod.PermissionPrompt | None:
+    """The question of *worker* that *prompt_id* names, or None for any other prompt."""
+    if not isinstance(prompt_id, int) or isinstance(prompt_id, bool):
+        return None
+    prompt = ledger.get_permission_prompt(prompt_id)
+    if prompt is None or prompt.worker_id != worker.id or prompt.kind != ledger_mod.PROMPT_QUESTION:
+        return None
+    return prompt
+
+
+def _answer_question(
+    request: Request,
+    ledger: Ledger,
+    worker: Worker,
+    target: str,
+    question: ledger_mod.PermissionPrompt,
+    body: dict[str, object],
+) -> Response:
+    """Resolve the question, and send the answer to the worker as a reply.
+
+    The first answer wins; a second one, or one after the question was cancelled, gets
+    409. The reply is a request like any other, so the tick puts the answer into the
+    worker's inbox, and delivery wakes the worker with it as its next turn.
+    """
+    text = _reply_text(body)
+    if not ledger.answer_question(question.id, by=ledger_mod.RESOLVED_BY_BOARD):
+        raise HTTPError(409, "this question was already answered, or its worker moved on")
+    log.info("%s: question %d answered on the board", worker.handle, question.id)
+    return _record(request, REPLY, target, text=text)
 
 
 def _clone(request: Request, worker: Worker, target: str, body: dict[str, object]) -> Response:
@@ -1013,6 +1049,7 @@ def card(
             if live and worker.waiting_for else None
         ),
         "permission_prompt": permission_prompt(prompt, held) if prompt else None,
+        "report": report_of(worker),
         "problem": (
             sanitize.one_line(worker.last_error, limit=300)
             if worker.last_error and worker.state in (ledger_mod.PAUSED, ledger_mod.FAILED)
@@ -1041,7 +1078,12 @@ def card(
 def permission_prompt(
     prompt: ledger_mod.PermissionPrompt, held: Callable[[int], bool]
 ) -> dict[str, object]:
-    """A prompt as its card shows it. *answers* is empty when only the session can answer."""
+    """A prompt as its card shows it. *answers* is empty when only the session can answer.
+
+    A question that the ask tool recorded is answered on the board with one line: one of
+    its *options*, or any other text.
+    """
+    question = prompt.kind == ledger_mod.PROMPT_QUESTION
     answerable = prompt.kind == ledger_mod.PROMPT_PERMISSION and held(prompt.id)
     return {
         "id": prompt.id,
@@ -1050,6 +1092,43 @@ def permission_prompt(
         "tool_input": sanitize.one_line(prompt.tool_input, limit=PROMPT_INPUT_LIMIT),
         "created_at": prompt.created_at,
         "answers": list(hooks_mod.ANSWERS) if answerable else [],
+        "options": question_options(prompt.options) if question else [],
+    }
+
+
+def question_options(raw: str | None) -> list[str]:
+    """The options of a question, each one clean line. Session text."""
+    try:
+        options = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    if not isinstance(options, list):
+        return []
+    return [
+        line for option in options
+        if isinstance(option, str) and (line := sanitize.one_line(option, limit=LINE_LIMIT))
+    ]
+
+
+def report_of(worker: Worker) -> dict[str, object] | None:
+    """The worker's last report as its card shows it. Session text, cleaned."""
+    if not worker.report_state:
+        return None
+    try:
+        links = json.loads(worker.report_links) if worker.report_links else []
+    except ValueError:
+        links = []
+    return {
+        "state": sanitize.one_line(worker.report_state, limit=40),
+        "summary": (
+            sanitize.one_line(worker.report_summary, limit=LINE_LIMIT * 2)
+            if worker.report_summary else None
+        ),
+        "links": [
+            url for link in (links if isinstance(links, list) else [])
+            if (url := sanitize.safe_url(link))
+        ],
+        "at": worker.reported_at,
     }
 
 
@@ -1133,6 +1212,8 @@ __all__ = [
     "actions",
     "outcome",
     "permission_prompt",
+    "question_options",
+    "report_of",
     "target_of",
     "COLUMNS",
     "COLUMN_OF",
