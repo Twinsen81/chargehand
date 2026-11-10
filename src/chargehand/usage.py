@@ -15,6 +15,14 @@ every turn, and the daemon writes the weekly one with the source ``session``
 (:func:`record_session_usage`). So a machine whose status line chargehand does not wrap
 still has a reading while its workers run.
 
+The daemon also asks Claude Code itself, every ``poll_secs`` of ``[usage]``, on a thread of
+its own (:class:`UsagePoller`): :meth:`chargehand.claude.ClaudeCLI.get_usage` sends the
+experimental ``get_usage`` control request to a print-mode process, and the weekly window
+of the answer is written with the source ``get_usage``. So the reading needs neither the
+wrapper nor a running worker. The request is experimental: an error, a timeout, an answer
+without the window, or a sign-in without rate limits writes nothing and logs one line,
+and the file keeps the reading it has.
+
 The wrapper runs on every status line refresh, so it does little: one read of stdin,
 one small atomic write, one subprocess. Nothing it does to the usage file can change
 the status line: a payload without the weekly window, or with one that has no reset time
@@ -30,20 +38,25 @@ nothing would end it.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chargehand import claude, paths
-from chargehand.config import ServeConfig
+from chargehand import claude, paths, sanitize
+from chargehand.config import MachineConfig, ServeConfig
 from chargehand.delivery import WEEKLY_WINDOW, UsageReading, UsageWindow
+from chargehand.errors import ChargehandError
+
+log = logging.getLogger(__name__)
 
 # The windows the file holds and the board shows.
 WINDOWS = (WEEKLY_WINDOW,)
@@ -146,6 +159,17 @@ def record_session_usage(path: Path, rate_limits: object, *, now: float | None =
     return True
 
 
+def windows_from_get_usage(response: object) -> dict[str, dict[str, float]] | None:
+    """The windows of a ``get_usage`` answer with a percentage and a reset time, or None."""
+    windows: dict[str, dict[str, float]] = {}
+    for name, window in (claude.usage_response_windows(response) or {}).items():
+        used = percent(window.get("used_percent"))
+        reset = resets_at(window.get("resets_at"))
+        if name in WINDOWS and used is not None and reset is not None:
+            windows[name] = {"used_percent": used, "resets_at": reset}
+    return windows or None
+
+
 def write_usage(
     path: Path,
     windows: Mapping[str, object],
@@ -224,6 +248,110 @@ def run_statusline(
     # The status line setting is a shell command, so it runs through a shell here too.
     code = subprocess.run(command, shell=True, input=stdin, check=False).returncode
     return code if code >= 0 else 128 - code
+
+
+# ----- the poller --------------------------------------------------------------
+
+# How often a poller whose interval is 0 (off) reads the configuration again.
+POLL_OFF_RECHECK_SECS = 60.0
+
+UsageFetch = Callable[[MachineConfig, Path], Mapping[str, object]]
+
+
+def fetch_usage(config: MachineConfig, cwd: Path) -> Mapping[str, object]:
+    return claude.ClaudeCLI(config.claude_bin).get_usage(cwd)
+
+
+def poll_dir() -> Path:
+    """The empty private directory the usage request runs in, under the state directory."""
+    return paths.state_dir() / "usage-request"
+
+
+class UsagePoller:
+    """Asks Claude Code for the weekly window every ``[usage] poll_secs``, on its own thread.
+
+    *config* gives the configuration the daemon read last, so a changed interval, binary or
+    usage file applies from the next poll. Neither the tick nor ``/api/state`` waits for a
+    poll. A poll that gets no reading writes nothing: it logs a warning when the reason is
+    new, and a debug line while it stays the same.
+    """
+
+    def __init__(
+        self,
+        config: Callable[[], MachineConfig],
+        *,
+        fetch: UsageFetch = fetch_usage,
+        workdir: Callable[[], Path] = poll_dir,
+        clock: Callable[[], float] = time.time,
+        wait: Callable[[float], bool] | None = None,
+    ) -> None:
+        self._config = config
+        self._fetch = fetch
+        self._workdir = workdir
+        self._clock = clock
+        self._stop = threading.Event()
+        self._wait = wait or self._stop.wait
+        self._thread: threading.Thread | None = None
+        self._problem: str | None = None
+        self.polls = 0
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self.run, name="chargehand-usage", daemon=True)
+        self._thread.start()
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            # A request in progress ends by its own timeout; the thread is a daemon thread.
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def run(self) -> None:
+        """Poll at once, then after each interval, until closed; *wait* True means stop."""
+        while not self._stop.is_set():
+            interval = self._config().usage.poll_secs
+            if interval:
+                self.poll_once()
+            if self._wait(float(interval) if interval else POLL_OFF_RECHECK_SECS):
+                return
+
+    def poll_once(self) -> bool:
+        """One request; True when it wrote a reading. Never raises."""
+        self.polls += 1
+        config = self._config()
+        try:
+            workdir = self._workdir()
+            workdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            response = self._fetch(config, workdir)
+            windows = windows_from_get_usage(response)
+            if windows:
+                write_usage(
+                    config.serve.usage_file, windows, source=SOURCE_GET_USAGE, now=self._clock()
+                )
+                problem = None
+            elif isinstance(response, Mapping) and claude.usage_unavailable(response):
+                problem = "Claude Code says this sign-in has no rate limits"
+            else:
+                problem = "the answer has no weekly window with a percentage and a reset time"
+        except (ChargehandError, OSError) as exc:
+            problem = sanitize.one_line(str(exc), limit=300)
+        except Exception as exc:
+            problem = f"unexpected {type(exc).__name__}"
+            log.debug("usage request failed", exc_info=True)
+        self._note(problem)
+        return problem is None
+
+    def _note(self, problem: str | None) -> None:
+        if problem is None:
+            if self._problem is not None:
+                log.info("usage: get_usage gives a weekly reading again")
+            else:
+                log.debug("usage: get_usage wrote a weekly reading")
+        elif problem != self._problem:
+            log.warning("usage: get_usage gave no reading: %s", problem)
+        else:
+            log.debug("usage: get_usage gave no reading: %s", problem)
+        self._problem = problem
 
 
 # ----- the reader --------------------------------------------------------------
@@ -336,15 +464,19 @@ __all__ = [
     "SOURCE_GET_USAGE",
     "SOURCE_SESSION",
     "SOURCE_STATUSLINE",
+    "UsagePoller",
     "configured_usage_file",
+    "fetch_usage",
     "level",
     "percent",
+    "poll_dir",
     "provider_reading",
     "read_usage",
     "record_session_usage",
     "resets_at",
     "run_statusline",
     "user_command",
+    "windows_from_get_usage",
     "windows_from_payload",
     "windows_from_session",
     "write_usage",

@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancelled worker's message is dropped, and its events wait. A message that the mod does
   not take within a minute, or that the session refuses, falls back to the stop and the
   resume. A session without the mod keeps the stop and the resume.
+- The daemon's own usage reading. Every `poll_secs` of `[usage]` (300 seconds by default,
+  at least 60, 0 turns it off) a thread of the daemon sends Claude Code's `get_usage`
+  control request to a short `claude -p` process in an empty directory under the state
+  directory, with all hooks turned off, and writes the weekly window of the answer with the
+  source `get_usage`. Claude Code fetches the usage with its own sign-in: chargehand reads
+  no token and makes no network call, and the request runs no turn. So the week bar and
+  the reserves work without the status line wrapper and without a running worker. The
+  request is experimental in Claude Code: an error, a timeout, an answer without the
+  window, or a sign-in without rate limits writes nothing and logs one line. The wrapper
+  and the worker sessions stay as sources; the newest reading counts. `doctor` shows the
+  source and the age of the last reading, and warns when it is older than three poll
+  intervals.
 - Usage readings from worker sessions. The usage file now names its source (`statusline`
   or `session`), and the `usage` object of `/api/board`, `/api/state` and `status --json`
   carries it as `source`. A session reading keeps only the `seven_day` window, as the
