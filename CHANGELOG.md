@@ -32,8 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and checks it at once with the new `POST /api/token`, which answers 204 for a valid
   token and 401 for a wrong or missing one, and records no request. The state shows next
   to the field as "no token", "checking", "token accepted" or "token not valid". The page
-  checks it again on load and after the daemon was unreachable, so a restart with a new
-  token file shows "token not valid" before the next action.
+  checks it again on load and when the daemon was restarted or unreachable, so a restart
+  with a new token file shows "token not valid" before the next action.
 - Clone a worker, from a card's Clone form or with `chargehand clone <ITEM> --mode
   fresh|full`. A clone is a new worker with origin `clone`, on its original's role and
   item, in a worktree of its own branched from the original's current branch, so its
