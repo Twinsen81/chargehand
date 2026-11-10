@@ -9,7 +9,7 @@
 // header, never in a URL. The board has no chat: a conversation goes through attach.
 // The field next to it shows whether the daemon accepts the stored token: the page checks
 // it with POST /api/token on load, on Enter, when the field loses focus with a new value,
-// and after the daemon was unreachable, as a restart can bring a new token file.
+// and when the daemon was restarted or unreachable, as a restart can bring a new token file.
 //
 // A permission prompt shows on its card with Allow, Deny and Always allow while the
 // session's hook waits in the daemon; after that only the session can answer it.
@@ -577,6 +577,8 @@ function showTokenState(name) {
 let tokenCheck = 0;
 // Set when the daemon did not answer, so the next good poll checks the token again.
 let tokenRecheck = false;
+// When the daemon that answered the last poll started; a new value is a restart.
+let daemonStartedAt = null;
 
 async function checkToken() {
   const check = ++tokenCheck;
@@ -644,6 +646,8 @@ async function send(path, body, what) {
     return;
   }
   notice(what + ': sending', 'pending');
+  // The operator can save another token while the action waits for its answer.
+  const sent = token();
   let response;
   try {
     response = await post(path, body);
@@ -657,14 +661,17 @@ async function send(path, body, what) {
   } catch (error) {
     payload = {};
   }
+  const current = sent === token();
   if (response.status === 401) {
-    tokenCheck++;
-    showTokenState('invalid');
+    if (current) {
+      tokenCheck++;
+      showTokenState('invalid');
+    }
     notice('The token is not valid. Paste the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
     return;
   }
   // The daemon checks the Host (403) before the token, and every later answer passed both.
-  if (response.status !== 403) {
+  if (response.status !== 403 && current) {
     tokenCheck++;
     showTokenState('accepted');
   }
@@ -1018,6 +1025,9 @@ async function poll() {
     const refresh = $('refresh');
     refresh.textContent = 'updated ' + new Date(model.generated_at * 1000).toLocaleTimeString();
     refresh.classList.remove('stale');
+    const started = model.health && model.health.started_at;
+    if (daemonStartedAt !== null && started !== daemonStartedAt && token()) tokenRecheck = true;
+    daemonStartedAt = started;
     if (tokenRecheck) checkToken();
   } catch (error) {
     if (token()) tokenRecheck = true;

@@ -118,8 +118,23 @@ def test_the_page_shows_the_state_of_its_token(daemon):
     assert 'id="token-state"' in page
     assert "post('/api/token'" in script
     controls = script[script.index("function setupControls("):script.index("async function poll(")]
-    assert "'keydown'" in controls and "'Enter'" in controls and "'change'" in controls
-    assert controls.count("checkToken()") == 3
+
+    def listener(target, event):
+        start = controls.index(f"{target}.addEventListener('{event}'")
+        return controls[start:controls.index("});", start)]
+
+    assert "event.key !== 'Enter'" in listener("input", "keydown")
+    assert "save();" in listener("input", "keydown") and "save();" in listener("input", "change")
+    assert "checkToken();" in listener("$('token-forget')", "click")
+    forget = listener("$('token-forget')", "click")
+    on_load = controls[controls.index(forget) + len(forget):controls.index("$('terminal')")]
+    assert "checkToken();" in on_load
+    # A restart can bring a new token file, and an answer to an older token says nothing
+    # about the one stored now.
+    poll = script[script.index("async function poll("):]
+    assert "model.health.started_at" in poll and "if (tokenRecheck) checkToken();" in poll
+    sender = script[script.index("async function send("):script.index("function workerAction(")]
+    assert "const sent = token();" in sender and "sent === token()" in sender
 
 
 def test_the_page_sends_the_token_only_in_a_header(daemon):
