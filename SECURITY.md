@@ -338,6 +338,12 @@ public location.
   outbox message the daemon handed it, which is chargehand's wake message of kinds and
   pointers. It posts only to the port that the launch settings name, with the token from
   the token file that they name; the settings name the file, not the token.
+- **The usage request holds no credential.** To read the weekly usage window, the daemon
+  sends Claude Code's `get_usage` control request to a short `claude -p` process. Claude
+  Code fetches the usage with its own sign-in; chargehand reads no token and no Keychain
+  item and makes no network call. The process runs in an empty private directory under
+  the state directory, with all hooks and your MCP servers turned off and no session
+  file, runs no turn, and is killed after a timeout. Only the percentage and the reset time of its answer are kept.
 
 ### Known limits
 

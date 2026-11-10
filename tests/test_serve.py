@@ -370,7 +370,12 @@ def test_sigterm_ends_the_process_with_exit_code_zero(tmp_path, repo, harness):
     port = _free_port()
     config_file = write_machine_config(tmp_path / "serve-config.toml", repo, harness.worktree_root)
     with config_file.open("a") as handle:
-        handle.write(f"\n[serve]\nport = {port}\ntoken_file = \"{tmp_path / 'serve.token'}\"\n")
+        # The daemon asks the fake binary for the usage window and writes the answer: never
+        # to the operator's own usage file.
+        handle.write(
+            f"\n[serve]\nport = {port}\ntoken_file = \"{tmp_path / 'serve.token'}\"\n"
+            f"usage_file = \"{tmp_path / 'usage.json'}\"\n"
+        )
     # Unbuffered, and with a traceback of every thread on SIGABRT, so that a daemon that
     # never answers says where it waits.
     env = {

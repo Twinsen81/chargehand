@@ -154,11 +154,30 @@ waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and t
 its own dialog, which only `claude attach` can answer; so does a prompt that was open
 when the daemon stopped.
 
-To let the daemon see your subscription's weekly usage window, wrap your status line
-command in `~/.claude/settings.json` with `chargehand statusline`. It writes the window to
-`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then runs your command
-with the same input, so your status line does not change. Other windows in the input are
-ignored. chargehand does not edit the settings file for you:
+The daemon reads your subscription's weekly usage window by itself. Every 5 minutes it
+starts a short `claude -p` process in an empty directory and sends it Claude Code's
+`get_usage` control request; Claude Code answers with the usage that it fetches with its
+own sign-in. chargehand reads no token and no Keychain item, the request runs no turn
+and no hooks, and it writes no transcript. The reading goes to
+`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`), and `/api/state` and the
+board show the window's percentage and reset time. The request is experimental in Claude
+Code and can change with any release: when it fails, times out or gets an answer without
+the window, the daemon logs one line and keeps the last reading, and the bar stays grey
+until there is one. `chargehand doctor` shows which source wrote the last reading and how
+old it is. Set the interval, or turn the request off with 0, in `[usage]`:
+
+```toml
+[usage]
+poll_secs = 300   # at least 60; 0 turns the request off
+```
+
+Two more sources write the same file, and the newest reading counts however old it is,
+until its reset time has passed; `source` in `/api/state` says which wrote it. Each worker
+session posts its reading after its turns, through the chargehand mod that every worker
+loads. And a status line command wrapped with `chargehand statusline` writes the window
+from its input and then runs your command with the same input, so your status line does not
+change; other windows in the input are ignored. chargehand does not edit the settings file
+for you:
 
 ```json
 "statusLine": {
@@ -166,12 +185,6 @@ ignored. chargehand does not edit the settings file for you:
   "command": "chargehand statusline -- '~/.claude/statusline.sh'"
 }
 ```
-
-`/api/state` then shows the window's percentage and reset time. The daemon also writes
-the reading that each worker session posts after its turns, through the chargehand mod
-that every worker loads, so the file has a reading while workers run even without the
-wrapper; `source` says which wrote it. The newest reading counts however old it is, until
-its reset time has passed.
 
 The reading also keeps a part of the weekly window for your own sessions. No wake starts
 while the window is above 80 %, and no new worker starts while it is above 70 %; set other
@@ -183,9 +196,9 @@ wake_reserve_percent = 20        # no wake above 100 minus this
 new_worker_reserve_percent = 30  # no new worker while the week is above 100 minus this
 ```
 
-Without a usage file there is no reserve. The wrapper writes the file only while a Claude
-Code session shows its status line, so between your sessions the reserves use the last
-reading. Once the window's reset time has passed, that reading holds nothing.
+Without a usage file there is no reserve. While no source can write a new reading, the
+reserves use the last one. Once the window's reset time has passed, that reading holds
+nothing.
 
 A turn that ends on a usage limit parks its worker instead of failing it: you are notified
 once, and after the reset the worker continues in the same session by itself, one at a time

@@ -506,6 +506,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             sessions=list_sessions,
             report=_log_report,
             on_config=apply_level,
+            usage_poller=lambda daemon: usage_mod.UsagePoller(lambda: daemon.config),
         )
         daemon.start()
     except ChargehandError as exc:

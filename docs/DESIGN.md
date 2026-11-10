@@ -299,11 +299,12 @@ The daemon reads two more tables. Every key is optional; these are the defaults:
 port = 7878                         # on 127.0.0.1; no key binds another address
 token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
 tick_interval_secs = 60             # how often the daemon ticks
-usage_file = "~/.cache/chargehand/usage.json"     # the status line wrapper writes it
+usage_file = "~/.cache/chargehand/usage.json"     # the usage readings go here
 
 [usage]
 wake_reserve_percent = 20           # no wake while the week is above 80 %
 new_worker_reserve_percent = 30     # no new worker while the week is above 70 %
+poll_secs = 300                     # how often the daemon asks Claude Code; 0 is off
 ```
 
 The reserves keep a part of the subscription's weekly usage window for your own sessions (see
@@ -488,11 +489,10 @@ repository's own `max_concurrent` when it has one, the role's `max_workers` when
 one, and the usage reserve for new workers: the weekly window of the role's provider at or
 below 100 minus `new_worker_reserve_percent` (70 % by default). The usage readings are kept
 per provider (window kind, percent used, reset time), and each runtime names the provider
-its sessions draw on; only `claude` has readings, from the status line wrapper's usage
-file. No usage file is no reading, and no reading means no reserve. The newest reading
-counts however old it is: the status line wrapper writes the file only while an
-interactive session shows its status line, and between sessions the last reading is the
-best one there is. Once the weekly window's reset time has passed, its percentage belongs
+its sessions draw on; only `claude` has readings, from the usage file that the daemon's
+own usage request, the worker sessions and the status line wrapper write. No usage file is
+no reading, and no reading means no reserve. The newest reading counts however old it is:
+when the usage request fails, the last reading is the best one there is. Once the weekly window's reset time has passed, its percentage belongs
 to the week before, so the reading holds nothing. A window without a reset time holds
 nothing either, because nothing would end it. The check covers the start
 rules, the board's new workers, clones and every later way to start one. A start that the reserve
@@ -1132,11 +1132,29 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   repository stays readable; each card shows its worker's job and archive time. Restoring
   a worktree from a zip is a manual step (see the README), not a button.
 - **Usage readings.** The usage file holds one reading: the weekly window, when it was
-  written and its source, `statusline` or `session`. Each source writes the same file, and
-  the newest write is the reading. The chargehand mod posts each worker session's
-  rate-limit windows after every turn, and the daemon writes the `seven_day` one with the
-  source `session`, so a machine whose status line is not wrapped still has a reading
-  while its workers run. Claude Code gives a status line command the subscription's
+  written and its source, `get_usage`, `session` or `statusline`. Each source writes the
+  same file, and the newest write is the reading. The daemon asks Claude Code itself every
+  `poll_secs` of `[usage]` (300 seconds by default, at least 60, 0 turns it off), on a
+  thread of its own, so no tick and no request waits for it: it starts `claude -p
+  --input-format stream-json --output-format stream-json --verbose --settings
+  '{"disableAllHooks": true}' --strict-mcp-config --no-session-persistence` (no MCP
+  servers of yours, no session file) in an empty private directory under the state directory,
+  writes one `control_request` line with the subtype `get_usage`, reads lines until the
+  `control_response` with that request id, and closes stdin. Claude Code fetches the usage
+  with its own sign-in, so chargehand reads no token and no Keychain item and makes
+  no network call; the request runs no turn and writes no transcript. The answer's
+  `rate_limits.seven_day` has `utilization` (a percentage) and `resets_at` (an ISO time),
+  and the daemon writes that window with the source `get_usage`; `five_hour`, the
+  per-model windows and `limits` are ignored. This request is experimental in Claude Code
+  and can change in any release, so the reader fails closed: an error, a timeout of 10
+  seconds (the process is then killed), an answer without the window, or
+  `rate_limits_available: false` writes nothing, logs one warning (a debug line while the
+  reason stays the same), and leaves the file with the reading it has. `--bare` is no
+  option, because it skips the Keychain, where the sign-in is. `doctor` shows the source
+  and the age of the last reading, and warns when it is older than three poll intervals.
+  The status line wrapper and the mod stay as sources beside it. The chargehand mod posts
+  each worker session's rate-limit windows after every turn, and the daemon writes the
+  `seven_day` one with the source `session`. Claude Code gives a status line command the subscription's
   `rate_limits`: a `seven_day` window with `used_percentage` and `resets_at`. It sends them
   on subscription plans only, and only after the session's first API response.
   `chargehand statusline -- '<command>'` reads that payload, writes the `seven_day` window
@@ -1403,6 +1421,8 @@ Done:
   capabilities.
 - The chargehand mod in every worker session: the worker tools from one registry, the wake
   of a live process from its outbox, the lifecycle posts and the usage readings.
+- The daemon's own usage reading, from Claude Code's experimental `get_usage` request, so
+  the week bar and the reserves need neither the status line wrapper nor a running worker.
 
 Next:
 
