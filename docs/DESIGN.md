@@ -923,11 +923,15 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   prompt; it answers at once, see section 6); `POST /api/repositories/<name>/pause` and
   `/resume`, `/archive`
   (with `force`) and `/unarchive`; `POST /api/pause` and `/api/resume` for all
-  repositories. An action waits up to three seconds for the tick
+  repositories; `POST /api/token` only checks the token (204 or 401) and records nothing.
+  An action waits up to three seconds for the tick
   and answers with the request's outcome, or with the request pending;
   `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
   The page asks for the token once, keeps it in the browser's `localStorage` for this
-  origin, and sends it only in the `Authorization` header, never in a URL.
+  origin, and sends it only in the `Authorization` header, never in a URL. It checks the
+  token on Enter, when the field loses focus with a new value, on load and after the
+  daemon was unreachable, and shows "no token", "checking", "token accepted" or "token
+  not valid" next to the field; an action that gets a 401 also shows "token not valid".
   A worker started from the board has origin `board`. The one-worker-per-role-and-item
   rule of the start rules does not hold it, but a paused repository and every cap do.
   Its item, when given, becomes a work item through the repository's tracker, which

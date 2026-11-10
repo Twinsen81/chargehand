@@ -96,8 +96,12 @@ discard a worker; reply to a worker with one line of text, which reaches it as a
 the way a comment would, and answers a question that ended the worker's turn; attach,
 which opens an iTerm2 or Terminal.app window (chosen on the page) running `claude attach`
 on the worker's session; and pause or resume a repository or all of them. The buttons
-need the daemon's token: paste the content of the token file into the token field once,
-and the browser keeps it for the page. Workers started on the board are named by a handle
+need the daemon's token: paste the content of the token file into the token field once
+and press Enter, or leave the field, and the browser keeps it for the page. The page checks
+the token at once and shows its state next to the field: "no token", "checking", "token
+accepted" or "token not valid". It checks again when the page loads and after the daemon
+was unreachable, so a restart with a new token file shows "token not valid" without
+running an action; "Forget token" removes it and shows "no token". Workers started on the board are named by a handle
 with their id, such as `implementer/ABC-1#7`, which every command that takes an item also
 accepts.
 
