@@ -109,6 +109,13 @@ button.repository.resume, button.action.continue { border-color: var(--green); }
 button.action.cancel, button.action.discard { border-color: var(--red); color: var(--red); }
 input, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; font: inherit; font-size: 12px; }
 input[type=checkbox] { padding: 0; }
+.token-state { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.token-state.checking { color: var(--amber); }
+.token-state.accepted { color: var(--green); }
+.token-state.invalid { color: var(--red); }
+input.token-checking { border-color: var(--amber); }
+input.token-accepted { border-color: var(--green); }
+input.token-invalid { border-color: var(--red); }
 .notice { padding: 6px 16px; font-size: 12px; font-family: var(--mono); border-bottom: 1px solid var(--border); color: var(--muted); overflow-wrap: anywhere; }
 .notice.ok { color: var(--green); }
 .notice.bad { color: var(--red); }

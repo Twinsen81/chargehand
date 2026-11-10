@@ -93,6 +93,35 @@ def test_every_action_needs_the_token_and_a_loopback_host(daemon, harness, path,
     assert harness.ledger.pending_requests() == []
 
 
+def request_rows(harness):
+    return harness.ledger._conn.execute("SELECT count(*) FROM requests").fetchone()[0]
+
+
+def test_the_token_check_answers_whether_the_token_is_valid_and_records_nothing(daemon, harness):
+    before = request_rows(harness)
+
+    status, body = support.request(daemon.port, "POST", "/api/token", body=b"{}", headers=AUTH)
+    assert (status, body) == (204, b"")
+    assert post(daemon, "/api/token", headers={"Content-Type": "application/json"})[0] == 401
+    wrong = {"Authorization": "Bearer not-the-token", "Content-Type": "application/json"}
+    assert post(daemon, "/api/token", headers=wrong)[0] == 401
+    assert post(daemon, "/api/token", host="evil.example:80")[0] == 403
+
+    assert request_rows(harness) == before
+
+
+def test_the_page_shows_the_state_of_its_token(daemon):
+    script = (board.asset_dir() / "board.js").read_text()
+    page = (board.asset_dir() / "index.html").read_text()
+    for label in ("no token", "checking", "token accepted", "token not valid"):
+        assert f"'{label}'" in script, label
+    assert 'id="token-state"' in page
+    assert "post('/api/token'" in script
+    controls = script[script.index("function setupControls("):script.index("async function poll(")]
+    assert "'keydown'" in controls and "'Enter'" in controls and "'change'" in controls
+    assert controls.count("checkToken()") == 3
+
+
 def test_the_page_sends_the_token_only_in_a_header(daemon):
     script = (board.asset_dir() / "board.js").read_text()
     assert "'Authorization': 'Bearer ' + token()" in script
