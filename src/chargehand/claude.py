@@ -1510,7 +1510,7 @@ class ClaudeRuntime(Runtime):
             return ()
 
     def _settings_for(
-        self, spec: LaunchSpec, warn: Callable[[str], None] | None, *, mod: bool
+        self, spec: LaunchSpec, warn: Callable[[str], None] | None, *, mod: bool = False
     ) -> dict[str, object] | Path | None:
         """The launch settings, in a private file when they carry the hooks and their token.
 
