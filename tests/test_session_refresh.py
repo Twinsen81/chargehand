@@ -9,6 +9,7 @@ import pytest
 
 from conftest import Harness, make_config
 from chargehand import board as board_mod
+from chargehand import channel
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
 from chargehand.config import SourceConfig
@@ -142,7 +143,7 @@ def test_the_wake_after_the_limit_starts_a_fresh_session_and_keeps_the_old_one(a
     # then the waiting event. The handoff note is never in it.
     prompt = fresh["argv"][-1]
     note, role_prompt, message = prompt.split("\n\n")
-    assert "PR-7" in note and HANDOFF_TOOL in note
+    assert "PR-7" in note and HANDOFF_TOOL in note and HANDOFF_TOOL in channel.TOOLS
     assert role_prompt.startswith("/review ")
     assert message.splitlines() == [MESSAGE_HEADER, f"comment: {pointer}"]
     assert NOTE not in prompt and "Open points" not in prompt

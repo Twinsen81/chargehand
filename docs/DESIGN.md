@@ -849,7 +849,7 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   new tool needs no change in the mod), and posts the session start. The hello is the
   record that this session takes its wakes from the outbox. The model sees the tools as
   `mcp__chargehand__<tool>`, and the launch settings allow them, so no permission mode
-  asks for them. In this release: `report`, `ask`, `handoff`, `request_wake` and
+  asks for them. In this release: `report`, `ask`, `handoff`, `read_handoff`, `request_wake` and
   `subscribe(item, kinds)`, which subscribes the worker to an item that a source names by
   its URL or identifier.
 - A tool call goes to `POST /channel/tool/<name>`, and the daemon's answer is the result.
@@ -861,7 +861,9 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   not built: a main-conversation tool call that runs over two minutes moves to a
   background task, and the model would go on without the answer. `handoff(note)` stores
   the note (16 KiB at most) and its time on the worker, for a later session of the same
-  work; it never reaches a log line or a notification. `request_wake(after_secs)` puts a
+  work; it never reaches a log line or a notification. `read_handoff` returns the stored
+  note to the session that calls it, or a line that says no note is stored; it is how a
+  fresh session after a refresh gets the note. `request_wake(after_secs)` puts a
   timer into the worker's inbox, due after 1 second to 7 days, one per worker: a later
   call replaces the one that waits. Delivery takes it once it is due, as any event, with
   the line `timer: request_wake`, through the same admission, and the daily cap counts
