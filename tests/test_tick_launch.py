@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from chargehand import claude as claude_mod
 from chargehand import ledger as ledger_mod
 from chargehand.config import DEFAULT_DENY_RULES, RepoConfig
 from chargehand.ledger import LAST_STEP
@@ -60,7 +61,10 @@ def test_deny_rules_can_be_left_out_of_the_launch(harness):
 
     harness.tick()
 
-    assert "--settings" not in harness.claude_state.launches[0]["argv"]
+    argv = harness.claude_state.launches[0]["argv"]
+    # Only the allow rule for the chargehand mod's tools is left.
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert settings == {"permissions": {"allow": [claude_mod.MOD_TOOL_RULE]}}
 
 
 def test_an_unlabelled_issue_is_not_picked_up(harness):

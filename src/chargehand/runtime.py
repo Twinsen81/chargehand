@@ -88,8 +88,9 @@ class Capabilities:
     A flag describes the agent, not a method of this interface: a feature that uses it
     brings its own call when it is built. In particular ``wake()`` is always the
     stop-and-resume path; a wake into a live session, for a runtime with
-    ``in_place_wake``, goes through the in-session channel, which is a separate path.
-    Usage readings have no call here yet for the same reason; board permissions use
+    ``in_place_wake``, goes through the in-session channel, which is a separate path: the
+    session's outbox, which delivery fills and the session's own channel client takes,
+    and :meth:`Runtime.respawn` first when the process is stopped. Board permissions use
     :meth:`Runtime.permission_hold_secs` and :meth:`Runtime.permission_decision`.
 
     ``live_attach``: an operator can open the running session without stopping it.
@@ -268,6 +269,18 @@ class Runtime(ABC):
     @classmethod
     def parse_hook(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
         """The post *payload* to `/hooks/<event>`, or None when it is not this runtime's."""
+        return None
+
+    # The lifecycle events a session of this runtime posts on the agent channel, to
+    # `/channel/lifecycle/<event>`, for a runtime with ``in_place_wake``.
+    channel_events: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def parse_channel(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
+        """The channel post *payload* to `/channel/lifecycle/<event>`, or None when it is not this runtime's.
+
+        The result goes through the same transitions as a session hook.
+        """
         return None
 
     @classmethod
