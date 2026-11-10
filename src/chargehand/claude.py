@@ -1728,7 +1728,7 @@ class ClaudeRuntime(Runtime):
             spec.options, self.deny_rules, spec.read_paths, hooks=hooks,
             protected_paths=spec.protected_paths, mod=mod, mod_env=env,
         )
-        if not hooks or settings is None:
+        if not hooks:
             return settings
         path = settings_file_for(spec.worktree)
         try:
