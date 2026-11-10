@@ -2,7 +2,7 @@
 
 The daemon serves on 127.0.0.1 on a port the kernel picks and runs no loop; the tests
 tick the harness themselves. Sessions are the fake `claude`'s, the tracker is the fake one,
-and attach runs a fake `osascript`.
+and attach runs a fake `open` or `osascript`.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import functools
 import json
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -709,20 +710,23 @@ def test_the_tick_report_says_where_a_request_came_from(harness):
 # ----- attach ---------------------------------------------------------------------------------
 
 
-class FakeOsascript:
+class FakeRun:
     def __init__(self, returncode=0, stderr=""):
         self.calls = []
+        self.scripts = []
         self.returncode = returncode
         self.stderr = stderr
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[0] == terminal.OPEN:
+            self.scripts.append(Path(argv[-1]).read_text())
         return subprocess.CompletedProcess(argv, self.returncode, "", self.stderr)
 
 
 @pytest.fixture
-def osascript(monkeypatch):
-    fake = FakeOsascript()
+def opener(monkeypatch):
+    fake = FakeRun()
     monkeypatch.setattr(
         terminal, "open_window",
         functools.partial(terminal.open_window, run=fake, platform="darwin"),
@@ -730,30 +734,41 @@ def osascript(monkeypatch):
     return fake
 
 
-@pytest.mark.parametrize("name, application, line", [
-    ("iterm2", 'tell application "iTerm"', "tell current session of attached to write text (item 1 of argv)"),
-    ("terminal", 'tell application "Terminal"', "do script (item 1 of argv)"),
-])
-def test_attach_opens_the_chosen_terminal_on_the_cards_session(daemon, harness, osascript, name, application, line):
+def test_attach_opens_terminal_on_the_cards_session_through_a_script_file(daemon, harness, opener):
     unqueued(harness)
     worker = board_worker(harness)
 
-    status, answer = post(daemon, f"/api/workers/{worker.id}/attach", {"terminal": name})
+    status, answer = post(daemon, f"/api/workers/{worker.id}/attach", {"terminal": "terminal"})
 
     assert status == 200
     assert (answer["ok"], answer["pending"], answer["kind"], answer["origin"]) == (True, False, "attach", "board")
-    (argv,) = osascript.calls
+    (argv,) = opener.calls
+    assert argv[:3] == [terminal.OPEN, "-a", "Terminal"]
+    assert Path(argv[3]).parent == terminal.script_dir() and argv[3].endswith(".command")
+    assert opener.scripts == [f'#!/bin/sh\nrm -f -- "$0"\nexec claude attach {worker.session_id}\n']
+    # Recorded for the audit trail, already applied: no tick acts on it.
+    assert harness.ledger.pending_requests() == []
+    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "terminal"}, "board")
+
+
+def test_attach_opens_iterm2_on_the_cards_session(daemon, harness, opener):
+    unqueued(harness)
+    worker = board_worker(harness)
+
+    status, answer = post(daemon, f"/api/workers/{worker.id}/attach", {"terminal": "iterm2"})
+
+    assert status == 200 and answer["ok"] is True
+    (argv,) = opener.calls
     assert argv[0] == terminal.OSASCRIPT
     assert argv[-1] == f"claude attach {worker.session_id}"
     script = [argv[i + 1] for i in range(1, len(argv) - 1, 2)]
-    assert application in script and line in script
+    assert 'tell application "iTerm"' in script
+    assert "tell current session of attached to write text (item 1 of argv)" in script
     assert all(argv[i] == "-e" for i in range(1, len(argv) - 1, 2))
-    # Recorded for the audit trail, already applied: no tick acts on it.
-    assert harness.ledger.pending_requests() == []
-    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": name}, "board")
+    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "iterm2"}, "board")
 
 
-def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness, osascript, monkeypatch):
+def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness, opener, monkeypatch):
     unqueued(harness)
     worker = board_worker(harness)
     ended = harness.ledger.update(board_worker(harness), state=ledger_mod.CANCELLED)
@@ -761,32 +776,12 @@ def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness,
     assert post(daemon, f"/api/workers/{ended.id}/attach")[0] == 409
     monkeypatch.setattr(
         terminal, "open_window",
-        functools.partial(terminal.open_window.func, run=osascript, platform="linux"),
+        functools.partial(terminal.open_window.func, run=opener, platform="linux"),
     )
     _, answer = post(daemon, f"/api/workers/{worker.id}/attach")
 
     assert answer["ok"] is False and "macOS only" in answer["message"]
-    assert osascript.calls == []
-
-
-def test_osascript_never_carries_the_command_in_its_script():
-    argv = terminal.osascript_argv("iterm2", "claude attach abc-123")
-    assert argv[-1] == "claude attach abc-123"
-    assert not any("abc-123" in part for part in argv[:-1])
-    for bad in ('claude attach x"; do shell script "rm', "claude attach $(id)", "claude  attach x", ""):
-        with pytest.raises(ValueError):
-            terminal.osascript_argv("iterm2", bad)
-    with pytest.raises(ValueError):
-        terminal.osascript_argv("xterm", "claude attach abc")
-
-
-def test_a_failed_osascript_says_how_to_allow_it():
-    fake = FakeOsascript(returncode=1, stderr="Not authorized to send Apple events to iTerm.\x1b[2J")
-
-    ok, message = terminal.open_window("iterm2", "claude attach abc", run=fake, platform="darwin")
-
-    assert ok is False
-    assert "Not authorized" in message and "Automation" in message and "\x1b" not in message
+    assert opener.calls == []
 
 
 # ----- the card ----------------------------------------------------------------------------
