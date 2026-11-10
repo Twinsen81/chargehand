@@ -910,6 +910,8 @@ def protected_path_rules(paths: Sequence[Path]) -> list[str]:
 # the package. Claude Code stores the flag with the job, so the mod comes back after a stop
 # and a resume or a respawn.
 MOD_DIR = Path(__file__).resolve().parent / "templates" / "mod"
+# What of the shipped folder a session loads. Its tests stay behind.
+MOD_FILES = (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.ts")
 MOD_NAME = "chargehand"
 # Claude Code lists a plugin's tool as `mcp__<plugin>__<tool>`.
 MOD_TOOL_RULE = f"mcp__{MOD_NAME}__*"
@@ -922,6 +924,40 @@ MOD_SESSION_START = "session_start"
 MOD_TURN_COMPLETE = "turn_complete"
 MOD_SESSION_END = "session_end"
 MOD_EVENTS = (MOD_SESSION_START, MOD_TURN_COMPLETE, MOD_SESSION_END)
+
+
+def installed_mod_dir() -> Path:
+    """Where the sessions load the mod from: a copy under the state directory.
+
+    Claude Code writes its API types and a `tsconfig.json` into the folder of a mod it
+    loads. The copy takes them, so the installed package, or the checkout it runs from,
+    stays as it was shipped.
+    """
+    return paths.state_dir() / "mod"
+
+
+def install_mod(source: Path | None = None, target: Path | None = None) -> Path:
+    """Bring the copy of the mod up to date with *source*, and return its folder.
+
+    Only a file whose content differs is written, each in one step, so a session that
+    loads the copy meanwhile reads either version of a file. What Claude Code wrote into
+    the copy stays. Raises OSError when the copy cannot be written.
+    """
+    source = MOD_DIR if source is None else source
+    target = installed_mod_dir() if target is None else target
+    for name in MOD_FILES:
+        content = (source / name).read_bytes()
+        path = target / name
+        try:
+            if path.read_bytes() == content:
+                continue
+        except OSError:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    return target
 
 
 def mod_env(port: int, token_file: Path) -> dict[str, str]:
@@ -1456,8 +1492,19 @@ class ClaudeRuntime(Runtime):
         )
 
     def plugin_dirs(self) -> tuple[Path, ...]:
-        """The plugin directories of every session: the chargehand mod, when it is installed."""
-        return (MOD_DIR,) if (MOD_DIR / ".claude-plugin" / "plugin.json").is_file() else ()
+        """The plugin directories of every session: the copy of the chargehand mod.
+
+        None when the package has no mod or the copy cannot be written; the session then
+        takes its wakes by stop and resume.
+        """
+        if not all((MOD_DIR / name).is_file() for name in MOD_FILES):
+            return ()
+        try:
+            return (install_mod(),)
+        except OSError as exc:
+            log.warning("could not copy the chargehand mod to %s: %s; sessions start without it",
+                        installed_mod_dir(), exc)
+            return ()
 
     def _settings_for(
         self, spec: LaunchSpec, warn: Callable[[str], None] | None
@@ -1895,6 +1942,7 @@ __all__ = [
     "ClaudeRuntime",
     "MOD_DIR",
     "MOD_EVENTS",
+    "MOD_FILES",
     "MOD_NAME",
     "MOD_PORT_ENV",
     "MOD_TOKEN_FILE_ENV",
@@ -1914,6 +1962,8 @@ __all__ = [
     "hook_settings",
     "input_digest",
     "permission_timeout_of",
+    "install_mod",
+    "installed_mod_dir",
     "launch_settings",
     "mod_env",
     "parse_hook",

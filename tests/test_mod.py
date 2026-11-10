@@ -86,7 +86,13 @@ def test_every_launch_loads_the_mod_and_allows_its_tools(harness, tmp_path):
     launch(harness)
 
     argv = harness.claude_state.launches[-1]["argv"]
-    assert argv[argv.index("--plugin-dir") + 1] == str(claude.MOD_DIR)
+    # A copy under the state directory, so that what Claude Code writes into the folder of
+    # a mod it loads never lands in the package.
+    loaded = Path(argv[argv.index("--plugin-dir") + 1])
+    assert loaded == claude.installed_mod_dir() != claude.MOD_DIR
+    for name in claude.MOD_FILES:
+        assert (loaded / name).read_bytes() == (claude.MOD_DIR / name).read_bytes()
+    assert not (loaded / "hooks" / "register.test.ts").exists()
     settings = settings_of_last_launch(harness)
     assert claude.MOD_TOOL_RULE in settings["permissions"]["allow"]
     # The mod finds the daemon where the hooks post; the file names the token file only.
@@ -125,6 +131,41 @@ def test_a_missing_mod_folder_is_not_passed(monkeypatch, tmp_path):
     monkeypatch.setattr(claude, "MOD_DIR", tmp_path / "gone")
 
     assert claude.ClaudeRuntime().plugin_dirs() == ()
+
+
+def test_a_copy_that_cannot_be_written_starts_the_session_without_the_mod(monkeypatch, tmp_path):
+    blocker = tmp_path / "state-file"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(claude, "installed_mod_dir", lambda: blocker / "mod")
+
+    assert claude.ClaudeRuntime().plugin_dirs() == ()
+
+
+def test_the_copy_follows_the_package_and_keeps_what_claude_code_wrote(tmp_path):
+    source = tmp_path / "shipped"
+    for name in claude.MOD_FILES:
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        (source / name).write_text(f"v1 {name}\n")
+    target = tmp_path / "copy"
+
+    assert claude.install_mod(source, target) == target
+    # What a session writes into the folder of the mod it loads.
+    (target / "tsconfig.json").write_text('{"extends": "./.claude-plugin/types/tsconfig.json"}')
+    (target / ".claude-plugin" / "types").mkdir()
+    module = target / "hooks" / "register.ts"
+    unchanged = (target / "hooks" / "hooks.json").stat().st_mtime_ns
+    (source / "hooks" / "register.ts").write_text("v2\n")
+
+    claude.install_mod(source, target)
+
+    assert module.read_text() == "v2\n"
+    assert (target / "hooks" / "hooks.json").stat().st_mtime_ns == unchanged
+    assert (target / "tsconfig.json").exists() and (target / ".claude-plugin" / "types").is_dir()
+    assert sorted(p.name for p in (target / "hooks").iterdir()) == ["hooks.json", "register.ts"]
+    # The shipped folder gets nothing.
+    assert sorted(p.name for p in source.rglob("*") if p.is_file()) == [
+        "hooks.json", "plugin.json", "register.ts",
+    ]
 
 
 # ----- the lifecycle posts ------------------------------------------------------------

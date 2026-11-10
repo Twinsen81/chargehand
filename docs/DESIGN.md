@@ -784,7 +784,10 @@ keeps the reason on the worker's card, as a queued worker does.
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
 launch and at a full-mode clone; Claude Code stores the flag with the job, so the mod
-comes back after a stop and a resume or a respawn. The launch settings tell it where the
+comes back after a stop and a resume or a respawn. The session loads a copy of the mod
+in the state directory (`mod/`), which each launch brings up to date: Claude Code writes
+its API types and a `tsconfig.json` into the folder of a mod it loads, and the copy keeps
+them out of the installed package and the checkout. The launch settings tell it where the
 daemon is, in their `env`: the port and the token file, never the token. Without them it
 posts nothing; it has no default port. It is the transport of the agent channel:
 

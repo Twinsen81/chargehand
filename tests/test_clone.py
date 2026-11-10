@@ -216,7 +216,7 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
         "--permission-mode", "manual", "--model", "sonnet", "--effort", "low",
     ]
     assert argv[12:16] == [
-        "--plugin-dir", str(claude_mod.MOD_DIR), "--settings", str(settings),
+        "--plugin-dir", str(claude_mod.installed_mod_dir()), "--settings", str(settings),
     ]
     assert settings != claude_mod.settings_file_for(original.worktree_path)
     written = json.loads(settings.read_text())

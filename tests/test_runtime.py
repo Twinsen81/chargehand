@@ -445,7 +445,7 @@ def test_a_fork_resumes_a_copy_in_its_own_worktree_with_the_new_model_and_effort
         "--model", "sonnet", "--effort", "low",
     ]
     # The mod and the launch settings come again: here the deny rules, as a launch passes them.
-    assert argv[12:14] == ["--plugin-dir", str(claude_mod.MOD_DIR)]
+    assert argv[12:14] == ["--plugin-dir", str(claude_mod.installed_mod_dir())]
     assert argv[14] == "--settings" and "deny" in argv[15]
     assert argv[16:] == ["carry on"]
     assert fork["cwd"] == os.path.realpath(worktree)
