@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -345,7 +345,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_uuid TEXT,
     kind         TEXT    NOT NULL,
     started_at   REAL    NOT NULL,
-    ended_at     REAL
+    ended_at     REAL,
+    -- The transcript of a session that a refresh replaced, as its hooks reported it.
+    transcript_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS sessions_worker ON sessions (worker_id);
@@ -650,6 +652,13 @@ _MIGRATE_V2_V10_TO_V11 = f"""
 {_SCHEMA}
 """
 
+# Version 12 keeps the transcript path of a session that a refresh replaced, on its row.
+# Every version from 2 on has a sessions table without it; the version 1 copy creates the
+# table with it.
+_MIGRATE_V11_TO_V12 = """
+ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -765,6 +774,7 @@ class SessionRecord:
     kind: str
     started_at: float
     ended_at: float | None
+    transcript_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -964,19 +974,22 @@ class Ledger:
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
-            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11,
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11
+            + _MIGRATE_V11_TO_V12,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
             5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
-            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
             6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10
-            + _MIGRATE_V10_TO_V11,
-            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
-            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
-            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
-            10: _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11
+            + _MIGRATE_V11_TO_V12,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            11: _MIGRATE_V11_TO_V12,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1578,6 +1591,14 @@ class Ledger:
                 "AND started_at >= ?",
                 (worker.id, *WAKE_KINDS, since),
             ).fetchone()[0]
+        )
+
+    def keep_session_transcript(self, worker: Worker, session_id: str, path: str) -> None:
+        """Keep *path* on the rows that started *session_id*, once a refresh replaces it."""
+        self._conn.execute(
+            "UPDATE sessions SET transcript_path = ? WHERE worker_id = ? AND session_id = ? "
+            "AND kind != ?",
+            (path, worker.id, session_id, SESSION_WAKE),
         )
 
     def wakes_in_session(self, worker: Worker) -> int:

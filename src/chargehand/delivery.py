@@ -61,6 +61,7 @@ the answer to a question stay in the session they belong to.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import stat
@@ -324,18 +325,19 @@ def _switch_session(
     """Make *session* the current session of *worker*, as read before the refresh, with a
     refresh row. The caller holds a transaction.
 
-    What described the old session goes; a hook of the fresh session may have written its
-    own already, and that stays.
+    What described the old session goes, and its transcript path stays on its own row, for
+    an archive. A hook of the fresh session may have written its own values already, during
+    the launch, and those stay.
     """
     current = ledger.get(worker.id) or worker
-    changes: dict[str, object] = {
-        "session_id": session.id,
-        "session_uuid": session.uuid,
-        "session_state": session.state,
-    }
+    changes: dict[str, object] = {"session_id": session.id, "session_uuid": session.uuid}
+    if current.last_hook_at == worker.last_hook_at:
+        changes["session_state"] = session.state
     for name in ("transcript_path", "context_tokens", "context_percent", "waiting_for"):
         if getattr(current, name) == getattr(worker, name):
             changes[name] = None
+    if worker.session_id and worker.transcript_path:
+        ledger.keep_session_transcript(worker, worker.session_id, worker.transcript_path)
     written = ledger.update(current, **changes)
     ledger.record_session(
         written, kind=ledger_mod.SESSION_REFRESH, session_id=session.id,
@@ -438,12 +440,15 @@ class Refresh:
     *session* is the fresh session. *prompted* says whether it started with the first
     prompt and the waiting events; a session that an earlier, interrupted refresh started
     did not get them, so they wait for its next wake. *busy* says why the old session
-    cannot be stopped now; then nothing changed.
+    cannot be stopped now; then nothing changed. *keep* says why the worker goes on in
+    its session instead, such as a fresh session that would not load the mod and its tool
+    for the handoff note; then the wake continues the session as any wake does.
     """
 
     session: runtime_mod.Session | None = None
     prompted: bool = False
     busy: str | None = None
+    keep: str | None = None
 
 
 @dataclass
@@ -637,8 +642,7 @@ class Delivery:
         worker = read
         if self._refresh is not None and worker.state in WAKE_STATES and entries:
             why = self._refresh_reason(worker)
-            if why is not None:
-                self._wake_fresh(worker, message, entries, why, result)
+            if why is not None and self._wake_fresh(worker, message, entries, why, result):
                 return
         # A wake through the outbox starts no turn here, so the state stays as it is.
         if self._wake_in_place(worker, message, entries, result):
@@ -748,13 +752,13 @@ class Delivery:
         entries: Sequence[InboxEntry],
         why: str,
         result: DeliveryResult,
-    ) -> None:
-        """Wake *worker* in a fresh session that the caller starts; the old one is kept."""
+    ) -> bool:
+        """Wake *worker* in a fresh session that the caller starts; the old one is kept.
+
+        False when the caller keeps the session, so that the wake continues it.
+        """
         assert self._refresh is not None
         reason_key = f"{QUEUE_REASON_PREFIX}{worker.id}"
-        # A wake in the old session's outbox would go to a process that is about to stop.
-        drop_open_outbox(self.ledger, worker, "the worker goes on in a fresh session",
-                         now=self._clock())
         try:
             refresh = self._refresh(worker, message)
         except (AgentRuntimeError, ConfigError) as exc:
@@ -762,25 +766,41 @@ class Delivery:
             self.ledger.update(self.ledger.get(worker.id) or worker, last_error=problem[:500])
             self.ledger.set_state(reason_key, problem[:300])
             result.errors.append(f"{worker.handle}: {problem}")
-            return
+            return True
+        if refresh.keep is not None:
+            result.warnings.append(
+                f"{worker.handle}: no refresh, {sanitize.one_line(refresh.keep, limit=300)}; "
+                f"the wake continues its session"
+            )
+            return False
         if refresh.busy is not None or refresh.session is None:
             detail = sanitize.one_line(refresh.busy or "no fresh session", limit=300)
             self.ledger.set_state(reason_key, f"wake held, {detail}")
             result.held.append(f"{worker.handle}: wake held, {detail}")
-            return
+            return True
+        # A wake in the old session's outbox would have gone to the process that stopped.
+        drop_open_outbox(self.ledger, worker, "the worker goes on in a fresh session",
+                         now=self._clock())
         if self.crash_after_wake:
             raise DeliveryAborted("delivery aborted after the wake")
         now = self._clock()
         with self.ledger.transaction():
             written = _switch_session(self.ledger, worker, refresh.session, now)
             if refresh.prompted:
+                # Against the worker as read before the refresh: a hook of the fresh
+                # session during its launch, such as a permission prompt, is newer, and
+                # keeps the state it wrote.
+                before = dataclasses.replace(
+                    written, state=worker.state, last_hook_at=worker.last_hook_at
+                )
                 written = _record_wake(
-                    self.ledger, written, entries, now, start_turn=True, wake_row=False
+                    self.ledger, before, entries, now, start_turn=True, wake_row=False
                 )
         log.info("%s: session %s replaces session %s, which is stopped and kept (%s)",
                  written.handle, written.session_id, worker.session_id or "-", why)
         if refresh.prompted:
             result.woken.append(written)
+        return True
 
     def _wake_in_place(
         self, worker: Worker, message: str, entries: Sequence[InboxEntry], result: DeliveryResult

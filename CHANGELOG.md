@@ -15,10 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the session and starts a fresh one for the same worker in the same worktree. The first
   prompt names the item and the tool that gives the worker's handoff note, then the role's
   prompt and the waiting events; the note itself never reaches the prompt. A new worker
-  tool, `read_handoff`, returns the stored note to the session. The old session
-  is kept, stopped, for `claude --resume`, and the board's card lists both sessions under
-  the one worker. The daily wake cap counts a refresh as a wake. Discard, retry and garbage
-  collection remove every session of a worker.
+  tool, `read_handoff`, returns the stored note to the session, and the `handoff` tool now
+  asks to be called at the end of every turn. A session that would start without the mod
+  is not refreshed. The old session is kept, stopped, for `claude --resume`, with its
+  transcript path on its row (ledger schema 12), and the board's card lists both sessions
+  under the one worker. The daily wake cap counts a refresh as a wake. Discard, retry and
+  garbage collection remove every session of a worker, and an archive holds the
+  transcript of each one.
 - The chargehand mod, a Claude Code plugin that ships in the package and that every worker
   session loads with `--plugin-dir` at launch and at a full-mode clone. Claude Code stores
   the flag with the job, so the mod comes back after a stop and a resume or a respawn. The

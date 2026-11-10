@@ -344,13 +344,23 @@ def refresh_prompt(worker: Worker, template: str, message: str | None, *, where:
     chargehand's own note, which names the item and the tool that gives the handoff note,
     then *template* filled in as at the launch, then the wake *message*. The handoff note
     is session text, so it is never part of it: the session reads it as a tool result.
+    Whether a note is stored at all is chargehand's own knowledge, and the note says so.
     """
-    note = (
+    lead = (
         f"This is a fresh session for the work on {worker.item or worker.handle}, which "
-        f"earlier sessions in this worktree started. First call chargehand's {HANDOFF_TOOL} "
-        f"tool: it gives the handoff note that your earlier session left, with what is done "
-        f"and what is left. Go on from that note, and do not start the work again."
+        f"earlier sessions in this worktree started."
     )
+    if worker.handoff_note:
+        note = (
+            f"{lead} First call chargehand's {HANDOFF_TOOL} tool: it gives the handoff note "
+            f"that your earlier session left, with what is done and what is left. Go on from "
+            f"that note, and do not start the work again."
+        )
+    else:
+        note = (
+            f"{lead} Your earlier session left no handoff note, so first look at the "
+            f"worktree, its branch and the item to see what is done, and go on from there."
+        )
     parts = [note, config_mod.render(template, template_values(worker), where=where)]
     if message:
         parts.append(message)
@@ -2882,6 +2892,11 @@ class Runner:
                 f"worker was created on '{worker.runtime}'"
             )
         runtime = self.runtime(worker.runtime)
+        if not runtime.capabilities.in_place_wake or not self._loads_mod(runtime):
+            return delivery_mod.Refresh(
+                keep="a fresh session would not load the chargehand mod, which gives the "
+                "handoff note"
+            )
         exclude = self._sessions_owned_by_other_workers(worker) | self._session_ids(worker)
         listed = self.sessions(worker.runtime, refresh=True)
         found = self._find_worker_session(worker, exclude=exclude)
@@ -2927,6 +2942,13 @@ class Runner:
             )
             raise
         return delivery_mod.Refresh(session=found, prompted=True)
+
+    @staticmethod
+    def _loads_mod(runtime: Runtime) -> bool:
+        """Whether a launch of *runtime* loads the chargehand mod: a runtime that ships it
+        names the plugin directories its launch passes."""
+        plugin_dirs = getattr(runtime, "plugin_dirs", None)
+        return callable(plugin_dirs) and bool(plugin_dirs())
 
     def _listed_session(self, worker: Worker) -> Session | None:
         """*worker*'s session as this tick's listing shows it, or None. No new call."""

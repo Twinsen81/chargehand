@@ -3,12 +3,14 @@ the next wake starts a fresh session for the same worker, which keeps the old on
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
 
 from conftest import Harness, make_config
 from chargehand import board as board_mod
+from chargehand import claude
 from chargehand import channel
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
@@ -134,6 +136,10 @@ def test_the_wake_after_the_limit_starts_a_fresh_session_and_keeps_the_old_one(a
     # A new background session in the same worktree, under the worker's name.
     assert "--bg" in fresh["argv"] and fresh["cwd"] == first["cwd"] == reviewer.worktree
     assert fresh["argv"][fresh["argv"].index("-n") + 1] == "reviewer/PR-7"
+    # It loads the mod, whose tool gives the note.
+    assert fresh["argv"][fresh["argv"].index("--plugin-dir") + 1] == (
+        first["argv"][first["argv"].index("--plugin-dir") + 1]
+    )
     # The old session is stopped, not removed, and the third wake did not resume it.
     assert ["stop", reviewer.session_id] in harness.claude_state.commands
     assert ["rm", reviewer.session_id] not in harness.claude_state.commands
@@ -415,3 +421,122 @@ def test_a_new_worker_in_the_same_worktree_does_not_take_a_replaced_session(afte
     owned = harness.runner._sessions_owned_by_other_workers(other)
 
     assert {reviewer.session_id, fresh.session_id} <= owned
+
+
+# ----- hooks during the launch, the mod, the note, and what stays in the old session ------
+
+
+def test_a_permission_prompt_during_the_refresh_launch_keeps_the_worker_blocked(
+    after_two, monkeypatch
+):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    real = claude.ClaudeRuntime.launch
+
+    def launch_then_prompt(self, spec, **kwargs):
+        result = real(self, spec, **kwargs)
+        fresh = harness.claude_state.sessions[-1]
+        hook = claude.parse_hook("PermissionRequest", {
+            "session_id": fresh["uuid"], "cwd": fresh["cwd"], "tool_name": "Bash",
+            "tool_input": {"command": "date"},
+        })
+        harness.runner.apply_hook(harness.ledger.get(reviewer.id), hook)
+        return result
+
+    monkeypatch.setattr(claude.ClaudeRuntime, "launch", launch_then_prompt)
+    report, _ = wake(harness, reviewer)
+
+    assert report.woken == ["reviewer/PR-7"]
+    after = harness.ledger.get(reviewer.id)
+    assert after.session_id == harness.claude_state.sessions[-1]["id"]
+    assert after.state == ledger_mod.BLOCKED
+    assert after.session_state == claude.BLOCKED
+    assert after.wakes == 3 and harness.ledger.inbox(after) == []
+    (prompt,) = harness.ledger.open_permission_prompts(after)
+    assert prompt.tool_name == "Bash"
+    assert kinds(harness, after)[-1] == "refresh"
+
+
+def test_a_runtime_that_would_not_load_the_mod_continues_the_session(after_two, monkeypatch):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    monkeypatch.setattr(claude.ClaudeRuntime, "plugin_dirs", lambda self: ())
+
+    report, pointer = wake(harness, reviewer)
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert any("no refresh, a fresh session would not load the chargehand mod" in line
+               for line in report.warnings)
+    assert len(launches(harness)) == 1
+    assert resumes(harness)[-1]["target"] == reviewer.session_uuid
+    assert resumes(harness)[-1]["prompt"].endswith(f"comment: {pointer}")
+    assert kinds(harness, reviewer) == ["initial", "wake", "wake", "wake"]
+
+
+def test_a_fresh_session_without_a_stored_note_is_not_sent_to_the_tool(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    for _ in range(3):
+        wake(harness, reviewer)
+
+    note = launches(harness)[-1]["argv"][-1].split("\n\n")[0]
+    assert "left no handoff note" in note and HANDOFF_TOOL not in note
+    assert "do not start the work again" not in note
+
+
+def test_the_old_session_keeps_its_transcript_path_on_its_row(after_two, tmp_path):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    transcript = tmp_path / "old.jsonl"
+    transcript.write_text("{}\n")
+    harness.ledger.update(reviewer, transcript_path=str(transcript))
+    for _ in range(3):
+        wake(harness, reviewer)
+
+    rows = harness.ledger.sessions_of(reviewer)
+    assert [(r.kind, r.transcript_path) for r in rows if r.kind != "wake"] == [
+        ("initial", str(transcript)), ("refresh", None),
+    ]
+    assert all(r.transcript_path is None for r in rows if r.kind == "wake")
+
+
+def test_the_resume_of_a_parked_worker_stays_in_its_session_past_the_limit(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    # A usage limit ended the last turn, and its reset time has passed.
+    harness.claude_state.set_session_state(reviewer.session_id, "failed", status="idle")
+    harness.ledger.update(
+        harness.ledger.get(reviewer.id), state=ledger_mod.PARKED, reset_at=time.time() - 1
+    )
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 1
+    assert resumes(harness)[-1]["target"] == reviewer.session_uuid
+    assert resumes(harness)[-1]["prompt"] == delivery_mod.RESUME_MESSAGE
+
+
+def test_the_answer_to_a_question_stays_in_its_session_past_the_limit(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    # The last turn ended with a plain-text question.
+    harness.claude_state.set_session_state(reviewer.session_id, "blocked", status="idle")
+    harness.next_tick()
+    assert harness.ledger.get(reviewer.id).state == ledger_mod.BLOCKED
+    harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="yes")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 1
+    assert resumes(harness)[-1]["target"] == reviewer.session_uuid
+    assert resumes(harness)[-1]["prompt"].endswith(f"{delivery_mod.REPLY_PREFIX}yes")

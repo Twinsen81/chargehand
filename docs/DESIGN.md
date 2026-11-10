@@ -816,23 +816,30 @@ worker has taken `refresh_after_wakes` wakes (the `wake` rows since its newest s
 row), or holds at least `refresh_after_tokens` tokens, its next admitted wake starts a
 fresh session for the same worker instead. The size is the context that the mod reported
 after the last turn, as a count, or as a percentage of a 200,000-token window; without a
-report, it is the transcript's size on disk at about four bytes per token. The tick
-reads the listing again and leaves a session alone that started a turn or opened a
-prompt since its listing; otherwise it drops the old session's open outbox message,
-stops the old session and confirms the stop, so two sessions never run in one worktree,
-and launches a new one in the same worktree under the worker's name, with the mod. Its
-first prompt is chargehand's own text, which names the item and the `read_handoff` tool,
-then the role's prompt, then the waiting events as the usual lines. The handoff note
-never reaches that prompt: the session reads it as the tool's result. One ledger
-transaction then switches the worker's session ids, clears what described the old
-session (its transcript path and context figures), records a `refresh` row in
-`sessions`, which the daily wake cap counts, and records the wake. The old session is
-stopped and kept, with its row, for `claude --resume`; discard, retry and garbage
-collection remove every session of the worker. Until the new ids are recorded, the new
-session's hooks and its mod's hello find the worker by its worktree, as during a launch;
-a crash in that window leaves the events in the inbox, and the next state diff takes the
-new session as the worker's. The resume of a `parked` worker and the answer to a
-question stay in the session they belong to. The card lists the worker's sessions.
+report, it is the transcript's size on disk at about four bytes per token. A runtime
+whose fresh session would not load the chargehand mod, and so has no tool for the note,
+keeps the session, with a warning. The tick reads the listing again and leaves a session
+alone that started a turn or opened a prompt since its listing; otherwise it stops the
+old session and confirms the stop, so two sessions never run in one worktree, drops the
+old session's open outbox message, and launches a new one in the same worktree under the
+worker's name, with the mod. Its first prompt is chargehand's own text, which names the
+item and the `read_handoff` tool, then the role's prompt, then the waiting events as the
+usual lines. When no note is stored, the text says so and sends the session to the
+worktree, its branch and the item instead of the tool. The handoff note never reaches
+that prompt: the session reads it as the tool's result. So a role with a refresh limit
+should have its worker call `handoff` at the end of every turn; the tool's description
+asks for that too. One ledger transaction then switches the worker's session ids, clears
+what described the old session (its context figures), keeps the old transcript path on
+the old session's row, records a `refresh` row in `sessions`, which the daily wake cap
+counts, and records the wake. The old session is stopped and kept, with its row, for
+`claude --resume`; discard, retry and garbage collection remove every session of the
+worker, and an archive holds the transcript of each one. Until the new ids are recorded,
+the new session's hooks and its mod's hello find the worker by its worktree, as during a
+launch. A hook that came in during the launch, such as a permission prompt, is newer
+than the wake, and keeps the state it wrote. A crash in that window leaves the events in
+the inbox, and the next state diff takes the new session as the worker's. The resume of
+a `parked` worker and the answer to a question stay in the session they belong to. The
+card lists the worker's sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
@@ -1170,8 +1177,10 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   reads the table: launches, supervision, notifications, `status` and the tick do not,
   so a hidden repository's workers run, are supervised and notify as before.
 - **Archives and jobs.** An archive is one zip of what a worker leaves: its worktree (and
-  the item checkout of a `checkout = "item"` role), the session transcript as text, its
-  ledger row and its sessions as JSON, and its handoff note when one exists. It is written
+  the item checkout of a `checkout = "item"` role), the session transcript as text (and,
+  as `transcript-1.txt` and on, oldest first, the transcript of each session that a refresh
+  replaced), its ledger row and its sessions as JSON, and its handoff note when one exists.
+  It is written
   under the state directory as `archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip`, mode
   0600; the time and the worker id keep two archives apart. The guard runs again when the
   cancel of a live worker has applied, before the zip. The `archive` request is applied
