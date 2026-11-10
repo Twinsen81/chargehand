@@ -232,6 +232,27 @@ def test_one_question_sends_one_notification(daemon, harness):
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
 
 
+def test_a_question_after_an_answered_permission_prompt_is_notified(daemon, harness):
+    worker = launch(harness)
+    hook = runtime_mod.Hook(
+        kind=runtime_mod.HOOK_PERMISSION, event="PermissionRequest", observed=runtime_mod.BLOCKED,
+        tool_name="Bash", tool_input="ls",
+    )
+    harness.runner.apply_hook(harness.ledger.get(worker.id), hook)
+    assert harness.notifications().count(("ABC-1", "blocked")) == 1
+    (prompt,) = harness.ledger.open_permission_prompts(worker)
+    # Answered on the board; no tick runs before the turn asks and ends.
+    assert harness.ledger.answer_permission_prompt(
+        prompt.id, ledger_mod.ALLOW, by=ledger_mod.RESOLVED_BY_BOARD
+    )
+
+    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
+    assert turn_end(daemon, harness, worker).state == ledger_mod.BLOCKED
+
+    assert harness.notifications().count(("ABC-1", "blocked")) == 2
+    assert harness.notifier.sent[-1].detail == tick_mod.ASKED
+
+
 def test_an_answer_needs_one_line_of_text(daemon, harness):
     worker = launch(harness)
     post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))

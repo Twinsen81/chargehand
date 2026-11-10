@@ -703,3 +703,29 @@ def test_a_permission_prompt_of_the_respawned_session_stays_open(harness, monkey
     [prompt] = harness.ledger.open_permission_prompts(harness.worker("ABC-1"))
     assert json.loads(prompt.tool_input) == {"command": "date"}
     assert harness.ledger.get_permission_prompt(old).state == "cancelled"
+
+
+def test_a_status_file_question_after_an_answered_permission_prompt_is_notified(
+    harness, repo, tmp_path
+):
+    from chargehand import runtime as runtime_mod
+
+    status_dir = with_status_file(repo, tmp_path)
+    worker = launch(harness)
+    hook = runtime_mod.Hook(
+        kind=runtime_mod.HOOK_PERMISSION, event="PermissionRequest", observed=runtime_mod.BLOCKED,
+        tool_name="Bash", tool_input="ls",
+    )
+    harness.runner.apply_hook(harness.ledger.get(worker.id), hook)
+    assert harness.notifications().count(("ABC-1", "blocked")) == 1
+    (prompt,) = harness.ledger.open_permission_prompts(worker)
+    harness.ledger.answer_permission_prompt(
+        prompt.id, ledger_mod.ALLOW, by=ledger_mod.RESOLVED_BY_BOARD
+    )
+
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "needs-input"}))
+    harness.claude_state.set_session_state("ABC-1", "done", status="idle")
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.notifications().count(("ABC-1", "blocked")) == 2

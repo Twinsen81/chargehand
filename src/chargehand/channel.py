@@ -168,6 +168,9 @@ def _ask(call: ToolCall) -> ToolResult:
         line for option in options if (line := sanitize.one_line(option, limit=OPTION_LIMIT))
     ))
     call.ledger.record_question(call.worker, text, kept)
+    # A new question: what was notified before, such as a permission prompt of this turn,
+    # does not cover it.
+    call.ledger.update(call.worker, notified_state=None)
     log.info("%s: asked a question with %d option(s)", call.worker.handle, len(kept))
     return ToolResult(
         "Your question is on the operator's board. End your turn now and do not wait for "

@@ -151,9 +151,10 @@ ASKED = "asked a question; answer it on the board"
 # turn started, so a report this much earlier still counts.
 REPORT_TURN_MARGIN_SECS = 5.0
 
-# The session states that a turn which ended with a question shows: `done` from the Stop
-# hook or the listing, `blocked` from the listing. A blocked worker notified for one of them
-# is not notified again for the other.
+# The session states that a turn which ended with an ask question shows: `done` from the
+# Stop hook or the listing, `blocked` from the listing. A blocked worker notified for one of
+# them is not notified again for the other while the question is open. The ask clears the
+# record of what was notified, so an earlier notification never covers a new question.
 QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
 
 # The worker states that are never notified. A worker that waits for events ends a turn
@@ -2584,6 +2585,10 @@ class Runner:
                 # (or the other way round). The operator was told once.
                 was_blocked and target_state == ledger_mod.BLOCKED
                 and {observed, worker.notified_state} <= QUESTION_TURN_ENDS
+                and any(
+                    prompt.kind == ledger_mod.PROMPT_QUESTION
+                    for prompt in self.ledger.open_permission_prompts(worker)
+                )
             )
         ):
             # Recorded only once delivered. A hook that failed, for example on the first
