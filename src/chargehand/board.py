@@ -11,7 +11,8 @@ one writer of side effects. An action waits a moment for its outcome and otherwi
 answers with the request pending; ``GET /api/requests/<id>`` reads the outcome. Attach
 is the exception: it opens a terminal window on this machine at once, because the tick
 can be busy with a launch for minutes, and records its request already applied. The
-board has no chat: a conversation with a session goes through attach.
+board has no chat: a conversation with a session goes through attach. ``POST /api/token``
+only answers 204, so the page can check its stored token without running an action.
 
 A permission prompt is answered on its card, also at once: the session's hook waits in
 the daemon for the answer (see :mod:`chargehand.hooks`), so a request for the tick would
@@ -221,6 +222,7 @@ def register_routes(routes: Routes) -> None:
     routes.add("POST", "/api/repositories", repository_action, prefix=True)
     routes.add("POST", "/api/pause", pause_all)
     routes.add("POST", "/api/resume", resume_all)
+    routes.add("POST", "/api/token", token_check)
 
 
 def asset_dir() -> Path:
@@ -651,6 +653,15 @@ def pause_all(request: Request) -> Response:
 
 def resume_all(request: Request) -> Response:
     return _record(request, "resume", None)
+
+
+def token_check(request: Request) -> Response:
+    """``POST /api/token``: the page checks its stored token without a side effect.
+
+    The daemon refuses a wrong Host and a missing or wrong token before any handler runs,
+    so reaching this handler is the answer.
+    """
+    return Response(status=204)
 
 
 def to_json(model: object) -> bytes:

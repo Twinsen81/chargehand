@@ -351,7 +351,7 @@ def test_the_board_reads_with_get_and_acts_only_through_its_post_routes(daemon):
         *board.ASSETS, "/api/board", "/api/requests", "/api/workers",
     }
     assert {path for method, path in board_routes if method == "POST"} == {
-        "/api/workers", "/api/repositories", "/api/pause", "/api/resume",
+        "/api/workers", "/api/repositories", "/api/pause", "/api/resume", "/api/token",
     }
     assert {method for method, _ in board_routes} == {"GET", "POST"}
     script = (board.asset_dir() / "board.js").read_text()
