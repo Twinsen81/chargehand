@@ -647,6 +647,137 @@ def test_discard_from_the_board_is_refused_for_unpushed_commits_and_a_dirty_tree
     assert worktree.exists()
 
 
+def card_of(daemon, worker):
+    _, raw = support.request(daemon.port, "GET", "/api/board")
+    cards = [c for column in json.loads(raw)["columns"] for c in column["cards"]]
+    return next(c for c in cards if c["id"] == worker.id)
+
+
+def outcome_of(daemon, answer):
+    _, raw = support.request(daemon.port, "GET", f"/api/requests/{answer['id']}")
+    return json.loads(raw)
+
+
+@pytest.mark.parametrize("action, button", [
+    ("discard", "Discard"), ("retry", "Retry"), ("archive", "Archive"),
+])
+def test_a_refusal_that_force_overrides_names_the_board_controls(daemon, harness, action, button):
+    unqueued(harness)
+    worker = board_worker(harness)
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/{action}", {"force": False})
+    assert answer["pending"] and answer["reason"] is None and answer["board_message"] is None
+    harness.next_tick()
+    outcome = outcome_of(daemon, answer)
+
+    assert (outcome["pending"], outcome["ok"]) == (False, False)
+    # The command line's text stays as it was; the board gets its own words.
+    assert outcome["message"] == harness.ledger.get_request(answer["id"])["message"]
+    assert outcome["message"].startswith(f"{worker.handle}: its worktree has uncommitted changes. ")
+    assert outcome["board_message"].startswith(
+        f"its worktree has uncommitted changes; tick force and press {button} again"
+    )
+    assert "--force" not in outcome["board_message"]
+    assert outcome["reason"]["needs_force"] is True
+    assert outcome["reason"]["work"]["uncommitted_changes"] is True
+    assert worker.worktree_path.exists()
+
+
+def test_the_card_tells_what_discard_would_lose(daemon, harness):
+    unqueued(harness)
+    worker = board_worker(harness)
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+    assert card_of(daemon, worker)["work_at_risk"] is None
+
+    worktree = worker.worktree_path
+    (worktree / "notes.txt").write_text("work\n")
+    run_git("add", "notes.txt", cwd=worktree)
+    run_git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-m", "work", cwd=worktree)
+    (worktree / "progress.log").write_text("notes\n")
+    harness.next_tick()
+
+    assert card_of(daemon, worker)["work_at_risk"] == {
+        "place": "worktree", "uncommitted_changes": True, "unpushed_commits": 1,
+        "uninspected": False, "text": "its worktree has uncommitted changes and 1 unpushed commit",
+    }
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/discard", {"force": True})
+    harness.next_tick()
+    assert outcome_of(daemon, answer)["ok"] is True
+    assert card_of(daemon, worker)["work_at_risk"] is None
+
+
+@pytest.mark.parametrize("raw, words", [
+    ({"needs_force": True, "work": {"place": "worktree", "unpushed_commits": 2}},
+     "its worktree has 2 unpushed commits; tick force and press Archive again; the archive "
+     "keeps the files, not the commits"),
+    ({"needs_force": True, "work": {"place": "item_checkout", "uninspected": True}},
+     "its item checkout could not be inspected; tick force and press Archive again; the "
+     "archive keeps the files, not the commits"),
+    ({"needs_force": True, "session_running": True},
+     "the session did not stop, so its worktree is still in use; tick force and press Archive "
+     "again; the archive keeps the files, not the commits"),
+])
+def test_the_board_words_each_reason(raw, words):
+    row = {"id": 1, "kind": "archive", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "the command line's text", "reason": raw}
+
+    answer = board.outcome(row)
+
+    assert answer["board_message"] == words
+    assert answer["message"] == "the command line's text"
+
+
+def test_a_reason_is_left_out_unless_force_would_override_a_refusal():
+    base = {"id": 1, "kind": "discard", "target": "#1", "message": "m"}
+    work = {"needs_force": True, "work": {"uncommitted_changes": True}}
+
+    assert board.outcome({**base, "applied_at": None, "ok": None, "reason": work})["reason"] is None
+    assert board.outcome({**base, "applied_at": 2.0, "ok": 1, "reason": work})["reason"] is None
+    refused = board.outcome({**base, "applied_at": 2.0, "ok": 0, "reason": None})
+    assert (refused["reason"], refused["board_message"]) == (None, None)
+    clean = {"needs_force": True, "work": {"uncommitted_changes": False}}
+    assert board.outcome({**base, "applied_at": 2.0, "ok": 0, "reason": clean})["board_message"] is None
+    other = board.outcome({**base, "kind": "continue", "applied_at": 2.0, "ok": 0, "reason": work})
+    assert other["reason"]["needs_force"] is True and other["board_message"] is None
+
+
+def test_the_card_shows_the_outcome_of_its_action_until_the_next_one_or_a_dismiss():
+    script = (board.asset_dir() / "board.js").read_text()
+    action = script[script.index("function workerAction("):script.index("function personalise(")]
+    # Pending at once, then each state of the request as the daemon answers it.
+    assert "setCardStatus(c.id, 'pending'" in action
+    assert "outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome)" in action
+    words = script[script.index("function statusText("):script.index("function rerender(")]
+    assert "'refused: ' + (outcome.board_message || outcome.message" in words
+    sender = script[script.index("async function send("):script.index("function riskWarning(")]
+    assert "if (onOutcome) onOutcome(payload);" in sender
+    assert "follow(payload, onOutcome)" in sender
+    follower = script[script.index("async function follow("):script.index("async function send(")]
+    assert "if (onOutcome) onOutcome(current);" in follower
+    # The line is part of the card's signature, so a re-render keeps it; a dismiss drops it.
+    assert "cardStatus.get(String(c.id)) || null" in script[script.index("function signature("):]
+    status = script[script.index("function statusNode("):script.index("function setCardStatus(")]
+    assert "cardStatus.delete(String(id));" in status
+    # The top notice stays as it is.
+    assert "notice(describe(current)" in follower
+
+
+def test_the_confirmation_dialog_warns_about_the_work_the_card_knows_of():
+    script = (board.asset_dir() / "board.js").read_text()
+    warning = script[script.index("function riskWarning("):script.index("function workerAction(")]
+    assert "c.work_at_risk" in warning and "risk.text" in warning
+    assert "without force the daemon refuses this. Tick force and press " in warning
+    assert "force is ticked, so that work is lost." in warning
+    action = script[script.index("function workerAction("):script.index("function personalise(")]
+    assert action.count("risk)) return;") == 3
+    assert "name === 'retry' && risk &&" in action
+
+
 # ----- the handle on the command line -------------------------------------------------------
 
 
