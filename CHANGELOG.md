@@ -141,6 +141,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window's reset time has passed. The `usage` object has no `age_secs` key any more, and
   the gauge no longer turns grey because of age.
 
+### Fixed
+
+- A worker action on the board shows its outcome on its card: "pending", then "done" or
+  "refused" with the reason, until the next action on that card or a dismiss; the notice
+  under the top bar stays as it was. A Discard, Retry or Archive that is refused without
+  force says it in the board's words, for example "its worktree has uncommitted changes;
+  tick force and press Discard again". Before, the outcome showed only in the notice, in
+  the command line's words ("Re-run with --force"), and the card seemed to do nothing. The
+  outcome of such a refusal (`/api/requests/<id>`) carries a `reason` (`needs_force`, and
+  the uncommitted changes and unpushed commits at risk, or a session that did not stop)
+  and a `board_message`; the command line's messages do not change. The ledger keeps the
+  reason with the request (schema version 13).
+- The confirmation dialog of Discard, Retry and Archive says when the worktree has
+  uncommitted changes or unpushed commits, and that the action is refused without force.
+  The tick looks at the worktree of each worker that ended within the last day, and of a
+  live worker after an action on it was refused, and the card's `work_at_risk` shows what
+  it found. Retry asks for a confirmation only in that case.
+
 ### Added
 
 - The board confirms the pasted token. Enter, or leaving the token field, saves the token
