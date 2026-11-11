@@ -749,9 +749,14 @@ def _turn_ended_with_a_background_shell(
         post(daemon, "Stop", {"session_id": worker.session_uuid})
     else:
         # Applied as the daemon applies the post, with the time of the post in the past,
-        # so that the limit has passed without the test waiting for it.
+        # so that the test does not wait for the limit. The worker and its turn started
+        # a minute before that turn end, as in a real run.
+        ended_at = time.time() - ended_mins_ago * 60
+        worker = harness.ledger.update(
+            worker, created_at=ended_at - 60, working_since=ended_at - 60
+        )
         stop = claude.parse_hook("Stop", {"session_id": worker.session_uuid})
-        harness.runner.apply_hook(worker, stop, now=time.time() - ended_mins_ago * 60)
+        harness.runner.apply_hook(worker, stop, now=ended_at)
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
     harness.claude_state.set_session_state(worker.session_id, listed_state, status="busy")
     return worker
@@ -824,10 +829,10 @@ def test_a_wake_after_the_turn_end_is_a_new_turn(daemon, harness, tmp_path):
 def test_a_background_shell_past_the_limit_notifies_once_and_the_worker_stays_idle(
     daemon, harness, tmp_path, listed_state
 ):
-    # The limit is 30 minutes by default.
     _turn_ended_with_a_background_shell(
-        daemon, harness, tmp_path, listed_state, ended_mins_ago=31
+        daemon, harness, tmp_path, listed_state, ended_mins_ago=6
     )
+    harness.config = dataclasses.replace(harness.config, background_shell_mins=5)
 
     report = harness.next_tick()
     harness.next_tick()
@@ -839,6 +844,24 @@ def test_a_background_shell_past_the_limit_notifies_once_and_the_worker_stays_id
     [line] = report.notified
     assert "a background shell still runs" in line
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
+
+
+@pytest.mark.parametrize("ended_mins_ago, limit_mins", [(4, 5), (29, None)])
+def test_a_background_shell_under_the_limit_sends_nothing(
+    daemon, harness, tmp_path, ended_mins_ago, limit_mins
+):
+    _turn_ended_with_a_background_shell(
+        daemon, harness, tmp_path, "done", ended_mins_ago=ended_mins_ago
+    )
+    if limit_mins is not None:
+        harness.config = dataclasses.replace(harness.config, background_shell_mins=limit_mins)
+
+    harness.next_tick()
+    harness.next_tick()
+
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, ledger_mod.SESSION_BACKGROUND)
+    assert harness.notifications() == []
 
 
 def test_a_limit_of_zero_never_notifies_about_a_background_shell(daemon, harness, tmp_path):
