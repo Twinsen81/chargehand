@@ -3022,6 +3022,10 @@ class Runner:
 
     def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
         """Wake each idle worker once, for every event waiting in its inbox."""
+        # A summary clone that a request of this tick ended no longer waits for a note, and
+        # it no longer holds a place under the global cap: its original must not be woken
+        # for it now.
+        self._forget_summary_waits()
         idle_before = {w.id for w in self.ledger.workers_in_state([ledger_mod.IDLE])}
         result = delivery_mod.Delivery(
             self.ledger,

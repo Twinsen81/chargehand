@@ -1041,6 +1041,33 @@ def test_an_ended_waiting_clone_takes_its_request_and_its_card_line_back(harness
     assert card is None or card["clone_start"] is None
 
 
+def test_a_clone_cancelled_while_the_global_cap_holds_the_note_turn_wakes_nothing(harness):
+    original = with_note(harness, original_worker(harness), current=False)
+    # The cap of the request tick has room for the clone and the note turn; one more daily
+    # wake is used up, so the request waits in the original's inbox.
+    write_role(harness, ROLE + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness.ledger.record_wake(original, session_id=original.session_id,
+                               session_uuid=original.session_uuid)
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    # Then only the global cap holds it: the waiting clone takes its one place.
+    write_role(harness)
+    harness.config = dataclasses.replace(harness.config, max_concurrent=1)
+    report = harness.next_tick()
+    assert any("global cap (1/1 working)" in line for line in report.skipped)
+    assert harness.ledger.get(original.id).state == ledger_mod.QUEUED
+    assert len(handoff_entries(harness, original, pending_only=True)) == 1
+    wakes = harness.ledger.wakes_since(original, 0)
+
+    # The cancel frees the place in the same tick that delivers.
+    request_id = harness.ledger.record_request("cancel", clone.target)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert harness.ledger.wakes_since(original, 0) == wakes
+    assert handoff_entries(harness, original) == []
+    assert harness.ledger.get(original.id).state == ledger_mod.IDLE
+
+
 def test_the_wait_uses_up_no_launch_attempt_with_a_limit_of_one(harness):
     harness.config = dataclasses.replace(harness.config, max_launch_attempts=1)
     original = with_note(harness, original_worker(harness), current=False)
