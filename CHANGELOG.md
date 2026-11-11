@@ -47,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
   effect: once a worker's session has taken that many wakes, or holds about that many
   tokens (the context that the mod reports, else the transcript size), its next wake stops
-  the session and starts a fresh one for the same worker in the same worktree. The first
+  the session and starts a fresh one for the same worker in the same worktree. A limit of
+  0 is no limit, as a key that is left out. The first
   prompt names the item and the tool that gives the worker's handoff note, then the role's
   prompt and the waiting events; the note itself never reaches the prompt. A new worker
   tool, `read_handoff`, returns the stored note to the session, and the `handoff` tool now

@@ -829,13 +829,14 @@ class Delivery:
             policy = self._policy(worker)
         except ConfigError:
             return None
+        # A limit of 0 is no limit, as for the role's other keys that 0 turns off.
         limit = policy.refresh_after_wakes
-        if limit is not None:
+        if limit:
             wakes = self.ledger.wakes_in_session(worker)
             if wakes >= limit:
                 return f"{wakes} wake(s) in its session, the role's limit is {limit}"
         limit = policy.refresh_after_tokens
-        if limit is not None:
+        if limit:
             tokens = session_tokens(worker)
             if tokens is not None and tokens >= limit:
                 return f"about {tokens} tokens in its session, the role's limit is {limit}"

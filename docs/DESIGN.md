@@ -346,8 +346,8 @@ unless_subscribed = "role"          # for later sources; the queue skips an item
 max_workers = 2                     # open workers of this role, across repositories
 max_wakes_per_day = 12              # wakes of one worker over the last 24 hours
 debounce_secs = 120                 # optional: a wake waits this long after the newest event
-refresh_after_wakes = 20            # optional: a fresh session after this many wakes
-refresh_after_tokens = 120000       # optional: a fresh session past about this many tokens
+refresh_after_wakes = 20            # optional: a fresh session after this many wakes; 0 for never
+refresh_after_tokens = 120000       # optional: a fresh session past about this many tokens; 0 for never
 ```
 
 A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` and
@@ -892,7 +892,7 @@ keeps the reason on the worker's card, as a queued worker does.
 read and decided. A long session gets more expensive with every wake, because each wake
 reads the whole conversation again, and after an hour without a turn its prompt cache is
 cold. The role's `refresh_after_wakes` and `refresh_after_tokens` set a limit; without
-them a worker keeps one session. Once the current session of an `idle` or `queued`
+them, or with 0, a worker keeps one session. Once the current session of an `idle` or `queued`
 worker has taken `refresh_after_wakes` wakes (the `wake` rows since its newest session
 row), or holds at least `refresh_after_tokens` tokens, its next admitted wake starts a
 fresh session for the same worker instead. The size is the context that the mod reported

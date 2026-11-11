@@ -122,6 +122,22 @@ def test_each_wake_continues_the_same_session_without_a_limit(tmp_path, repo, cl
     harness.ledger.close()
 
 
+@pytest.mark.parametrize("policy", ["refresh_after_wakes = 0", "refresh_after_tokens = 0"])
+def test_a_limit_of_zero_is_no_limit(tmp_path, repo, claude_state, board, policy):
+    harness = build(tmp_path, repo, claude_state, board, policy)
+    reviewer = start_reviewer(harness)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("x" * 4000)
+    harness.ledger.update(harness.ledger.get(reviewer.id), transcript_path=str(transcript))
+
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+
+    assert kinds(harness, reviewer) == ["initial", "wake", "wake"]
+    assert len(launches(harness)) == 1
+    harness.ledger.close()
+
+
 def test_the_wake_after_the_limit_starts_a_fresh_session_and_keeps_the_old_one(after_two):
     harness = after_two
     reviewer = start_reviewer(harness)
