@@ -880,9 +880,10 @@ what described the old session (its context figures), keeps the old transcript p
 the old session's row, records a `refresh` row in `sessions`, which the daily wake cap
 counts, and records the wake. The old session is stopped and kept, with its row, for
 `claude --resume`; discard, retry and garbage collection remove every session of the
-worker, and an archive holds the transcript of each one. Until the new ids are recorded,
-the new session's hooks and its mod's hello find the worker by its worktree, as during a
-launch. A hook that came in during the launch, such as a permission prompt, is newer
+worker, and an archive holds the transcript of each one. The launch writes a new token
+for the new session, and its hooks and its mod's hello find the worker by that token, as
+during a launch; until the new ids are recorded, a post with that token from any session
+id counts as the worker's. A hook that came in during the launch, such as a permission prompt, is newer
 than the wake, and keeps the state it wrote; a post that the old session sent while it
 stopped is older, because the tick reads the worker again once the stop is confirmed. A
 crash in that window leaves the events in the inbox, and the next state diff takes the
