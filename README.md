@@ -105,10 +105,10 @@ valid" without running an action; "Forget token" removes it and shows "no token"
 Workers started on the board are named by a handle with their id, such as
 `implementer/ABC-1#7`, which every command that takes an item also accepts.
 
-Attach in Terminal.app needs no macOS permission: the daemon writes a one-line script
-(`exec claude attach <session id>`) into a private directory under its state directory
-and opens it with `/usr/bin/open -a Terminal`; the script deletes itself before it runs
-the command. iTerm2 asks for confirmation before it runs any file it is asked to open, so
+Attach in Terminal.app needs no macOS permission: the daemon writes a three-line shell
+script (a `#!/bin/sh` line, `rm -f -- "$0"`, and `exec claude attach <session id>`) into a
+private directory under its state directory and opens it with `/usr/bin/open -a
+Terminal`; the script deletes itself before it runs the command. iTerm2 asks for confirmation before it runs any file it is asked to open, so
 attach in iTerm2 still goes through Apple events: macOS asks once whether the daemon's
 Python may control iTerm2 (System Settings, Privacy & Security, Automation). macOS gives
 that permission to the Python interpreter binary, not to chargehand, so every background

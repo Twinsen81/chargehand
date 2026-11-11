@@ -1243,8 +1243,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   so it needs no Automation permission; a file that never ran is removed when the next
   one is written. iTerm2 asks for confirmation before it runs a file it is asked to open,
   so it is opened through `osascript`, with the command as an argument of the
-  AppleScript, never part of its source, and needs the Automation permission once. The board has no chat:
-  anything that needs a conversation goes through attach.
+  AppleScript, never part of its source, and needs the Automation permission once. The
+  board has no chat: anything that needs a conversation goes through attach.
 - **Clone.** A clone is a new worker made from an existing one, for a second opinion, a
   retry with another prompt, or another model. `POST /api/workers/<id>/clone` takes
   `mode` (`fresh`: nothing from the old session; `full`: a copy of its conversation;

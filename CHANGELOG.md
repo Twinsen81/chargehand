@@ -362,9 +362,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Attach opens Terminal.app by default; iTerm2 stays a choice on the page, listed second.
   Attach in Terminal.app no longer needs the Automation permission. The daemon writes a
-  script file (`exec claude attach <session id>`, mode 0700) into `attach/` under the
-  state directory (mode 0700) and opens it with `/usr/bin/open -a Terminal`. The script
-  deletes itself before it runs the command, and a script that never ran is removed when
+  three-line shell script (`#!/bin/sh`, `rm -f -- "$0"`, `exec claude attach <session
+  id>`, mode 0700) into `attach/` under the state directory (mode 0700) and opens it with
+  `/usr/bin/open -a Terminal`. The script deletes itself before it runs the command, and a script that never ran is removed when
   the next one is written. Attach in iTerm2 still runs `osascript`, because iTerm2 asks for
   confirmation before it runs a file that it is asked to open; its error now also says that
   Terminal needs no permission. The session id must be a plain identifier for both.
