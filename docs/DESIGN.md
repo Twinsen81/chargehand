@@ -265,7 +265,7 @@ Machine layer — `~/.config/chargehand/config.toml`:
 
 ```toml
 poll_interval_secs = 180
-max_concurrent = 2                  # launch throttle: workers currently working
+max_concurrent = 2                  # working turns, across all repositories: launches and wakes
 max_open_workers = 4                # working + blocked; bounds the resume burst
 max_run_hours = 6                   # watchdog: notify
 hard_stop_hours = 10                # watchdog: stop the session
@@ -344,6 +344,7 @@ unless_subscribed = "role"          # for later sources; the queue skips an item
 [policy]
 max_workers = 2                     # open workers of this role, across repositories
 max_wakes_per_day = 12              # wakes of one worker over the last 24 hours
+debounce_secs = 120                 # optional: a wake waits this long after the newest event
 refresh_after_wakes = 20            # optional: a fresh session after this many wakes
 refresh_after_tokens = 120000       # optional: a fresh session past about this many tokens
 ```
@@ -781,12 +782,21 @@ name (`[a-z][a-z0-9_]{0,63}`) is written as `event`, so its pointer still arrive
 typed on the board (section 7) is the one line that carries text:
 `reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
-wake must pass admission: the number of working turns below `max_concurrent`, the role's
+wake waits first for the role's `debounce_secs` (0 by default): until no new event has
+arrived for that long, so a burst of review comments becomes one wake. A reply from the
+board and a due `request_wake` timer do not wait, because the operator waits for the
+answer and the worker chose the time itself; the waiting events go along with them. The
+wake must then pass admission: the number of working turns below `max_concurrent`, counted
+over the workers of all repositories, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
 worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
 reading means no reserve; a reading counts however old it is, until the window's reset
-time has passed (see "Admission" in section 5). A worker that is not admitted becomes `queued` and
-keeps its events, and the reason it waits is kept for the board. A session whose
+time has passed (see "Admission" in section 5). A worker that waits becomes `queued` and
+keeps its events, and the reason it waits is kept for the board. A worker that reaches its
+daily cap is notified once, with the state `daily-cap`, and again only after its next wake.
+A `/loop` that a role's prompt starts runs its own turns, which chargehand does not start:
+the debounce and the daily cap do not count them, and no cap stops them. While such a turn
+runs, the worker is `running` and holds one slot of `max_concurrent`. A session whose
 chargehand mod said hello gets the message in its outbox (see "The chargehand mod" below).
 Any other session is woken by the runtime: `claude` stops a live idle process, confirms
 that it stopped, and resumes it by the full session id. It reads the listing again first:
@@ -1515,6 +1525,8 @@ Done:
   the week bar and the reserves need neither the status line wrapper nor a running worker.
 - Session refresh: a fresh session for the same worker past a wake or size limit, which
   reads the worker's handoff note through a tool.
+- Wake policies: a debounce that makes a burst of events one wake, a notification at the
+  daily wake cap, and the global cap on working turns across repositories.
 
 Next:
 
