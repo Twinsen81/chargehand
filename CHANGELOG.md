@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Clone in summary mode, from the card's Clone form or with `chargehand clone <ITEM>
+  --mode summary`. The clone gets its own worktree from the original's branch and a new
+  session that loads the mod; its first prompt names the item and the `read_handoff`
+  tool, never the note, and the tool gives the clone the original's handoff note, copied
+  into the clone's own row right before the launch. When the note is older than the
+  start of the original's last turn, chargehand first puts one `handoff` event into the
+  original's inbox, which wakes it under the usual caps, and the clone's launch waits
+  for a current note without using up launch attempts; after 10 minutes, or at once
+  when no wake can reach the original, it starts from the stored note and its card says
+  so, and without any note it fails. The form offers summary mode only when it can work,
+  and says why not otherwise (`summary_refused`).
+
 - Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
   effect: once a worker's session has taken that many wakes, or holds about that many
   tokens (the context that the mod reports, else the transcript size), its next wake stops

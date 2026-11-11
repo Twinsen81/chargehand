@@ -110,7 +110,11 @@ the worker's current branch, so its commits carry over and the two never write t
 files; uncommitted changes stay with the original. The form starts with the worker's prompt
 template, model and effort, which you can change. Fresh mode starts a new session; full
 mode starts with a copy of the worker's conversation (only while the worker is not in the
-middle of a turn or a prompt). The clone follows no events on the item unless you name the
+middle of a turn or a prompt); summary mode starts a new session that first reads the
+worker's handoff note through the `read_handoff` tool. When that note is older than the
+worker's last turn, chargehand first wakes the worker once to write a current note, and the
+clone waits for it for up to 10 minutes; then it starts from the stored note, and its card
+says so. The clone follows no events on the item unless you name the
 kinds, so only your replies reach it. Its card follows the original's card and says "clone
 of" the original. From a terminal: `chargehand clone implementer/ABC-1#7 --mode full
 --model sonnet --prompt-file next.txt`, with `--effort`, `--prompt` and `--subscribe KIND`
