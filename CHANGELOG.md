@@ -166,6 +166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The status-file protocol (a role's `status_file`). It still works in this release and is
   removed in a later one; a worker reports with the mod's `report` and `ask` tools instead.
+  `doctor` names each role that still sets the key, and the implementer role template
+  says that it is deprecated.
 
 ### Removed
 

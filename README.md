@@ -181,7 +181,10 @@ card's link and the worker follows that pull request, and `done` or `failed` end
 worker when its turn ends, which clears or keeps the label as a finished worker does. A
 worker that never reports is supervised by its hooks and its session state as before.
 The `status_file` key of a role is deprecated: it still works in this release and goes
-away in a later one; use `report` and `ask` in the role's prompt instead.
+away in a later one. A worker reports and asks with the `report` and `ask` tools, which
+its session gets from chargehand with their own descriptions, so a prompt that told the
+worker to write the file can drop that instruction. `doctor` names each role that still
+sets the key.
 
 The daemon reads your subscription's weekly usage window by itself. Every 5 minutes it
 starts a short `claude -p` process in an empty directory and sends it Claude Code's

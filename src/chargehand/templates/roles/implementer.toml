@@ -65,9 +65,11 @@ allow = [
   "Bash(gh pr comment *--body-file *)",
 ]
 
-# Optional. `done` is ambiguous: a session that asked its question as plain text and
-# ended its turn also reads done. Write {"state": "needs-input|complete|aborted",
-# "stop_reason": "...", "pr_url": "..."} at every yield point to disambiguate.
+# Deprecated: it still works in this release and goes away in a later one. A worker now
+# reports with the `report` tool and asks with the `ask` tool, which its session gets
+# from chargehand and which need no instruction here. The key is for a prompt that still
+# writes {"state": "needs-input|complete|aborted", "stop_reason": "...", "pr_url": "..."}
+# at every yield point.
 # status_file = "/tmp/chargehand/{item}/status.json"
 
 # A start rule creates a worker on its own when an event arrives. `labeled` is the

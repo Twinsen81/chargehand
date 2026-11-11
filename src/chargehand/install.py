@@ -452,6 +452,16 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
                 checks.append(Check(role_label, WARN, detail + " · no start rule, so nothing starts it on its own"))
             else:
                 checks.append(Check(role_label, OK, detail))
+            if role.status_file:
+                checks.append(
+                    Check(
+                        f"{role_label} status_file",
+                        INFO,
+                        "status_file is deprecated: it still works in this release and goes "
+                        "away in a later one; a worker reports with the report tool and asks "
+                        "with the ask tool",
+                    )
+                )
         if check_trackers:
             try:
                 tracker = build_tracker(repository)
