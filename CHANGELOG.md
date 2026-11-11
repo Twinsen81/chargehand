@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Wake policies. A role's `debounce_secs` now takes effect: a worker's wake waits until no
+  new event has arrived for that many seconds, so a burst of comments becomes one wake,
+  but at most five times that long after the first waiting event, and its card shows until
+  when it waits. A reply from the board and a due `request_wake`
+  timer do not wait, and take the waiting events along. The default is 0, so a role that
+  does not set the key wakes at the next tick as before; the shipped role templates set
+  120. A worker that reaches its `max_wakes_per_day` stays queued with the reason on its
+  card, and one `daily-cap` notification goes out, again only after its next wake. The
+  global `max_concurrent` cap counts the working turns of all repositories. The role
+  templates say that a `/loop` that a role's prompt starts is not counted by these caps.
 - Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
   effect: once a worker's session has taken that many wakes, or holds about that many
   tokens (the context that the mod reports, else the transcript size), its next wake stops
