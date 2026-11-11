@@ -29,10 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when it waits. A reply from the board, a due `request_wake` timer and a summary clone's
   request for a current handoff note do not wait, and take the waiting events along. The
   default is 0, so a role that does not set the key wakes at the next tick as before; the
-  shipped role templates set 120. A worker that reaches its `max_wakes_per_day` stays queued with the reason on its
-  card, and one `daily-cap` notification goes out, again only after its next wake. The
-  global `max_concurrent` cap counts the working turns of all repositories. The role
-  templates say that a `/loop` that a role's prompt starts is not counted by these caps.
+  shipped role templates set 120. A worker that reaches its `max_wakes_per_day` stays
+  queued with the reason on its card, and one `daily-cap` notification goes out, again
+  only after its next wake. The global `max_concurrent` cap counts the working turns of
+  all repositories. The role templates say that a `/loop` that a role's prompt starts is
+  not counted by these caps.
 - Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
   effect: once a worker's session has taken that many wakes, or holds about that many
   tokens (the context that the mod reports, else the transcript size), its next wake stops
