@@ -177,7 +177,7 @@ def test_the_hello_records_the_mod_and_lists_the_tools(daemon, harness):
 
     assert status == 200
     assert [tool["name"] for tool in answer["tools"]] == [
-        "report", "ask", "handoff", "request_wake", "subscribe",
+        "report", "ask", "handoff", "read_handoff", "request_wake", "subscribe",
     ]
     assert all(tool["description"] and tool["input_schema"]["type"] == "object"
                for tool in answer["tools"])
@@ -584,6 +584,24 @@ def test_handoff_stores_the_note_and_keeps_it_out_of_the_log(daemon, harness, ca
 
     post(daemon, "tool/handoff", of(worker, input={"note": "y" * (channel.HANDOFF_LIMIT + 10)}))
     assert len(harness.ledger.get(worker.id).handoff_note) == channel.HANDOFF_LIMIT
+
+
+def test_read_handoff_returns_the_stored_note_and_keeps_it_out_of_the_log(
+    daemon, harness, caplog
+):
+    worker = launch(harness)
+
+    status, said = post(daemon, "tool/read_handoff", of(worker, input={}))
+    assert status == 200 and said["is_error"] is False
+    assert said["result"] == "No handoff note is stored for this work yet."
+
+    post(daemon, "tool/handoff", of(worker, input={"note": "open points: the second thread"}))
+    with caplog.at_level("DEBUG"):
+        status, said = post(daemon, "tool/read_handoff", of(worker, input={}))
+
+    assert status == 200 and said["is_error"] is False
+    assert said["result"] == "open points: the second thread"
+    assert "open points" not in caplog.text
 
 
 def test_request_wake_is_delivered_once_due_and_counts_as_a_wake(daemon, harness):

@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -69,12 +69,16 @@ LAST_STEP = 4
 # a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`. A wake
 # continues the same session, so each wake has its own `wake` row: the daily wake cap
 # counts them. A clone in full mode starts with a copy of its original's conversation,
-# which is a `fork` row.
+# which is a `fork` row. A wake past the role's refresh limit starts a fresh session for
+# the same worker instead, which is a `refresh` row; the daily wake cap counts it too.
 SESSION_INITIAL = "initial"
 SESSION_ADOPTED = "adopted"
 SESSION_MIGRATED = "migrated"
 SESSION_WAKE = "wake"
 SESSION_FORK = "fork"
+SESSION_REFRESH = "refresh"
+# The rows that count against the daily wake cap.
+WAKE_KINDS = (SESSION_WAKE, SESSION_REFRESH)
 
 # How a worker came to exist. Only `source` workers are held to one per role and item.
 ORIGIN_SOURCE = "source"
@@ -341,7 +345,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_uuid TEXT,
     kind         TEXT    NOT NULL,
     started_at   REAL    NOT NULL,
-    ended_at     REAL
+    ended_at     REAL,
+    -- The transcript of a session that a refresh replaced, as its hooks reported it.
+    transcript_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS sessions_worker ON sessions (worker_id);
@@ -646,6 +652,13 @@ _MIGRATE_V2_V10_TO_V11 = f"""
 {_SCHEMA}
 """
 
+# Version 12 keeps the transcript path of a session that a refresh replaced, on its row.
+# Every version from 2 on has a sessions table without it; the version 1 copy creates the
+# table with it.
+_MIGRATE_V11_TO_V12 = """
+ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -761,6 +774,7 @@ class SessionRecord:
     kind: str
     started_at: float
     ended_at: float | None
+    transcript_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -960,19 +974,22 @@ class Ledger:
         script = {
             1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
-            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11,
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11
+            + _MIGRATE_V11_TO_V12,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
             5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
-            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
             6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10
-            + _MIGRATE_V10_TO_V11,
-            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
-            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
-            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11,
-            10: _MIGRATE_V10_TO_V11,
+            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11
+            + _MIGRATE_V11_TO_V12,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            11: _MIGRATE_V11_TO_V12,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1217,6 +1234,15 @@ class Ledger:
     def worker_by_session_id(self, session_id: str) -> Worker | None:
         row = self._conn.execute(
             "SELECT * FROM workers WHERE session_id = ? ORDER BY id DESC LIMIT 1", (session_id,)
+        ).fetchone()
+        return _row_to_worker(row) if row else None
+
+    def worker_by_session_row(self, session_id: str) -> Worker | None:
+        """The newest worker that a session row names *session_id* for, in any state."""
+        row = self._conn.execute(
+            "SELECT w.* FROM workers w JOIN sessions s ON s.worker_id = w.id "
+            "WHERE s.session_id = ? ORDER BY w.id DESC LIMIT 1",
+            (session_id,),
         ).fetchone()
         return _row_to_worker(row) if row else None
 
@@ -1563,10 +1589,38 @@ class Ledger:
     def wakes_since(self, worker: Worker, since: float) -> int:
         return int(
             self._conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND started_at >= ?",
-                (worker.id, SESSION_WAKE, since),
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind IN (?, ?) "
+                "AND started_at >= ?",
+                (worker.id, *WAKE_KINDS, since),
             ).fetchone()[0]
         )
+
+    def keep_session_transcript(self, worker: Worker, session_id: str, path: str) -> None:
+        """Keep *path* on the rows that started *session_id*, once a refresh replaces it."""
+        self._conn.execute(
+            "UPDATE sessions SET transcript_path = ? WHERE worker_id = ? AND session_id = ? "
+            "AND kind != ?",
+            (path, worker.id, session_id, SESSION_WAKE),
+        )
+
+    def wakes_in_session(self, worker: Worker) -> int:
+        """The wakes of *worker* since its newest session row other than a wake."""
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND id > "
+                "(SELECT COALESCE(MAX(id), 0) FROM sessions WHERE worker_id = ? AND kind != ?)",
+                (worker.id, SESSION_WAKE, worker.id, SESSION_WAKE),
+            ).fetchone()[0]
+        )
+
+    def session_ids_of_others(self, worker: Worker) -> set[str]:
+        """Every session id that a session row gives another worker of *worker*'s runtime."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT s.session_id FROM sessions s JOIN workers w ON w.id = s.worker_id "
+            "WHERE s.worker_id != ? AND w.runtime = ? AND s.session_id IS NOT NULL",
+            (worker.id, worker.runtime),
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def sessions_of(self, worker: Worker) -> list[SessionRecord]:
         rows = self._conn.execute(

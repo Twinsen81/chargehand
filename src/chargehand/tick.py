@@ -208,6 +208,9 @@ PENDING_NOTIFICATION_MAX_AGE_SECS = 24 * 3600
 
 SESSION_STILL_WORKING = "not collected, its session is still working"
 
+# The channel tool that gives a fresh session its worker's handoff note.
+HANDOFF_TOOL = "read_handoff"
+
 # Names no branch, because the session chose the name and this text reaches the terminal,
 # the tick log, and whichever assistant ran the command.
 KEPT_BRANCH = (
@@ -333,6 +336,35 @@ def launch_prompt(
     if worker.clone_mode == ledger_mod.CLONE_FULL and originals:
         return f"{clone_note(worker, originals)}\n\n{prompt}"
     return prompt
+
+
+def refresh_prompt(worker: Worker, template: str, message: str | None, *, where: str) -> str:
+    """The first prompt of a fresh session that continues *worker*'s work after a refresh.
+
+    chargehand's own note, which names the item and the tool that gives the handoff note,
+    then *template* filled in as at the launch, then the wake *message*. The handoff note
+    is session text, so it is never part of it: the session reads it as a tool result.
+    Whether a note is stored at all is chargehand's own knowledge, and the note says so.
+    """
+    lead = (
+        f"This is a fresh session for the work on {worker.item or worker.handle}, which "
+        f"earlier sessions in this worktree started."
+    )
+    if worker.handoff_note:
+        note = (
+            f"{lead} First call chargehand's {HANDOFF_TOOL} tool: it gives the handoff note "
+            f"that your earlier session left, with what is done and what is left. Go on from "
+            f"that note, and do not start the work again."
+        )
+    else:
+        note = (
+            f"{lead} Your earlier session left no handoff note, so first look at the "
+            f"worktree, its branch and the item to see what is done, and go on from there."
+        )
+    parts = [note, config_mod.render(template, template_values(worker), where=where)]
+    if message:
+        parts.append(message)
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -871,9 +903,13 @@ class Runner:
     ) -> None:
         root = self.config.worktree_root
         live = [w for w in self.ledger.live_workers() if w.runtime == runtime]
-        known = {str(Path(w.worktree)) for w in live} | {w.session_id for w in live if w.session_id}
+        # By the real path: the listing names a worktree under a linked root, such as /tmp
+        # on macOS, by the path the link leads to.
+        known = {os.path.realpath(w.worktree) for w in live} | {
+            w.session_id for w in live if w.session_id
+        }
         for session in sessions:
-            if session.id in known or (session.cwd and str(Path(session.cwd)) in known):
+            if session.id in known or (session.cwd and os.path.realpath(session.cwd) in known):
                 continue
             if not self._under(root, session.cwd):
                 continue
@@ -881,12 +917,22 @@ class Runner:
             by_id = self.ledger.worker_by_session_id(session.id)
             if by_id is not None and by_id.runtime != runtime:
                 by_id = None
+            replaced = None if by_id is not None else self.ledger.worker_by_session_row(session.id)
+            if replaced is not None:
+                # A session that a refresh replaced, or that a removal left behind, belongs to
+                # its worker, which keeps it stopped: it is never adopted as another worker.
+                key = f"orphan-notified:{session.id}"
+                if session.state == runtime_mod.WORKING and not self.ledger.get_state(key):
+                    self.ledger.set_state(key, "1")
+                    report.warnings.append(
+                        f"session {session.id}, an earlier session of {replaced.handle}, is "
+                        f"working again; attach to it or stop it"
+                    )
+                continue
             # A worker started by hand has a worktree of its own and a handle with its id,
             # which name no `role/item` to adopt the session as. Its session is reported,
             # never adopted as a start rule's worker.
-            by_hand = by_id or (
-                self.ledger.worker_by_worktree(str(Path(session.cwd))) if session.cwd else None
-            )
+            by_hand = by_id or (self._worker_in_worktree(session.cwd) if session.cwd else None)
             if by_hand is not None and by_hand.origin != ledger_mod.ORIGIN_SOURCE:
                 key = f"orphan-notified:{session.id}"
                 working = by_hand.is_terminal and session.state == runtime_mod.WORKING
@@ -984,17 +1030,42 @@ class Runner:
         return self.runtime(worker.runtime).is_stopped(session)
 
     def _remove_session(self, worker: Worker) -> bool:
-        if worker.session_id:
-            self.runtime(worker.runtime).remove(worker.session_id)
+        """Remove the worker's session and each earlier one that a refresh kept."""
+        ids = self._session_ids(worker)
+        if ids:
+            runtime = self.runtime(worker.runtime)
+            for session_id in sorted(ids):
+                runtime.remove(session_id)
             self.invalidate_sessions(worker.runtime)
             try:
                 sessions = self.sessions(worker.runtime, refresh=True)
             except AgentRuntimeError:
                 return False
-            if any(s.id == worker.session_id for s in sessions):
+            if any(s.id in ids for s in sessions):
                 return False
         self._release_launch_files(worker)
         return True
+
+    def _latest_session_id(self, worker: Worker) -> str | None:
+        """The session that *worker*'s newest session row other than a wake started."""
+        return next(
+            (
+                record.session_id for record in reversed(self.ledger.sessions_of(worker))
+                if record.kind != ledger_mod.SESSION_WAKE and record.session_id
+            ),
+            None,
+        )
+
+    def _session_ids(self, worker: Worker) -> set[str]:
+        """The ids of every session the worker had: its current one, and the earlier ones."""
+        ids = {record.session_id for record in self.ledger.sessions_of(worker) if record.session_id}
+        if worker.session_id:
+            ids.add(worker.session_id)
+        # A live worker's current session is its own, whatever an old row says.
+        return ids - {
+            other.session_id for other in self.ledger.live_workers()
+            if other.id != worker.id and other.session_id
+        }
 
     def _release_launch_files(self, worker: Worker) -> None:
         """Delete what the launch kept for a session that is gone, such as its settings file."""
@@ -1094,6 +1165,22 @@ class Runner:
         worker = self._adopt(worker, session, report)
         report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
         return worker
+
+    def _worker_in_worktree(self, cwd: str) -> Worker | None:
+        """The newest worker whose worktree is *cwd*, compared by the real path.
+
+        A worktree is stored under the configured root, and the listing may name it by
+        the path that a linked root leads to, so that path is mapped back onto the root.
+        """
+        found = self.ledger.worker_by_worktree(str(Path(cwd)))
+        if found is not None:
+            return found
+        root = self.config.worktree_root
+        try:
+            relative = Path(os.path.realpath(cwd)).relative_to(os.path.realpath(root))
+        except ValueError:
+            return None
+        return self.ledger.worker_by_worktree(str(root / relative))
 
     @staticmethod
     def _queue_starts(context: RepositoryContext, role_name: str) -> bool:
@@ -2390,8 +2477,24 @@ class Runner:
                     continue
             session = listings[worker.runtime].get(worker.session_id or "")
             if session is None:
-                session = self._find_worker_session(worker)
-                if session is not None:
+                # A session that a refresh replaced is the last choice: the fresh one, if
+                # an interrupted refresh started it, is the worker's.
+                earlier = self._session_ids(worker) - {worker.session_id}
+                session = self._find_worker_session(worker, exclude=earlier) or (
+                    self._find_worker_session(worker) if earlier else None
+                )
+                if session is not None and worker.session_id is None and (
+                    session.id not in earlier
+                ):
+                    # Only a refresh clears a live worker's session: a crash interrupted
+                    # it after the launch of this one, which the refresh would have
+                    # recorded so.
+                    with self.ledger.transaction():
+                        worker = delivery_mod.switch_session(
+                            self.ledger, worker, session, time.time(),
+                            replaced=self._latest_session_id(worker),
+                        )
+                elif session is not None:
                     worker = self.ledger.update(
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
@@ -2791,6 +2894,7 @@ class Runner:
             prepare=self._refresh_item_checkout,
             resume_hold=self._resume_hold,
             awaits_answer=self._awaits_answer,
+            refresh=lambda worker, message: self._refresh_session(worker, message, report),
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -2810,6 +2914,87 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+
+    def _refresh_session(
+        self, worker: Worker, message: str, report: TickReport
+    ) -> delivery_mod.Refresh:
+        """Stop *worker*'s session and start a fresh one in its worktree, with *message*.
+
+        The old session is stopped and kept, for `claude --resume`, so two sessions never
+        run in one worktree. A session that an earlier, interrupted refresh started there
+        is taken as it is. AgentRuntimeError or ConfigError when the refresh fails; the
+        worker then keeps its old session.
+        """
+        context = self.context_for_worker(worker)
+        if context is None or not context.usable:
+            raise ConfigError(f"repository '{worker.repository}' is unavailable")
+        role = context.role(worker.role)
+        if role.runtime != worker.runtime:
+            raise ConfigError(
+                f"{worker.handle}: the role now names runtime '{role.runtime}', but this "
+                f"worker was created on '{worker.runtime}'"
+            )
+        runtime = self.runtime(worker.runtime)
+        if not runtime.capabilities.in_place_wake or not self._loads_mod(runtime):
+            return delivery_mod.Refresh(
+                keep="a fresh session would not load the chargehand mod, which gives the "
+                "handoff note"
+            )
+        exclude = self._sessions_owned_by_other_workers(worker) | self._session_ids(worker)
+        listed = self.sessions(worker.runtime, refresh=True)
+        found = self._find_worker_session(worker, exclude=exclude)
+        current = next((s for s in listed if s.id == worker.session_id), None)
+        if (
+            found is None and current is not None and not runtime.is_stopped(current)
+            and current.state in (runtime_mod.WORKING, runtime_mod.BLOCKED)
+        ):
+            # The operator may have started a turn in it since this tick's listing.
+            return delivery_mod.Refresh(busy="the session has a turn or a prompt")
+        if not self._stop_session(worker):
+            raise AgentRuntimeError(f"session {worker.session_id} did not stop")
+        # What the old session posted while it stopped is older than the fresh session.
+        read = self.ledger.get(worker.id) or worker
+        if found is not None:
+            return delivery_mod.Refresh(session=found, read=read)
+        runtime.check_role(role, worker.worktree_path)
+        originals = ancestors(self.ledger, worker)
+        prompt = refresh_prompt(
+            worker, worker.prompt or role.prompt, message,
+            where=(
+                "the clone prompt" if worker.prompt
+                else f"{role.source or 'role ' + role.name}.prompt"
+            ),
+        )
+        spec = self._launch_spec(worker, role, prompt, originals)
+        # As in a launch: the launch writes a new token for the fresh session, and its
+        # hooks and its mod's hello find the worker by that token. Until the fresh
+        # session's ids are recorded, a post from any session id counts as the worker's.
+        self.ledger.update(worker, session_id=None, session_uuid=None)
+        try:
+            result = runtime.launch(spec, warn=report.warnings.append)
+            self.sessions(worker.runtime, refresh=True)
+            found = self._find_worker_session(worker, exclude=exclude)
+            if found is None:
+                raise AgentRuntimeError(
+                    f"started a fresh session for {worker.handle} but it did not appear in "
+                    f"the session listing of runtime {worker.runtime}; the launch printed: "
+                    f"{sanitize.one_line(result.output, limit=200)!r}"
+                )
+        except (AgentRuntimeError, ConfigError):
+            # Back to the stopped session, which the next wake resumes or refreshes again.
+            current_row = self.ledger.get(worker.id) or worker
+            self.ledger.update(
+                current_row, session_id=worker.session_id, session_uuid=worker.session_uuid
+            )
+            raise
+        return delivery_mod.Refresh(session=found, prompted=True, read=read)
+
+    @staticmethod
+    def _loads_mod(runtime: Runtime) -> bool:
+        """Whether a launch of *runtime* loads the chargehand mod: a runtime that ships it
+        names the plugin directories its launch passes."""
+        plugin_dirs = getattr(runtime, "plugin_dirs", None)
+        return callable(plugin_dirs) and bool(plugin_dirs())
 
     def _listed_session(self, worker: Worker) -> Session | None:
         """*worker*'s session as this tick's listing shows it, or None. No new call."""
@@ -3575,21 +3760,7 @@ class Runner:
                     else f"{role.source or 'role ' + role.name}.prompt"
                 ),
             )
-            spec = LaunchSpec(
-                worktree=worker.worktree_path,
-                name=worker.handle,
-                prompt=prompt,
-                options=role.options,
-                model=worker.model or role.model,
-                effort=worker.effort or role.effort,
-                read_paths=(
-                    (item_checkout_path(worker),)
-                    if role.checkout == roles_mod.CHECKOUT_ITEM else ()
-                ),
-                # Two workers never write one tree: a clone's file tools stay out of its
-                # original's worktree, whatever its permission mode.
-                protected_paths=tuple(original.worktree_path for original in originals),
-            )
+            spec = self._launch_spec(worker, role, prompt, originals)
             if worker.clone_mode == ledger_mod.CLONE_FULL:
                 if parent is None or not parent.session_uuid or parent.gc_done:
                     return self._fail_worker(
@@ -3636,6 +3807,25 @@ class Runner:
         report.launched.append(worker.handle)
         return worker
 
+    def _launch_spec(
+        self, worker: Worker, role: Role, prompt: str, originals: Sequence[Worker]
+    ) -> LaunchSpec:
+        return LaunchSpec(
+            worktree=worker.worktree_path,
+            name=worker.handle,
+            prompt=prompt,
+            options=role.options,
+            model=worker.model or role.model,
+            effort=worker.effort or role.effort,
+            read_paths=(
+                (item_checkout_path(worker),)
+                if role.checkout == roles_mod.CHECKOUT_ITEM else ()
+            ),
+            # Two workers never write one tree: a clone's file tools stay out of its
+            # original's worktree, whatever its permission mode.
+            protected_paths=tuple(original.worktree_path for original in originals),
+        )
+
     def _find_worker_session(self, worker: Worker, *, exclude: Collection[str] = ()) -> Session | None:
         """The worker's session in the current listing, by worktree or by name.
 
@@ -3652,11 +3842,12 @@ class Runner:
         return found
 
     def _sessions_owned_by_other_workers(self, worker: Worker) -> set[str]:
+        # The rows name the sessions that a refresh replaced, which keep the worktree.
         return {
             other.session_id
             for other in self.ledger.recent_workers(200)
             if other.session_id and other.id != worker.id and other.runtime == worker.runtime
-        }
+        } | self.ledger.session_ids_of_others(worker)
 
     def _attach_command(self, worker: Worker) -> str:
         try:

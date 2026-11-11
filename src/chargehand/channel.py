@@ -40,7 +40,7 @@ from chargehand import sanitize, usage
 from chargehand.ledger import Ledger, Worker
 from chargehand.runtime import Runtime
 from chargehand.serve import AUTH_WORKER, HTTPError, Request, Response, Routes
-from chargehand.tick import TickReport
+from chargehand.tick import HANDOFF_TOOL, TickReport
 
 log = logging.getLogger(__name__)
 
@@ -195,6 +195,15 @@ def _handoff(call: ToolCall) -> ToolResult:
     return ToolResult("Your handoff note is stored. A later call replaces it.")
 
 
+def _read_handoff(call: ToolCall) -> ToolResult:
+    """The worker's stored handoff note: its own text, which reaches the model only as this result."""
+    note = call.worker.handoff_note
+    if not note:
+        return ToolResult("No handoff note is stored for this work yet.")
+    log.info("%s: read its handoff note (%d characters)", call.worker.handle, len(note))
+    return ToolResult(note)
+
+
 def _request_wake(call: ToolCall) -> ToolResult:
     """Put a timer into the worker's inbox; delivery wakes it once it is due, as for any event."""
     after = call.arguments.get("after_secs")
@@ -298,9 +307,17 @@ REGISTRY: tuple[Tool, ...] = (
     Tool(
         "handoff",
         "Write your handoff note: what you did, what is left, and where things are, so that a "
-        "later session can go on from it. A later call replaces it.",
+        "later session can go on from it. Call it at the end of every turn, so the note stays "
+        "current. A later call replaces it.",
         _schema({"note": _TEXT}, ("note",)),
         _handoff,
+    ),
+    Tool(
+        HANDOFF_TOOL,
+        "Read your handoff note, the one that your earlier session of this work stored with "
+        "handoff. Call it first in a fresh session.",
+        _schema({}, ()),
+        _read_handoff,
     ),
     Tool(
         "request_wake",
