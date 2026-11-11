@@ -82,6 +82,8 @@ from chargehand.tick import (
     REQUEST_MESSAGE_LIMIT,
     SUMMARY_STATE_PREFIX,
     UNARCHIVE_REPOSITORY,
+    WORK_AT_RISK_PREFIX,
+    WORK_AT_RISK_WINDOW_SECS,
     fork_refusal,
     summary_refusal,
     ancestors,
@@ -106,7 +108,8 @@ COLUMNS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 )
 COLUMN_OF = {state: key for key, _, _, states in COLUMNS for state in states}
 
-CLOSED_WINDOW_SECS = 24 * 3600
+# The tick keeps the facts about work at risk current for the same closed cards.
+CLOSED_WINDOW_SECS = WORK_AT_RISK_WINDOW_SECS
 # How long the model-limit badge shows when the failure gave no reset time.
 MODEL_LIMIT_SHOWN_SECS = 5 * 3600
 CLOSED_LIMIT = 30
@@ -288,11 +291,20 @@ def _segments(request: Request, prefix: str) -> list[str]:
     return [part for part in request.path[len(prefix):].split("/") if part]
 
 
+# The card button that a refused worker action names in its board wording.
+FORCED_BUTTONS = {"retry": "Retry", "discard": "Discard", ARCHIVE: "Archive"}
+
+
 def outcome(row: dict[str, object]) -> dict[str, object]:
-    """A request as an action answers it. Its message is chargehand's own, in one line."""
+    """A request as an action answers it. Its message is chargehand's own, in one line.
+
+    A refusal that force overrides also carries its machine-readable *reason*, and a
+    *board_message* that names the card's controls instead of the command line's flags.
+    """
     message = row.get("message")
     applied = row.get("applied_at") is not None
     target = row.get("target")
+    reason = refusal_reason(row.get("reason")) if applied and not row.get("ok") else None
     return {
         "id": row["id"],
         "kind": row["kind"],
@@ -305,7 +317,69 @@ def outcome(row: dict[str, object]) -> dict[str, object]:
         "message": (
             sanitize.one_line(str(message), limit=REQUEST_MESSAGE_LIMIT) if message else None
         ),
+        "reason": reason,
+        "board_message": board_refusal(str(row["kind"]), reason) if reason else None,
     }
+
+
+def work_facts(raw: object) -> dict[str, object] | None:
+    """The tick's facts about work that a removal would lose, checked field by field."""
+    if not isinstance(raw, dict):
+        return None
+    unpushed = raw.get("unpushed_commits")
+    facts = {
+        "place": "item_checkout" if raw.get("place") == "item_checkout" else "worktree",
+        "uncommitted_changes": raw.get("uncommitted_changes") is True,
+        "unpushed_commits": unpushed if isinstance(unpushed, int) and unpushed > 0 else 0,
+        "uninspected": raw.get("uninspected") is True,
+    }
+    if not (facts["uncommitted_changes"] or facts["unpushed_commits"] or facts["uninspected"]):
+        return None
+    facts["text"] = work_text(facts)
+    return facts
+
+
+def work_text(facts: dict[str, object]) -> str:
+    """*facts* as the board says them: what the worktree holds, in one clause."""
+    where = "its item checkout" if facts["place"] == "item_checkout" else "its worktree"
+    if facts["uninspected"]:
+        return f"{where} could not be inspected"
+    held = []
+    if facts["uncommitted_changes"]:
+        held.append("uncommitted changes")
+    count = facts["unpushed_commits"]
+    if count:
+        held.append(f"{count} unpushed commit{'' if count == 1 else 's'}")
+    return f"{where} has {' and '.join(held)}"
+
+
+def refusal_reason(raw: object) -> dict[str, object] | None:
+    if not isinstance(raw, dict) or raw.get("needs_force") is not True:
+        return None
+    reason: dict[str, object] = {"needs_force": True}
+    if (work := work_facts(raw.get("work"))) is not None:
+        reason["work"] = work
+    if raw.get("session_running") is True:
+        reason["session_running"] = True
+    return reason
+
+
+def board_refusal(kind: str, reason: dict[str, object]) -> str | None:
+    """A refusal that force overrides, in words that name the card's force box and button."""
+    button = FORCED_BUTTONS.get(kind)
+    if button is None:
+        return None
+    work = reason.get("work")
+    if isinstance(work, dict):
+        why = str(work["text"])
+    elif reason.get("session_running"):
+        why = "the session did not stop, so its worktree is still in use"
+    else:
+        return None
+    again = f"tick force and press {button} again"
+    if kind == ARCHIVE:
+        again += "; the archive keeps the files, not the commits"
+    return f"{why}; {again}"
 
 
 def _answer(ledger: Ledger, request_id: int) -> Response:
@@ -1094,11 +1168,24 @@ def card(
         ),
         "last_hook": worker.last_hook,
         "job": job_entry(job, worker, ledger) if job else None,
+        "work_at_risk": work_at_risk(worker, ledger),
         "archived_at": worker.archived_at,
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
         "finished_at": worker.finished_at,
     }
+
+
+def work_at_risk(worker: Worker, ledger: Ledger) -> dict[str, object] | None:
+    """What Discard, Retry or Archive would lose, as the tick last found it, or None when
+    it found nothing or does not look."""
+    if worker.gc_done:
+        return None
+    raw = ledger.get_state(f"{WORK_AT_RISK_PREFIX}{worker.id}")
+    try:
+        return work_facts(json.loads(raw)) if raw else None
+    except ValueError:
+        return None
 
 
 def permission_prompt(
@@ -1238,6 +1325,7 @@ __all__ = [
     "personalise",
     "WORKER_ACTIONS",
     "actions",
+    "board_refusal",
     "outcome",
     "permission_prompt",
     "question_options",
@@ -1253,6 +1341,7 @@ __all__ = [
     "register_routes",
     "to_json",
     "tokens_estimate",
+    "work_at_risk",
     "under_originals",
     "clone_form",
 ]

@@ -113,6 +113,15 @@ CHECKOUT_HEAD_PREFIX = "checkout-head:"
 # working directory is not resumed there. `continue --force` records them again.
 WORKSPACE_FILES_PREFIX = "workspace-files:"
 WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_FILES_PREFIX)
+# What a removal of a worker's worktree would lose, as `WorkAtRisk.facts` gives it with the
+# time it was found (`checked_at`), under this prefix and the worker id, so that its card can
+# warn before Discard, Retry or Archive. The board model makes no git call, so the tick
+# records it: for each worker that ended within the board's closed window, once it ended
+# and again after the refresh interval, and for a live worker whose action it refused. An
+# ended worker's worktree rarely changes, and each look runs git twice in it.
+WORK_AT_RISK_PREFIX = "work-at-risk:"
+WORK_AT_RISK_WINDOW_SECS = 24 * 3600
+WORK_AT_RISK_REFRESH_SECS = 600
 
 # A start event for a repository that no `[[repository]]` names is ignored. It is reported
 # once per source and repository; this prefix marks the ones reported.
@@ -461,6 +470,48 @@ def refresh_prompt(worker: Worker, template: str, message: str | None, *, where:
     if message:
         parts.append(message)
     return "\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class WorkAtRisk:
+    """Work in a worker's worktree or item checkout that removing it would lose.
+
+    *place* is ``worktree`` or ``item_checkout``; *unpushed* is -1 when the checkout could
+    not be inspected, which counts as work.
+    """
+
+    place: str
+    unpushed: int
+    uncommitted: bool
+
+    @property
+    def text(self) -> str:
+        where = "its item checkout" if self.place == "item_checkout" else "its worktree"
+        if self.unpushed < 0:
+            return f"{where} could not be inspected"
+        if self.unpushed > 0:
+            return f"{where} holds {self.unpushed} unpushed commit(s)"
+        return f"{where} has uncommitted changes"
+
+    def facts(self) -> dict[str, object]:
+        return {
+            "place": self.place,
+            "uncommitted_changes": self.uncommitted,
+            "unpushed_commits": max(self.unpushed, 0),
+            "uninspected": self.unpushed < 0,
+        }
+
+
+class NeedsForce(str):
+    """A refusal that force overrides: the command line's message, which carries the
+    machine-readable *reason* that the board words for its own controls."""
+
+    reason: dict[str, object]
+
+    def __new__(cls, message: str, reason: dict[str, object]) -> "NeedsForce":
+        made = super().__new__(cls, message)
+        made.reason = {"needs_force": True, **reason}
+        return made
 
 
 @dataclass(frozen=True)
@@ -1332,7 +1383,10 @@ class Runner:
             except Exception as exc:  # a bad request must not kill the tick
                 log.exception("request %s failed", request["id"])
                 ok, message = False, f"internal error: {exc}"
-            self.ledger.complete_request(request["id"], ok=ok, message=message)
+            self.ledger.complete_request(
+                request["id"], ok=ok, message=message,
+                reason=message.reason if isinstance(message, NeedsForce) else None,
+            )
             report.requests.append(
                 f"{kind}{f' {target}' if target else ''} from {request.get('origin') or 'cli'}: "
                 f"{'ok' if ok else 'refused'} — {message}"
@@ -1875,12 +1929,12 @@ class Runner:
             return False, f"repository '{worker.repository}' is unavailable"
         branches_removed = True
         if worker.worktree_path.exists():
-            blocker = self._worktree_holds_work(worker)
-            if blocker and not force:
-                return False, (
-                    f"{worker.name}: {blocker}. Push or discard it first "
+            risk = self._work_at_risk(worker)
+            if risk and not force:
+                return False, self._needs_force(worker, risk, (
+                    f"{worker.name}: {risk.text}. Push or discard it first "
                     f"(`chargehand discard {self.ledger.target_for(worker)} --yes`)."
-                )
+                ))
             try:
                 branches_removed = self._remove_worktree(worker, force=True)
             except GitError as exc:
@@ -1956,17 +2010,19 @@ class Runner:
     def _do_discard(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
     ) -> tuple[bool, str]:
-        blocker = self._worktree_holds_work(worker)
-        if blocker and not force:
-            return False, f"{worker.name}: {blocker}. Re-run with --force to discard anyway."
+        risk = self._work_at_risk(worker)
+        if risk and not force:
+            return False, self._needs_force(
+                worker, risk, f"{worker.name}: {risk.text}. Re-run with --force to discard anyway."
+            )
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
         if not self._stop_session(worker) and not force:
-            return False, (
+            return False, NeedsForce((
                 f"{worker.name}: the session did not stop, so its worktree is still "
                 f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
-            )
+            ), {"session_running": True})
         removed = self._remove_session(worker)
         try:
             branches_removed = self._remove_worktree(worker, force=True)
@@ -2007,12 +2063,12 @@ class Runner:
         refusal = self._archive_refusal(worker)
         if refusal is not None:
             return False, refusal
-        blocker = self._worktree_holds_work(worker)
-        if blocker and not force:
-            return False, (
-                f"{worker.name}: {blocker}. Commit and push that work first, or archive with "
+        risk = self._work_at_risk(worker)
+        if risk and not force:
+            return False, self._needs_force(worker, risk, (
+                f"{worker.name}: {risk.text}. Commit and push that work first, or archive with "
                 f"force: the archive keeps the files, not the commits."
-            )
+            ))
         job = self._queue_archive(worker, force, origin)
         if job.state == ledger_mod.JOB_WAITING:
             return True, (
@@ -2093,7 +2149,11 @@ class Runner:
         return True, f"repository {repository.name} shows on the board again; its archives stay"
 
     def _worktree_holds_work(self, worker: Worker) -> str | None:
-        found = self._checkout_holds_work(worker.worktree_path, (), "its worktree")
+        risk = self._work_at_risk(worker)
+        return risk.text if risk else None
+
+    def _work_at_risk(self, worker: Worker) -> WorkAtRisk | None:
+        found = self._checkout_at_risk(worker.worktree_path, (), "worktree")
         checkout = item_checkout_path(worker)
         if found is None and checkout.exists():
             # The item's checkout sits on its head commit, which no remote-tracking ref
@@ -2102,22 +2162,69 @@ class Runner:
             # `gh pr checkout` fetched again.
             given = self.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}")
             fetched = self.git.head_commit(checkout, "FETCH_HEAD")
-            found = self._checkout_holds_work(
-                checkout, tuple(c for c in (given, fetched) if c), "its item checkout"
+            found = self._checkout_at_risk(
+                checkout, tuple(c for c in (given, fetched) if c), "item_checkout"
             )
         return found
 
-    def _checkout_holds_work(self, path: Path, not_in: tuple[str, ...], name: str) -> str | None:
+    def _checkout_at_risk(
+        self, path: Path, not_in: tuple[str, ...], place: str
+    ) -> WorkAtRisk | None:
         if not path.exists():
             return None
         unpushed = self.git.unpushed_commits(path, not_in=not_in)
         if unpushed < 0:
-            return f"{name} could not be inspected"
-        if unpushed > 0:
-            return f"{name} holds {unpushed} unpushed commit(s)"
-        if self.git.is_dirty(path):
-            return f"{name} has uncommitted changes"
-        return None
+            return WorkAtRisk(place, -1, False)
+        uncommitted = self.git.is_dirty(path)
+        return WorkAtRisk(place, unpushed, uncommitted) if unpushed or uncommitted else None
+
+    def _needs_force(self, worker: Worker, risk: WorkAtRisk, message: str) -> NeedsForce:
+        """A refusal for *risk*, which the worker's card learns at once."""
+        self._keep_work_at_risk(worker, risk, time.time())
+        return NeedsForce(message, {"work": risk.facts()})
+
+    def _keep_work_at_risk(self, worker: Worker, risk: WorkAtRisk | None, now: float) -> None:
+        facts = risk.facts() if risk else WorkAtRisk("worktree", 0, False).facts()
+        self.ledger.set_state(
+            f"{WORK_AT_RISK_PREFIX}{worker.id}", json.dumps({**facts, "checked_at": now})
+        )
+
+    def _record_work_at_risk(self, now: float | None = None) -> None:
+        """Keep the card facts under `WORK_AT_RISK_PREFIX` current, at most once per
+        `WORK_AT_RISK_REFRESH_SECS` for each worker.
+
+        A live session changes its worktree all the time, so a live worker is looked at
+        only once an action on it was refused, until its worktree holds nothing to lose.
+        The record of a worker that is neither of these is dropped.
+        """
+        now = time.time() if now is None else now
+        checked: dict[int, float] = {}
+        for key, value in self.ledger.all_state().items():
+            worker_id = key.removeprefix(WORK_AT_RISK_PREFIX)
+            if key.startswith(WORK_AT_RISK_PREFIX) and worker_id.isdigit():
+                try:
+                    at = json.loads(value).get("checked_at")
+                except (ValueError, AttributeError):
+                    at = None
+                checked[int(worker_id)] = at if isinstance(at, (int, float)) else 0.0
+        ended = self.ledger.terminal_workers_since(WORK_AT_RISK_WINDOW_SECS)
+        live = [worker for worker in self.ledger.live_workers() if worker.id in checked]
+        for worker in (*ended, *live):
+            key = f"{WORK_AT_RISK_PREFIX}{worker.id}"
+            at = checked.pop(worker.id, None)
+            if worker.gc_done:
+                if at is not None:
+                    self.ledger.delete_state(key)
+                continue
+            if at is not None and now - at < WORK_AT_RISK_REFRESH_SECS:
+                continue
+            risk = self._work_at_risk(worker)
+            if risk is None and not worker.is_terminal:
+                self.ledger.delete_state(key)
+            else:
+                self._keep_work_at_risk(worker, risk, now)
+        for worker_id in checked:
+            self.ledger.delete_state(f"{WORK_AT_RISK_PREFIX}{worker_id}")
 
     def _remove_worktree(self, worker: Worker, *, force: bool) -> bool:
         """Remove the worktree and every branch the runner can show is its own.
@@ -4164,6 +4271,7 @@ class Runner:
             problem = self._collect(worker, report)
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
+        self._record_work_at_risk()
         self._forget_checkout_heads()
         self._forget_summary_waits()
 
@@ -4287,7 +4395,10 @@ class Runner:
         records that only a live worker needs once it has ended."""
         for key in self.ledger.all_state():
             live_only = next((p for p in LIVE_WORKER_STATE_PREFIXES if key.startswith(p)), None)
-            prefix = live_only or next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            prefix = live_only or next(
+                (p for p in (*WORKER_STATE_PREFIXES, WORK_AT_RISK_PREFIX) if key.startswith(p)),
+                None,
+            )
             if prefix is None:
                 continue
             worker_id = key.removeprefix(prefix)

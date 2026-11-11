@@ -87,6 +87,11 @@ main { flex: 1; display: flex; gap: 12px; padding: 14px 16px; overflow-x: auto; 
 .card .path { color: var(--faint); font-size: 11px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 6px; }
 .card .alert { color: var(--red); font-size: 12px; margin: 4px 0; font-weight: 500; overflow-wrap: anywhere; }
 .card .note { color: var(--amber); font-size: 12px; margin: 4px 0; overflow-wrap: anywhere; }
+.card .status { display: flex; gap: 6px; align-items: baseline; font-size: 12px; font-family: var(--mono); margin: 4px 0; overflow-wrap: anywhere; }
+.card .status.pending { color: var(--amber); }
+.card .status.ok { color: var(--green); }
+.card .status.bad { color: var(--red); }
+.card .status .dismiss { margin-left: auto; padding: 0 4px; }
 .card .prompt pre.input { font-family: ui-monospace, Menlo, monospace; font-size: 11px; margin: 2px 0 4px; padding: 4px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8em; overflow: auto; }
 .card .prompt .answers { display: flex; gap: 5px; flex-wrap: wrap; margin: 4px 0; }
 .card .prompt button.answer.allow, .card .prompt button.answer.always { border-color: var(--green); }

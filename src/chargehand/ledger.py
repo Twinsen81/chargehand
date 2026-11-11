@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -370,7 +370,8 @@ CREATE TABLE IF NOT EXISTS requests (
     applied_at  REAL,
     ok          INTEGER,
     message     TEXT,
-    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}'
+    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}',
+    reason      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS requests_pending ON requests (applied_at);
@@ -666,6 +667,12 @@ _MIGRATE_V2_V10_TO_V11 = f"""
 # table with it.
 _MIGRATE_V11_TO_V12 = """
 ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+"""
+
+# Version 13 keeps the machine-readable reason of a refused request, for the board. Every
+# version has a requests table without it, the version 1 one included.
+_MIGRATE_V12_TO_V13 = """
+ALTER TABLE requests ADD COLUMN reason TEXT;
 """
 
 
@@ -981,24 +988,28 @@ class Ledger:
         # schema but keeps its own requests table, which gains the request origin. Up to
         # version 3 the schema creates the prompts table whole, so only 4 to 6 alter it.
         script = {
-            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V12_TO_V13,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
             + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11
-            + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
             5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
-            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10
-            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11
-            + _MIGRATE_V11_TO_V12,
-            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
-            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
-            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
-            11: _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
+            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            11: _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            12: _MIGRATE_V12_TO_V13,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -2043,10 +2054,15 @@ class Ledger:
         row = self._conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
         return self._request_to_dict(row) if row else None
 
-    def complete_request(self, request_id: int, *, ok: bool, message: str) -> None:
+    def complete_request(
+        self, request_id: int, *, ok: bool, message: str, reason: dict[str, Any] | None = None
+    ) -> None:
+        """*reason* is the machine-readable form of a refusal, for the board; *message*
+        stays the command line's text."""
         self._conn.execute(
-            "UPDATE requests SET applied_at = ?, ok = ?, message = ? WHERE id = ?",
-            (time.time(), 1 if ok else 0, message, request_id),
+            "UPDATE requests SET applied_at = ?, ok = ?, message = ?, reason = ? WHERE id = ?",
+            (time.time(), 1 if ok else 0, message,
+             json.dumps(reason, sort_keys=True) if reason else None, request_id),
         )
 
     @staticmethod
@@ -2056,6 +2072,11 @@ class Ledger:
             data["args"] = json.loads(data["args"])
         except (TypeError, ValueError):
             data["args"] = {}
+        try:
+            reason = json.loads(data.get("reason") or "null")
+        except ValueError:
+            reason = None
+        data["reason"] = reason if isinstance(reason, dict) else None
         return data
 
     def prune_requests(self, older_than_secs: float = 7 * 24 * 3600) -> int:
