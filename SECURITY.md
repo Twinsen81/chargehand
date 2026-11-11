@@ -378,7 +378,7 @@ public location.
   stored as a link, so a link to a file elsewhere does not copy that file into the zip. The
   transcript path comes from a hook post, so only a regular `.jsonl` file under Claude
   Code's `projects` directory is read. The settings file of a session, which holds the
-  daemon's token, is not in the worktree and so not in the archive. The worktree is
+  session's own token, is not in the worktree and so not in the archive. The worktree is
   removed only after the zip is complete and has passed its check, and only by the tick,
   with the guard of discard applied again.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
