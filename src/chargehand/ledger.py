@@ -1246,13 +1246,6 @@ class Ledger:
         ).fetchone()
         return _row_to_worker(row) if row else None
 
-    def latest_worker_by_session_uuid(self, session_uuid: str) -> Worker | None:
-        """The newest worker of the session, in any state."""
-        row = self._conn.execute(
-            "SELECT * FROM workers WHERE session_uuid = ? ORDER BY id DESC LIMIT 1", (session_uuid,)
-        ).fetchone()
-        return _row_to_worker(row) if row else None
-
     def worker_by_worktree(self, worktree: str) -> Worker | None:
         row = self._conn.execute(
             "SELECT * FROM workers WHERE worktree = ? ORDER BY id DESC LIMIT 1", (worktree,)

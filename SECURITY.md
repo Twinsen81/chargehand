@@ -57,11 +57,11 @@ public location.
   a report's summary and links (only plain http(s) URLs, and only a pull request link
   becomes the card's link), and the handoff note. The board renders them as text, no log
   line or notification carries them, and no prompt that chargehand writes includes them.
-  `read_handoff` gives the note back only as a tool result, to a session of the worker that
-  the post maps to, so a fresh session after a refresh reads it as session data, not as a
-  prompt.
-  A report of `done` or `failed` can end the worker that the post maps to, as its status
-  file could (see the known limit of the shared token below). A timer from `request_wake` is a wake with
+  `read_handoff` gives the note back only as a tool result, to a session of the worker
+  whose token the post carries, so a fresh session after a refresh reads it as session
+  data, not as a prompt.
+  A report of `done` or `failed` can end the worker whose token the post carries, as its
+  status file could. A timer from `request_wake` is a wake with
   chargehand's own pointer, under the same caps as any wake. The answer to a question is
   the operator's line, sent as a reply.
 - **Command source output.** The commands of a `command` source are the operator's own,
@@ -168,15 +168,36 @@ public location.
   and no response carries a CORS header, so a web page on another origin cannot read a
   response. A cross-origin page can still send a request without reading the answer,
   which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
+- **A token per session.** Each launch and each fork writes a new token for its session,
+  in a file of mode 0600 in a directory of mode 0700 under the state directory
+  (`worker-tokens/`). The session's hooks and its chargehand mod send that token, and the
+  daemon maps the token, not the session id or the working directory that a post names,
+  to the worker, comparing in constant time. A session never gets the board's token: its
+  settings hold its own token, and the mod's environment names its own token file. The
+  channel routes take only a worker's token, and the board's routes only the board's
+  token. A token ends with its worker: the daemon refuses the token of a worker that ended,
+  a new launch in the same worktree replaces it, and the file is deleted when the session
+  is removed. A tool call acts as the token's worker, whatever session id it names. A
+  hook, a hello, a lifecycle or usage post, or an outbox poll from a session that is not
+  the worker's current one, such as a copy that a resume started in the same worktree
+  with the same settings, is ignored: the post changes nothing, and the poll gets no
+  message. Every launch's settings deny `Read` and `Edit` (which covers Write) on the
+  board's token file and on the whole token directory, a launch without hooks too, so a
+  session launched earlier is also denied the token files of sessions launched after it; a
+  launch with hooks also denies them on every session settings file. The mod still reads
+  its own token file, because a `Read` deny rule does not bind the mod's own file reads
+  (observed with Claude Code 2.1.322).
 - **Session hooks.** Launched sessions post their start, turn ends, failures,
   notifications and permission prompts to `POST /hooks/<event>` on that port, with the
-  token in the `Authorization` header; a post without the token changes nothing. The token
+  session's token in the `Authorization` header; a post without a valid token changes
+  nothing. A session launched before sessions had their own token posts with the board's
+  token, which `/hooks` still accepts, and the daemon logs that once per session. The token
   is never on a command line, where other users of the machine could read it with `ps`:
   the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
   0700 under the state directory, and the `SessionStart` command hook names the token
   file, not the token, and runs its script with `python -I`, so nothing in the worktree
   is imported. The settings file is deleted when its session is removed. A post moves
-  only the live worker whose session posted it. The daemon answers every post but a
+  only the live worker whose token it carries. The daemon answers every post but a
   permission prompt with an empty object, so it never keeps a turn running and never
   adds text to the model's context. The payload is untrusted: the
   last answer, the tool input and the other fields are cleaned of terminal control
@@ -347,8 +368,8 @@ public location.
   registers tools and submits a prompt. It never answers a permission prompt, never
   writes a file or the environment and runs no process. The only text it submits is the
   outbox message the daemon handed it, which is chargehand's wake message of kinds and
-  pointers. It posts only to the port that the launch settings name, with the token from
-  the token file that they name; the settings name the file, not the token.
+  pointers. It posts only to the port that the launch settings name, with the session's own token
+  from the token file that they name; the settings name the file, not the token.
 - **The usage request holds no credential.** To read the weekly usage window, the daemon
   sends Claude Code's `get_usage` control request to a short `claude -p` process. Claude
   Code fetches the usage with its own sign-in; chargehand reads no token and no Keychain
@@ -372,13 +393,18 @@ public location.
   install. Treat it as you would a CI worker with write access.
 - A session runs as the operator's user, so it can read the daemon's token file and the
   ledger. The deny rules for the port are a guardrail against the careless path; a session
-  that reads the token and reaches the port another way can send what the CLI can. The
-  token is also in each session's own hook settings, so a session can read it there too,
-  and post hooks in the name of another worker's session. That can move another worker's
-  state and its label, but it runs no command and answers no prompt. The same holds for
-  the agent channel: with the token, a session can post as another worker's mod, take that
-  worker's outbox message or call a tool for it. The launch settings put the token file's
-  path in the session's environment, where every command of the session can read it.
+  that reads the token and reaches the port another way can send what the CLI can.
+- The token per session is a guardrail of the same kind, not a wall. It stops the careless
+  path and a prompt-injected call that names another worker's session id: such a call acts
+  as the worker whose token it carries. A process of the same user can still read another
+  session's token file or settings file with a shell command, which the deny rules do not
+  cover. With
+  another worker's token, a session can post as that worker's hooks and mod: move its
+  state and its label, take its outbox message or call a tool for it, but run no command
+  and answer no prompt. Sessions launched before sessions had their own token still post
+  their hooks with the board's token until their next launch. The launch settings put the
+  session's own token file path in its environment, where every command of the session
+  can read it.
 - A session can read any credential that the runner or a notification hook reads from the
   login keychain, because it runs as the same user. Give a hook a credential that protects
   nothing else, such as the password of a mailbox that exists only to send alerts.

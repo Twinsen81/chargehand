@@ -1,11 +1,16 @@
 """The hook receiver: what worker sessions post to the daemon, applied to the ledger at once.
 
 Each session is launched with settings hooks that post to ``POST /hooks/<event>`` with
-the daemon's token: its start, the end of each turn, a turn that failed, its
-notifications and its permission prompts. The runtime that owns the event reads the
-payload; this module finds the worker and hands the post to the tick's own transition
-code, so a hook and the session diff move a worker the same way and send the same
-notification. The diff of each tick stays as the fallback for a hook that never came.
+the session's own token (see :mod:`chargehand.worker_tokens`): its start, the end of each
+turn, a turn that failed, its notifications and its permission prompts. The token says
+which worker posts. A session launched before sessions had their own token posts with the
+board's token, and its post maps to a worker by its session id and working directory, as
+before. A post with a worker's token that names another session than the worker's own,
+such as a copy that a resume started in the same worktree, changes nothing. The runtime
+that owns the event reads the payload; this module finds the worker and hands the post to
+the tick's own transition code, so a hook and the session diff move a worker the same way
+and send the same notification. The diff of each tick stays as the fallback for a hook
+that never came.
 
 Almost every answer is an empty JSON object. A turn end gets no decision that would keep
 the turn running, and a session start gets no context for the model. A post that maps to
@@ -35,7 +40,7 @@ from chargehand import runtime as runtime_mod
 from chargehand import sanitize
 from chargehand.ledger import Ledger, PermissionPrompt, Worker
 from chargehand.runtime import Hook, Runtime
-from chargehand.serve import HTTPError, Request, Response, Routes
+from chargehand.serve import AUTH_WORKER_OR_BOARD, HTTPError, Request, Response, Routes
 from chargehand.tick import TickReport
 
 log = logging.getLogger(__name__)
@@ -183,7 +188,7 @@ def _drain() -> None:
 
 def register_routes(routes: Routes) -> None:
     global _drain_registered
-    routes.add("POST", PREFIX, receive, prefix=True)
+    routes.add("POST", PREFIX, receive, prefix=True, auth=AUTH_WORKER_OR_BOARD)
     routes.extend_state(add_to_state)
     if not _drain_registered:
         atexit.register(_drain)
@@ -216,8 +221,18 @@ def receive(request: Request) -> Response:
         log.info("hook %s: the payload is not one a runtime reads", event)
         return NO_DECISION
     ledger = request.ledger()
-    worker = find_worker(ledger, hook, runtime.name)
     session = session_prefix(hook)
+    if request.caller is not None:
+        worker = ledger.get(request.caller.id)
+        if worker is not None and (
+            worker.is_terminal or worker.runtime != runtime.name
+            or not is_own_session(worker, hook.session_uuid)
+        ):
+            worker = None
+    else:
+        worker = find_worker(ledger, hook, runtime.name)
+        if worker is not None:
+            _note_board_token(worker, hook)
     if worker is None:
         log.info("hook %s from session %s: no live worker has this session (cwd %s)",
                  event, session, sanitize.one_line(hook.cwd or "-", limit=300))
@@ -440,6 +455,36 @@ def _session_waits(request: Request, ledger: Ledger, worker: Worker) -> bool | N
         log.exception("%s: cannot read whether the session waits for a permission answer",
                       worker.handle)
         return None
+
+
+# The sessions whose hooks were seen with the board's token, so that the log says it once
+# per session. Bounded: a long-running daemon forgets the oldest.
+_BOARD_TOKEN_SESSIONS: dict[str, None] = {}
+_BOARD_TOKEN_SESSIONS_MAX = 1000
+_board_token_lock = threading.Lock()
+
+
+def _note_board_token(worker: Worker, hook: Hook) -> None:
+    key = hook.session_uuid or worker.worktree
+    with _board_token_lock:
+        if key in _BOARD_TOKEN_SESSIONS:
+            return
+        _BOARD_TOKEN_SESSIONS[key] = None
+        while len(_BOARD_TOKEN_SESSIONS) > _BOARD_TOKEN_SESSIONS_MAX:
+            del _BOARD_TOKEN_SESSIONS[next(iter(_BOARD_TOKEN_SESSIONS))]
+    log.info("%s: session %s posts its hooks with the board's token; it was launched before "
+             "sessions had their own token, and its next launch gets one", worker.handle,
+             session_prefix(hook))
+
+
+def is_own_session(worker: Worker, session_uuid: str | None) -> bool:
+    """Whether a post that names *session_uuid* comes from *worker*'s own session.
+
+    A worker without a session id yet, in the middle of its launch, takes the post. The
+    token says which worker posts; this says that the session is the one the worker has,
+    and not a copy that a resume started in the same worktree with the same settings.
+    """
+    return not (worker.session_uuid and session_uuid and session_uuid != worker.session_uuid)
 
 
 def session_prefix(hook: Hook) -> str:

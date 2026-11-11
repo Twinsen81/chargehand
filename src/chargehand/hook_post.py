@@ -3,10 +3,10 @@
 A session runs this file as a `command` hook, by its path and with ``python -I``, so
 nothing from the session's working directory is imported:
 
-    python3 -I .../hook_post.py --port 7878 --token-file ~/.config/chargehand/board.token SessionStart
+    python3 -I .../hook_post.py --port 7878 --token-file .../worker-tokens/<digest>.token SessionStart
 
-It reads the token from the token file, which must be a private regular file of this
-user, so the token never appears on a command line. It prints nothing, because Claude
+It reads the session's own token from the token file, which must be a private regular
+file of this user, so the token never appears on a command line. It prints nothing, because Claude
 Code gives a SessionStart hook's output to the model, and it always exits 0 within a few
 seconds: a daemon that is down or slow must never hold up or stop the session. Standard
 library only, and no import from chargehand, so it runs with any Python 3.

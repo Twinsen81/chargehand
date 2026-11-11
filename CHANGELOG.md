@@ -95,6 +95,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timer that waits.
 - The ledger keeps each worker's last report and its handoff note, and the due time of an
   inbox entry (schema version 11).
+- A token per worker session. Each launch and each fork writes a new token for its session
+  into a private file under the state directory (`worker-tokens/`), and the session's
+  hooks and its mod send it. The daemon maps the token, not the session id or the working
+  directory that a post names, to the worker, so one worker cannot speak for another by
+  naming its session. The token ends with its worker: the daemon refuses it once the
+  worker ended, and the file is deleted with the session's settings file. A tool call acts
+  as the token's worker, whatever session id it names; before, a tool call from a session
+  that was not the worker's was refused. A hook, a hello, a lifecycle or usage post, or an
+  outbox poll from a session that is not the worker's current one, such as a copy that a
+  resume started in the same worktree with the same settings, is ignored: the post
+  changes nothing, and the poll gets no message. Every launch's settings deny `Read` and
+  `Edit` on the board's token file and on the whole token directory, a launch without
+  hooks too; a launch with hooks also denies them on every session settings file.
+
+### Changed
+
+- A session no longer gets the board's token. Its settings file holds its own token in the
+  hooks' `Authorization` header, and the mod's environment names its own token file. The
+  `/channel/` routes refuse the board's token. `/hooks/` still accepts it from a session
+  launched before this change, maps that post by its session id and working directory as
+  before, and logs it once per session.
 
 ### Deprecated
 

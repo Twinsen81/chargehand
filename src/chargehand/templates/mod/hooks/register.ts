@@ -5,8 +5,9 @@
 // and end of the session, each turn end and the usage reading. It never approves a tool
 // call, and it submits no prompt but the text the daemon handed it.
 //
-// The daemon's port and token file come from the session's launch settings. There is no
-// default: a session that chargehand did not start posts nowhere.
+// The daemon's port and the file of this session's own token come from the session's launch
+// settings. The token tells the daemon which worker posts. There is no default: a session
+// that chargehand did not start posts nowhere.
 import type { EngineInterface, Register } from 'claude-code'
 
 const PREFIX = 'mcp__chargehand__'

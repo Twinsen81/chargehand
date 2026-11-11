@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from chargehand import board, channel
+from chargehand import board, channel, worker_tokens
 from chargehand import ledger as ledger_mod
 from chargehand import runtime as runtime_mod
 from chargehand import tick as tick_mod
@@ -30,6 +30,8 @@ def launch(harness, identifier="ABC-1"):
     harness.tick()
     worker = harness.worker(identifier)
     assert worker.state == ledger_mod.RUNNING and worker.session_uuid
+    # The harness has no daemon, so its launch writes no token: this one is the session's.
+    worker_tokens.issue(worker.worktree_path)
     return worker
 
 
@@ -43,42 +45,129 @@ def daemon(harness, tmp_path):
         yield built
 
 
-def post(daemon, path, payload, *, headers=AUTH):
+def as_(token):
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def post(daemon, path, payload, *, headers=None):
+    """Post *payload* with *headers*, else with the token that :func:`of` put into it."""
+    payload = dict(payload)
+    token = payload.pop(_TOKEN, None)
+    if headers is None:
+        headers = as_(token) if token else {"Content-Type": "application/json"}
     status, raw = support.request(
         daemon.port, "POST", f"/channel/{path}", body=json.dumps(payload).encode(), headers=headers
     )
     return status, json.loads(raw) if raw else None
 
 
+_TOKEN = object()
+
+
 def of(worker, **extra):
-    return {"session_id": worker.session_uuid, "cwd": worker.worktree, **extra}
+    """What the mod of *worker*'s session posts, and the token it posts with."""
+    return {
+        "session_id": worker.session_uuid, "cwd": worker.worktree,
+        _TOKEN: worker_tokens.read(worker.worktree_path), **extra,
+    }
 
 
 # ----- the token and the worker ------------------------------------------------------
 
 
+ROUTES = ("hello", "tool/subscribe", "outbox", "outbox/confirm", "lifecycle/turn_complete", "usage")
+
+
 @pytest.mark.parametrize("headers", [
     {"Content-Type": "application/json"},
     {"Authorization": "Bearer wrong", "Content-Type": "application/json"},
-])
-def test_every_route_refuses_a_post_without_the_token(daemon, harness, headers):
+    # The board's token is the operator's: no session speaks with it here.
+    AUTH,
+], ids=["none", "wrong", "board"])
+def test_every_route_refuses_a_post_without_a_worker_token(daemon, harness, headers):
     worker = launch(harness)
     before = harness.ledger.get(worker.id)
 
-    for path in ("hello", "tool/subscribe", "outbox", "outbox/confirm", "lifecycle/turn_complete",
-                 "usage"):
+    for path in ROUTES:
         assert post(daemon, path, of(worker), headers=headers)[0] == 401
 
     assert harness.ledger.get(worker.id) == before
 
 
-def test_a_post_from_a_session_no_worker_has_changes_nothing(daemon, harness):
+def test_the_token_not_the_session_id_says_which_worker_calls(daemon, harness):
+    first = launch(harness, "ABC-1")
+    second = launch(harness, "ABC-2")
+    # The token of the first worker, with the session id and the worktree of the second.
+    as_first = {**of(second), _TOKEN: worker_tokens.read(first.worktree_path)}
+
+    status, answer = post(daemon, "tool/report", {
+        **as_first, "input": {"state": "working", "summary": "from the first"},
+    })
+
+    assert (status, answer["is_error"]) == (200, False)
+    assert harness.ledger.get(first.id).report_summary == "from the first"
+    assert harness.ledger.get(second.id).report_summary is None
+
+
+@pytest.mark.parametrize("session", ["second", "a copy"])
+def test_the_session_posts_of_another_session_with_a_workers_token_change_nothing(
+    daemon, harness, session
+):
+    first = launch(harness, "ABC-1")
+    second = launch(harness, "ABC-2")
+    # The second worker's session, or a copy that a resume started in the first worktree
+    # with the same settings and so the same token.
+    session_id = second.session_uuid if session == "second" else "copy-of-the-first"
+    elsewhere = {**of(first), "session_id": session_id}
+    before = (harness.ledger.get(first.id), harness.ledger.get(second.id))
+
+    for path, extra in (
+        ("hello", {}),
+        ("lifecycle/turn_complete", {"reason": "answer", "answer": "from elsewhere"}),
+        ("usage", {"context": {"tokens": 5, "percent": 1}}),
+    ):
+        assert post(daemon, path, {**elsewhere, **extra})[0] == 404, path
+    assert post(daemon, "outbox", elsewhere) == (200, {"message": None})
+
+    assert (harness.ledger.get(first.id), harness.ledger.get(second.id)) == before
+
+
+def test_the_token_of_a_worker_that_ended_is_refused(daemon, harness):
+    worker = launch(harness)
+    harness.ledger.update(worker, state=ledger_mod.CANCELLED)
+
+    for path in ROUTES:
+        status, answer = post(daemon, path, of(worker, id=1, submitted=True))
+        if path == "outbox":
+            # The mod stops polling rather than hear a refusal every few seconds.
+            assert (status, answer) == (200, {"message": None, "ended": True})
+        else:
+            assert status == 401, path
+
+    assert harness.ledger.get(worker.id).mod_session is None
+
+
+def test_a_worker_token_opens_no_route_of_the_board(daemon, harness):
     worker = launch(harness)
 
-    status, _ = post(daemon, "hello", {"session_id": "not-a-worker", "cwd": "/elsewhere"})
+    status, _ = support.request(
+        daemon.port, "POST", f"/api/workers/{worker.id}/pause", body=b"{}",
+        headers=as_(worker_tokens.read(worker.worktree_path)),
+    )
 
-    assert status == 404
-    assert harness.ledger.get(worker.id).mod_session is None
+    assert status == 401
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+
+
+def test_a_token_ends_when_its_session_is_released_or_relaunched(daemon, harness):
+    worker = launch(harness)
+    old = worker_tokens.read(worker.worktree_path)
+
+    assert worker_tokens.issue(worker.worktree_path) != old
+    assert post(daemon, "hello", {**of(worker), _TOKEN: old})[0] == 401
+    assert post(daemon, "hello", of(worker))[0] == 200
+    harness.runner.runtime(worker.runtime).release(worker.worktree_path)
+    assert worker_tokens.read(worker.worktree_path) is None
 
 
 def test_the_hello_records_the_mod_and_lists_the_tools(daemon, harness):
@@ -97,11 +186,11 @@ def test_the_hello_records_the_mod_and_lists_the_tools(daemon, harness):
     assert after.mod_session == worker.session_uuid and after.mod_seen_at is not None
 
 
-def test_a_hello_during_the_launch_is_found_by_the_worktree(daemon, harness):
+def test_a_hello_during_the_launch_is_found_by_the_token(daemon, harness):
     worker = launch(harness)
     harness.ledger.update(worker, session_uuid=None)
 
-    status, _ = post(daemon, "hello", {"session_id": "new-session", "cwd": worker.worktree})
+    status, _ = post(daemon, "hello", of(worker, session_id="new-session", cwd="/elsewhere"))
 
     assert status == 200
     # It counts once the tick records that session as the worker's.
@@ -610,7 +699,8 @@ def test_another_session_or_a_paused_worker_takes_no_message(daemon, harness):
     worker = launch(harness)
     harness.ledger.put_outbox(worker, session_uuid=worker.session_uuid, text="wake", entries=[])
 
-    assert post(daemon, "outbox", of(worker, session_id="someone-else"))[0] == 404
+    # The worker's token from another session: the message is its session's alone.
+    assert post(daemon, "outbox", of(worker, session_id="someone-else")) == (200, {"message": None})
     harness.ledger.update(harness.ledger.get(worker.id), state=ledger_mod.PAUSED)
     # A paused worker goes on after `continue`, so its mod keeps polling.
     assert post(daemon, "outbox", of(worker))[1] == {"message": None}

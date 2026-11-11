@@ -2971,8 +2971,9 @@ class Runner:
             ),
         )
         spec = self._launch_spec(worker, role, prompt, originals)
-        # As in a launch: until the fresh session's ids are recorded, its hooks and its
-        # mod's hello find the worker by its worktree.
+        # As in a launch: the launch writes a new token for the fresh session, and its
+        # hooks and its mod's hello find the worker by that token. Until the fresh
+        # session's ids are recorded, a post from any session id counts as the worker's.
         self.ledger.update(worker, session_id=None, session_uuid=None)
         try:
             result = runtime.launch(spec, warn=report.warnings.append)
