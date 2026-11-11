@@ -86,10 +86,12 @@ ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
 
-# How much of its original's session a clone gets: nothing, or a copy of the conversation.
+# How much of its original's session a clone gets: nothing, a copy of the conversation, or
+# the original's handoff note, which the clone's new session reads through a tool.
 CLONE_FRESH = "fresh"
 CLONE_FULL = "full"
-CLONE_MODES = (CLONE_FRESH, CLONE_FULL)
+CLONE_SUMMARY = "summary"
+CLONE_MODES = (CLONE_FRESH, CLONE_FULL, CLONE_SUMMARY)
 
 # Where a control request came from: the command line or the board. Both record the same
 # kinds and arguments; the tick applies them alike.
@@ -111,6 +113,13 @@ REPLY_LIMIT = 500
 TIMER_SOURCE = "timer"
 TIMER_KIND = "timer"
 TIMER_POINTER = "request_wake"
+
+# A summary clone whose original's handoff note is older than the original's last turn
+# asks the original for a current note: an event of this source and kind in the
+# original's inbox, which delivery turns into a wake line. Its pointer is chargehand's own
+# identifier, which names the clone.
+HANDOFF_SOURCE = "clone"
+HANDOFF_KIND = "handoff"
 
 # What a worker's session last reported with the report tool. `done` and `failed` end the
 # worker at the end of the turn that reported them; the other states are card text only.
@@ -1772,6 +1781,15 @@ class Ledger:
             (worker.id, at),
         ).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
+
+    def drop_pending(self, worker_id: int, source: str, dedupe_id: str) -> bool:
+        """Remove one entry from a worker's inbox that no wake has taken yet."""
+        cursor = self._conn.execute(
+            "DELETE FROM inbox WHERE worker_id = ? AND source = ? AND dedupe_id = ? "
+            "AND delivered_at IS NULL",
+            (worker_id, source, dedupe_id),
+        )
+        return cursor.rowcount > 0
 
     def mark_delivered(self, entries: Iterable[InboxEntry], *, now: float | None = None) -> None:
         ids = [entry.id for entry in entries]

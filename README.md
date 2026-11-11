@@ -110,7 +110,11 @@ the worker's current branch, so its commits carry over and the two never write t
 files; uncommitted changes stay with the original. The form starts with the worker's prompt
 template, model and effort, which you can change. Fresh mode starts a new session; full
 mode starts with a copy of the worker's conversation (only while the worker is not in the
-middle of a turn or a prompt). The clone follows no events on the item unless you name the
+middle of a turn or a prompt); summary mode starts a new session that first reads the
+worker's handoff note through the `read_handoff` tool. When that note is older than the
+worker's last turn, chargehand first wakes the worker once to write a current note, and the
+clone waits for it for up to 10 minutes; then it starts from the stored note, and its card
+says so. The clone follows no events on the item unless you name the
 kinds, so only your replies reach it. Its card follows the original's card and says "clone
 of" the original. From a terminal: `chargehand clone implementer/ABC-1#7 --mode full
 --model sonnet --prompt-file next.txt`, with `--effort`, `--prompt` and `--subscribe KIND`
@@ -219,9 +223,11 @@ Three limits keep wakes from using up the week. `max_concurrent` in the machine
 configuration caps the working turns of all repositories together, launches and wakes. In
 a role's `[policy]`, `debounce_secs` holds a wake until no new event has arrived for that
 many seconds, so a burst of review comments becomes one wake, and at most five times that
-long after the first waiting event; it is 0 by default, and the role templates set 120. A reply from the board does not wait. `max_wakes_per_day` (12 by
-default) caps the wakes of one worker over the last 24 hours: a worker at its cap stays in
-Queued with the reason on its card, and you are notified once. Each card shows the wakes in
+long after the first waiting event; it is 0 by default, and the role templates set 120. A
+reply from the board, a due `request_wake` timer and a summary clone's request for a
+current handoff note do not wait. `max_wakes_per_day` (12 by default) caps the wakes of
+one worker over the last 24 hours: a worker at its cap stays in Queued with the reason on
+its card, and you are notified once. Each card shows the wakes in
 that window and an estimate of the tokens in the worker's session. A `/loop` that a role's
 prompt starts runs its own turns, which chargehand does not start: these limits do not
 count them, and no cap stops them.

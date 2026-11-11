@@ -49,6 +49,12 @@ const ACTION_LABELS = {
 const CLONE_MODE_HINTS = {
   fresh: 'Nothing from the old session: a new session with the prompt below',
   full: 'A copy of the old conversation, which goes on with the prompt below',
+  summary: 'A new session that first reads the handoff note of the old worker, then the prompt below',
+};
+const CLONE_ORIGIN_HINTS = {
+  fresh: 'Started fresh from the branch of ',
+  full: 'Started with a copy of the conversation of ',
+  summary: 'Started from the handoff note and the branch of ',
 };
 const FORCED = new Set(['continue', 'retry', 'discard', 'archive']);
 const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
@@ -272,7 +278,7 @@ function cardChildren(c, now) {
   top.append(el('span', 'chip state ' + c.state, shown));
   if (c.parent) {
     const parent = el('span', 'chip clone', 'clone of ' + c.parent.handle);
-    parent.title = (c.clone_mode === 'full' ? 'Started with a copy of the conversation of ' : 'Started fresh from the branch of ') +
+    parent.title = (CLONE_ORIGIN_HINTS[c.clone_mode] || CLONE_ORIGIN_HINTS.fresh) +
       c.parent.handle + ', in a worktree of its own';
     top.append(parent);
   }
@@ -332,6 +338,7 @@ function cardChildren(c, now) {
       : 'parked; no reset time given, continue resumes it'));
   }
   if (c.queue_reason) nodes.push(el('div', 'note', c.queue_reason));
+  if (c.clone_start) nodes.push(el('div', 'note', c.clone_start));
   if (c.job && (c.job.active || c.job.error)) {
     const job = el('div', 'note job ' + c.job.state, jobText(c.job));
     if (c.job.result_path) job.title = c.job.result_path;
@@ -934,7 +941,8 @@ async function openClone(c) {
   const panel = $('panel');
   const modes = el('div', 'modes');
   const radios = {};
-  for (const mode of ['fresh', 'full']) {
+  const refused = { full: form.full_refused, summary: form.summary_refused };
+  for (const mode of form.choices || ['fresh', 'full']) {
     const label = el('label', 'mode');
     const radio = el('input');
     radio.type = 'radio';
@@ -942,7 +950,7 @@ async function openClone(c) {
     radio.value = mode;
     radio.disabled = !form.modes.includes(mode);
     radio.checked = mode === 'fresh';
-    label.title = radio.disabled ? (form.full_refused || '') : CLONE_MODE_HINTS[mode];
+    label.title = radio.disabled ? (refused[mode] || '') : (CLONE_MODE_HINTS[mode] || '');
     label.append(radio, ' ' + mode);
     radios[mode] = radio;
     modes.append(label);
@@ -973,11 +981,14 @@ async function openClone(c) {
   const fields = [field('mode', modes), field('prompt', prompt), field('model', model), field('effort', effort)];
   if (form.item) fields.push(field('wakes on', kinds));
   const extra = [];
-  if (form.full_refused) extra.push(el('div', 'note', 'full: ' + form.full_refused));
+  for (const mode of Object.keys(refused)) {
+    if (refused[mode] && radios[mode]) extra.push(el('div', 'note', mode + ': ' + refused[mode]));
+  }
   // Only what differs from the role goes into the request, as on the command line.
   const role = form.role_values || {};
   const submit = () => {
-    const body = { mode: radios.full.checked ? 'full' : 'fresh' };
+    const chosen = Object.keys(radios).find((mode) => radios[mode].checked);
+    const body = { mode: chosen || 'fresh' };
     if (prompt.value.trim() && prompt.value.trim() !== (role.prompt || '').trim()) body.prompt = prompt.value;
     if (model.value.trim() && model.value.trim() !== role.model) body.model = model.value.trim();
     if (effort.value && effort.value !== role.effort) body.effort = effort.value;

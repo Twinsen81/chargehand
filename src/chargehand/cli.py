@@ -1040,7 +1040,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_item(clone)
     clone.add_argument(
         "--mode", required=True, choices=ledger_mod.CLONE_MODES,
-        help="fresh: nothing from the old session; full: a copy of its conversation",
+        help="fresh: nothing from the old session; full: a copy of its conversation; "
+             "summary: a new session that reads the old worker's handoff note first",
     )
     prompt = clone.add_mutually_exclusive_group()
     prompt.add_argument("--prompt", metavar="TEXT",

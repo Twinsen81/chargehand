@@ -532,7 +532,27 @@ idempotent, and the row's `step` advances after each one.
    effort chosen for it where it has them, filled in with its own worktree and branch;
    in full mode the session is a fork of the original's, with one line before the prompt
    that names the clone's worktree and branch and says that the original's worktree
-   belongs to another worker.
+   belongs to another worker. In summary mode the session is new and loads the mod; the
+   line before the prompt names the item (or the original's id handle), the
+   `read_handoff` tool, the clone's worktree and branch and the original's worktree, and
+   never the note itself. Right before the launch, the original's handoff note and its
+   time are copied into the clone's own row, so the tool gives the clone that note, and a
+   later note or a discard of the original does not change it. A note is current when it
+   was written at or after the start of the original's last turn (`working_since`, set at
+   the launch, at each wake and when the listing shows a turn that the operator started);
+   the end of the turn is never compared, because a note written in a turn is always
+   older than its end. When the note is not current and a wake can reach the original
+   (it has a session and is not ended or paused), this step waits: it puts one inbox
+   entry of kind `handoff` with the pointer
+   `write-a-current-note-with-the-handoff-tool-for-clone-<id>` into the original's inbox,
+   once per clone, and delivery wakes the original with it under the usual caps; the
+   `handoff` tool's description says that a wake line `handoff: ...` asks for a current
+   note in that turn. Waiting uses up no launch attempt, and the clone's card shows the
+   reason. After 10 minutes from the clone's creation, or at once when no wake can reach
+   the original, the clone starts from the stored note and its card says so; without any
+   note it fails. A summary clone that ends while it waits (cancel, discard, a failure)
+   takes its inbox entry back from the original and its line off its card, so the
+   original is not woken for it later.
    Starting inside a linked worktree means Claude Code does not create one of its own.
 6. Find the new session in the listing by name or working directory and record its ids.
    `state = running`. Looking it up rather than scraping the launch output is what makes
@@ -826,8 +846,10 @@ wake waits first for the role's `debounce_secs` (0 by default): until no new eve
 arrived for that long, so a burst of review comments becomes one wake, but at most five
 times that long after the oldest waiting event, so a steady stream of events, such as CI
 results during a long run, does not hold the worker for ever. A reply from the
-board and a due `request_wake` timer do not wait, because the operator waits for the
-answer and the worker chose the time itself; the waiting events go along with them. The
+board, a due `request_wake` timer and a summary clone's request for a current handoff
+note (section 5) do not wait, because the operator waits for the answer, the worker chose
+the time itself, and the clone's launch waits for the note; the waiting events go along
+with them. The
 wake must then pass admission: the number of working turns below `max_concurrent`, counted
 over the workers of all repositories, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
@@ -1035,7 +1057,7 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
-chargehand clone <ITEM> --mode fresh|full [--prompt TEXT | --prompt-file PATH] [--model M]
+chargehand clone <ITEM> --mode fresh|full|summary [--prompt TEXT | --prompt-file PATH] [--model M]
                  [--effort E] [--subscribe KIND]...   # a new worker from an existing one
 chargehand tick                     # run a tick now, under the tick lock
 chargehand serve                    # the daemon; `install` writes the job that runs it
@@ -1180,7 +1202,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   anything that needs a conversation goes through attach.
 - **Clone.** A clone is a new worker made from an existing one, for a second opinion, a
   retry with another prompt, or another model. `POST /api/workers/<id>/clone` takes
-  `mode` (`fresh`: nothing from the old session; `full`: a copy of its conversation),
+  `mode` (`fresh`: nothing from the old session; `full`: a copy of its conversation;
+  `summary`: a new session that reads the old worker's handoff note as a tool result),
   and optionally `prompt` (a prompt template, at most 16 KiB, cleaned of control
   sequences, with the same placeholders as a role's prompt), `model` (a model name or
   alias that does not start with `-`), `effort` (a level of the role file) and
@@ -1189,37 +1212,45 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   records the same request row, with origin `cli`. `GET /api/workers/<id>/clone`, a read
   without the token, answers what the card's clone form starts with: the worker's prompt
   template, model and effort (its role's, or for a clone the ones chosen for it), the
-  effort levels, the item, `modes` with `full` only while a copy is possible, and
-  `full_refused` with the reason otherwise. The form has a mode choice, the prompt as a
-  text area, the model, the effort and, for a worker with an item, the event kinds,
-  empty by default. A card offers Clone while the worker's worktree or branch exists:
-  not after garbage collection or an archive, nor while an archive of it runs.
+  effort levels, the item, `choices` with every mode, `modes` with `full` only while a
+  copy is possible and `summary` only while a start from the handoff note is, and
+  `full_refused` and `summary_refused` with the reason otherwise. The form has a mode
+  choice, the prompt as a text area, the model, the effort and, for a worker with an
+  item, the event kinds, empty by default. A card offers Clone while the worker's
+  worktree or branch exists: not after garbage collection or an archive, nor while an
+  archive of it runs.
   The tick checks the request again and refuses it, before any ledger row or worktree
   exists, when the repository is paused or unavailable, when the original's branch is
   gone, for full mode when the runtime cannot fork, the original has no session, or it
   is launching, running or blocked (a copy would take a turn in progress or an open
-  prompt), and when a cap or the usage reserve for new workers holds it. A clone has
-  origin `clone`, the original's role and item, and the id handle; the
-  one-worker-per-role-and-item rule does not hold it. It gets a new worktree and branch
-  (`<item>-<id>`) from the original's current branch (section 5), so the two never
-  write the same tree; when the original's worktree has uncommitted changes, the answer
-  says that they are not in the clone. By default it follows no event kinds, so it
+  prompt), for summary mode when the runtime's sessions do not load the chargehand mod
+  (no tool gives the note), when the original's note is not current and it is
+  launching, running or blocked ("clone it in summary mode once it is idle"), when it
+  has no note and no wake can reach it, or when the note is not current and the global
+  cap leaves no room for the original's turn next to the clone's launch (the waiting
+  clone counts as launching); and in every mode when a cap or the usage reserve for new
+  workers holds it. A clone has origin `clone`, the original's role and item, and the id
+  handle; the one-worker-per-role-and-item rule does not hold it. It gets a new worktree
+  and branch (`<item>-<id>`) from the original's current branch (section 5), so the two
+  never write the same tree; when the original's worktree has uncommitted changes, the
+  answer says that they are not in the clone. By default it follows no event kinds, so it
   costs nothing per comment and only a reply from the board reaches it. Its original,
-  mode, prompt, model and effort are columns of its ledger row (schema version 9), so
-  a launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a
-  new clone of the same original with them, or says why it cannot. A full-mode fork is
-  recorded as a `fork` session. A clone's session gets `Edit` and `Write` deny rules
-  for its original's worktree in its own settings file, in both modes, and for the
+  mode, prompt, model and effort are columns of its ledger row (schema version 9), so a
+  launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a new
+  clone of the same original with them, or says why it cannot. A full-mode fork is
+  recorded as a `fork` session; a summary clone's session is an `initial` one (section 5
+  describes its wait for a current note). A clone's session gets `Edit` and `Write` deny
+  rules for its original's worktree in its own settings file, in every mode, and for the
   worktree of every earlier original of a clone of a clone, because a copy of a copy
-  names them all; the line before a full-mode prompt names them all too. A deny rule holds
-  in every permission mode, so its file tools cannot change the original's tree, while
-  its Bash tool is not covered (SECURITY.md). The clone's branch holds the original's
-  commits, so its retry, discard and archive refuse while those are not pushed, unless
-  forced. In a repository group of one column a clone's card follows its original's
-  card, and a clone of a clone follows its own original, when both cards are pinned or
-  both are not: a pinned clone of an unpinned card stays with the pinned cards, and an
-  unpinned clone of a pinned card stays with the others, so the pinned cards still come
-  first. Every clone card carries "clone of <handle>".
+  names them all; the line before a full-mode prompt names them all too. A deny rule
+  holds in every permission mode, so its file tools cannot change the original's tree,
+  while its Bash tool is not covered (SECURITY.md). The clone's branch holds the
+  original's commits, so its retry, discard and archive refuse while those are not
+  pushed, unless forced. In a repository group of one column a clone's card follows its
+  original's card, and a clone of a clone follows its own original, when both cards are
+  pinned or both are not: a pinned clone of an unpinned card stays with the pinned cards,
+  and an unpinned clone of a pinned card stays with the others, so the pinned cards still
+  come first. Every clone card carries "clone of <handle>".
 - **Board personalisation.** Each column groups its cards by repository, under a heading
   with the repository's name, icon, card count and a collapse toggle. A repository can be
   renamed, given an icon, pinned, collapsed and hidden; a worker can be renamed, given an
@@ -1584,9 +1615,9 @@ Next:
   banksman.
 - Event sources (`github`, `linear`, `command`) that start workers and wake idle ones, with
   workers that subscribe to the pull requests and issues they follow.
-- Actions on the board: new worker, reply, pause, cancel, discard, clone in fresh or
-  full mode. A third clone mode that hands over a summary of the old session waits for
-  the handoff note.
+- Actions on the board: new worker, reply, pause, cancel, discard, clone in fresh,
+  full or summary mode; a summary clone starts a new session that reads the old
+  worker's handoff note through a tool.
 - Packaging, first release.
 - Optional: agents under a separate user.
 

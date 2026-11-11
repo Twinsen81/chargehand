@@ -211,6 +211,13 @@ SESSION_STILL_WORKING = "not collected, its session is still working"
 # The channel tool that gives a fresh session its worker's handoff note.
 HANDOFF_TOOL = "read_handoff"
 
+# How long a summary clone waits for a current handoff note of its original, from the
+# clone's creation. Then it starts from the note that is stored, or fails without one.
+SUMMARY_WAIT_SECS = 10 * 60
+# What a summary clone waits for, or how it started, for its card: chargehand's own text
+# under this prefix and the clone's id, in the ledger's state table.
+SUMMARY_STATE_PREFIX = "summary-clone:"
+
 # Names no branch, because the session chose the name and this text reaches the terminal,
 # the tick log, and whichever assistant ran the command.
 KEPT_BRANCH = (
@@ -296,6 +303,73 @@ def fork_refusal(worker: Worker) -> str | None:
     return None
 
 
+def note_is_current(worker: Worker) -> bool:
+    """Whether *worker*'s handoff note was written in its last turn or later.
+
+    The start of the turn decides, never its end: a note written during the turn is
+    always older than the turn's end.
+    """
+    if not worker.handoff_note or worker.handoff_at is None:
+        return False
+    since = worker.working_since or worker.last_wake_at or worker.created_at
+    return worker.handoff_at >= since
+
+
+def can_be_asked_for_a_note(worker: Worker) -> bool:
+    """Whether a wake can reach *worker*'s session, so that it writes a current note."""
+    return not (
+        worker.is_terminal or worker.gc_done or worker.archived_at is not None
+        or not worker.session_id or worker.state == ledger_mod.PAUSED
+    )
+
+
+def summary_refusal(worker: Worker, *, loads_mod: bool | None = None) -> str | None:
+    """Why a summary clone of *worker* cannot start now, or None when it can.
+
+    *loads_mod* says whether a session of the worker's runtime loads the chargehand mod,
+    whose tool gives the clone the note; without it, the runtime's capabilities decide.
+    """
+    if loads_mod is None:
+        try:
+            loads_mod = runtime_mod.get(worker.runtime).capabilities.in_place_wake
+        except ConfigError:
+            loads_mod = False
+    if not loads_mod:
+        return (
+            f"runtime {worker.runtime} does not load the chargehand mod, whose tool gives the "
+            f"handoff note; summary mode is not available"
+        )
+    if note_is_current(worker):
+        return None
+    if worker.state in FORK_BUSY_STATES:
+        why = (
+            "its handoff note is older than its current turn" if worker.handoff_note
+            else "has no handoff note yet"
+        )
+        return (
+            f"{worker.id_handle} is {worker.state} and {why}, so clone it in summary mode "
+            f"once it is idle"
+        )
+    if not worker.handoff_note and not can_be_asked_for_a_note(worker):
+        return f"{worker.id_handle} left no handoff note and cannot be asked for one"
+    return None
+
+
+def summary_request_id(clone: Worker) -> str:
+    """The dedupe id of the one request for a current note that *clone* puts into its
+    original's inbox."""
+    return f"handoff:clone-{clone.id}"
+
+
+def summary_request_pointer(clone: Worker) -> str:
+    """The pointer of *clone*'s request for a current note: chargehand's own words."""
+    return f"write-a-current-note-with-the-handoff-tool-for-clone-{clone.id}"
+
+
+class SummaryWait(ChargehandError):
+    """A summary clone's launch waits for a current handoff note of its original."""
+
+
 def ancestors(ledger: Ledger, worker: Worker) -> list[Worker]:
     """The worker a clone was made from, then that one's original, and so on.
 
@@ -313,28 +387,50 @@ def ancestors(ledger: Ledger, worker: Worker) -> list[Worker]:
     return found
 
 
+def _keep_out(originals: Sequence[Worker]) -> str:
+    paths = [original.worktree for original in originals]
+    keep_out = "do not change anything there."
+    if len(paths) == 1:
+        return f"The worktree {paths[0]} belongs to the other worker: {keep_out}"
+    named = f"{', '.join(paths[:-1])} and {paths[-1]}"
+    return f"The worktrees {named} belong to other workers: {keep_out}"
+
+
 def clone_note(worker: Worker, originals: Sequence[Worker]) -> str:
     """The line before a full-mode clone's prompt. Only paths and names chargehand chose."""
     lead = (
         f"This session continues a copy of another worker's conversation. From now on you "
         f"work in {worker.worktree} on branch {worker.branch}."
     )
-    paths = [original.worktree for original in originals]
-    keep_out = "do not change anything there."
-    if len(paths) == 1:
-        return f"{lead} The worktree {paths[0]} belongs to the other worker: {keep_out}"
-    named = f"{', '.join(paths[:-1])} and {paths[-1]}"
-    return f"{lead} The worktrees {named} belong to other workers: {keep_out}"
+    return f"{lead} {_keep_out(originals)}"
+
+
+def summary_note(worker: Worker, originals: Sequence[Worker]) -> str:
+    """The line before a summary clone's prompt: the item, the tool that gives the note,
+    and the paths. Only names and paths chargehand chose; the note itself is session text,
+    which the session reads as a tool result."""
+    original = originals[0]
+    work = worker.item or f"the work of {original.id_handle}"
+    lead = (
+        f"This is a new session for {work}, which the worker {original.id_handle} started. "
+        f"First call chargehand's {HANDOFF_TOOL} tool: it gives that worker's handoff note, "
+        f"with what is done and what is left. Go on from that note, and do not start the "
+        f"work again. You work in {worker.worktree} on branch {worker.branch}."
+    )
+    return f"{lead} {_keep_out(originals)}"
 
 
 def launch_prompt(
     worker: Worker, template: str, originals: Sequence[Worker], *, where: str
 ) -> str:
     """The first prompt of *worker*'s session: *template* filled in with the worker's own
-    values, after the note of a full-mode clone. *originals* are its :func:`ancestors`."""
+    values, after the note of a full-mode or a summary clone. *originals* are its
+    :func:`ancestors`."""
     prompt = config_mod.render(template, template_values(worker), where=where)
     if worker.clone_mode == ledger_mod.CLONE_FULL and originals:
         return f"{clone_note(worker, originals)}\n\n{prompt}"
+    if worker.clone_mode == ledger_mod.CLONE_SUMMARY and originals:
+        return f"{summary_note(worker, originals)}\n\n{prompt}"
     return prompt
 
 
@@ -876,6 +972,10 @@ class Runner:
                 self._run_launch_steps(context, worker, report)
             except LaunchAborted:
                 raise
+            except SummaryWait as exc:
+                # Waiting for the original's note is not a failed attempt: give it back.
+                self.ledger.update(worker, launch_attempts=before)
+                report.skipped.append(str(exc))
             except TRACKER_FAILURES as exc:
                 # A tracker outage is not this worker's fault. Give the retry back,
                 # otherwise three unlucky ticks fail a launch that never went wrong.
@@ -1365,6 +1465,19 @@ class Runner:
             worker = launch()
         except LaunchAborted:
             raise
+        except SummaryWait as exc:
+            created = getattr(exc, "worker", None)
+            if created is None:
+                raise
+            # The row starts with its first attempt counted. Waiting for the note is not an
+            # attempt, so reconciliation counts the launch once it really runs.
+            row = self.ledger.get(created.id) or created
+            self.ledger.update(row, launch_attempts=max(0, row.launch_attempts - 1))
+            report.skipped.append(str(exc))
+            return True, (
+                f"created {created.handle}; its session starts once its original has written "
+                f"a current handoff note"
+            )
         except ChargehandError as exc:
             # The row exists, so reconciliation resumes the launch on the next tick, as it
             # resumes any launch that stopped part way.
@@ -1420,6 +1533,10 @@ class Runner:
             refusal = fork_refusal(original)
             if refusal is not None:
                 return False, refusal
+        if mode == ledger_mod.CLONE_SUMMARY:
+            refusal = summary_refusal(original, loads_mod=self._summary_capable(original))
+            if refusal is not None:
+                return False, refusal
         try:
             role = context.role(original.role)
         except ConfigError as exc:
@@ -1427,6 +1544,8 @@ class Runner:
         refusal = self._launch_refusal(
             repository, role, original.item or f"clone of {name}", by_hand=True
         )
+        if refusal is None and mode == ledger_mod.CLONE_SUMMARY:
+            refusal = self._summary_room(original)
         if refusal is not None:
             return False, refusal
         try:
@@ -1446,16 +1565,47 @@ class Runner:
             values["model"] or "of the role", values["effort"] or "of the role",
         )
         item = context.item_of(original) if original.item else None
-        ok, outcome = self._launch_by_hand(
-            lambda: self._launch(
+        launched: list[Worker] = []
+
+        def launch() -> Worker:
+            launched.append(self._launch(
                 context, role, None, item, report, origin=ledger_mod.ORIGIN_CLONE, kinds=kinds,
                 clone=values,
-            ),
-            report,
-        )
+            ))
+            return launched[0]
+
+        ok, outcome = self._launch_by_hand(launch, report)
         if ok and dirty:
             outcome += f"; the uncommitted changes in the worktree of {name} are not in the clone"
+        if ok and launched and launched[0].clone_mode == ledger_mod.CLONE_SUMMARY:
+            # A clone that started from a note older than its original's last turn says so.
+            started = self.ledger.get_state(f"{SUMMARY_STATE_PREFIX}{launched[0].id}")
+            if started:
+                outcome += f"; {started}"
         return ok, outcome
+
+    def _summary_capable(self, original: Worker) -> bool:
+        """Whether a new session of *original*'s runtime loads the chargehand mod."""
+        try:
+            runtime = self.runtime(original.runtime)
+        except ConfigError:
+            return False
+        return runtime.capabilities.in_place_wake and self._loads_mod(runtime)
+
+    def _summary_room(self, original: Worker) -> str | None:
+        """Why the global cap leaves no room for the turn that writes *original*'s current
+        note next to the clone's launch, or None. Both count as working while the clone
+        waits, so with one place left the turn would wait until the clone gives up."""
+        if note_is_current(original) or not can_be_asked_for_a_note(original):
+            return None
+        working, _, _ = self._counts()
+        if working + 2 <= self.config.max_concurrent:
+            return None
+        return (
+            f"{original.id_handle}: its handoff note is older than its last turn, and the "
+            f"global cap ({working}/{self.config.max_concurrent} working) leaves no room for "
+            f"the turn that writes a current note next to the clone's launch"
+        )
 
     def _clone_base(self, original: Worker) -> str | None:
         """The branch a clone of *original* starts from: the branch its worktree is on now,
@@ -2881,6 +3031,10 @@ class Runner:
 
     def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
         """Wake each idle worker once, for every event waiting in its inbox."""
+        # A summary clone that a request of this tick ended no longer waits for a note, and
+        # it no longer holds a place under the global cap: its original must not be woken
+        # for it now.
+        self._forget_summary_waits()
         idle_before = {w.id for w in self.ledger.workers_in_state([ledger_mod.IDLE])}
         result = delivery_mod.Delivery(
             self.ledger,
@@ -3756,6 +3910,10 @@ class Runner:
                 )
             originals = ancestors(self.ledger, worker)
             parent = originals[0] if originals else None
+            if worker.clone_mode == ledger_mod.CLONE_SUMMARY:
+                worker = self._summary_start(context, worker, parent, runtime, report)
+                if worker.state == ledger_mod.FAILED:
+                    return worker
             prompt = launch_prompt(
                 worker,
                 worker.prompt or role.prompt,
@@ -3811,6 +3969,95 @@ class Runner:
         )
         report.launched.append(worker.handle)
         return worker
+
+    def _summary_start(
+        self,
+        context: RepositoryContext,
+        clone: Worker,
+        original: Worker | None,
+        runtime: Runtime,
+        report: TickReport,
+    ) -> Worker:
+        """Get a summary clone ready for its launch: copy its original's handoff note into
+        the clone's own, once the note is current.
+
+        A stale note of an original that a wake can reach is asked for again first: one
+        inbox entry, which delivery turns into a wake line, while the clone waits with
+        :class:`SummaryWait`. After :data:`SUMMARY_WAIT_SECS`, or when no wake can reach the
+        original, the clone starts from the stored note and its card says so; without any
+        note it fails. The copy makes the clone's read tool independent of the original: a
+        later note of the original, or its discard, does not change what the clone reads.
+        The note is session text: it goes from row to row and never into a log line.
+        """
+        if original is None:
+            return self._fail_worker(
+                clone, context, "the worker it clones is no longer recorded", report,
+                notify_detail="the original is gone",
+            )
+        if not (runtime.capabilities.in_place_wake and self._loads_mod(runtime)):
+            # Without the mod the session has no tool that gives the note. A copy of the mod
+            # that could not be written may work on a later attempt.
+            raise AgentRuntimeError(
+                f"{clone.handle}: a session of runtime {clone.runtime} would not load the "
+                f"chargehand mod, whose tool gives the handoff note"
+            )
+        key = f"{SUMMARY_STATE_PREFIX}{clone.id}"
+        dedupe = summary_request_id(clone)
+        stale = None
+        if not note_is_current(original):
+            reachable = can_be_asked_for_a_note(original)
+            if reachable and time.time() - clone.created_at < SUMMARY_WAIT_SECS:
+                if self._ask_for_note(original, clone, dedupe):
+                    log.info("%s: asked %s for a current handoff note", clone.handle,
+                             original.handle)
+                reason = (
+                    f"waits for a current handoff note of {original.id_handle}, which "
+                    f"chargehand asked it for"
+                )
+                self.ledger.set_state(key, reason)
+                raise SummaryWait(f"{clone.handle} {reason}")
+            if not original.handoff_note:
+                self.ledger.drop_pending(original.id, ledger_mod.HANDOFF_SOURCE, dedupe)
+                self.ledger.delete_state(key)
+                return self._fail_worker(
+                    clone, context, f"{original.id_handle} wrote no handoff note to start from",
+                    report, notify_detail="no handoff note to start from",
+                )
+            stale = (
+                f"started from the stored handoff note of {original.id_handle}, which is "
+                f"older than its last turn"
+            )
+            if reachable:
+                stale += f"; no current note came within {SUMMARY_WAIT_SECS // 60} minutes"
+        # A current note came without the wake, such as in a turn for another event.
+        self.ledger.drop_pending(original.id, ledger_mod.HANDOFF_SOURCE, dedupe)
+        clone = self.ledger.update(
+            clone, handoff_note=original.handoff_note, handoff_at=original.handoff_at
+        )
+        if stale is None:
+            self.ledger.delete_state(key)
+        else:
+            self.ledger.set_state(key, stale)
+            report.warnings.append(f"{clone.handle}: {stale}")
+            log.info("%s: %s", clone.handle, stale)
+        return clone
+
+    def _ask_for_note(self, original: Worker, clone: Worker, dedupe: str) -> bool:
+        """Put the request for a current handoff note into *original*'s inbox, once per
+        clone. Delivery wakes it as for any event, under the same caps."""
+        now = time.time()
+        key = original.item or original.handle
+        return self.ledger.enqueue(original.id, Event(
+            source=ledger_mod.HANDOFF_SOURCE,
+            kind=ledger_mod.HANDOFF_KIND,
+            item=WorkItem(source=ledger_mod.HANDOFF_SOURCE, key=key, ref=original.item_id or key),
+            actor=ledger_mod.HANDOFF_SOURCE,
+            occurred_at=now,
+            dedupe_id=dedupe,
+            # The wake line is "handoff: <pointer>", so the pointer says in plain words
+            # what the turn is for; it is a plain identifier, as every pointer.
+            pointer=summary_request_pointer(clone),
+        ), now=now)
 
     def _launch_spec(
         self, worker: Worker, role: Role, prompt: str, originals: Sequence[Worker]
@@ -3918,6 +4165,24 @@ class Runner:
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
         self._forget_checkout_heads()
+        self._forget_summary_waits()
+
+    def _forget_summary_waits(self) -> None:
+        """Drop what an ended summary clone left: its card line, and its request for a
+        current note in its original's inbox, which would otherwise still wake the
+        original for a clone that no longer waits."""
+        for key in self.ledger.all_state():
+            if not key.startswith(SUMMARY_STATE_PREFIX):
+                continue
+            worker_id = key.removeprefix(SUMMARY_STATE_PREFIX)
+            clone = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            if clone is not None and not clone.is_terminal and not clone.gc_done:
+                continue
+            if clone is not None and clone.parent_id is not None:
+                self.ledger.drop_pending(
+                    clone.parent_id, ledger_mod.HANDOFF_SOURCE, summary_request_id(clone)
+                )
+            self.ledger.delete_state(key)
 
     def _collect(
         self, worker: Worker, report: TickReport, *, force: bool = False, **changes: object

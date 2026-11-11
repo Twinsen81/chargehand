@@ -308,7 +308,8 @@ REGISTRY: tuple[Tool, ...] = (
         "handoff",
         "Write your handoff note: what you did, what is left, and where things are, so that a "
         "later session can go on from it. Call it at the end of every turn, so the note stays "
-        "current. A later call replaces it.",
+        "current. A later call replaces it. A wake line 'handoff: ...' asks for a current note "
+        "now: call handoff in that turn.",
         _schema({"note": _TEXT}, ("note",)),
         _handoff,
     ),
