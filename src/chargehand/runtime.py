@@ -118,6 +118,7 @@ class Capabilities:
 
 # What a session hook reports, in every runtime's terms.
 HOOK_SESSION_START = "session_start"
+HOOK_TURN_START = "turn_start"
 HOOK_TURN_END = "turn_end"
 HOOK_TURN_FAILED = "turn_failed"
 HOOK_PERMISSION = "permission"
@@ -282,6 +283,15 @@ class Runtime(ABC):
         The result goes through the same transitions as a session hook.
         """
         return None
+
+    @classmethod
+    def reports_turn_starts(cls, worktree: Path) -> bool:
+        """Whether the session in *worktree* posts a hook when a turn starts.
+
+        Without that hook, a session that the listing shows working after its turn ended
+        has started a new turn, as far as chargehand can tell.
+        """
+        return False
 
     @classmethod
     def permission_hold_secs(cls, worktree: Path) -> float | None:

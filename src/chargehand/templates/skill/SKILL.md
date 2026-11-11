@@ -73,7 +73,9 @@ chargehand tick                             # run a tick now
   and chooses `chargehand continue <ITEM> --force`, which accepts it, or `discard`. Give
   the user both; run neither.
 - `session_state` is what Claude Code reports: `working`, `blocked`, `done`,
-  `failed`, `stopped`, `missing`, `unknown`.
+  `failed`, `stopped`, `missing`, `unknown`. `background` means the turn ended but a
+  background shell of that turn still runs, so Claude Code lists the session as working;
+  the worker keeps the state of its turn end, usually `idle`.
 - `waiting: true` means the session asked something. Why it is waiting is the question
   itself, which only the session shows; tell the user to attach.
 - `recent` lists workers that have ended. None of them is waiting for an answer.

@@ -63,6 +63,7 @@ from chargehand.runtime import (
     HOOK_PERMISSION,
     HOOK_SESSION_START,
     HOOK_TURN_END,
+    HOOK_TURN_START,
     HOOK_TURN_FAILED,
     CHECK_FAIL,
     CHECK_OK,
@@ -1220,8 +1221,14 @@ def parse_mod_post(event: str, payload: Mapping[str, Any]) -> Hook | None:
 
 # The settings hooks every session posts to the daemon. Claude Code sends an http hook
 # itself, and runs a command hook outside the Bash tool, so the deny rules for the
-# daemon's port stop neither.
-HOOK_EVENTS = ("SessionStart", "Stop", "StopFailure", "Notification", "PermissionRequest")
+# daemon's port stop neither. UserPromptSubmit marks the start of a turn: the listing shows
+# a session with a background shell as working after its turn ended, so only a hook tells
+# a new turn from that shell. Its post never reads the prompt, and the daemon answers it
+# with an empty object, which adds nothing to the turn.
+TURN_START_HOOK = "UserPromptSubmit"
+HOOK_EVENTS = (
+    "SessionStart", TURN_START_HOOK, "Stop", "StopFailure", "Notification", "PermissionRequest",
+)
 # Observed in Claude Code 2.1.312: SessionStart skips an http hook ("HTTP hooks are not
 # supported for SessionStart") and runs only command hooks. That event goes through
 # hook_post.py, which reads the token from its file and posts the payload.
@@ -1514,8 +1521,9 @@ def _zone(name: str | None):
 def parse_hook(event: str, payload: Mapping[str, Any], now: float | None = None) -> Hook | None:
     """A Claude Code hook post, read into a :class:`~chargehand.runtime.Hook`.
 
-    Read on every event: ``session_id``, ``cwd`` and ``transcript_path``. Stop and
-    StopFailure: ``last_assistant_message``; StopFailure also ``error`` and
+    Read on every event: ``session_id``, ``cwd`` and ``transcript_path``. UserPromptSubmit:
+    nothing more; its ``prompt`` is never read. Stop and StopFailure:
+    ``last_assistant_message``; StopFailure also ``error`` and
     ``error_details``. Notification: ``notification_type``. PermissionRequest:
     ``tool_name`` and ``tool_input``. SessionStart: ``source``. Each is untrusted text,
     and is cleaned and capped here.
@@ -1531,6 +1539,8 @@ def parse_hook(event: str, payload: Mapping[str, Any], now: float | None = None)
     if event == "SessionStart":
         return Hook(kind=HOOK_SESSION_START, observed=WORKING,
                     source=_text(payload, "source", 40), **common)
+    if event == TURN_START_HOOK:
+        return Hook(kind=HOOK_TURN_START, observed=WORKING, **common)
     if event == "Stop":
         return Hook(kind=HOOK_TURN_END, observed=DONE,
                     last_answer=_text(payload, "last_assistant_message", LAST_ANSWER_LIMIT),
@@ -1668,6 +1678,17 @@ class ClaudeRuntime(Runtime):
     @classmethod
     def parse_channel(cls, event: str, payload: Mapping[str, Any]) -> Hook | None:
         return parse_mod_post(event, payload)
+
+    @classmethod
+    def reports_turn_starts(cls, worktree: Path) -> bool:
+        """From the hooks in the session's settings file: a session launched before the
+        UserPromptSubmit hook existed keeps the hooks of its launch, through every resume."""
+        try:
+            settings = json.loads(settings_file_for(worktree).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        hooks = settings.get("hooks") if isinstance(settings, dict) else None
+        return isinstance(hooks, dict) and TURN_START_HOOK in hooks
 
     @classmethod
     def permission_hold_secs(cls, worktree: Path) -> float | None:

@@ -20,6 +20,10 @@ max_open_workers = 4
 max_run_hours = 6
 hard_stop_hours = 10
 
+# A turn that ended while a background shell runs: the worker stays idle, and after this
+# many minutes without a new turn you are notified. 0 never notifies.
+background_shell_mins = 30
+
 worktree_root = "~/chargehand-worktrees"
 
 # Warn when the worktree root's filesystem drops below this.
