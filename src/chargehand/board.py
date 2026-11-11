@@ -27,7 +27,7 @@ before; only their cards leave the page until the operator asks to see them.
 
 A clone of a worker is a request like the others. ``GET /api/workers/<id>/clone`` answers
 what its form starts with: the prompt template, model and effort the worker started with,
-and whether a copy of its session is possible now. The edited prompt is operator text: it is
+and whether a copy of its session, or a start from its handoff note, is possible now. The edited prompt is operator text: it is
 checked and capped by :func:`chargehand.clone.clone_args`, as the command line checks it.
 A clone's card follows its original's in a repository group of one column.
 
@@ -79,8 +79,10 @@ from chargehand.tick import (
     NEW_WORKER,
     REPLY,
     REQUEST_MESSAGE_LIMIT,
+    SUMMARY_STATE_PREFIX,
     UNARCHIVE_REPOSITORY,
     fork_refusal,
+    summary_refusal,
     ancestors,
     launch_prompt,
 )
@@ -431,8 +433,10 @@ def clone_form(request: Request) -> Response:
     """``GET /api/workers/<id>/clone``: what the clone form of a card starts with.
 
     The prompt template, model and effort are the worker's own: its role's, or for a clone
-    the ones chosen for it. ``modes`` lists ``full`` only while a copy of the session is
-    possible, and ``full_refused`` says why not otherwise. The tick checks all of it again.
+    the ones chosen for it. ``choices`` lists every mode; ``modes`` lists ``full`` only
+    while a copy of the session is possible, and ``summary`` only while a start from the
+    handoff note is; ``full_refused`` and ``summary_refused`` say why not otherwise. The
+    tick checks all of it again.
     """
     parts = _segments(request, "/api/workers")
     if len(parts) != 2 or not parts[0].isdigit() or parts[1] != CLONE:
@@ -448,6 +452,7 @@ def clone_form(request: Request) -> Response:
     if role is None:
         raise HTTPError(409, f"role {worker.role} of {worker.id_handle} does not load")
     full = fork_refusal(worker)
+    summary = summary_refusal(worker)
     form = {
         "id": worker.id,
         "handle": worker.target,
@@ -459,8 +464,12 @@ def clone_form(request: Request) -> Response:
         # A value equal to the role's is not sent, so the clone keeps following its role.
         "role_values": {"prompt": role.prompt, "model": role.model, "effort": role.effort},
         "efforts": list(roles_mod.EFFORT_LEVELS),
-        "modes": [ledger_mod.CLONE_FRESH] + ([] if full else [ledger_mod.CLONE_FULL]),
+        "choices": list(ledger_mod.CLONE_MODES),
+        "modes": [ledger_mod.CLONE_FRESH] + ([] if full else [ledger_mod.CLONE_FULL]) + (
+            [] if summary else [ledger_mod.CLONE_SUMMARY]
+        ),
         "full_refused": full,
+        "summary_refused": summary,
         "subscribe": [],
         "prompt_limit": clone_mod.PROMPT_LIMIT,
     }
@@ -1073,6 +1082,13 @@ def card(
             sanitize.one_line(reason, limit=LINE_LIMIT)
             if worker.state in (ledger_mod.QUEUED, ledger_mod.PARKED, ledger_mod.BLOCKED)
             and (reason := ledger.get_state(f"{QUEUE_REASON_PREFIX}{worker.id}"))
+            else None
+        ),
+        # What a summary clone waits for, or that it started from an older note.
+        "clone_start": (
+            sanitize.one_line(note, limit=LINE_LIMIT)
+            if worker.clone_mode == ledger_mod.CLONE_SUMMARY
+            and (note := ledger.get_state(f"{SUMMARY_STATE_PREFIX}{worker.id}"))
             else None
         ),
         "last_hook": worker.last_hook,
