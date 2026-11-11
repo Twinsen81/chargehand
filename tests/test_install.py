@@ -278,6 +278,19 @@ def test_doctor_warns_when_the_launch_deny_rules_cannot_be_passed(capsys, config
     assert checks["launch deny rules"]["status"] == install.OK
 
 
+def test_doctor_names_a_role_that_still_sets_the_status_file(capsys, config_file, harness, repo):
+    (repo / ".chargehand.toml").write_text(
+        'base = "origin/main"\nprompt = "{issue}"\nstatus_file = "/tmp/status/{issue}.json"\n'
+    )
+
+    main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
+
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
+    note = checks["repository test role implementer status_file"]
+    assert note["status"] == install.INFO and "deprecated" in note["detail"]
+    assert checks["repository test role implementer"]["status"] == install.OK
+
+
 def test_doctor_names_a_setting_that_is_ignored(capsys, tmp_path, repo, harness):
     from conftest import write_machine_config
 

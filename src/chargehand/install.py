@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from chargehand import __version__, paths
 from chargehand import roles as roles_mod
 from chargehand import runtime as runtime_mod
 from chargehand import serve
+from chargehand import usage as usage_mod
 from chargehand.config import MachineConfig, load_repo_config
 from chargehand.errors import ChargehandError, ConfigError
 from chargehand.gitutil import Git
@@ -397,6 +399,8 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
     else:
         checks.append(Check("notify", WARN, "no notify.command configured; nothing will reach you"))
 
+    checks.append(usage_check(config))
+
     for repository in config.repositories:
         label = f"repository {repository.name}"
         if not repository.path.exists():
@@ -448,6 +452,16 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
                 checks.append(Check(role_label, WARN, detail + " · no start rule, so nothing starts it on its own"))
             else:
                 checks.append(Check(role_label, OK, detail))
+            if role.status_file:
+                checks.append(
+                    Check(
+                        f"{role_label} status_file",
+                        INFO,
+                        "status_file is deprecated: it still works in this release and goes "
+                        "away in a later one; a worker reports with the report tool and asks "
+                        "with the ask tool",
+                    )
+                )
         if check_trackers:
             try:
                 tracker = build_tracker(repository)
@@ -494,6 +508,51 @@ def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list
         )
     checks.extend(daemon_checks(config))
     return checks
+
+
+def _age(secs: float) -> str:
+    if secs < 60:
+        return "less than a minute"
+    if secs < 3600:
+        return f"{secs // 60:.0f} min"
+    if secs < 2 * 86400:
+        return f"{secs // 3600:.0f} h"
+    return f"{secs // 86400:.0f} days"
+
+
+def usage_check(config: MachineConfig, now: float | None = None) -> Check:
+    """Which source wrote the last usage reading, how old it is, and what it says.
+
+    A reading older than three poll intervals while the daemon asks Claude Code is a
+    warning: the requests fail, or the daemon does not run.
+    """
+    current = time.time() if now is None else now
+    path = config.serve.usage_file
+    poll = config.usage.poll_secs
+    reading = usage_mod.read_usage(path, current)
+    if not reading["known"]:
+        how = (f"the daemon asks Claude Code every {poll}s" if poll
+               else "poll_secs in [usage] is 0, so only the status line wrapper and the "
+               "worker sessions write one")
+        return Check("usage", INFO, f"no reading in {path} yet; {how}; without a reading there is no reserve")
+    age = max(0.0, current - float(reading["written_at"]))  # type: ignore[arg-type]
+    source = reading["source"] or "unknown"
+    weekly = reading[usage_mod.WINDOWS[0]]
+    used = weekly.get("used_percent") if isinstance(weekly, Mapping) else None
+    resets = weekly.get("resets_at") if isinstance(weekly, Mapping) else None
+    what = (
+        f"weekly {used:.0f}% until {time.strftime('%a %d %b %H:%M', time.localtime(resets))}"
+        if isinstance(used, float) and isinstance(resets, float)
+        else "no current weekly window"
+    )
+    detail = f"{what} · source {source} · {_age(age)} old"
+    if poll and age > 3 * poll:
+        return Check(
+            "usage", WARN,
+            f"{detail}; older than three poll intervals ({poll}s): get_usage gives no "
+            "reading, or the daemon does not run; see the daemon log",
+        )
+    return Check("usage", OK, detail)
 
 
 def import_checks(config: MachineConfig) -> list[Check]:

@@ -33,10 +33,12 @@ runner's status and, with the user's approval, steers it.
 4. **`discard` destroys work.** It removes the session, the worktree, and the local
    branch. It refuses when commits are unpushed. Never pass `--force` to it or to any
    other command: `--force` overrides a check that the user must make.
-5. **You cannot answer a session's question from here.** A blocked worker shows
-   `waiting: true` and an `attach` command. Give the user that command, or point them
-   to `claude agents`, and let them answer there. Do not fetch the question in order
-   to answer it through the CLI.
+5. **You cannot answer a worker's question from here.** A worker that needs an answer
+   has `state: blocked` and an `attach` command. A question that it asked with its `ask`
+   tool is on its card on the board, with its options; a prompt or a question that the
+   session shows itself (`waiting: true`) is answered in the session. Point the user to
+   the board, or give them the `attach` command or `claude agents`, and let them answer
+   there. Do not fetch the question in order to answer it through the CLI.
 6. **Name the role when the item is ambiguous.** Several roles can hold one item. When
    a command answers that the item has live workers in several roles, repeat it with
    `--role <role>`; never pick a role the user did not name.
@@ -55,7 +57,7 @@ chargehand stop <ITEM> [--role <role>]      # pause one worker
 chargehand continue <ITEM> [--role <role>]  # respawn it
 chargehand retry <ITEM> [--role <role>]     # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes [--role <role>]  # remove session, worktree, and branch
-chargehand clone <ITEM> --mode fresh|full [--role <role>]  # a new worker from this one
+chargehand clone <ITEM> --mode fresh|full|summary [--role <role>]  # a new worker from this one
 chargehand tick                             # run a tick now
 ```
 
@@ -65,7 +67,8 @@ chargehand tick                             # run a tick now
 - `state` is the worker: `launching`, `running`, `idle`, `queued`, `blocked`, `paused`,
   `parked`, `done`, `failed`, `cancelled`. `idle` means its turn ended and it waits for
   events on the items it follows; `queued` means events wait for it and the wake is held
-  back, by a cap or because its checkout could not be refreshed. `parked` means the
+  back, by a cap, by the role's debounce, or because its checkout could not be refreshed.
+  `parked` means the
   account's usage limit ended its turn; it waits for the reset, and nothing wakes it.
   The user may choose `chargehand continue <ITEM>` after the reset.
 - `paused` with a `last_error` that starts with `wake refused` means the worker's own
@@ -73,9 +76,13 @@ chargehand tick                             # run a tick now
   and chooses `chargehand continue <ITEM> --force`, which accepts it, or `discard`. Give
   the user both; run neither.
 - `session_state` is what Claude Code reports: `working`, `blocked`, `done`,
-  `failed`, `stopped`, `missing`, `unknown`.
-- `waiting: true` means the session asked something. Why it is waiting is the question
-  itself, which only the session shows; tell the user to attach.
+  `failed`, `stopped`, `missing`, `unknown`. `background` means the turn ended but a
+  background shell of that turn still runs, so Claude Code lists the session as busy;
+  the worker keeps the state of its turn end, usually `idle`.
+- `waiting: true` means the session shows a prompt or a question of its own. Why it is
+  waiting is session text, which only the session shows; tell the user to attach. A
+  worker that asked with its `ask` tool is `blocked` without it, and its question is on
+  its card on the board.
 - `recent` lists workers that have ended. None of them is waiting for an answer.
 - `label_state` is the tracker label that chargehand last confirmed. A failed or
   cancelled run keeps the blocked label until the user retries or discards it, so that
@@ -84,5 +91,5 @@ chargehand tick                             # run a tick now
 - A finished turn makes a worker `idle`, not `done`, for every role: it waits for
   events. `idle` does not mean "succeeded"; the user may look at what the turn left.
   `idle` and `queued` send no notification; `status` and the board show them.
-  A worker becomes `done` when its item is closed, or when a status file says
-  `complete`.
+  A worker becomes `done` when its item is closed, when its session reports `done`
+  with the `report` tool, or when a status file (deprecated) says `complete`.

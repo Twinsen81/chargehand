@@ -232,9 +232,13 @@ def test_launch_settings_carry_the_deny_rules_and_the_roles_allow_rules():
     settings = launch_settings(role.options, DEFAULT_DENY_RULES)
 
     assert settings == {
-        "permissions": {"deny": list(DEFAULT_DENY_RULES), "allow": ["Bash(gh pr *)"]}
+        "permissions": {
+            "deny": [*DEFAULT_DENY_RULES, "AskUserQuestion"], "allow": ["Bash(gh pr *)"],
+        }
     }
-    assert launch_settings(Role(name="r", prompt="{item}").options, ()) is None
+    assert launch_settings(Role(name="r", prompt="{item}").options, ()) == {
+        "permissions": {"deny": ["AskUserQuestion"]}
+    }
 
 
 def test_role_names_are_kept_boring():

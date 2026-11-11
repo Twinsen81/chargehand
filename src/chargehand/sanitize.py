@@ -55,6 +55,32 @@ def one_line(text: str, *, limit: int = 120) -> str:
     return cleaned[: limit - 1] + "…"
 
 
+# Format characters, such as the zero-width ones and the tags, and private-use and
+# surrogate code points.
+_UNSEEN_CATEGORIES = frozenset(("Cf", "Co", "Cs"))
+# Fillers, variation selectors and the code points that a display ignores although they
+# are not assigned, as ranges: no reader sees them, a run of them can carry hidden text,
+# and their categories are not the ones above. Any other unassigned code point stays: a
+# character that is newer than this Python's tables, such as a new emoji, is one.
+_UNSEEN_RANGES = (
+    (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x2065, 0x2065),
+    (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0xE0000, 0xE0FFF),
+)
+
+
+def visible(text: str) -> str:
+    """*text* without the characters that a reader cannot see.
+
+    For text that a session wrote and that the operator may send back as their own words,
+    such as an option of a question: what a button shows is then what its click sends.
+    """
+    return "".join(
+        character for character in text
+        if unicodedata.category(character) not in _UNSEEN_CATEGORIES
+        and not any(low <= ord(character) <= high for low, high in _UNSEEN_RANGES)
+    )
+
+
 def safe_url(value: object, *, limit: int = 500) -> str | None:
     """Return *value* only if it really is an ordinary http(s) URL.
 

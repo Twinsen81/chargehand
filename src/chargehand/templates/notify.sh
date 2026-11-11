@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # chargehand notification hook.
 #
-# Called once when a worker needs you or ends: blocked, parked, failed, done through the
-# status file, and the watchdog states. A turn end that waits for events (idle) and a
-# worker whose item closed are not notified; `status` shows them. These variables are set:
+# Called once when a worker needs you or ends: blocked, parked, failed, done through a
+# report or the status file, the watchdog states, and the daily wake cap. A turn end that
+# waits for events and a worker whose item closed are not notified; `status` shows them.
+# One exception: a worker whose turn ended while a background shell of that turn still
+# runs is notified once, with the state idle, after background_shell_mins. These
+# variables are set:
 #
 #   CHARGEHAND_ITEM    the work item (an issue identifier); for a worker started on the
 #                      board, its handle with its id instead, such as implementer/ABC-1#7
 #   CHARGEHAND_ROLE    the worker's role
 #   CHARGEHAND_ISSUE   the same as CHARGEHAND_ITEM, kept for older hooks
 #   CHARGEHAND_STATE   blocked | parked | done | failed | cancelled | long-running |
-#                      watchdog-stopped | wake-fault | ...
+#                      watchdog-stopped | wake-fault | daily-cap | idle | ...
 #   CHARGEHAND_URL     the issue URL, when the tracker provides one
 #   CHARGEHAND_REPOSITORY  the repository name (CHARGEHAND_ROUTE carries the same)
 #   CHARGEHAND_DETAIL  a short chargehand-generated reason
 #
 # There is no question text and no agent output here on purpose: this payload usually
-# crosses a third-party relay. To read the question, attach to the session.
+# crosses a third-party relay. To read the question, open the board or attach to the session.
 #
 # Exit non-zero when a notification did not go out. The runner logs it and sends a
 # session's new state again on the next tick.

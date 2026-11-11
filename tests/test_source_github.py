@@ -971,3 +971,41 @@ def test_an_unreadable_cursor_starts_again(source, gh, cursor):
 
     assert [e.kind for e in events] == ["review_requested"]
     assert json.loads(fresh)["next_poll_at"] == NOW + 60
+
+
+# ----- an item a worker asks to follow -----------------------------------------------
+
+
+@pytest.mark.parametrize("text, key, ref, url", [
+    ("https://github.com/octo/app/pull/7", "octo_app_7", "octo/app#7", "https://github.com/octo/app/pull/7"),
+    ("https://github.com/octo/app/pull/7#issuecomment-1", "octo_app_7", "octo/app#7",
+     "https://github.com/octo/app/pull/7"),
+    ("https://github.com/Octo/App/issues/12", "octo_app_12", "Octo/App#12",
+     "https://github.com/Octo/App/issues/12"),
+    ("octo/app#7", "octo_app_7", "octo/app#7", "https://github.com/octo/app/issues/7"),
+])
+def test_a_url_or_a_reference_names_an_item(source, gh, text, key, ref, url):
+    item = source.item_for(text)
+
+    assert (item.source, item.key, item.ref, item.url) == ("github", key, ref, url)
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize("text", [
+    "", "octo_app_7", "https://example.com/octo/app/pull/7", "http://github.com/octo/app/pull/7",
+    "https://github.com/octo/app/pulls/7", "https://github.com/octo/app/pull/x",
+    "https://github.com/octo/app/pull/7 extra", "octo/app#0", "../app#1",
+])
+def test_anything_else_names_no_item(source, text):
+    assert source.item_for(text) is None
+
+
+def test_an_item_of_a_repository_that_is_not_configured_is_refused(source, tmp_path):
+    repository = Repository(
+        name="test", path=tmp_path, tracker=TrackerConfig(type="fake"),
+        labels=Labels(**LABELS), github="octo/app",
+    )
+    source.use_repositories([repository])
+
+    assert source.item_for("https://github.com/OCTO/app/pull/7").key == "octo_app_7"
+    assert source.item_for("https://github.com/octo/other/pull/7") is None

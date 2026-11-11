@@ -175,11 +175,17 @@ def _parse_start_rules(value: object, where: str) -> tuple[StartRule, ...]:
     return rules
 
 
+# A role without `debounce_secs` wakes at the next tick: a debounce by default would hold
+# back every wake of every such role. Events that arrive within one tick already become
+# one wake; a role that gets bursts across ticks, such as review comments, sets its own.
+DEFAULT_DEBOUNCE_SECS = 0
+
+
 @dataclass(frozen=True)
 class Policy:
     max_workers: int | None = None
     max_wakes_per_day: int = 12
-    debounce_secs: int = 120
+    debounce_secs: int = DEFAULT_DEBOUNCE_SECS
     refresh_after_tokens: int | None = None
     refresh_after_wakes: int | None = None
 
@@ -202,7 +208,7 @@ class Policy:
         }
         return cls(
             max_wakes_per_day=_as_int(table.get("max_wakes_per_day", 12), f"{where}.max_wakes_per_day"),
-            debounce_secs=_as_int(table.get("debounce_secs", 120), f"{where}.debounce_secs"),
+            debounce_secs=_as_int(table.get("debounce_secs", DEFAULT_DEBOUNCE_SECS), f"{where}.debounce_secs"),
             **optional,
         )
 

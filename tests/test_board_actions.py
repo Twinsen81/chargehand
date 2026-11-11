@@ -2,7 +2,7 @@
 
 The daemon serves on 127.0.0.1 on a port the kernel picks and runs no loop; the tests
 tick the harness themselves. Sessions are the fake `claude`'s, the tracker is the fake one,
-and attach runs a fake `osascript`.
+and attach runs a fake `open` or `osascript`.
 """
 
 from __future__ import annotations
@@ -10,12 +10,16 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import re
+import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
 from chargehand import board, ledger as ledger_mod, terminal
+from chargehand import tick as tick_mod
 from chargehand.cli import EXIT_OK, main
 from chargehand.config import NotifyConfig
 from conftest import run_git
@@ -91,6 +95,62 @@ def test_every_action_needs_the_token_and_a_loopback_host(daemon, harness, path,
     assert post(daemon, path, body, headers=wrong)[0] == 401
     assert post(daemon, path, body, host="evil.example:80")[0] == 403
     assert harness.ledger.pending_requests() == []
+
+
+def request_rows(harness):
+    return harness.ledger._conn.execute("SELECT count(*) FROM requests").fetchone()[0]
+
+
+def test_the_token_check_answers_whether_the_token_is_valid_and_records_nothing(daemon, harness):
+    before = request_rows(harness)
+
+    status, body = support.request(daemon.port, "POST", "/api/token", body=b"{}", headers=AUTH)
+    assert (status, body) == (204, b"")
+    assert post(daemon, "/api/token", headers={"Content-Type": "application/json"})[0] == 401
+    wrong = {"Authorization": "Bearer not-the-token", "Content-Type": "application/json"}
+    assert post(daemon, "/api/token", headers=wrong)[0] == 401
+    assert post(daemon, "/api/token", host="evil.example:80")[0] == 403
+
+    assert request_rows(harness) == before
+
+
+def test_the_page_shows_the_state_of_its_token(daemon):
+    script = (board.asset_dir() / "board.js").read_text()
+    page = (board.asset_dir() / "index.html").read_text()
+    for label in ("no token", "checking", "token accepted", "token not valid"):
+        assert f"'{label}'" in script, label
+    assert 'id="token-state"' in page
+    assert "post('/api/token'" in script
+    controls = script[script.index("function setupControls("):script.index("async function poll(")]
+
+    def listener(target, event):
+        start = controls.index(f"{target}.addEventListener('{event}'")
+        return controls[start:controls.index("});", start)]
+
+    assert "event.key !== 'Enter'" in listener("input", "keydown")
+    assert "save();" in listener("input", "keydown") and "save();" in listener("input", "change")
+    assert "checkToken();" in listener("$('token-forget')", "click")
+    forget = listener("$('token-forget')", "click")
+    on_load = controls[controls.index(forget) + len(forget):controls.index("$('terminal')")]
+    assert "checkToken();" in on_load
+    # A restart can bring a new token file, and an answer to an older token says nothing
+    # about the one stored now.
+    poll = script[script.index("async function poll("):]
+    assert "model.health.started_at" in poll and "if (tokenRecheck) checkToken();" in poll
+    sender = script[script.index("async function send("):script.index("function workerAction(")]
+    assert "const sent = token();" in sender and "sent === token()" in sender
+
+
+def test_an_accepted_token_clears_the_notice_that_asked_for_it():
+    script = (board.asset_dir() / "board.js").read_text()
+    sender = script[script.index("async function send("):script.index("function workerAction(")]
+    for asked in ("Paste the token first", "The token is not valid"):
+        assert re.search(rf"notice\('{asked}[^\n]*\n\s*tokenNoticeShown = true;", sender), asked
+    shown = script[script.index("function showTokenState("):script.index("// True while the notice")]
+    assert "if (name === 'accepted' && tokenNoticeShown) notice('');" in shown
+    notices = script[script.index("function notice("):script.index("function describe(")]
+    # Any other notice replaces the one about the token, so the check leaves it alone.
+    assert "tokenNoticeShown = false;" in notices
 
 
 def test_the_page_sends_the_token_only_in_a_header(daemon):
@@ -590,6 +650,335 @@ def test_discard_from_the_board_is_refused_for_unpushed_commits_and_a_dirty_tree
     assert worktree.exists()
 
 
+def card_of(daemon, worker):
+    _, raw = support.request(daemon.port, "GET", "/api/board")
+    cards = [c for column in json.loads(raw)["columns"] for c in column["cards"]]
+    return next(c for c in cards if c["id"] == worker.id)
+
+
+def outcome_of(daemon, answer):
+    _, raw = support.request(daemon.port, "GET", f"/api/requests/{answer['id']}")
+    return json.loads(raw)
+
+
+@pytest.mark.parametrize("action, button", [
+    ("discard", "Discard"), ("retry", "Retry"), ("archive", "Archive"),
+])
+def test_a_refusal_that_force_overrides_names_the_board_controls(daemon, harness, action, button):
+    unqueued(harness)
+    worker = board_worker(harness)
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/{action}", {"force": False})
+    assert answer["pending"] and answer["reason"] is None and answer["board_message"] is None
+    harness.next_tick()
+    outcome = outcome_of(daemon, answer)
+
+    assert (outcome["pending"], outcome["ok"]) == (False, False)
+    # The command line's text stays as it was; the board gets its own words.
+    assert outcome["message"] == harness.ledger.get_request(answer["id"])["message"]
+    assert outcome["message"].startswith(f"{worker.handle}: its worktree has uncommitted changes. ")
+    assert outcome["board_message"].startswith(
+        f"its worktree has uncommitted changes; tick force and press {button} again"
+    )
+    assert "--force" not in outcome["board_message"]
+    assert outcome["reason"]["needs_force"] is True
+    assert outcome["reason"]["work"]["uncommitted_changes"] is True
+    assert worker.worktree_path.exists()
+
+
+def test_the_card_tells_what_discard_would_lose(daemon, harness):
+    unqueued(harness)
+    worker = board_worker(harness)
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+    assert card_of(daemon, worker)["work_at_risk"] is None
+
+    worktree = worker.worktree_path
+    (worktree / "notes.txt").write_text("work\n")
+    run_git("add", "notes.txt", cwd=worktree)
+    run_git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-m", "work", cwd=worktree)
+    (worktree / "progress.log").write_text("notes\n")
+    # The tick looks again once the refresh interval has passed since its last look.
+    harness.runner._record_work_at_risk(now=time.time() + tick_mod.WORK_AT_RISK_REFRESH_SECS + 1)
+
+    assert card_of(daemon, worker)["work_at_risk"] == {
+        "place": "worktree", "uncommitted_changes": True, "unpushed_commits": 1,
+        "uninspected": False, "text": "its worktree has uncommitted changes and 1 unpushed commit",
+    }
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/discard", {"force": True})
+    harness.next_tick()
+    assert outcome_of(daemon, answer)["ok"] is True
+    assert card_of(daemon, worker)["work_at_risk"] is None
+
+
+@pytest.mark.parametrize("raw, words", [
+    ({"needs_force": True, "work": {"place": "worktree", "unpushed_commits": 2}},
+     "its worktree has 2 unpushed commits; tick force and press Archive again; the archive "
+     "keeps the files, not the commits"),
+    ({"needs_force": True, "work": {"place": "item_checkout", "uninspected": True}},
+     "its item checkout could not be inspected; tick force and press Archive again; the "
+     "archive keeps the files, not the commits"),
+    ({"needs_force": True, "session_running": True},
+     "the session did not stop, so its worktree is still in use; tick force and press Archive "
+     "again; the archive keeps the files, not the commits"),
+])
+def test_the_board_words_each_reason(raw, words):
+    row = {"id": 1, "kind": "archive", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "the command line's text", "reason": raw}
+
+    answer = board.outcome(row)
+
+    assert answer["board_message"] == words
+    assert answer["message"] == "the command line's text"
+
+
+def test_a_reason_is_left_out_unless_force_would_override_a_refusal():
+    base = {"id": 1, "kind": "discard", "target": "#1", "message": "m"}
+    work = {"needs_force": True, "work": {"uncommitted_changes": True}}
+
+    assert board.outcome({**base, "applied_at": None, "ok": None, "reason": work})["reason"] is None
+    assert board.outcome({**base, "applied_at": 2.0, "ok": 1, "reason": work})["reason"] is None
+    refused = board.outcome({**base, "applied_at": 2.0, "ok": 0, "reason": None})
+    assert (refused["reason"], refused["board_message"]) == (None, None)
+    clean = {"needs_force": True, "work": {"uncommitted_changes": False}}
+    assert board.outcome({**base, "applied_at": 2.0, "ok": 0, "reason": clean})["board_message"] is None
+    other = board.outcome({**base, "kind": "continue", "applied_at": 2.0, "ok": 0, "reason": work})
+    assert other["reason"]["needs_force"] is True and other["board_message"] is None
+
+
+def test_the_card_shows_the_outcome_of_its_action_until_the_next_one_or_a_dismiss():
+    script = (board.asset_dir() / "board.js").read_text()
+    action = script[script.index("function workerAction("):script.index("function personalise(")]
+    # Pending at once, then each state of the request as the daemon answers it.
+    assert "setCardStatus(c.id, 'pending'" in action
+    assert "outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome)" in action
+    words = script[script.index("function statusText("):script.index("function rerender(")]
+    assert "'refused: ' + (outcome.board_message || outcome.message" in words
+    sender = script[script.index("async function send("):script.index("function riskWarning(")]
+    assert "if (onOutcome) onOutcome(payload);" in sender
+    assert "follow(payload, onOutcome)" in sender
+    follower = script[script.index("async function follow("):script.index("async function send(")]
+    assert "if (onOutcome) onOutcome(current);" in follower
+    # The line is part of the card's signature, so a re-render keeps it; a dismiss drops it.
+    assert "cardStatus.get(String(c.id)) || null" in script[script.index("function signature("):]
+    status = script[script.index("function statusNode("):script.index("function setCardStatus(")]
+    assert "cardStatus.delete(String(id));" in status
+    # The top notice stays as it is.
+    assert "notice(describe(current)" in follower
+
+
+def test_the_confirmation_dialog_warns_about_the_work_the_card_knows_of():
+    script = (board.asset_dir() / "board.js").read_text()
+    warning = script[script.index("function riskWarning("):script.index("function workerAction(")]
+    assert "c.work_at_risk" in warning and "risk.text" in warning
+    assert "without force the daemon refuses this. Tick force and press " in warning
+    assert "force is ticked, so that work is lost." in warning
+    action = script[script.index("function workerAction("):script.index("function personalise(")]
+    assert action.count("risk)) return;") == 3
+    assert "name === 'retry' && risk &&" in action
+    # A retry does not always start a new worker: a worker that does not drive the queue
+    # label waits for its next start event.
+    assert "It removes the worktree and clears the worker." in action
+    assert "starts a new worker" not in action
+
+
+def test_an_older_action_on_a_card_cannot_replace_the_outcome_of_a_newer_one():
+    script = (board.asset_dir() / "board.js").read_text()
+    action = script[script.index("function workerAction("):script.index("function personalise(")]
+    assert "if (!latestAction()) return;" in action
+    # A dismiss drops the line, not the count, so an old outcome stays ignored after it.
+    status = script[script.index("function statusNode("):script.index("function setCardStatus(")]
+    assert "cardActionSequence" not in status
+
+
+NODE_RACE = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const grab = (head) => {
+  const start = src.indexOf(head);
+  return src.slice(start, src.indexOf('\n}\n', start) + 3);
+};
+const constant = (name) => {
+  const start = src.indexOf('const ' + name + ' =');
+  return src.slice(start, src.indexOf(';\n', start) + 2);
+};
+const window = { confirm: () => true };
+const $ = () => ({ value: '' });
+const sent = [];
+function send(path, body, what, onOutcome) { sent.push(onOutcome); }
+// The constants live in the eval's scope, so the stub that writes the card line does too.
+eval(['FORCED', 'ACTION_LABELS', 'ARCHIVE_NOTE', 'cardStatus', 'cardActionSequence', 'cardDraft']
+  .map(constant).join('')
+  + 'function setCardStatus(id, kind, text) { cardStatus.set(String(id), { kind, text }); }'
+  + grab('function keepDraft(')
+  + grab('function statusText(') + grab('function riskWarning(') + grab('function workerAction(')
+  + ';globalThis.run = (c, name, force) => workerAction(c, name, force);'
+  + 'globalThis.status = (id) => cardStatus.get(String(id));');
+const c = { id: 7, handle: 'implementer/ABC-1#7', column: 'closed', work_at_risk: null };
+run(c, 'discard', false);
+run(c, 'discard', true);
+const [first, second] = sent;
+second({ pending: false, ok: true, message: 'discarded #7' });
+first({ pending: false, ok: false, message: 'cli text', board_message: 'its worktree has uncommitted changes' });
+console.log(JSON.stringify(status(7)));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_late_refusal_of_an_older_action_leaves_the_newer_outcome_on_the_card(tmp_path):
+    runner = tmp_path / "race.js"
+    runner.write_text(NODE_RACE)
+    out = subprocess.run(
+        ["node", str(runner), str(board.asset_dir() / "board.js")],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    assert json.loads(out) == {"kind": "ok", "text": "done: discarded #7"}
+
+
+# The page with a small stand-in for the DOM: enough to build a card, to type into it, and
+# to build it again from a model that changed.
+NODE_RERENDER = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const byId = new Map();
+class El {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this.parent = null; this.className = '';
+    this.dataset = {}; this.style = {}; this.listeners = {}; this.textContent = '';
+    this.value = ''; this.checked = false; this.hidden = false; this._id = '';
+    this.classList = { add() {}, remove() {} };
+  }
+  set id(v) { this._id = v; byId.set(v, this); }
+  get id() { return this._id; }
+  append(...nodes) {
+    for (const n of nodes) if (n instanceof El) { n.remove(); n.parent = this; this.children.push(n); }
+  }
+  replaceChildren(...nodes) {
+    for (const c of this.children) c.parent = null;
+    this.children = [];
+    this.append(...nodes);
+  }
+  remove() {
+    if (!this.parent) return;
+    this.parent.children.splice(this.parent.children.indexOf(this), 1);
+    this.parent = null;
+  }
+  insertBefore(node, ref) {
+    node.remove(); node.parent = this;
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i < 0) this.children.push(node); else this.children.splice(i, 0, node);
+  }
+  addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); }
+  fire(name) { for (const fn of this.listeners[name] || []) fn({ key: '' }); }
+  focus() { document.activeElement = this; }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  has(cls) { return String(this.className).split(/\s+/).includes(cls); }
+  *walk() { for (const c of this.children) { yield c; yield* c.walk(); } }
+  querySelectorAll(sel) {
+    return sel === '.card, .group' ? [...this.walk()].filter((n) => n.has('card') || n.has('group')) : [];
+  }
+  querySelector() { return new El('stub'); }
+}
+const root = new El('body');
+const document = {
+  activeElement: null,
+  createElement: (tag) => new El(tag),
+  getElementById: (id) => {
+    if (!byId.has(id)) { const e = new El('div'); e.id = id; root.append(e); }
+    return byId.get(id);
+  },
+  querySelector: (sel) => {
+    const m = /^\.card\[data-id="(.*)"\]$/.exec(sel);
+    return m ? [...root.walk()].find((n) => n.has('card') && n.dataset.id === m[1]) || null : null;
+  },
+  querySelectorAll: () => [],
+};
+const window = { confirm: () => true };
+const CSS = { escape: (s) => s };
+const store = new Map([['chargehand.token', 'tok']]);
+const localStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k),
+};
+const fetch = async () => { throw new Error('no network here'); };
+const setTimeout = () => 0;
+eval(src + ';globalThis.page = { render, workerAction };');
+const question = (id) => ({
+  id, kind: 'question', tool_name: 'ask', tool_input: 'Which colour?', created_at: 1, answers: [],
+  options: ['red', 'blue'],
+});
+const card = (changes) => Object.assign({
+  id: 7, handle: 'implementer/ABC-1#7', origin: 'board', parent: null, clone_mode: null,
+  actions: ['continue', 'cancel', 'reply', 'attach', 'discard', 'archive', 'clone'],
+  column: 'needs_you', state: 'blocked', session_state: 'done', role: 'implementer', repository: 'test',
+  item: 'ABC-1', item_url: null, pr_url: null, branch: 'b', worktree: '/w', model: null, effort: null,
+  last_prompt: null, last_answer: null, waiting_for: null, permission_prompt: question(3),
+  report: null, problem: null, wakes_today: 0, wake_cap: null, tokens_estimate: 100, sessions: [],
+  attach: 'claude attach abc', reset_at: null, queue_reason: null, clone_start: null, last_hook: 'Stop',
+  job: null, work_at_risk: null, archived_at: null, created_at: 1, updated_at: 2, finished_at: null,
+  display_name: null, icon: null, icon_glyph: null, pinned: false, repository_label: 'test', hidden: false,
+}, changes);
+const model = (c) => ({
+  generated_at: 10, usage: { known: false }, model_limit: null,
+  throttle: { working: 0, max_concurrent: 1, open: 1, max_open_workers: 5, paused: false, paused_repositories: [] },
+  health: { ticking: false }, jobs: [], job_summary: { shown: [], counts: {} },
+  columns: [{ key: 'needs_you', title: 'Needs you', hint: '', count: 1, cards: [c],
+    groups: [{ repository: 'test', display_name: null, icon: null, icon_glyph: null, pinned: false,
+      collapsed: false, hidden: false, count: 1, folded: 0 }] }],
+  repositories: [{ name: 'test', roles: ['implementer'], paused: false, pinned: false, collapsed: false, hidden: false }],
+  hidden: { repositories: [], count: 0, cards: 0, shown: false }, icons: {}, terminals: ['terminal', 'iterm2'],
+  token_file: '/t',
+});
+const find = (test) => [...root.walk()].find(test);
+const answerField = () => find((n) => n.tagName === 'input' && n.type === 'text' && n.parent && n.parent.has('answer-line'));
+const forceBox = () => find((n) => n.tagName === 'input' && n.type === 'checkbox' && n.parent && n.parent.has('force'));
+const out = {};
+
+page.render(model(card({})));
+const typed = answerField();
+typed.focus();
+typed.value = 'use the blue one';
+typed.setSelectionRange(7, 7);
+typed.fire('input');
+forceBox().checked = true;
+forceBox().fire('change');
+// The next poll reads a card whose data changed: the page builds its nodes again.
+page.render(model(card({ session_state: 'blocked', last_hook: 'Notification', tokens_estimate: 101 })));
+out.rebuilt = answerField() !== typed;
+out.answer = answerField().value;
+out.focused = document.activeElement === answerField();
+out.caret = [answerField().selectionStart, answerField().selectionEnd];
+out.force = forceBox().checked;
+// An action that used the tick takes it: it was set for that one action.
+page.workerAction(card({ session_state: 'blocked' }), 'discard', true);
+out.forceAfterAction = forceBox().checked;
+// Another question is not answered by the line typed for the first one.
+page.render(model(card({ permission_prompt: question(4) })));
+out.answerToNextQuestion = answerField().value;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_card_that_is_built_again_keeps_what_the_operator_put_into_it(tmp_path):
+    runner = tmp_path / "rerender.js"
+    runner.write_text(NODE_RERENDER)
+    out = subprocess.run(
+        ["node", str(runner), str(board.asset_dir() / "board.js")],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    assert json.loads(out.splitlines()[-1]) == {
+        "rebuilt": True, "answer": "use the blue one", "focused": True, "caret": [7, 7],
+        "force": True, "forceAfterAction": False, "answerToNextQuestion": "",
+    }
+
+
 # ----- the handle on the command line -------------------------------------------------------
 
 
@@ -709,20 +1098,23 @@ def test_the_tick_report_says_where_a_request_came_from(harness):
 # ----- attach ---------------------------------------------------------------------------------
 
 
-class FakeOsascript:
+class FakeRun:
     def __init__(self, returncode=0, stderr=""):
         self.calls = []
+        self.scripts = []
         self.returncode = returncode
         self.stderr = stderr
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[0] == terminal.OPEN:
+            self.scripts.append(Path(argv[-1]).read_text())
         return subprocess.CompletedProcess(argv, self.returncode, "", self.stderr)
 
 
 @pytest.fixture
-def osascript(monkeypatch):
-    fake = FakeOsascript()
+def opener(monkeypatch):
+    fake = FakeRun()
     monkeypatch.setattr(
         terminal, "open_window",
         functools.partial(terminal.open_window, run=fake, platform="darwin"),
@@ -730,30 +1122,55 @@ def osascript(monkeypatch):
     return fake
 
 
-@pytest.mark.parametrize("name, application, line", [
-    ("iterm2", 'tell application "iTerm"', "tell current session of attached to write text (item 1 of argv)"),
-    ("terminal", 'tell application "Terminal"', "do script (item 1 of argv)"),
-])
-def test_attach_opens_the_chosen_terminal_on_the_cards_session(daemon, harness, osascript, name, application, line):
+def test_attach_opens_terminal_on_the_cards_session_through_a_script_file(daemon, harness, opener):
     unqueued(harness)
     worker = board_worker(harness)
 
-    status, answer = post(daemon, f"/api/workers/{worker.id}/attach", {"terminal": name})
+    status, answer = post(daemon, f"/api/workers/{worker.id}/attach", {"terminal": "terminal"})
 
     assert status == 200
     assert (answer["ok"], answer["pending"], answer["kind"], answer["origin"]) == (True, False, "attach", "board")
-    (argv,) = osascript.calls
+    (argv,) = opener.calls
+    assert argv[:3] == [terminal.OPEN, "-a", "Terminal"]
+    assert Path(argv[3]).parent == terminal.script_dir() and argv[3].endswith(".command")
+    assert opener.scripts == [
+        f'#!/bin/sh\nrm -f -- "$0"\nexec "${{SHELL:-/bin/sh}}" -ic \'claude attach {worker.session_id}\'\n'
+    ]
+    # Recorded for the audit trail, already applied: no tick acts on it.
+    assert harness.ledger.pending_requests() == []
+    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "terminal"}, "board")
+
+
+def test_attach_opens_iterm2_on_the_cards_session(daemon, harness, opener):
+    unqueued(harness)
+    worker = board_worker(harness)
+
+    status, answer = post(daemon, f"/api/workers/{worker.id}/attach", {"terminal": "iterm2"})
+
+    assert status == 200 and answer["ok"] is True
+    (argv,) = opener.calls
     assert argv[0] == terminal.OSASCRIPT
     assert argv[-1] == f"claude attach {worker.session_id}"
     script = [argv[i + 1] for i in range(1, len(argv) - 1, 2)]
-    assert application in script and line in script
+    assert 'tell application "iTerm"' in script
+    assert "tell current session of attached to write text (item 1 of argv)" in script
     assert all(argv[i] == "-e" for i in range(1, len(argv) - 1, 2))
-    # Recorded for the audit trail, already applied: no tick acts on it.
-    assert harness.ledger.pending_requests() == []
-    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": name}, "board")
+    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "iterm2"}, "board")
 
 
-def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness, osascript, monkeypatch):
+def test_attach_without_a_terminal_name_opens_terminal(daemon, harness, opener):
+    unqueued(harness)
+    worker = board_worker(harness)
+
+    status, answer = post(daemon, f"/api/workers/{worker.id}/attach")
+
+    assert status == 200 and answer["ok"] is True
+    (argv,) = opener.calls
+    assert argv[:3] == [terminal.OPEN, "-a", "Terminal"]
+    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "terminal"}, "board")
+
+
+def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness, opener, monkeypatch):
     unqueued(harness)
     worker = board_worker(harness)
     ended = harness.ledger.update(board_worker(harness), state=ledger_mod.CANCELLED)
@@ -761,32 +1178,12 @@ def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness,
     assert post(daemon, f"/api/workers/{ended.id}/attach")[0] == 409
     monkeypatch.setattr(
         terminal, "open_window",
-        functools.partial(terminal.open_window.func, run=osascript, platform="linux"),
+        functools.partial(terminal.open_window.func, run=opener, platform="linux"),
     )
     _, answer = post(daemon, f"/api/workers/{worker.id}/attach")
 
     assert answer["ok"] is False and "macOS only" in answer["message"]
-    assert osascript.calls == []
-
-
-def test_osascript_never_carries_the_command_in_its_script():
-    argv = terminal.osascript_argv("iterm2", "claude attach abc-123")
-    assert argv[-1] == "claude attach abc-123"
-    assert not any("abc-123" in part for part in argv[:-1])
-    for bad in ('claude attach x"; do shell script "rm', "claude attach $(id)", "claude  attach x", ""):
-        with pytest.raises(ValueError):
-            terminal.osascript_argv("iterm2", bad)
-    with pytest.raises(ValueError):
-        terminal.osascript_argv("xterm", "claude attach abc")
-
-
-def test_a_failed_osascript_says_how_to_allow_it():
-    fake = FakeOsascript(returncode=1, stderr="Not authorized to send Apple events to iTerm.\x1b[2J")
-
-    ok, message = terminal.open_window("iterm2", "claude attach abc", run=fake, platform="darwin")
-
-    assert ok is False
-    assert "Not authorized" in message and "Automation" in message and "\x1b" not in message
+    assert opener.calls == []
 
 
 # ----- the card ----------------------------------------------------------------------------
@@ -889,7 +1286,7 @@ def test_a_card_offers_the_actions_its_state_can_take(harness):
         "name": "test", "roles": ["implementer"], "paused": False, "display_name": None,
         "icon": None, "icon_glyph": None, "pinned": False, "collapsed": False, "hidden": False,
     }]
-    assert page["terminals"] == ["iterm2", "terminal"]
+    assert page["terminals"] == ["terminal", "iterm2"]
     card = next(c for column in page["columns"] for c in column["cards"])
     assert (card["handle"], card["origin"]) == (worker.handle, "board")
 

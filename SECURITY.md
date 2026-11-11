@@ -50,6 +50,26 @@ public location.
   not leave the source. The marker filter is a convenience against workers waking each
   other, not a defense: anyone can quote the marker, and it only drops comments by the
   signed-in account.
+- **Posts of the chargehand mod.** The mod runs in the worker's session, so what it posts
+  (tool arguments, the last answer, the rate limits) is session output. The daemon cleans
+  and caps it like a hook post, and it changes a worker only through the hook transitions.
+  The worker tools keep what they are given as untrusted text: a question and its options,
+  a report's summary and links (only plain http(s) URLs, and only a pull request link
+  becomes the card's link), and the handoff note. The board renders them as text, and no
+  notification carries them. No prompt that chargehand writes includes them, and no log
+  line carries them, with one exception that the operator makes: an option that the
+  operator clicks is sent as the operator's answer, so it reaches the session that wrote
+  it as the reply line of its next wake, and the log line of that wake. A question and
+  its options are stored without the characters that a reader cannot see (zero-width and
+  other format characters, the tag block, variation selectors), so a button sends what it
+  shows.
+  `read_handoff` gives the note back only as a tool result, to a session of the worker
+  whose token the post carries, so a fresh session after a refresh reads it as session
+  data, not as a prompt.
+  A report of `done` or `failed` can end the worker whose token the post carries, as its
+  status file could. A timer from `request_wake` is a wake with
+  chargehand's own pointer, under the same caps as any wake. The answer to a question is
+  the operator's line, or the option that the operator clicked, sent as a reply.
 - **Command source output.** The commands of a `command` source are the operator's own,
   but what they print comes from the system they poll. chargehand runs them without a
   shell, with a timeout and a cap on the output, and checks every line against a closed
@@ -154,19 +174,42 @@ public location.
   and no response carries a CORS header, so a web page on another origin cannot read a
   response. A cross-origin page can still send a request without reading the answer,
   which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
-- **Session hooks.** Launched sessions post their start, turn ends, failures,
-  notifications and permission prompts to `POST /hooks/<event>` on that port, with the
-  token in the `Authorization` header; a post without the token changes nothing. The token
+- **A token per session.** Each launch and each fork writes a new token for its session,
+  in a file of mode 0600 in a directory of mode 0700 under the state directory
+  (`worker-tokens/`). The session's hooks and its chargehand mod send that token, and the
+  daemon maps the token, not the session id or the working directory that a post names,
+  to the worker, comparing in constant time. A session never gets the board's token: its
+  settings hold its own token, and the mod's environment names its own token file. The
+  channel routes take only a worker's token, and the board's routes only the board's
+  token. A token ends with its worker: the daemon refuses the token of a worker that ended,
+  a new launch in the same worktree replaces it, and the file is deleted when the session
+  is removed. A tool call acts as the token's worker, whatever session id it names. A
+  hook, a hello, a lifecycle or usage post, or an outbox poll from a session that is not
+  the worker's current one, such as a copy that a resume started in the same worktree
+  with the same settings, is ignored: the post changes nothing, and the poll gets no
+  message. Every launch's settings deny `Read` and `Edit` (which covers Write) on the
+  board's token file and on the whole token directory, a launch without hooks too, so a
+  session launched earlier is also denied the token files of sessions launched after it; a
+  launch with hooks also denies them on every session settings file. The mod still reads
+  its own token file, because a `Read` deny rule does not bind the mod's own file reads
+  (observed with Claude Code 2.1.322).
+- **Session hooks.** Launched sessions post their start, the start and end of each turn,
+  failures, notifications and permission prompts to `POST /hooks/<event>` on that port,
+  with the session's token in the `Authorization` header; a post without a valid token
+  changes nothing. A session launched before sessions had their own token posts with the board's
+  token, which `/hooks` still accepts, and the daemon logs that once per session. The token
   is never on a command line, where other users of the machine could read it with `ps`:
   the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
   0700 under the state directory, and the `SessionStart` command hook names the token
   file, not the token, and runs its script with `python -I`, so nothing in the worktree
   is imported. The settings file is deleted when its session is removed. A post moves
-  only the live worker whose session posted it. The daemon answers every post but a
-  permission prompt with an empty object, so it never keeps a turn running and never
-  adds text to the model's context. The payload is untrusted: the
-  last answer, the tool input and the other fields are cleaned of terminal control
-  sequences and capped when stored, never reach a notification or a prompt, and
+  only the live worker whose token it carries. The daemon answers every post but a
+  permission prompt with an empty object, so it never keeps a turn running, never
+  blocks a prompt and never adds text to the model's context. The turn-start post
+  (`UserPromptSubmit`) carries the prompt, which the daemon never reads or stores. The
+  payload is untrusted: the last answer, the tool input and the other fields are cleaned
+  of terminal control sequences and capped when stored, never reach a notification or a
+  prompt, and
   `GET /api/state` returns them as JSON data for the page to escape. `status --json`
   names the last hook event and the reset time, but no payload text.
 - **Permission decisions come from the operator only.** The daemon holds a session's
@@ -209,10 +252,12 @@ public location.
   `localStorage` for `http://127.0.0.1:<port>` and sends it only in the `Authorization`
   header. It is never in a URL, in `GET /`, or in any answer. Anything that can run
   script in that origin, or read that browser profile, can therefore read the token, so
-  use the board in your own browser profile; "Forget token" removes it. Another origin
-  cannot read it, and the `Host` check and the missing CORS headers still apply. The
-  token is the same one every client uses: a board action can do what any CLI command can,
-  and no more.
+  use the board in your own browser profile; "Forget token" removes it. The page checks
+  the token with `POST /api/token`, which passes the same `Host` and token checks as
+  every action and then answers 204: it records nothing and tells a caller nothing that
+  a refused action does not tell already. Another origin cannot read the token, and the
+  `Host` check and the missing CORS headers still apply. The token is the same one every
+  client uses: a board action can do what any CLI command can, and no more.
 - **Operator text from the board.** A reply is trusted operator text: it reaches the
   session's next turn as written. It is one line, cleaned of control sequences and
   direction overrides, capped at 500 characters, and carried in the inbox under the
@@ -251,13 +296,28 @@ public location.
   markup) or a name from a bundled set, so nothing is uploaded or fetched. The model cleans both again when it reads them, because an
   import writes the same table. Hiding a repository only filters the board: its workers
   are still supervised and still notify, so hiding cannot silence a blocked worker.
-- **Attach runs a terminal on this machine.** `POST /api/workers/<id>/attach` makes the
-  daemon run `/usr/bin/osascript`, which opens an iTerm2 or Terminal.app window that runs
-  the worker's attach command. The terminal is one of those two names; the session id must
-  be a plain identifier; the command must be plain words, and it reaches the AppleScript as
-  an argument, never inside the script's source, so no text in it can change the script.
-  macOS asks once whether the daemon's process may control the terminal (Privacy &
-  Security, Automation). The board embeds no chat: a conversation with a session happens
+- **Attach runs a terminal on this machine.** `POST /api/workers/<id>/attach` opens an
+  iTerm2 or Terminal.app window that runs the worker's attach command. The terminal is one
+  of those two names; the command must be plain words and its last word, the session id, a
+  plain identifier, so a shell that runs it finds no metacharacter. For Terminal.app the
+  daemon writes the command into a script file and runs `/usr/bin/open -a Terminal
+  <file>`, through LaunchServices, so it needs no Automation permission. The file is in
+  `attach/` under the state directory (mode 0700, created anew if missing, refused if it
+  is a symbolic link), has a random name and mode 0700, is created with `O_EXCL` and
+  `O_NOFOLLOW`, and holds only `#!/bin/sh`, `rm -f -- "$0"` and
+  `exec "${SHELL:-/bin/sh}" -ic '<command>'`: it deletes itself before the operator's own
+  shell runs the command, as an interactive shell, so that a `claude` which is an alias
+  of that shell is found; the command is plain words, so the single quotes hold it whole.
+  A file that never ran is removed when the
+  next one is written, after five minutes. The daemon's process sets no quarantine
+  attribute, so macOS shows no dialog for the file. For iTerm2, which asks before it runs
+  any file it opens, the daemon runs `/usr/bin/osascript`; the command reaches the
+  AppleScript as an argument, never inside the script's source, so no text in it can
+  change the script. macOS asks once whether the daemon's process may control iTerm2
+  (Privacy & Security, Automation). macOS gives that grant to the Python interpreter
+  binary, not to chargehand: every background job that runs on that Python can then read
+  and type into every iTerm2 session, and a Python upgrade asks again. Terminal.app, the
+  default, needs no grant. The board embeds no chat: a conversation with a session happens
   in that terminal.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
@@ -318,10 +378,27 @@ public location.
   stored as a link, so a link to a file elsewhere does not copy that file into the zip. The
   transcript path comes from a hook post, so only a regular `.jsonl` file under Claude
   Code's `projects` directory is read. The settings file of a session, which holds the
-  daemon's token, is not in the worktree and so not in the archive. The worktree is
+  session's own token, is not in the worktree and so not in the archive. The worktree is
   removed only after the zip is complete and has passed its check, and only by the tick,
   with the guard of discard applied again.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
+
+- **The chargehand mod does only what it says.** Every worker session loads it, so what it
+  may do is checked in the test suite against its source, and against `claude plugin
+  validate` where Claude Code is installed: it hooks the session start, the turn end, the
+  session end and the calls of its own tools; it reads two environment variables, the
+  token file and the session's id, working directory and usage; it posts to the daemon,
+  registers tools and submits a prompt. It never answers a permission prompt, never
+  writes a file or the environment and runs no process. The only text it submits is the
+  outbox message the daemon handed it, which is chargehand's wake message of kinds and
+  pointers. It posts only to the port that the launch settings name, with the session's own token
+  from the token file that they name; the settings name the file, not the token.
+- **The usage request holds no credential.** To read the weekly usage window, the daemon
+  sends Claude Code's `get_usage` control request to a short `claude -p` process. Claude
+  Code fetches the usage with its own sign-in; chargehand reads no token and no Keychain
+  item and makes no network call. The process runs in an empty private directory under
+  the state directory, with all hooks and your MCP servers turned off and no session
+  file, runs no turn, and is killed after a timeout. Only the percentage and the reset time of its answer are kept.
 
 ### Known limits
 
@@ -339,10 +416,18 @@ public location.
   install. Treat it as you would a CI worker with write access.
 - A session runs as the operator's user, so it can read the daemon's token file and the
   ledger. The deny rules for the port are a guardrail against the careless path; a session
-  that reads the token and reaches the port another way can send what the CLI can. The
-  token is also in each session's own hook settings, so a session can read it there too,
-  and post hooks in the name of another worker's session. That can move another worker's
-  state and its label, but it runs no command and answers no prompt.
+  that reads the token and reaches the port another way can send what the CLI can.
+- The token per session is a guardrail of the same kind, not a wall. It stops the careless
+  path and a prompt-injected call that names another worker's session id: such a call acts
+  as the worker whose token it carries. A process of the same user can still read another
+  session's token file or settings file with a shell command, which the deny rules do not
+  cover. With
+  another worker's token, a session can post as that worker's hooks and mod: move its
+  state and its label, take its outbox message or call a tool for it, but run no command
+  and answer no prompt. Sessions launched before sessions had their own token still post
+  their hooks with the board's token until their next launch. The launch settings put the
+  session's own token file path in its environment, where every command of the session
+  can read it.
 - A session can read any credential that the runner or a notification hook reads from the
   login keychain, because it runs as the same user. Give a hook a credential that protects
   nothing else, such as the password of a mailbox that exists only to send alerts.

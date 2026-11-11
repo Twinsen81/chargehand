@@ -71,6 +71,14 @@ close_on = ["pr_closed"]
 
 [policy]
 max_workers = 4
-# A comment without the marker wakes the worker once. This cap stops a loop.
+# A comment without the marker wakes the worker once. This cap stops a loop: a worker
+# at the cap stays queued with its events, and you are notified once.
 max_wakes_per_day = 12
+# A wake waits until no new event has arrived for this many seconds, so a burst of
+# review comments becomes one wake, but at most five times this after the first waiting
+# event. A reply from the board does not wait.
 debounce_secs = 120
+# A /loop that the role's prompt starts runs its own turns in the session; chargehand
+# does not start them. The debounce and the daily wake cap do not count them, and no cap
+# stops them. While such a turn runs, the worker is working and holds one slot of the
+# machine's max_concurrent.

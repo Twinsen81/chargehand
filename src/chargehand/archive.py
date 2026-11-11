@@ -1,8 +1,9 @@
 """Archives: what a finished worker leaves, in one zip file, written off the tick.
 
 An archive holds the worker's worktree (and its item checkout, when it has one), its
-session transcript as text, its ledger row and its sessions as JSON, and its handoff
-note when one exists. It is written under the state directory as
+session transcript as text (and the transcript of each earlier session that a refresh
+replaced), its ledger row and its sessions as JSON, and its handoff note when one exists.
+It is written under the state directory as
 ``archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip``, with mode 0600: a transcript
 can hold anything the session read.
 
@@ -46,6 +47,8 @@ PART_SUFFIX = ".part"
 WORKER_MEMBER = "worker.json"
 SESSIONS_MEMBER = "sessions.json"
 TRANSCRIPT_MEMBER = "transcript.txt"
+# The transcript of each session that a refresh replaced, oldest first, from 1.
+EARLIER_TRANSCRIPT_MEMBER = "transcript-{n}.txt"
 HANDOFF_MEMBER = "handoff.md"
 # The member prefix of the worktree, and of the item checkout of a `checkout = "item"` role.
 WORKTREE_TREE = "worktree"
@@ -100,8 +103,12 @@ def records(
     *,
     transcript: str | None,
     handoff: str | None = None,
+    earlier: Sequence[str | None] = (),
 ) -> dict[str, str]:
-    """The members that are not files of a tree: the rows as JSON, and the texts."""
+    """The members that are not files of a tree: the rows as JSON, and the texts.
+
+    *earlier* are the transcripts of the sessions that a refresh replaced, oldest first.
+    """
     members = {
         WORKER_MEMBER: json.dumps(dataclasses.asdict(worker), indent=2, sort_keys=True) + "\n",
         SESSIONS_MEMBER: json.dumps(
@@ -110,6 +117,9 @@ def records(
     }
     if transcript:
         members[TRANSCRIPT_MEMBER] = transcript
+    for n, text in enumerate(earlier, start=1):
+        if text:
+            members[EARLIER_TRANSCRIPT_MEMBER.format(n=n)] = text
     if handoff:
         members[HANDOFF_MEMBER] = handoff
     return members
@@ -415,7 +425,20 @@ class JobRunner:
 
         try:
             transcript = self._transcript(ledger, worker)
-            members = records(worker, ledger.sessions_of(worker), transcript=transcript)
+            sessions = ledger.sessions_of(worker)
+            # Each session that a refresh replaced, read as the worker's own was.
+            earlier = [
+                self._transcript(ledger, dataclasses.replace(
+                    worker, session_id=record.session_id, transcript_path=record.transcript_path,
+                ))
+                for record in sessions
+                if record.kind != ledger_mod.SESSION_WAKE and record.session_id
+                and record.session_id != worker.session_id
+            ]
+            members = records(
+                worker, sessions, transcript=transcript, handoff=worker.handoff_note,
+                earlier=earlier,
+            )
             summary = write_archive(
                 dest, members=members, trees=trees, progress=progress,
                 stopping=self.stopping.is_set,

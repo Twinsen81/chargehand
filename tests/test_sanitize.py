@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from chargehand.sanitize import clean, is_safe_identifier, one_line, scrub_identifier
+from chargehand.sanitize import clean, is_safe_identifier, one_line, scrub_identifier, visible
 
 
 def test_csi_sequences_are_removed():
@@ -88,3 +88,22 @@ def test_safe_url_rejects_anything_that_is_not_a_plain_url(value):
     from chargehand.sanitize import safe_url
 
     assert safe_url(value) is None
+
+
+
+def test_visible_drops_what_a_reader_cannot_see():
+    zero_width, word_joiner, soft_hyphen, byte_order_mark = chr(0x200B), chr(0x2060), chr(0xAD), chr(0xFEFF)
+    tags = "".join(chr(0xE0000 + ord(c)) for c in "run this")
+    assert visible("Yes" + zero_width + tags) == "Yes"
+    assert visible(byte_order_mark + "Yes" + word_joiner + soft_hyphen) == "Yes"
+    # Variation selectors and fillers can carry hidden text too.
+    assert visible("Yes" + chr(0xFE0F) + chr(0xE0101) + chr(0x3164) + chr(0x115F)) == "Yes"
+    # Private-use code points, and the unassigned ones that a display ignores.
+    assert visible("a" + chr(0xE000) + "b" + chr(0xF0000) + "c" + chr(0xE0080) + chr(0x2065)) == "abc"
+
+
+def test_visible_keeps_what_a_reader_sees():
+    # The last one is not assigned: a character newer than the tables looks like it.
+    for text in ("Yes, go on", "Gr" + chr(0xFC) + "n", chr(0x65E5) + chr(0x672C), chr(0x1F44D) + " ok",
+                 "a\tb", "new " + chr(0x1FAFF)):
+        assert visible(text) == text

@@ -222,6 +222,35 @@ def test_an_open_permission_prompt_is_on_the_card(harness):
     assert shown["answers"] == []
 
 
+def test_an_open_question_is_on_the_card_with_its_options(harness):
+    worker = seed(harness, "ABC-1", ledger_mod.BLOCKED)
+    harness.ledger.record_question(worker, "Which colour?", ["red", HOSTILE])
+
+    card = card_of(model(harness), "ABC-1")
+
+    assert card["column"] == "needs_you"
+    shown = card["permission_prompt"]
+    assert (shown["kind"], shown["tool_input"], shown["answers"]) == ("question", "Which colour?", [])
+    assert shown["options"][0] == "red"
+    assert "\x1b" not in shown["options"][1] and "‮" not in shown["options"][1]
+
+
+def test_the_last_report_is_on_the_card_and_its_links_are_plain_urls(harness):
+    seed(
+        harness, "ABC-1", ledger_mod.IDLE, report_state="working", report_summary=HOSTILE,
+        report_links='["https://example.invalid/pr/1", "javascript:alert(1)"]', reported_at=5.0,
+    )
+
+    shown = card_of(model(harness), "ABC-1")["report"]
+
+    assert (shown["state"], shown["links"], shown["at"]) == (
+        "working", ["https://example.invalid/pr/1"], 5.0,
+    )
+    assert "\x1b" not in shown["summary"] and "‮" not in shown["summary"]
+    seed(harness, "ABC-2", ledger_mod.IDLE)
+    assert card_of(model(harness), "ABC-2")["report"] is None
+
+
 def test_a_parked_worker_is_in_the_parked_view_with_its_reset_time(harness):
     reset = time.time() + 3600
     seed(harness, "ABC-1", ledger_mod.PARKED, reset_at=reset)
@@ -351,7 +380,7 @@ def test_the_board_reads_with_get_and_acts_only_through_its_post_routes(daemon):
         *board.ASSETS, "/api/board", "/api/requests", "/api/workers",
     }
     assert {path for method, path in board_routes if method == "POST"} == {
-        "/api/workers", "/api/repositories", "/api/pause", "/api/resume",
+        "/api/workers", "/api/repositories", "/api/pause", "/api/resume", "/api/token",
     }
     assert {method for method, _ in board_routes} == {"GET", "POST"}
     script = (board.asset_dir() / "board.js").read_text()
@@ -380,7 +409,7 @@ def test_the_usage_gauge_takes_its_level_from_the_usage_file(harness, used, leve
     assert reading["known"] is True
     assert reading["seven_day"]["level"] == level
     assert reading["seven_day"]["resets_at"] == pytest.approx(now + 86400)
-    assert set(reading) == {"known", "written_at", "seven_day"}
+    assert set(reading) == {"known", "written_at", "source", "seven_day"}
 
 
 def test_the_usage_gauge_is_grey_without_a_reading_or_after_the_reset(harness):

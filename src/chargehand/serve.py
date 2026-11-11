@@ -13,10 +13,15 @@ host is refused, which stops a web page that rebinds its own name to 127.0.0.1 f
 reading the API, and no response carries a CORS header. Other modules add their
 handlers to the route table, and their part of `/api/state`; each handler thread opens
 its own ledger connection, because a SQLite connection belongs to the thread that opened
-it. :mod:`chargehand.hooks` receives the posts of the worker sessions there, and
-:mod:`chargehand.board` serves the read-only board.
+it. :mod:`chargehand.hooks` receives the posts of the worker sessions there,
+:mod:`chargehand.channel` the posts of their chargehand mod, and :mod:`chargehand.board`
+serves the read-only board.
 
-A third thread runs the slow jobs that the tick records, such as an archive (see
+A thread of :mod:`chargehand.usage` asks Claude Code for the weekly usage window on its own
+interval, when ``chargehand serve`` gives the daemon one, so no tick and no request waits
+for it.
+
+Another thread runs the slow jobs that the tick records, such as an archive (see
 :mod:`chargehand.archive`), so that neither the tick nor the board waits for them. It
 writes only its files and the job rows; whatever a job leaves for the tick to remove, the
 tick removes.
@@ -47,7 +52,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import parse_qs, urlsplit
 
-from chargehand import __version__, archive, daemonlog, paths, sanitize
+from chargehand import __version__, archive, daemonlog, paths, sanitize, usage, worker_tokens
 from chargehand.config import MachineConfig
 from chargehand.errors import ChargehandError, TickBusy
 from chargehand.ledger import Ledger, Worker
@@ -72,8 +77,17 @@ CONNECTION_TIMEOUT_SECS = 10.0
 # The methods that change nothing and need no token.
 SAFE_METHODS = ("GET", "HEAD")
 
+# Which token a route takes for a method that needs one. The board's token is the
+# operator's; a worker's token is its session's own (see :mod:`chargehand.worker_tokens`),
+# and the request then carries the worker as its caller.
+AUTH_BOARD = "board"
+AUTH_WORKER = "worker"
+# A worker's token, or the board's from a session launched before sessions had their own.
+AUTH_WORKER_OR_BOARD = "worker or board"
+AUTH_KINDS = (AUTH_BOARD, AUTH_WORKER, AUTH_WORKER_OR_BOARD)
+
 # Modules that add routes, each through a `register_routes(routes)` function.
-ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks", "chargehand.board")
+ROUTE_PROVIDERS: tuple[str, ...] = ("chargehand.hooks", "chargehand.board", "chargehand.channel")
 
 # What `/api/state` says about sessions before the first tick has listed them.
 NO_SESSIONS_YET = "the daemon has not listed the sessions yet"
@@ -154,6 +168,8 @@ class Request:
     headers: Mapping[str, str]
     body: bytes
     daemon: "Daemon"
+    # The worker whose token the request carries, in any state; None for the board's token.
+    caller: Worker | None = None
     _ledger: Ledger | None = field(default=None, repr=False)
 
     def ledger(self) -> Ledger:
@@ -202,22 +218,35 @@ class Routes:
 
     def __init__(self) -> None:
         self._routes: list[tuple[str, str, bool, Handler]] = []
+        # The auth of each route, by method, path and prefix.
+        self._auth: dict[tuple[str, str, bool], str] = {}
         self.state_extenders: list[StateExtender] = []
 
     def extend_state(self, extender: StateExtender) -> None:
         self.state_extenders.append(extender)
 
-    def add(self, method: str, path: str, handler: Handler, *, prefix: bool = False) -> None:
+    def add(
+        self, method: str, path: str, handler: Handler, *, prefix: bool = False,
+        auth: str = AUTH_BOARD,
+    ) -> None:
+        """Add a route. *auth* is the token it takes when *method* needs one (AUTH_KINDS)."""
         method = method.upper()
-        for known_method, known_path, known_prefix, _ in self._routes:
-            if (known_method, known_path, known_prefix) == (method, path, prefix):
-                raise ValueError(f"a route for {method} {path} exists already")
+        if auth not in AUTH_KINDS:
+            raise ValueError(f"unknown auth {auth!r}")
+        if (method, path, prefix) in self._auth:
+            raise ValueError(f"a route for {method} {path} exists already")
         self._routes.append((method, path, prefix, handler))
+        self._auth[(method, path, prefix)] = auth
 
     def match(self, method: str, path: str) -> tuple[Handler | None, bool]:
         """The handler for *method* on *path*, and whether any route has the path."""
+        handler, known, _ = self.find(method, path)
+        return handler, known
+
+    def find(self, method: str, path: str) -> tuple[Handler | None, bool, str]:
+        """As :meth:`match`, with the auth of the route found (AUTH_BOARD without one)."""
         known = False
-        best: tuple[int, Handler] | None = None
+        best: tuple[int, Handler, str] | None = None
         for route_method, route_path, prefix, handler in self._routes:
             if prefix:
                 hit = path == route_path or path.startswith(route_path.rstrip("/") + "/")
@@ -228,8 +257,10 @@ class Routes:
             known = True
             # The longest path wins, so a module can take a part of another's prefix.
             if route_method == method and (best is None or len(route_path) > best[0]):
-                best = (len(route_path), handler)
-        return (best[1] if best else None), known
+                best = (len(route_path), handler, self._auth[(route_method, route_path, prefix)])
+        if best is None:
+            return None, known, AUTH_BOARD
+        return best[1], known, best[2]
 
 
 def build_routes(providers: Iterable[str] = ROUTE_PROVIDERS) -> Routes:
@@ -336,6 +367,7 @@ class Daemon:
         providers: Iterable[str] = ROUTE_PROVIDERS,
         clock: Callable[[], float] = time.monotonic,
         jobs: Callable[["Daemon"], archive.JobRunner | None] | None = None,
+        usage_poller: Callable[["Daemon"], usage.UsagePoller | None] | None = None,
     ) -> None:
         self.config = config
         self._load_config = load_config or (lambda: self.config)
@@ -371,6 +403,9 @@ class Daemon:
             daemon.ledger_path, transcript=daemon.transcript, written=daemon.tick_soon,
         ))
         self.jobs: archive.JobRunner | None = None
+        # None by default, so a daemon in a test never starts a Claude Code process for it.
+        self._usage_factory = usage_poller or (lambda daemon: None)
+        self.usage_poller: usage.UsagePoller | None = None
         # Set by a job that left work for the tick, so the loop does not wait an interval.
         self._tick_soon = threading.Event()
 
@@ -428,27 +463,48 @@ class Daemon:
         host = (headers.get("Host") or "").strip().lower()
         if host not in self.allowed_hosts():
             raise HTTPError(403, "unknown Host header")
-        if method not in SAFE_METHODS and not self._authorized(headers):
-            raise HTTPError(401, "a valid bearer token is required")
-        payload = self._read_body(headers, body)
         parts = urlsplit(target)
-        handler, known = self.routes.match("GET" if method == "HEAD" else method, parts.path)
+        handler, known, auth = self.routes.find("GET" if method == "HEAD" else method, parts.path)
+        needs_token = method not in SAFE_METHODS
+        # Without a route, the board's token decides between 401 and 404, as before routes
+        # took other tokens.
+        board_only = handler is None or auth == AUTH_BOARD
+        if needs_token and board_only and not self._authorized(headers):
+            raise HTTPError(401, "a valid bearer token is required")
         if handler is None:
+            self._read_body(headers, body)
             raise HTTPError(405 if known else 404, "method not allowed" if known else "not found")
         request = Request(
             method=method, path=parts.path, query=parse_qs(parts.query),
-            headers=headers, body=payload, daemon=self,
+            headers=headers, body=b"", daemon=self,
         )
         try:
+            if needs_token and auth != AUTH_BOARD:
+                given = self._bearer(headers)
+                request.caller = (
+                    worker_tokens.worker_for(request.ledger(), given) if given else None
+                )
+                if request.caller is None and not (
+                    auth == AUTH_WORKER_OR_BOARD and self._authorized(headers)
+                ):
+                    raise HTTPError(401, "a valid bearer token is required")
+            request.body = self._read_body(headers, body)
             return handler(request)
         finally:
             request.close()
 
-    def _authorized(self, headers: Mapping[str, str]) -> bool:
+    @staticmethod
+    def _bearer(headers: Mapping[str, str]) -> str | None:
         scheme, _, given = (headers.get("Authorization") or "").partition(" ")
-        if scheme.lower() != "bearer" or not given or not self._token:
+        if scheme.lower() != "bearer" or not given.strip():
+            return None
+        return given.strip()
+
+    def _authorized(self, headers: Mapping[str, str]) -> bool:
+        given = self._bearer(headers)
+        if not given or not self._token:
             return False
-        return hmac.compare_digest(given.strip().encode("utf-8"), self._token.encode("utf-8"))
+        return hmac.compare_digest(given.encode("utf-8"), self._token.encode("utf-8"))
 
     @staticmethod
     def _read_body(headers: Mapping[str, str], body: BinaryIO) -> bytes:
@@ -525,9 +581,12 @@ class Daemon:
             self.start()
         ledger = Ledger(self.ledger_path)
         self.jobs = self._jobs_factory(self)
+        self.usage_poller = self._usage_factory(self)
         try:
             if self.jobs is not None:
                 self.jobs.start()
+            if self.usage_poller is not None:
+                self.usage_poller.start()
             next_tick = self._clock()
             while not self.stop_requested():
                 soon = self._tick_soon.is_set()
@@ -539,6 +598,8 @@ class Daemon:
                         self._tick_soon.set()
                 self.stopping.wait(self._poll_secs)
         finally:
+            if self.usage_poller is not None:
+                self.usage_poller.close()
             if self.jobs is not None:
                 self.jobs.close()
             self.polls.flush()

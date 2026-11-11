@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from conftest import Harness, make_config, run_git
+from conftest import REPO_CONFIG, Harness, make_config, run_git
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
 from chargehand import paths, sanitize
-from chargehand.config import SourceConfig
+from chargehand.config import SourceConfig, TrackerConfig
 from chargehand.delivery import (
     MESSAGE_HEADER,
     UNKNOWN_KIND,
@@ -28,8 +28,9 @@ from chargehand.gitutil import Git
 from chargehand.ledger import InboxEntry, Ledger
 from chargehand.notify import Notifier
 from chargehand.roles import Role
+from chargehand.sources import Event, WorkItem
 from chargehand.tick import Runner
-from support import fake_source
+from support import fake_source, fake_tracker
 from support.fake_gh import GhState
 
 FAKE_SOURCE = SourceConfig(name="fake", type="fake", options={"board": "default", "repository": "test"})
@@ -479,6 +480,313 @@ def test_the_global_cap_keeps_the_events_queued(tmp_path, repo, claude_state, bo
     harness.ledger.close()
 
 
+def deliver_at(harness, clock):
+    """One delivery pass at *clock*, as a tick runs it."""
+    return delivery_mod.Delivery(
+        harness.ledger, max_concurrent=5, runtime=harness.runner.runtime,
+        policy=harness.runner._policy_of, clock=lambda: clock,
+    ).run()
+
+
+def comment_at(harness, worker, number: int, at: float) -> None:
+    harness.ledger.enqueue(worker.id, Event(
+        source="fake", kind="comment", item=WorkItem("fake", worker.item, worker.item),
+        actor="someone", occurred_at=at, dedupe_id=f"c{number}",
+        pointer=f"https://example.invalid/c{number}",
+    ), now=at)
+
+
+def test_ten_events_in_the_debounce_window_give_one_wake_after_it(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 30\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    feed = fake_source.feed()
+    ids = [feed.emit("comment", "PR-7") for _ in range(10)]
+
+    report = harness.next_tick()
+
+    assert resumes(harness) == []
+    held = harness.ledger.get(reviewer.id)
+    assert held.state == ledger_mod.QUEUED
+    assert any("wake held by the debounce until" in line for line in report.skipped)
+    reason = harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{reviewer.id}")
+    assert reason.startswith("wake held by the debounce until ")
+    newest = max(entry.queued_at for entry in harness.ledger.inbox(held))
+
+    assert deliver_at(harness, newest + 29).woken == []
+    assert resumes(harness) == []
+
+    result = deliver_at(harness, newest + 30)
+
+    assert [w.id for w in result.woken] == [reviewer.id]
+    (resume,) = resumes(harness)
+    assert resume["prompt"].splitlines() == [
+        MESSAGE_HEADER, *(f"comment: https://tracker.invalid/PR-7#{i}" for i in ids),
+    ]
+    assert [s.kind for s in harness.ledger.sessions_of(held)].count("wake") == 1
+    assert pending(harness, held) == []
+    harness.ledger.close()
+
+
+def test_a_new_event_during_the_debounce_starts_the_window_again(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 30\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    first = time.time()
+    comment_at(harness, reviewer, 1, first)
+    comment_at(harness, reviewer, 2, first + 20)
+
+    assert deliver_at(harness, first + 30).woken == []
+    assert harness.ledger.get(reviewer.id).state == ledger_mod.QUEUED
+    assert deliver_at(harness, first + 49).woken == []
+
+    assert [w.id for w in deliver_at(harness, first + 50).woken] == [reviewer.id]
+    assert resumes(harness)[-1]["prompt"].splitlines()[1:] == [
+        "comment: https://example.invalid/c1", "comment: https://example.invalid/c2",
+    ]
+    harness.ledger.close()
+
+
+def test_a_reply_from_the_board_does_not_wait_for_the_debounce_and_takes_the_burst_along(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 600\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    now = time.time()
+    comment_at(harness, reviewer, 1, now)
+    harness.ledger.enqueue(reviewer.id, Event(
+        source=ledger_mod.REPLY_SOURCE, kind=ledger_mod.REPLY_KIND,
+        item=WorkItem(ledger_mod.REPLY_SOURCE, "PR-7", "PR-7"), actor=ledger_mod.REPLY_SOURCE,
+        occurred_at=now, dedupe_id="reply-1", pointer="go on",
+    ), now=now)
+
+    assert [w.id for w in deliver_at(harness, now + 1).woken] == [reviewer.id]
+    assert resumes(harness)[-1]["prompt"].splitlines()[1:] == [
+        "comment: https://example.invalid/c1", f"{delivery_mod.REPLY_PREFIX}go on",
+    ]
+    harness.ledger.close()
+
+
+def test_a_due_timer_does_not_wait_for_the_debounce_and_takes_the_burst_along(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 600\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    now = time.time()
+    comment_at(harness, reviewer, 1, now)
+    harness.ledger.put_timer(
+        harness.ledger.get(reviewer.id), due_at=now, item="PR-7", item_ref="PR-7", now=now - 60
+    )
+
+    assert [w.id for w in deliver_at(harness, now + 1).woken] == [reviewer.id]
+    assert resumes(harness)[-1]["prompt"].splitlines()[1:] == [
+        "comment: https://example.invalid/c1", "timer: request_wake",
+    ]
+    harness.ledger.close()
+
+
+def test_a_clones_request_for_a_note_does_not_wait_for_the_debounce_and_takes_the_burst_along(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 600\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    now = time.time()
+    comment_at(harness, reviewer, 1, now)
+    assert deliver_at(harness, now + 1).woken == []
+    harness.ledger.enqueue(reviewer.id, Event(
+        source=ledger_mod.HANDOFF_SOURCE, kind=ledger_mod.HANDOFF_KIND,
+        item=WorkItem(ledger_mod.HANDOFF_SOURCE, "PR-7", "PR-7"),
+        actor=ledger_mod.HANDOFF_SOURCE, occurred_at=now, dedupe_id="handoff:clone-9",
+        pointer="for-clone-9",
+    ), now=now)
+
+    assert [w.id for w in deliver_at(harness, now + 2).woken] == [reviewer.id]
+    assert resumes(harness)[-1]["prompt"].splitlines()[1:] == [
+        "comment: https://example.invalid/c1", "handoff: for-clone-9",
+    ]
+    harness.ledger.close()
+
+
+def test_a_steady_stream_of_events_holds_the_wake_at_most_five_debounce_windows(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 30\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    first = time.time()
+    longest = delivery_mod.DEBOUNCE_MAX_HOLD_FACTOR * 30
+    # One event every 20 seconds: the 30-second window never passes on its own.
+    for number in range(longest // 20 + 1):
+        at = first + 20 * number
+        comment_at(harness, reviewer, number, at)
+        if at < first + longest:
+            assert deliver_at(harness, at).woken == [], at
+
+    assert deliver_at(harness, first + longest - 1).woken == []
+    assert [w.id for w in deliver_at(harness, first + longest).woken] == [reviewer.id]
+    assert len(resumes(harness)[-1]["prompt"].splitlines()) == 1 + longest // 20 + 1
+    harness.ledger.close()
+
+
+@pytest.mark.parametrize("name", ["implementer", "pr-reviewer"])
+def test_the_shipped_roles_debounce_and_say_that_a_loop_is_not_counted(name):
+    text = (paths.templates_dir() / "roles" / f"{name}.toml").read_text(encoding="utf-8")
+    role = Role.parse(name, tomllib.loads(text))
+
+    assert role.policy.debounce_secs == 120
+    assert "/loop" in text and "do not count them" in text
+
+
+def test_a_role_without_a_debounce_wakes_at_the_next_tick(wired):
+    assert wired.runner._policy_of(start_reviewer(wired)).debounce_secs == 0
+    end_turn(wired)
+    emit_three()
+
+    assert wired.next_tick().woken == ["reviewer/PR-7"]
+
+
+def test_a_worker_at_its_daily_cap_is_notified_once_until_its_next_wake(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    emit_three()
+    harness.next_tick()
+    end_turn(harness)
+
+    def capped() -> list[tuple[str, str]]:
+        return [n for n in harness.notifications() if n[1] == "daily-cap"]
+
+    for _ in range(3):
+        fake_source.feed().emit("comment", "PR-7")
+        report = harness.next_tick()
+        assert harness.ledger.get(reviewer.id).state == ledger_mod.QUEUED
+        assert any("daily cap (1/1)" in line for line in report.skipped)
+    assert capped() == [("PR-7", "daily-cap")]
+    (sent,) = [n for n in harness.notifier.sent if n.state == "daily-cap"]
+    assert sent.role == "reviewer"
+    assert sent.detail == "1 wakes in 24 hours, the role's daily cap is 1"
+    reason = harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{reviewer.id}")
+    assert reason == "wake held by the daily cap (1/1)"
+
+    # A day later the wake goes and clears the record, so the next time at the cap is
+    # notified again.
+    harness.ledger._conn.execute(
+        "UPDATE sessions SET started_at = started_at - 86401 WHERE kind = 'wake'"
+    )
+    assert harness.next_tick().woken == ["reviewer/PR-7"]
+    assert harness.ledger.get_state(f"{delivery_mod.CAP_NOTIFIED_PREFIX}{reviewer.id}") is None
+    end_turn(harness)
+    fake_source.feed().emit("comment", "PR-7")
+    harness.next_tick()
+    assert len(capped()) == 2
+    harness.ledger.close()
+
+
+def test_a_failed_cap_notification_goes_again_on_the_next_tick(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\nmax_wakes_per_day = 0\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    emit_three()
+    failing = [True]
+    dispatch = harness.notifier.dispatch
+
+    def flaky(notification):
+        outcome = dispatch(notification)
+        return dataclasses.replace(outcome, failed=failing[0], sent=not failing[0])
+
+    harness.notifier.dispatch = flaky
+    harness.next_tick()
+    assert harness.ledger.get_state(f"{delivery_mod.CAP_NOTIFIED_PREFIX}{reviewer.id}") is None
+    failing[0] = False
+    harness.next_tick()
+    harness.next_tick()
+    assert [n for n in harness.notifications() if n[1] == "daily-cap"] == [
+        ("PR-7", "daily-cap"), ("PR-7", "daily-cap"),
+    ]
+    harness.ledger.close()
+
+
+def second_repository(tmp_path: Path) -> Path:
+    origin = tmp_path / "second-origin.git"
+    run_git("init", "--bare", "--initial-branch=main", str(origin), cwd=tmp_path)
+    path = tmp_path / "second"
+    path.mkdir()
+    run_git("init", "--initial-branch=main", cwd=path)
+    run_git("remote", "add", "origin", str(origin), cwd=path)
+    (path / "README.md").write_text("# second repo\n")
+    (path / paths.REPO_CONFIG_NAME).write_text(REPO_CONFIG)
+    run_git("add", "-A", cwd=path)
+    run_git("commit", "-m", "initial", cwd=path)
+    run_git("push", "-u", "origin", "main", cwd=path)
+    return path
+
+
+def test_the_global_cap_holds_across_two_repositories(tmp_path, repo, claude_state, board):
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1)
+    other = dataclasses.replace(
+        harness.config.repositories[0], name="second", path=second_repository(tmp_path),
+        tracker=TrackerConfig(type="fake", options={"board": "second"}),
+    )
+    harness.config = dataclasses.replace(
+        harness.config, repositories=(*harness.config.repositories, other)
+    )
+    board.add("ABC-1")
+    harness.next_tick()
+    first = harness.worker("ABC-1", "implementer")
+    assert first.repository == "test" and first.state == ledger_mod.RUNNING
+    fake_tracker.board("second").add("XYZ-1")
+    harness.next_tick()
+    # The launch waits too: the one working slot is taken in the other repository.
+    assert harness.worker("XYZ-1", "implementer") is None
+    claude_state.set_session_state("ABC-1", "done", status="idle")
+    harness.next_tick()
+    second = harness.worker("XYZ-1", "implementer")
+    assert second.repository == "second" and second.state == ledger_mod.RUNNING
+    claude_state.set_session_state("XYZ-1", "done", status="idle")
+    harness.next_tick()
+    assert {harness.ledger.get(w.id).state for w in (first, second)} == {ledger_mod.IDLE}
+    comment_at(harness, first, 1, time.time())
+    comment_at(harness, second, 2, time.time())
+
+    report = harness.next_tick()
+
+    assert report.woken == ["implementer/ABC-1"]
+    assert harness.ledger.get(second.id).state == ledger_mod.QUEUED
+    assert any(
+        "implementer/XYZ-1" in line and "global cap (1/1 working)" in line
+        for line in report.skipped
+    )
+
+    claude_state.set_session_state("ABC-1", "done", status="idle")
+    assert harness.next_tick().woken == ["implementer/XYZ-1"]
+    harness.ledger.close()
+
+
 def test_the_usage_reserve_holds_a_wake_and_an_unknown_reading_admits(
     tmp_path, repo, claude_state, board
 ):
@@ -637,3 +945,345 @@ def test_a_permission_prompt_of_the_woken_turn_stays_open(wired, monkeypatch):
     assert report.woken == ["reviewer/PR-7"]
     [prompt] = wired.ledger.open_permission_prompts(wired.ledger.get(reviewer.id))
     assert prompt.tool_name == "Bash"
+
+
+# ----- the wake through the outbox ---------------------------------------------------
+
+
+def with_mod(harness, worker):
+    """The worker's session says hello from its chargehand mod, as the mod's session start does."""
+    return delivery_mod.record_mod_hello(harness.ledger, harness.ledger.get(worker.id), worker.session_uuid)
+
+
+def mod_takes(harness, worker):
+    """What the mod's outbox poll does: it takes the message for its session."""
+    current = harness.ledger.get(worker.id)
+    return delivery_mod.take_outbox(harness.ledger, current, current.session_uuid)
+
+
+def mod_confirms(harness, message, *, submitted=True):
+    current = harness.ledger.get(message.worker_id)
+    return delivery_mod.confirm_outbox(harness.ledger, current, message.id, submitted=submitted)
+
+
+def wake_rows(harness, worker) -> list[str]:
+    return [s.kind for s in harness.ledger.sessions_of(worker)]
+
+
+def test_a_live_session_with_the_mod_takes_its_wake_from_the_outbox(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+
+    report = wired.next_tick()
+
+    assert report.errors == [] and report.woken == []
+    # No stop and no resume: the process goes on.
+    assert resumes(wired) == []
+    assert ["stop", reviewer.session_id] not in wired.claude_state.commands
+    message = wired.ledger.outbox_message(reviewer)
+    assert message.state == ledger_mod.OUTBOX_PENDING
+    assert message.session_uuid == reviewer.session_uuid
+    assert message.text.splitlines() == [
+        MESSAGE_HEADER, *(f"{kind}: {p}" for kind, p in zip(THREE_KINDS, pointers)),
+    ]
+    waiting = wired.ledger.get(reviewer.id)
+    # Until the mod confirms, the events wait and no wake is recorded.
+    assert waiting.state == ledger_mod.IDLE and waiting.wakes == 0
+    assert pending(wired, waiting) == pointers
+    assert sorted(message.entries) == sorted(e.id for e in wired.ledger.inbox(waiting))
+
+    taken = mod_takes(wired, reviewer)
+    assert (taken.id, taken.text) == (message.id, message.text)
+    outcome, woken = mod_confirms(wired, taken)
+
+    assert outcome == delivery_mod.CONFIRM_RECORDED
+    assert woken.state == ledger_mod.RUNNING and woken.wakes == 1
+    assert woken.session_id == reviewer.session_id
+    assert wake_rows(wired, woken) == ["initial", "wake"]
+    assert pending(wired, woken) == []
+    # A second confirm of the same submit records nothing.
+    assert mod_confirms(wired, taken)[0] == delivery_mod.CONFIRM_ALREADY
+    assert wake_rows(wired, woken) == ["initial", "wake"]
+    assert resumes(wired) == []
+
+
+def test_ten_events_in_one_poll_give_one_outbox_message_and_one_wake(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    feed = fake_source.feed()
+    for _ in range(10):
+        feed.emit("comment", "PR-7")
+
+    wired.next_tick()
+    wired.next_tick()
+
+    (message,) = wired.ledger._conn.execute("SELECT id FROM outbox").fetchall()
+    taken = mod_takes(wired, reviewer)
+    assert len(taken.text.splitlines()) == 11
+    mod_confirms(wired, taken)
+    woken = wired.ledger.get(reviewer.id)
+    assert wake_rows(wired, woken) == ["initial", "wake"]
+    assert woken.wakes == 1 and pending(wired, woken) == []
+    assert resumes(wired) == [] and ["stop", reviewer.session_id] not in wired.claude_state.commands
+
+
+def test_events_join_a_pending_message_and_wait_once_the_mod_took_it(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    feed = fake_source.feed()
+    feed.emit("comment", "PR-7")
+    wired.next_tick()
+    first = wired.ledger.outbox_message(reviewer)
+
+    feed.emit("ci_status", "PR-7")
+    wired.next_tick()
+    joined = wired.ledger.outbox_message(reviewer)
+    assert joined.id == first.id and len(joined.entries) == 2
+
+    taken = mod_takes(wired, reviewer)
+    late = feed.emit("comment", "PR-7")
+    report = wired.next_tick()
+    assert any("took its wake message" in line for line in report.skipped)
+    assert wired.ledger.outbox_message(reviewer).entries == taken.entries
+
+    mod_confirms(wired, taken)
+    woken = wired.ledger.get(reviewer.id)
+    # The late event was not in the submitted message, so it waits for the next wake.
+    assert pending(wired, woken) == [f"https://tracker.invalid/PR-7#{late}"]
+
+
+def test_a_stopped_session_with_the_mod_is_respawned_and_then_takes_the_wake(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    stop_process(wired)
+    wired.claude_state.set(respawn_state="done")
+    emit_three()
+
+    report = wired.next_tick()
+
+    assert report.errors == []
+    assert ["respawn", reviewer.session_id] in wired.claude_state.commands
+    assert resumes(wired) == []
+    assert wired.ledger.outbox_message(reviewer).state == ledger_mod.OUTBOX_PENDING
+
+
+def test_a_failed_respawn_keeps_the_events_and_reports_it(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    stop_process(wired)
+    wired.claude_state.set(respawn_returncode=3)
+    pointers = emit_three()
+
+    report = wired.next_tick()
+
+    assert any("respawn of session" in line and "exited 3" in line for line in report.errors)
+    assert wired.ledger.outbox_message(reviewer) is None
+    assert pending(wired, wired.ledger.get(reviewer.id)) == pointers
+
+
+def test_a_session_whose_mod_said_no_hello_keeps_the_stop_and_the_resume(wired):
+    reviewer = start_reviewer(wired)
+    # The hello came from another session, such as the one before a retry.
+    wired.ledger.update(wired.ledger.get(reviewer.id), mod_session="an-older-session")
+    end_turn(wired)
+    emit_three()
+
+    report = wired.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert ["stop", reviewer.session_id] in wired.claude_state.commands
+    assert len(resumes(wired)) == 1
+    assert wired.ledger.outbox_message(reviewer) is None
+
+
+def test_a_message_the_mod_never_takes_falls_back_to_the_stop_and_the_resume(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    emit_three()
+    wired.next_tick()
+    message = wired.ledger.outbox_message(reviewer)
+    wired.ledger._conn.execute(
+        "UPDATE outbox SET created_at = created_at - ?", (delivery_mod.OUTBOX_TAKE_SECS + 1,)
+    )
+
+    report = wired.next_tick()
+
+    assert any("did not take its wake from the outbox" in line for line in report.warnings)
+    assert report.woken == ["reviewer/PR-7"] and len(resumes(wired)) == 1
+    assert wired.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED
+    woken = wired.ledger.get(reviewer.id)
+    assert woken.mod_session is None and woken.wakes == 1 and pending(wired, woken) == []
+
+
+def test_a_submit_the_session_refused_drops_the_message_and_the_mod(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+    wired.next_tick()
+    taken = mod_takes(wired, reviewer)
+
+    outcome, after = mod_confirms(wired, taken, submitted=False)
+
+    assert outcome == delivery_mod.CONFIRM_DROPPED
+    assert after.mod_session is None and after.wakes == 0
+    assert pending(wired, after) == pointers
+    assert wired.ledger.get_outbox(taken.id).state == ledger_mod.OUTBOX_DROPPED
+    # The next wake stops and resumes the session.
+    wired.next_tick()
+    assert len(resumes(wired)) == 1
+
+
+def test_a_wake_in_an_outbox_counts_against_the_global_cap(tmp_path, repo, claude_state, board):
+    write_role(repo, "reviewer", REVIEWER)
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=3)
+    first = with_mod(harness, start_reviewer(harness, "PR-7"))
+    end_turn(harness, "PR-7")
+    harness.next_tick()
+    second = start_reviewer(harness, "PR-8")
+    end_turn(harness, "PR-8")
+    harness.next_tick()
+    emit_three("PR-7")
+    emit_three("PR-8")
+
+    report = harness.next_tick()
+
+    assert harness.ledger.outbox_message(first) is not None
+    assert harness.ledger.get(second.id).state == ledger_mod.QUEUED
+    assert any("reviewer/PR-8" in line and "global cap (1/1 working)" in line for line in report.skipped)
+    harness.ledger.close()
+
+
+def test_a_wake_in_an_outbox_counts_against_the_launch_throttle(tmp_path, repo, claude_state, board):
+    write_role(repo, "reviewer", REVIEWER)
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=3)
+    reviewer = with_mod(harness, start_reviewer(harness))
+    end_turn(harness)
+    harness.next_tick()
+    emit_three()
+    harness.board.add("ABC-1")
+
+    report = harness.next_tick()
+
+    assert harness.ledger.outbox_message(reviewer) is not None
+    assert harness.worker("ABC-1", "implementer") is None
+    assert any("launch throttle (1/1)" in line for line in report.skipped)
+
+    # Once the turn ran and ended, the slot is free again.
+    mod_confirms(harness, mod_takes(harness, reviewer))
+    end_turn(harness)
+    harness.next_tick()
+    harness.next_tick()
+    assert harness.worker("ABC-1", "implementer") is not None
+    harness.ledger.close()
+
+
+def test_a_paused_worker_with_a_wake_in_its_outbox_holds_no_working_slot(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER)
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=3)
+    first = with_mod(harness, start_reviewer(harness, "PR-7"))
+    end_turn(harness, "PR-7")
+    harness.next_tick()
+    emit_three("PR-7")
+    harness.next_tick()
+    message = harness.ledger.outbox_message(first)
+    assert message is not None
+    # The operator stops it before the mod took the wake.
+    harness.ledger.record_request("stop", "reviewer/PR-7")
+    harness.next_tick()
+    assert harness.ledger.get(first.id).state == ledger_mod.PAUSED
+    assert harness.ledger.outbox_workers() == set()
+    second = start_reviewer(harness, "PR-8")
+    end_turn(harness, "PR-8")
+    harness.next_tick()
+    emit_three("PR-8")
+
+    report = harness.next_tick()
+
+    assert not any("global cap" in line for line in report.skipped)
+    assert report.woken == ["reviewer/PR-8"]
+    assert harness.ledger.get(second.id).state == ledger_mod.RUNNING
+    # Its message does not go out; its events wait for a wake after a continue.
+    assert harness.ledger.get_outbox(message.id).state == ledger_mod.OUTBOX_DROPPED
+    assert len(pending(harness, harness.ledger.get(first.id))) == 3
+    harness.ledger.close()
+
+
+def test_a_stop_and_a_continue_in_one_tick_drop_the_taken_wake(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+    wired.next_tick()
+    taken = mod_takes(wired, reviewer)
+    wired.ledger.record_request("stop", "reviewer/PR-7")
+    wired.ledger.record_request("continue", "reviewer/PR-7")
+
+    wired.next_tick()
+
+    assert ["respawn", reviewer.session_id] in wired.claude_state.commands
+    assert wired.ledger.get_outbox(taken.id).state == ledger_mod.OUTBOX_DROPPED
+    # The stopped process's submit, if its confirm still comes, records no wake.
+    outcome, after = mod_confirms(wired, taken)
+    assert outcome == delivery_mod.CONFIRM_DROPPED and after.wakes == 0
+    assert pending(wired, after) == pointers
+
+    # The next turn end gets the events in a new message, without the retake wait.
+    end_turn(wired)
+    wired.next_tick()
+    fresh = wired.ledger.outbox_message(reviewer)
+    assert fresh is not None and fresh.id != taken.id and fresh.state == ledger_mod.OUTBOX_PENDING
+
+
+def test_a_cancel_drops_the_wake_in_the_outbox(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    emit_three()
+    wired.next_tick()
+    message = wired.ledger.outbox_message(reviewer)
+    wired.ledger.record_request("cancel", "reviewer/PR-7")
+
+    wired.next_tick()
+
+    assert wired.ledger.get(reviewer.id).state == ledger_mod.CANCELLED
+    dropped = wired.ledger.get_outbox(message.id)
+    # The cancel drops it, not only the sweep of the delivery that follows.
+    assert (dropped.state, dropped.reason) == (ledger_mod.OUTBOX_DROPPED, "the worker was cancelled")
+
+
+def test_a_wake_the_worktree_guard_refuses_drops_the_outbox_message(wired):
+    reviewer = with_mod(wired, start_reviewer(wired))
+    end_turn(wired)
+    pointers = emit_three()
+    wired.next_tick()
+    message = wired.ledger.outbox_message(reviewer)
+
+    result = delivery_mod.Delivery(
+        wired.ledger, max_concurrent=5, runtime=wired.runner.runtime,
+        policy=wired.runner._policy_of, guard=lambda worker: "the worktree changed",
+    ).run()
+
+    paused = wired.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED and result.faults
+    dropped = wired.ledger.get_outbox(message.id)
+    assert (dropped.state, dropped.reason) == (ledger_mod.OUTBOX_DROPPED, "the wake was refused")
+    assert pending(wired, paused) == pointers
+
+
+def test_delivery_takes_a_timer_by_its_own_clock(wired):
+    reviewer = start_reviewer(wired)
+    end_turn(wired)
+    wired.next_tick()
+    idle = wired.ledger.get(reviewer.id)
+    assert idle.state == ledger_mod.IDLE
+    due = time.time() + 3600
+    wired.ledger.put_timer(idle, due_at=due, item="PR-7", item_ref="PR-7")
+
+    def run(clock):
+        return delivery_mod.Delivery(
+            wired.ledger, max_concurrent=5, runtime=wired.runner.runtime,
+            policy=wired.runner._policy_of, clock=lambda: clock,
+        ).run()
+
+    assert run(due - 1).woken == []
+    assert [w.id for w in run(due).woken] == [reviewer.id]
+    assert "timer: request_wake" in resumes(wired)[-1]["prompt"].splitlines()
