@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import pytest
 
 from chargehand import board, channel, worker_tokens
+from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
 from chargehand import runtime as runtime_mod
 from chargehand import tick as tick_mod
@@ -692,6 +693,83 @@ def test_request_wake_is_delivered_once_due_and_counts_as_a_wake(daemon, harness
     assert harness.ledger.wakes_since(woken, time.time() - 60) == 1
     (resume,) = harness.claude_state.read()["resumes"]
     assert "timer: request_wake" in resume["prompt"].splitlines()
+
+
+# A session that can call the worker tools has the mod, so its wakes go through its outbox.
+
+
+def take_and_start(daemon, harness, worker):
+    """The mod's part of a wake, in the order a live session gives it: the mod takes the
+    message, its submit starts the turn, which the turn-start hook reports first, and then
+    the mod confirms. The text that was submitted, and the worker after the confirm."""
+    status, taken = post(daemon, "outbox", of(worker))
+    assert status == 200 and taken["message"] is not None
+    session_hook(daemon, worker, "UserPromptSubmit")
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+    status, outcome = post(
+        daemon, "outbox/confirm", of(worker, id=taken["message"]["id"], submitted=True)
+    )
+    assert (status, outcome) == (200, {"outcome": "recorded"})
+    return taken["message"]["text"], harness.ledger.get(worker.id)
+
+
+@pytest.mark.parametrize("listed", ["blocked", "done"])
+def test_the_answer_to_a_question_goes_through_the_outbox_of_a_session_with_the_mod(
+    daemon, harness, monkeypatch, listed
+):
+    monkeypatch.setattr(board, "REQUEST_WAIT_SECS", 0.0)
+    worker = launch(harness)
+    assert post(daemon, "hello", of(worker))[0] == 200
+    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?", "options": ["red"]}))
+    turn_end(daemon, harness, worker)
+    harness.claude_state.set_session_state(worker.session_id, listed, status="idle")
+    harness.next_tick()
+    (question,) = harness.ledger.open_permission_prompts(worker)
+    assert answer(daemon, worker, {"prompt": question.id, "text": "red"})[0] == 202
+
+    harness.next_tick()
+
+    assert harness.ledger.outbox_message(worker).state == ledger_mod.OUTBOX_PENDING
+    text, woken = take_and_start(daemon, harness, worker)
+    assert text.splitlines()[-1] == "reply from the operator: red"
+    assert (woken.state, woken.wakes, harness.ledger.inbox(woken)) == (ledger_mod.RUNNING, 1, [])
+    assert [s.kind for s in harness.ledger.sessions_of(woken)] == ["initial", "wake"]
+    assert harness.claude_state.read().get("resumes", []) == []
+
+
+def test_a_due_timer_goes_through_the_outbox_of_a_session_with_the_mod(daemon, harness):
+    worker = launch(harness)
+    assert post(daemon, "hello", of(worker))[0] == 200
+    post(daemon, "tool/request_wake", of(worker, input={"after_secs": 600}))
+    idle = turn_end(daemon, harness, worker)
+    harness.claude_state.set_session_state(worker.session_id, "done", status="idle")
+    timer = harness.ledger.pending_timer(idle)
+    harness.ledger._conn.execute("UPDATE inbox SET due_at = ? WHERE id = ?", (time.time() - 1, timer.id))
+
+    harness.next_tick()
+
+    text, woken = take_and_start(daemon, harness, worker)
+    assert text.splitlines()[-1] == "timer: request_wake"
+    assert (woken.state, woken.wakes, harness.ledger.inbox(woken)) == (ledger_mod.RUNNING, 1, [])
+    assert harness.ledger.wakes_since(woken, time.time() - 60) == 1
+    assert harness.claude_state.read().get("resumes", []) == []
+
+
+def test_a_parked_worker_resumes_through_the_outbox_of_a_session_with_the_mod(daemon, harness):
+    worker = launch(harness)
+    assert post(daemon, "hello", of(worker))[0] == 200
+    # A usage limit ended the turn, and its reset time has passed.
+    harness.claude_state.set_session_state(worker.session_id, "failed", status="idle")
+    harness.ledger.update(
+        harness.ledger.get(worker.id), state=ledger_mod.PARKED, reset_at=time.time() - 1
+    )
+
+    harness.next_tick()
+
+    text, woken = take_and_start(daemon, harness, worker)
+    assert text == delivery_mod.RESUME_MESSAGE
+    assert (woken.state, woken.wakes, woken.reset_at) == (ledger_mod.RUNNING, 1, None)
+    assert harness.claude_state.read().get("resumes", []) == []
 
 
 def test_a_new_request_wake_replaces_the_one_that_waits(daemon, harness):
