@@ -96,10 +96,14 @@ discard a worker; reply to a worker with one line of text, which reaches it as a
 the way a comment would, and answers a question that ended the worker's turn; attach,
 which opens an iTerm2 or Terminal.app window (chosen on the page) running `claude attach`
 on the worker's session; and pause or resume a repository or all of them. The buttons
-need the daemon's token: paste the content of the token file into the token field once,
-and the browser keeps it for the page. Workers started on the board are named by a handle
-with their id, such as `implementer/ABC-1#7`, which every command that takes an item also
-accepts.
+need the daemon's token: paste the content of the token file into the token field once
+and press Enter, or leave the field, and the browser keeps it for the page. The page
+checks the token at once and shows its state next to the field: "no token", "checking",
+"token accepted" or "token not valid". It checks again when the page loads and when the
+daemon was restarted or unreachable, so a restart with a new token file shows "token not
+valid" without running an action; "Forget token" removes it and shows "no token".
+Workers started on the board are named by a handle with their id, such as
+`implementer/ABC-1#7`, which every command that takes an item also accepts.
 
 Attach in Terminal.app needs no macOS permission: the daemon writes a one-line script
 (`exec claude attach <session id>`) into a private directory under its state directory
@@ -114,7 +118,11 @@ the worker's current branch, so its commits carry over and the two never write t
 files; uncommitted changes stay with the original. The form starts with the worker's prompt
 template, model and effort, which you can change. Fresh mode starts a new session; full
 mode starts with a copy of the worker's conversation (only while the worker is not in the
-middle of a turn or a prompt). The clone follows no events on the item unless you name the
+middle of a turn or a prompt); summary mode starts a new session that first reads the
+worker's handoff note through the `read_handoff` tool. When that note is older than the
+worker's last turn, chargehand first wakes the worker once to write a current note, and the
+clone waits for it for up to 10 minutes; then it starts from the stored note, and its card
+says so. The clone follows no events on the item unless you name the
 kinds, so only your replies reach it. Its card follows the original's card and says "clone
 of" the original. From a terminal: `chargehand clone implementer/ABC-1#7 --mode full
 --model sonnet --prompt-file next.txt`, with `--effort`, `--prompt` and `--subscribe KIND`
@@ -158,11 +166,41 @@ waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and t
 its own dialog, which only `claude attach` can answer; so does a prompt that was open
 when the daemon stopped.
 
-To let the daemon see your subscription's weekly usage window, wrap your status line
-command in `~/.claude/settings.json` with `chargehand statusline`. It writes the window to
-`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`) and then runs your command
-with the same input, so your status line does not change. Other windows in the input are
-ignored. chargehand does not edit the settings file for you:
+A worker asks you a question with the `ask` tool of the chargehand mod; `AskUserQuestion`
+is denied for every worker. The question shows on its card in Needs you with its options
+as buttons and a one-line answer field. The worker ends its turn after it asks, and your
+answer reaches it as a reply, as its next turn. A worker reports its progress with the
+`report` tool: the card shows the state and the summary, a pull request link becomes the
+card's link and the worker follows that pull request, and `done` or `failed` ends the
+worker when its turn ends, which clears or keeps the label as a finished worker does. A
+worker that never reports is supervised by its hooks and its session state as before.
+The `status_file` key of a role is deprecated: it still works in this release and goes
+away in a later one; use `report` and `ask` in the role's prompt instead.
+
+The daemon reads your subscription's weekly usage window by itself. Every 5 minutes it
+starts a short `claude -p` process in an empty directory and sends it Claude Code's
+`get_usage` control request; Claude Code answers with the usage that it fetches with its
+own sign-in. chargehand reads no token and no Keychain item, the request runs no turn
+and no hooks, and it writes no transcript. The reading goes to
+`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`), and `/api/state` and the
+board show the window's percentage and reset time. The request is experimental in Claude
+Code and can change with any release: when it fails, times out or gets an answer without
+the window, the daemon logs one line and keeps the last reading, and the bar stays grey
+until there is one. `chargehand doctor` shows which source wrote the last reading and how
+old it is. Set the interval, or turn the request off with 0, in `[usage]`:
+
+```toml
+[usage]
+poll_secs = 300   # at least 60; 0 turns the request off
+```
+
+Two more sources write the same file, and the newest reading counts however old it is,
+until its reset time has passed; `source` in `/api/state` says which wrote it. Each worker
+session posts its reading after its turns, through the chargehand mod that every worker
+loads. And a status line command wrapped with `chargehand statusline` writes the window
+from its input and then runs your command with the same input, so your status line does not
+change; other windows in the input are ignored. chargehand does not edit the settings file
+for you:
 
 ```json
 "statusLine": {
@@ -170,9 +208,6 @@ ignored. chargehand does not edit the settings file for you:
   "command": "chargehand statusline -- '~/.claude/statusline.sh'"
 }
 ```
-
-`/api/state` then shows the window's percentage and reset time. The newest reading counts
-however old it is, until its reset time has passed.
 
 The reading also keeps a part of the weekly window for your own sessions. No wake starts
 while the window is above 80 %, and no new worker starts while it is above 70 %; set other
@@ -184,13 +219,26 @@ wake_reserve_percent = 20        # no wake above 100 minus this
 new_worker_reserve_percent = 30  # no new worker while the week is above 100 minus this
 ```
 
-Without a usage file there is no reserve. The wrapper writes the file only while a Claude
-Code session shows its status line, so between your sessions the reserves use the last
-reading. Once the window's reset time has passed, that reading holds nothing.
+Without a usage file there is no reserve. While no source can write a new reading, the
+reserves use the last one. Once the window's reset time has passed, that reading holds
+nothing.
 
 A turn that ends on a usage limit parks its worker instead of failing it: you are notified
 once, and after the reset the worker continues in the same session by itself, one at a time
 within `max_concurrent`.
+
+Three limits keep wakes from using up the week. `max_concurrent` in the machine
+configuration caps the working turns of all repositories together, launches and wakes. In
+a role's `[policy]`, `debounce_secs` holds a wake until no new event has arrived for that
+many seconds, so a burst of review comments becomes one wake, and at most five times that
+long after the first waiting event; it is 0 by default, and the role templates set 120. A
+reply from the board, a due `request_wake` timer and a summary clone's request for a
+current handoff note do not wait. `max_wakes_per_day` (12 by default) caps the wakes of
+one worker over the last 24 hours: a worker at its cap stays in Queued with the reason on
+its card, and you are notified once. Each card shows the wakes in
+that window and an estimate of the tokens in the worker's session. A `/loop` that a role's
+prompt starts runs its own turns, which chargehand does not start: these limits do not
+count them, and no cap stops them.
 
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).
@@ -261,7 +309,8 @@ At `info` the log holds:
 `warning` keeps only warnings and errors.
 
 The log never holds what a worker said or did in its session: no last answer, waiting
-text, permission tool input, status file text, comment body or transcript path. It never
+text, permission tool input, question, report summary, handoff note, status file text,
+comment body or transcript path. It never
 holds a comment author either, which on Linear is an email address. Those stay in the
 ledger and on the board. Text from outside chargehand that may appear, such as a setup
 script's error or a command's stderr, is capped and cut to one line.
@@ -315,9 +364,16 @@ prompt before anything runs.
 ## Notifications
 
 The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or ends:
-blocked, parked, failed, done through the status file, or stopped by the watchdog. A
+blocked, parked, failed, done through a report or the status file, stopped by the
+watchdog, or held by its daily wake cap (`daily-cap`). A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
-are not notified; `chargehand status` shows them. As shipped it
+are not notified; `chargehand status` shows them. A turn can end while a background shell
+that it started still runs; Claude Code then lists the session as busy, with the state
+working or done, and the board and `status` show the worker as idle with the session state
+`background`. When no new turn has started 30 minutes after that turn end (`background_shell_mins` in the machine
+configuration; 0 turns it off), you are notified once, because a shell that never ends,
+such as a dev server, can hide a session that waits for you. This applies to workers
+launched by this release or a later one. As shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an
 email, and a push service, and you can enable more than one. The hook receives only the

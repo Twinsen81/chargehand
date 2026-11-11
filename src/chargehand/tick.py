@@ -113,6 +113,15 @@ CHECKOUT_HEAD_PREFIX = "checkout-head:"
 # working directory is not resumed there. `continue --force` records them again.
 WORKSPACE_FILES_PREFIX = "workspace-files:"
 WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_FILES_PREFIX)
+# What a removal of a worker's worktree would lose, as `WorkAtRisk.facts` gives it with the
+# time it was found (`checked_at`), under this prefix and the worker id, so that its card can
+# warn before Discard, Retry or Archive. The board model makes no git call, so the tick
+# records it: for each worker that ended within the board's closed window, once it ended
+# and again after the refresh interval, and for a live worker whose action it refused. An
+# ended worker's worktree rarely changes, and each look runs git twice in it.
+WORK_AT_RISK_PREFIX = "work-at-risk:"
+WORK_AT_RISK_WINDOW_SECS = 24 * 3600
+WORK_AT_RISK_REFRESH_SECS = 600
 
 # A start event for a repository that no `[[repository]]` names is ignored. It is reported
 # once per source and repository; this prefix marks the ones reported.
@@ -143,6 +152,36 @@ class _RowChanged(Exception):
 
 # The detail of a worker whose turn ended without a question.
 TURN_ENDED = "turn ended; waits for events"
+# The detail of a worker whose turn ended after it asked a question with the ask tool.
+ASKED = "asked a question; answer it on the board"
+
+# A report counts for the turn it was made in: from the last wake on, or from the launch.
+# The wake is recorded once its resume or its submit returned, a moment after the new
+# turn started, so a report this much earlier still counts.
+REPORT_TURN_MARGIN_SECS = 5.0
+
+# One notification per ask question. The question that a notification was about is kept
+# under this prefix and the worker id. While the worker stays blocked, another view of the
+# same turn end (`done` from the Stop hook or the listing, `blocked` from the listing,
+# before or after the answer) sends nothing more, as long as no permission prompt is open
+# and the question is the worker's newest. A permission prompt notified before or after
+# the question records no question, so it never covers one. A new turn, a turn end that
+# waits for events and the end of the worker drop the record.
+NOTIFIED_QUESTION_PREFIX = "notified-question:"
+# The end of a worker's last turn, while no turn has started since: the time and the
+# session, kept under this prefix and the worker id. A turn-end hook writes it. A hook that
+# shows another session state, and a listing that no longer shows the session working or
+# busy, drop it; a later wake makes it void. While it holds, a listing that shows the
+# session working, or done but busy, sees a background shell of the ended turn, not a new
+# turn: Claude Code lists a session with a live background shell so, and names no shell.
+TURN_ENDED_PREFIX = "turn-ended:"
+# Records per worker that only a live worker needs: garbage collection drops them once the
+# worker has ended (cancelled, discarded, closed). Not in WORKER_STATE_PREFIXES, whose
+# records say that a worker has an item checkout.
+LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX, TURN_ENDED_PREFIX)
+# The worker states a turn end leaves, which a background shell of that turn keeps.
+TURN_END_STATES = (ledger_mod.IDLE, ledger_mod.QUEUED, ledger_mod.BLOCKED)
+QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
 
 # The worker states that are never notified. A worker that waits for events ends a turn
 # for each event it answers; `status` and the board show it. Blocked, parked, failed, done
@@ -186,6 +225,16 @@ PENDING_NOTIFICATION_PREFIX = "notify-pending:"
 PENDING_NOTIFICATION_MAX_AGE_SECS = 24 * 3600
 
 SESSION_STILL_WORKING = "not collected, its session is still working"
+
+# The channel tool that gives a fresh session its worker's handoff note.
+HANDOFF_TOOL = "read_handoff"
+
+# How long a summary clone waits for a current handoff note of its original, from the
+# clone's creation. Then it starts from the note that is stored, or fails without one.
+SUMMARY_WAIT_SECS = 10 * 60
+# What a summary clone waits for, or how it started, for its card: chargehand's own text
+# under this prefix and the clone's id, in the ledger's state table.
+SUMMARY_STATE_PREFIX = "summary-clone:"
 
 # Names no branch, because the session chose the name and this text reaches the terminal,
 # the tick log, and whichever assistant ran the command.
@@ -272,6 +321,73 @@ def fork_refusal(worker: Worker) -> str | None:
     return None
 
 
+def note_is_current(worker: Worker) -> bool:
+    """Whether *worker*'s handoff note was written in its last turn or later.
+
+    The start of the turn decides, never its end: a note written during the turn is
+    always older than the turn's end.
+    """
+    if not worker.handoff_note or worker.handoff_at is None:
+        return False
+    since = worker.working_since or worker.last_wake_at or worker.created_at
+    return worker.handoff_at >= since
+
+
+def can_be_asked_for_a_note(worker: Worker) -> bool:
+    """Whether a wake can reach *worker*'s session, so that it writes a current note."""
+    return not (
+        worker.is_terminal or worker.gc_done or worker.archived_at is not None
+        or not worker.session_id or worker.state == ledger_mod.PAUSED
+    )
+
+
+def summary_refusal(worker: Worker, *, loads_mod: bool | None = None) -> str | None:
+    """Why a summary clone of *worker* cannot start now, or None when it can.
+
+    *loads_mod* says whether a session of the worker's runtime loads the chargehand mod,
+    whose tool gives the clone the note; without it, the runtime's capabilities decide.
+    """
+    if loads_mod is None:
+        try:
+            loads_mod = runtime_mod.get(worker.runtime).capabilities.in_place_wake
+        except ConfigError:
+            loads_mod = False
+    if not loads_mod:
+        return (
+            f"runtime {worker.runtime} does not load the chargehand mod, whose tool gives the "
+            f"handoff note; summary mode is not available"
+        )
+    if note_is_current(worker):
+        return None
+    if worker.state in FORK_BUSY_STATES:
+        why = (
+            "its handoff note is older than its current turn" if worker.handoff_note
+            else "has no handoff note yet"
+        )
+        return (
+            f"{worker.id_handle} is {worker.state} and {why}, so clone it in summary mode "
+            f"once it is idle"
+        )
+    if not worker.handoff_note and not can_be_asked_for_a_note(worker):
+        return f"{worker.id_handle} left no handoff note and cannot be asked for one"
+    return None
+
+
+def summary_request_id(clone: Worker) -> str:
+    """The dedupe id of the one request for a current note that *clone* puts into its
+    original's inbox."""
+    return f"handoff:clone-{clone.id}"
+
+
+def summary_request_pointer(clone: Worker) -> str:
+    """The pointer of *clone*'s request for a current note: chargehand's own words."""
+    return f"write-a-current-note-with-the-handoff-tool-for-clone-{clone.id}"
+
+
+class SummaryWait(ChargehandError):
+    """A summary clone's launch waits for a current handoff note of its original."""
+
+
 def ancestors(ledger: Ledger, worker: Worker) -> list[Worker]:
     """The worker a clone was made from, then that one's original, and so on.
 
@@ -289,29 +405,122 @@ def ancestors(ledger: Ledger, worker: Worker) -> list[Worker]:
     return found
 
 
+def _keep_out(originals: Sequence[Worker]) -> str:
+    paths = [original.worktree for original in originals]
+    keep_out = "do not change anything there."
+    if len(paths) == 1:
+        return f"The worktree {paths[0]} belongs to the other worker: {keep_out}"
+    named = f"{', '.join(paths[:-1])} and {paths[-1]}"
+    return f"The worktrees {named} belong to other workers: {keep_out}"
+
+
 def clone_note(worker: Worker, originals: Sequence[Worker]) -> str:
     """The line before a full-mode clone's prompt. Only paths and names chargehand chose."""
     lead = (
         f"This session continues a copy of another worker's conversation. From now on you "
         f"work in {worker.worktree} on branch {worker.branch}."
     )
-    paths = [original.worktree for original in originals]
-    keep_out = "do not change anything there."
-    if len(paths) == 1:
-        return f"{lead} The worktree {paths[0]} belongs to the other worker: {keep_out}"
-    named = f"{', '.join(paths[:-1])} and {paths[-1]}"
-    return f"{lead} The worktrees {named} belong to other workers: {keep_out}"
+    return f"{lead} {_keep_out(originals)}"
+
+
+def summary_note(worker: Worker, originals: Sequence[Worker]) -> str:
+    """The line before a summary clone's prompt: the item, the tool that gives the note,
+    and the paths. Only names and paths chargehand chose; the note itself is session text,
+    which the session reads as a tool result."""
+    original = originals[0]
+    work = worker.item or f"the work of {original.id_handle}"
+    lead = (
+        f"This is a new session for {work}, which the worker {original.id_handle} started. "
+        f"First call chargehand's {HANDOFF_TOOL} tool: it gives that worker's handoff note, "
+        f"with what is done and what is left. Go on from that note, and do not start the "
+        f"work again. You work in {worker.worktree} on branch {worker.branch}."
+    )
+    return f"{lead} {_keep_out(originals)}"
 
 
 def launch_prompt(
     worker: Worker, template: str, originals: Sequence[Worker], *, where: str
 ) -> str:
     """The first prompt of *worker*'s session: *template* filled in with the worker's own
-    values, after the note of a full-mode clone. *originals* are its :func:`ancestors`."""
+    values, after the note of a full-mode or a summary clone. *originals* are its
+    :func:`ancestors`."""
     prompt = config_mod.render(template, template_values(worker), where=where)
     if worker.clone_mode == ledger_mod.CLONE_FULL and originals:
         return f"{clone_note(worker, originals)}\n\n{prompt}"
+    if worker.clone_mode == ledger_mod.CLONE_SUMMARY and originals:
+        return f"{summary_note(worker, originals)}\n\n{prompt}"
     return prompt
+
+
+def refresh_prompt(worker: Worker, template: str, message: str | None, *, where: str) -> str:
+    """The first prompt of a fresh session that continues *worker*'s work after a refresh.
+
+    chargehand's own note, which names the item and the tool that gives the handoff note,
+    then *template* filled in as at the launch, then the wake *message*. The handoff note
+    is session text, so it is never part of it: the session reads it as a tool result.
+    Whether a note is stored at all is chargehand's own knowledge, and the note says so.
+    """
+    lead = (
+        f"This is a fresh session for the work on {worker.item or worker.handle}, which "
+        f"earlier sessions in this worktree started."
+    )
+    if worker.handoff_note:
+        note = (
+            f"{lead} First call chargehand's {HANDOFF_TOOL} tool: it gives the handoff note "
+            f"that your earlier session left, with what is done and what is left. Go on from "
+            f"that note, and do not start the work again."
+        )
+    else:
+        note = (
+            f"{lead} Your earlier session left no handoff note, so first look at the "
+            f"worktree, its branch and the item to see what is done, and go on from there."
+        )
+    parts = [note, config_mod.render(template, template_values(worker), where=where)]
+    if message:
+        parts.append(message)
+    return "\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class WorkAtRisk:
+    """Work in a worker's worktree or item checkout that removing it would lose.
+
+    *place* is ``worktree`` or ``item_checkout``; *unpushed* is -1 when the checkout could
+    not be inspected, which counts as work.
+    """
+
+    place: str
+    unpushed: int
+    uncommitted: bool
+
+    @property
+    def text(self) -> str:
+        where = "its item checkout" if self.place == "item_checkout" else "its worktree"
+        if self.unpushed < 0:
+            return f"{where} could not be inspected"
+        if self.unpushed > 0:
+            return f"{where} holds {self.unpushed} unpushed commit(s)"
+        return f"{where} has uncommitted changes"
+
+    def facts(self) -> dict[str, object]:
+        return {
+            "place": self.place,
+            "uncommitted_changes": self.uncommitted,
+            "unpushed_commits": max(self.unpushed, 0),
+            "uninspected": self.unpushed < 0,
+        }
+
+
+class NeedsForce(str):
+    """A refusal that force overrides: the command line's message, which carries the
+    machine-readable *reason* that the board words for its own controls."""
+
+    reason: dict[str, object]
+
+    def __new__(cls, message: str, reason: dict[str, object]) -> "NeedsForce":
+        made = super().__new__(cls, message)
+        made.reason = {"needs_force": True, **reason}
+        return made
 
 
 @dataclass(frozen=True)
@@ -823,6 +1032,10 @@ class Runner:
                 self._run_launch_steps(context, worker, report)
             except LaunchAborted:
                 raise
+            except SummaryWait as exc:
+                # Waiting for the original's note is not a failed attempt: give it back.
+                self.ledger.update(worker, launch_attempts=before)
+                report.skipped.append(str(exc))
             except TRACKER_FAILURES as exc:
                 # A tracker outage is not this worker's fault. Give the retry back,
                 # otherwise three unlucky ticks fail a launch that never went wrong.
@@ -850,9 +1063,13 @@ class Runner:
     ) -> None:
         root = self.config.worktree_root
         live = [w for w in self.ledger.live_workers() if w.runtime == runtime]
-        known = {str(Path(w.worktree)) for w in live} | {w.session_id for w in live if w.session_id}
+        # By the real path: the listing names a worktree under a linked root, such as /tmp
+        # on macOS, by the path the link leads to.
+        known = {os.path.realpath(w.worktree) for w in live} | {
+            w.session_id for w in live if w.session_id
+        }
         for session in sessions:
-            if session.id in known or (session.cwd and str(Path(session.cwd)) in known):
+            if session.id in known or (session.cwd and os.path.realpath(session.cwd) in known):
                 continue
             if not self._under(root, session.cwd):
                 continue
@@ -860,12 +1077,22 @@ class Runner:
             by_id = self.ledger.worker_by_session_id(session.id)
             if by_id is not None and by_id.runtime != runtime:
                 by_id = None
+            replaced = None if by_id is not None else self.ledger.worker_by_session_row(session.id)
+            if replaced is not None:
+                # A session that a refresh replaced, or that a removal left behind, belongs to
+                # its worker, which keeps it stopped: it is never adopted as another worker.
+                key = f"orphan-notified:{session.id}"
+                if session.state == runtime_mod.WORKING and not self.ledger.get_state(key):
+                    self.ledger.set_state(key, "1")
+                    report.warnings.append(
+                        f"session {session.id}, an earlier session of {replaced.handle}, is "
+                        f"working again; attach to it or stop it"
+                    )
+                continue
             # A worker started by hand has a worktree of its own and a handle with its id,
             # which name no `role/item` to adopt the session as. Its session is reported,
             # never adopted as a start rule's worker.
-            by_hand = by_id or (
-                self.ledger.worker_by_worktree(str(Path(session.cwd))) if session.cwd else None
-            )
+            by_hand = by_id or (self._worker_in_worktree(session.cwd) if session.cwd else None)
             if by_hand is not None and by_hand.origin != ledger_mod.ORIGIN_SOURCE:
                 key = f"orphan-notified:{session.id}"
                 working = by_hand.is_terminal and session.state == runtime_mod.WORKING
@@ -963,17 +1190,42 @@ class Runner:
         return self.runtime(worker.runtime).is_stopped(session)
 
     def _remove_session(self, worker: Worker) -> bool:
-        if worker.session_id:
-            self.runtime(worker.runtime).remove(worker.session_id)
+        """Remove the worker's session and each earlier one that a refresh kept."""
+        ids = self._session_ids(worker)
+        if ids:
+            runtime = self.runtime(worker.runtime)
+            for session_id in sorted(ids):
+                runtime.remove(session_id)
             self.invalidate_sessions(worker.runtime)
             try:
                 sessions = self.sessions(worker.runtime, refresh=True)
             except AgentRuntimeError:
                 return False
-            if any(s.id == worker.session_id for s in sessions):
+            if any(s.id in ids for s in sessions):
                 return False
         self._release_launch_files(worker)
         return True
+
+    def _latest_session_id(self, worker: Worker) -> str | None:
+        """The session that *worker*'s newest session row other than a wake started."""
+        return next(
+            (
+                record.session_id for record in reversed(self.ledger.sessions_of(worker))
+                if record.kind != ledger_mod.SESSION_WAKE and record.session_id
+            ),
+            None,
+        )
+
+    def _session_ids(self, worker: Worker) -> set[str]:
+        """The ids of every session the worker had: its current one, and the earlier ones."""
+        ids = {record.session_id for record in self.ledger.sessions_of(worker) if record.session_id}
+        if worker.session_id:
+            ids.add(worker.session_id)
+        # A live worker's current session is its own, whatever an old row says.
+        return ids - {
+            other.session_id for other in self.ledger.live_workers()
+            if other.id != worker.id and other.session_id
+        }
 
     def _release_launch_files(self, worker: Worker) -> None:
         """Delete what the launch kept for a session that is gone, such as its settings file."""
@@ -1074,6 +1326,22 @@ class Runner:
         report.warnings.append(f"adopted unsupervised session {session.id} as {worker.handle}")
         return worker
 
+    def _worker_in_worktree(self, cwd: str) -> Worker | None:
+        """The newest worker whose worktree is *cwd*, compared by the real path.
+
+        A worktree is stored under the configured root, and the listing may name it by
+        the path that a linked root leads to, so that path is mapped back onto the root.
+        """
+        found = self.ledger.worker_by_worktree(str(Path(cwd)))
+        if found is not None:
+            return found
+        root = self.config.worktree_root
+        try:
+            relative = Path(os.path.realpath(cwd)).relative_to(os.path.realpath(root))
+        except ValueError:
+            return None
+        return self.ledger.worker_by_worktree(str(root / relative))
+
     @staticmethod
     def _queue_starts(context: RepositoryContext, role_name: str) -> bool:
         """Whether the queue label starts workers of this role. Unknown counts as no."""
@@ -1124,7 +1392,10 @@ class Runner:
             except Exception as exc:  # a bad request must not kill the tick
                 log.exception("request %s failed", request["id"])
                 ok, message = False, f"internal error: {exc}"
-            self.ledger.complete_request(request["id"], ok=ok, message=message)
+            self.ledger.complete_request(
+                request["id"], ok=ok, message=message,
+                reason=message.reason if isinstance(message, NeedsForce) else None,
+            )
             report.requests.append(
                 f"{kind}{f' {target}' if target else ''} from {request.get('origin') or 'cli'}: "
                 f"{'ok' if ok else 'refused'} — {message}"
@@ -1257,6 +1528,19 @@ class Runner:
             worker = launch()
         except LaunchAborted:
             raise
+        except SummaryWait as exc:
+            created = getattr(exc, "worker", None)
+            if created is None:
+                raise
+            # The row starts with its first attempt counted. Waiting for the note is not an
+            # attempt, so reconciliation counts the launch once it really runs.
+            row = self.ledger.get(created.id) or created
+            self.ledger.update(row, launch_attempts=max(0, row.launch_attempts - 1))
+            report.skipped.append(str(exc))
+            return True, (
+                f"created {created.handle}; its session starts once its original has written "
+                f"a current handoff note"
+            )
         except ChargehandError as exc:
             # The row exists, so reconciliation resumes the launch on the next tick, as it
             # resumes any launch that stopped part way.
@@ -1312,6 +1596,10 @@ class Runner:
             refusal = fork_refusal(original)
             if refusal is not None:
                 return False, refusal
+        if mode == ledger_mod.CLONE_SUMMARY:
+            refusal = summary_refusal(original, loads_mod=self._summary_capable(original))
+            if refusal is not None:
+                return False, refusal
         try:
             role = context.role(original.role)
         except ConfigError as exc:
@@ -1319,6 +1607,8 @@ class Runner:
         refusal = self._launch_refusal(
             repository, role, original.item or f"clone of {name}", by_hand=True
         )
+        if refusal is None and mode == ledger_mod.CLONE_SUMMARY:
+            refusal = self._summary_room(original)
         if refusal is not None:
             return False, refusal
         try:
@@ -1338,16 +1628,47 @@ class Runner:
             values["model"] or "of the role", values["effort"] or "of the role",
         )
         item = context.item_of(original) if original.item else None
-        ok, outcome = self._launch_by_hand(
-            lambda: self._launch(
+        launched: list[Worker] = []
+
+        def launch() -> Worker:
+            launched.append(self._launch(
                 context, role, None, item, report, origin=ledger_mod.ORIGIN_CLONE, kinds=kinds,
                 clone=values,
-            ),
-            report,
-        )
+            ))
+            return launched[0]
+
+        ok, outcome = self._launch_by_hand(launch, report)
         if ok and dirty:
             outcome += f"; the uncommitted changes in the worktree of {name} are not in the clone"
+        if ok and launched and launched[0].clone_mode == ledger_mod.CLONE_SUMMARY:
+            # A clone that started from a note older than its original's last turn says so.
+            started = self.ledger.get_state(f"{SUMMARY_STATE_PREFIX}{launched[0].id}")
+            if started:
+                outcome += f"; {started}"
         return ok, outcome
+
+    def _summary_capable(self, original: Worker) -> bool:
+        """Whether a new session of *original*'s runtime loads the chargehand mod."""
+        try:
+            runtime = self.runtime(original.runtime)
+        except ConfigError:
+            return False
+        return runtime.capabilities.in_place_wake and self._loads_mod(runtime)
+
+    def _summary_room(self, original: Worker) -> str | None:
+        """Why the global cap leaves no room for the turn that writes *original*'s current
+        note next to the clone's launch, or None. Both count as working while the clone
+        waits, so with one place left the turn would wait until the clone gives up."""
+        if note_is_current(original) or not can_be_asked_for_a_note(original):
+            return None
+        working, _, _ = self._counts()
+        if working + 2 <= self.config.max_concurrent:
+            return None
+        return (
+            f"{original.id_handle}: its handoff note is older than its last turn, and the "
+            f"global cap ({working}/{self.config.max_concurrent} working) leaves no room for "
+            f"the turn that writes a current note next to the clone's launch"
+        )
 
     def _clone_base(self, original: Worker) -> str | None:
         """The branch a clone of *original* starts from: the branch its worktree is on now,
@@ -1367,7 +1688,8 @@ class Runner:
 
         Delivery wakes the worker with it as with any event, under the same caps and the
         same usage reserve; a worker that delivery does not wake keeps it until it may. A
-        worker blocked by a question is woken by the reply, which answers it.
+        worker blocked by a question is woken by the reply, which answers it; a question
+        that it asked with its ask tool is resolved by the reply.
         """
         if worker.is_terminal:
             return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
@@ -1385,6 +1707,10 @@ class Runner:
             dedupe_id=f"reply:{args.get('request_id') or now}",
             pointer=text,
         ), now=now)
+        # The reply answers a question that the worker asked with its ask tool, so that
+        # question no longer holds the worker, and delivery wakes it with the reply.
+        if self.ledger.answer_questions(worker, by=ledger_mod.RESOLVED_BY_REPLY, now=now):
+            log.info("%s: the reply answers its question", worker.handle)
         log.info("%s: a reply from the board waits in its inbox", worker.handle)
         if worker.state in delivery_mod.WAKE_STATES:
             return True, "reply queued; delivery wakes the worker with it"
@@ -1427,6 +1753,7 @@ class Runner:
                 f"Check it with `{self._attach_command(worker)}`."
             )
         worker = self.ledger.update(worker, state=ledger_mod.CANCELLED, session_state=None)
+        delivery_mod.drop_open_outbox(self.ledger, worker, "the worker was cancelled")
         self._sync_labels(worker, context, report)
         self._notify(report, worker.name, "cancelled", worker.url, worker.repository, role=worker.role,
                      detail="cancelled by operator")
@@ -1442,6 +1769,8 @@ class Runner:
         if not self._stop_session(worker):
             return False, f"{worker.name}: the session did not stop; it is still working"
         worker = self.ledger.update(worker, state=ledger_mod.PAUSED)
+        # The stopped process took its wake with it; a continue gets a new one.
+        delivery_mod.drop_open_outbox(self.ledger, worker, "the worker was stopped")
         self._sync_labels(worker, context, report)
         return True, "session stopped; `chargehand continue` respawns it"
 
@@ -1609,12 +1938,12 @@ class Runner:
             return False, f"repository '{worker.repository}' is unavailable"
         branches_removed = True
         if worker.worktree_path.exists():
-            blocker = self._worktree_holds_work(worker)
-            if blocker and not force:
-                return False, (
-                    f"{worker.name}: {blocker}. Push or discard it first "
+            risk = self._work_at_risk(worker)
+            if risk and not force:
+                return False, self._needs_force(worker, risk, (
+                    f"{worker.name}: {risk.text}. Push or discard it first "
                     f"(`chargehand discard {self.ledger.target_for(worker)} --yes`)."
-                )
+                ))
             try:
                 branches_removed = self._remove_worktree(worker, force=True)
             except GitError as exc:
@@ -1690,17 +2019,19 @@ class Runner:
     def _do_discard(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
     ) -> tuple[bool, str]:
-        blocker = self._worktree_holds_work(worker)
-        if blocker and not force:
-            return False, f"{worker.name}: {blocker}. Re-run with --force to discard anyway."
+        risk = self._work_at_risk(worker)
+        if risk and not force:
+            return False, self._needs_force(
+                worker, risk, f"{worker.name}: {risk.text}. Re-run with --force to discard anyway."
+            )
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
         if not self._stop_session(worker) and not force:
-            return False, (
+            return False, NeedsForce((
                 f"{worker.name}: the session did not stop, so its worktree is still "
                 f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
-            )
+            ), {"session_running": True})
         removed = self._remove_session(worker)
         try:
             branches_removed = self._remove_worktree(worker, force=True)
@@ -1741,12 +2072,12 @@ class Runner:
         refusal = self._archive_refusal(worker)
         if refusal is not None:
             return False, refusal
-        blocker = self._worktree_holds_work(worker)
-        if blocker and not force:
-            return False, (
-                f"{worker.name}: {blocker}. Commit and push that work first, or archive with "
+        risk = self._work_at_risk(worker)
+        if risk and not force:
+            return False, self._needs_force(worker, risk, (
+                f"{worker.name}: {risk.text}. Commit and push that work first, or archive with "
                 f"force: the archive keeps the files, not the commits."
-            )
+            ))
         job = self._queue_archive(worker, force, origin)
         if job.state == ledger_mod.JOB_WAITING:
             return True, (
@@ -1827,7 +2158,11 @@ class Runner:
         return True, f"repository {repository.name} shows on the board again; its archives stay"
 
     def _worktree_holds_work(self, worker: Worker) -> str | None:
-        found = self._checkout_holds_work(worker.worktree_path, (), "its worktree")
+        risk = self._work_at_risk(worker)
+        return risk.text if risk else None
+
+    def _work_at_risk(self, worker: Worker) -> WorkAtRisk | None:
+        found = self._checkout_at_risk(worker.worktree_path, (), "worktree")
         checkout = item_checkout_path(worker)
         if found is None and checkout.exists():
             # The item's checkout sits on its head commit, which no remote-tracking ref
@@ -1836,22 +2171,69 @@ class Runner:
             # `gh pr checkout` fetched again.
             given = self.ledger.get_state(f"{CHECKOUT_HEAD_PREFIX}{worker.id}")
             fetched = self.git.head_commit(checkout, "FETCH_HEAD")
-            found = self._checkout_holds_work(
-                checkout, tuple(c for c in (given, fetched) if c), "its item checkout"
+            found = self._checkout_at_risk(
+                checkout, tuple(c for c in (given, fetched) if c), "item_checkout"
             )
         return found
 
-    def _checkout_holds_work(self, path: Path, not_in: tuple[str, ...], name: str) -> str | None:
+    def _checkout_at_risk(
+        self, path: Path, not_in: tuple[str, ...], place: str
+    ) -> WorkAtRisk | None:
         if not path.exists():
             return None
         unpushed = self.git.unpushed_commits(path, not_in=not_in)
         if unpushed < 0:
-            return f"{name} could not be inspected"
-        if unpushed > 0:
-            return f"{name} holds {unpushed} unpushed commit(s)"
-        if self.git.is_dirty(path):
-            return f"{name} has uncommitted changes"
-        return None
+            return WorkAtRisk(place, -1, False)
+        uncommitted = self.git.is_dirty(path)
+        return WorkAtRisk(place, unpushed, uncommitted) if unpushed or uncommitted else None
+
+    def _needs_force(self, worker: Worker, risk: WorkAtRisk, message: str) -> NeedsForce:
+        """A refusal for *risk*, which the worker's card learns at once."""
+        self._keep_work_at_risk(worker, risk, time.time())
+        return NeedsForce(message, {"work": risk.facts()})
+
+    def _keep_work_at_risk(self, worker: Worker, risk: WorkAtRisk | None, now: float) -> None:
+        facts = risk.facts() if risk else WorkAtRisk("worktree", 0, False).facts()
+        self.ledger.set_state(
+            f"{WORK_AT_RISK_PREFIX}{worker.id}", json.dumps({**facts, "checked_at": now})
+        )
+
+    def _record_work_at_risk(self, now: float | None = None) -> None:
+        """Keep the card facts under `WORK_AT_RISK_PREFIX` current, at most once per
+        `WORK_AT_RISK_REFRESH_SECS` for each worker.
+
+        A live session changes its worktree all the time, so a live worker is looked at
+        only once an action on it was refused, until its worktree holds nothing to lose.
+        The record of a worker that is neither of these is dropped.
+        """
+        now = time.time() if now is None else now
+        checked: dict[int, float] = {}
+        for key, value in self.ledger.all_state().items():
+            worker_id = key.removeprefix(WORK_AT_RISK_PREFIX)
+            if key.startswith(WORK_AT_RISK_PREFIX) and worker_id.isdigit():
+                try:
+                    at = json.loads(value).get("checked_at")
+                except (ValueError, AttributeError):
+                    at = None
+                checked[int(worker_id)] = at if isinstance(at, (int, float)) else 0.0
+        ended = self.ledger.terminal_workers_since(WORK_AT_RISK_WINDOW_SECS)
+        live = [worker for worker in self.ledger.live_workers() if worker.id in checked]
+        for worker in (*ended, *live):
+            key = f"{WORK_AT_RISK_PREFIX}{worker.id}"
+            at = checked.pop(worker.id, None)
+            if worker.gc_done:
+                if at is not None:
+                    self.ledger.delete_state(key)
+                continue
+            if at is not None and now - at < WORK_AT_RISK_REFRESH_SECS:
+                continue
+            risk = self._work_at_risk(worker)
+            if risk is None and not worker.is_terminal:
+                self.ledger.delete_state(key)
+            else:
+                self._keep_work_at_risk(worker, risk, now)
+        for worker_id in checked:
+            self.ledger.delete_state(f"{WORK_AT_RISK_PREFIX}{worker_id}")
 
     def _remove_worktree(self, worker: Worker, *, force: bool) -> bool:
         """Remove the worktree and every branch the runner can show is its own.
@@ -2361,12 +2743,34 @@ class Runner:
                     continue
             session = listings[worker.runtime].get(worker.session_id or "")
             if session is None:
-                session = self._find_worker_session(worker)
-                if session is not None:
+                # A session that a refresh replaced is the last choice: the fresh one, if
+                # an interrupted refresh started it, is the worker's.
+                earlier = self._session_ids(worker) - {worker.session_id}
+                session = self._find_worker_session(worker, exclude=earlier) or (
+                    self._find_worker_session(worker) if earlier else None
+                )
+                if session is not None and worker.session_id is None and (
+                    session.id not in earlier
+                ):
+                    # Only a refresh clears a live worker's session: a crash interrupted
+                    # it after the launch of this one, which the refresh would have
+                    # recorded so.
+                    with self.ledger.transaction():
+                        worker = delivery_mod.switch_session(
+                            self.ledger, worker, session, time.time(),
+                            replaced=self._latest_session_id(worker),
+                        )
+                elif session is not None:
                     worker = self.ledger.update(
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
+            busy = observed == runtime_mod.WORKING or (
+                observed == runtime_mod.DONE and session is not None and session.busy
+            )
+            if busy and self._turn_ended_at(worker) is not None:
+                # The turn ended, and the process is still busy: a background shell runs.
+                observed = ledger_mod.SESSION_BACKGROUND
             waiting = session.waiting_for if session else None
             # The listed state only, never its waiting text: that quotes the agent.
             log.log(
@@ -2395,6 +2799,9 @@ class Runner:
                 if written is None:
                     continue
                 worker = written
+            if observed not in (runtime_mod.WORKING, ledger_mod.SESSION_BACKGROUND):
+                # The background shell ended, or the listing has caught up with the turn end.
+                self._drop_turn_end(worker)
 
             try:
                 worker = self._apply_session_state(worker, observed, report, session=session)
@@ -2439,10 +2846,20 @@ class Runner:
         if hook.observed is not None and current.state not in HOOK_FROZEN_STATES:
             changes["session_state"] = hook.observed
         current = self.ledger.update(current, **changes)
+        turn_ended_key = f"{TURN_ENDED_PREFIX}{current.id}"
+        if hook.kind == runtime_mod.HOOK_TURN_END:
+            self.ledger.set_state(
+                turn_ended_key, json.dumps({"at": stamp, "session": current.session_id})
+            )
+        elif hook.observed is not None:
+            # A new turn, a prompt in a turn, a new session or a failed turn.
+            self.ledger.delete_state(turn_ended_key)
         if hook.kind == runtime_mod.HOOK_PERMISSION:
             # A session shows one permission dialog at a time; an older open prompt was
-            # answered in the session.
-            self.ledger.resolve_permission_prompts(current, now=stamp)
+            # answered in the session. A question that the ask tool recorded stays open.
+            self.ledger.resolve_permission_prompts(
+                current, now=stamp, kind=ledger_mod.PROMPT_PERMISSION
+            )
             self.ledger.record_permission_prompt(
                 current, tool_name=hook.tool_name or "unknown", tool_input=hook.tool_input or "",
                 now=stamp,
@@ -2479,6 +2896,7 @@ class Runner:
         context = self.context_for_worker(worker)
         detail: str | None = None
         target_state = worker.state
+        was_blocked = worker.state == ledger_mod.BLOCKED
 
         if worker.state == ledger_mod.PARKED and hook is None:
             return worker
@@ -2488,6 +2906,8 @@ class Runner:
             # `stop` keeps the session, and a stopped Claude Code session still lists the
             # state of its last turn, often `done`. Only a live process ends the pause.
             return worker
+        if observed == ledger_mod.SESSION_BACKGROUND:
+            return self._background_shell(worker, report)
         if observed == runtime_mod.WORKING:
             target_state = ledger_mod.RUNNING
             if worker.state != ledger_mod.RUNNING:
@@ -2547,6 +2967,9 @@ class Runner:
             report.transitions.append(_transition_line(worker.handle, before, target_state, observed))
         self._sync_labels(worker, context, report)
 
+        question_key = f"{NOTIFIED_QUESTION_PREFIX}{worker.id}"
+        if target_state in QUIET_STATES or observed == runtime_mod.WORKING or worker.is_terminal:
+            self.ledger.delete_state(question_key)
         if target_state in QUIET_STATES:
             # No notification for a turn end that waits for events. The record is
             # cleared, so the next state that needs the operator is notified even when
@@ -2554,17 +2977,117 @@ class Runner:
             if worker.notified_state is not None:
                 worker = self.ledger.update(worker, notified_state=None)
         elif observed != worker.notified_state and observed != runtime_mod.WORKING:
+            question = self._question_to_notify(worker)
+            if (
+                was_blocked and target_state == ledger_mod.BLOCKED
+                and observed in QUESTION_TURN_ENDS and question is not None
+                and self.ledger.get_state(question_key) == str(question.id)
+            ):
+                # Another view of the turn end of a question that was notified: recorded,
+                # so that the next view compares with it, and not sent again.
+                worker = self.ledger.update(worker, notified_state=observed)
             # Recorded only once delivered. A hook that failed, for example on the first
             # tick after a wake while the network is still down, is run again on the next
             # tick; otherwise the run would sit blocked with nobody told.
-            if self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
+            elif self._notify(report, worker.name, target_state, worker.url, worker.repository, role=worker.role, detail=detail):
                 worker = self.ledger.update(worker, notified_state=observed)
+                if target_state == ledger_mod.BLOCKED and question is not None and (
+                    question.state == ledger_mod.PROMPT_OPEN
+                ):
+                    self.ledger.set_state(question_key, str(question.id))
+                else:
+                    self.ledger.delete_state(question_key)
             elif worker.is_terminal:
                 # A finished worker leaves the live loop, so nothing would visit it again.
                 self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{worker.id}", detail or "")
         elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
         return worker
+
+    def _turn_ended_at(self, worker: Worker) -> float | None:
+        """When the last turn of *worker*'s current session ended, while no turn has started
+        since and the worker is in the state that turn end left; else None."""
+        if worker.state not in TURN_END_STATES:
+            return None
+        record = self._turn_end_record(worker)
+        if record is None or record[1] != worker.session_id:
+            return None
+        ended_at = record[0]
+        if worker.last_wake_at is not None and worker.last_wake_at >= ended_at:
+            # A wake started a turn after it.
+            return None
+        try:
+            runtime = self.runtime(worker.runtime)
+        except ConfigError:
+            return None
+        if not worker.worktree or not runtime.reports_turn_starts(worker.worktree_path):
+            # Without the hook, a turn the operator starts in the session looks the same.
+            return None
+        return ended_at
+
+    def _turn_end_record(self, worker: Worker) -> tuple[float, str | None] | None:
+        raw = self.ledger.get_state(f"{TURN_ENDED_PREFIX}{worker.id}")
+        if not raw:
+            return None
+        try:
+            record = json.loads(raw)
+            return float(record["at"]), record.get("session")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return None
+
+    def _drop_turn_end(self, worker: Worker) -> None:
+        """Drop the turn-end record of *worker* when the tick's listing is newer than it."""
+        key = f"{TURN_ENDED_PREFIX}{worker.id}"
+        if self.ledger.get_state(key) is None:
+            return
+        record = self._turn_end_record(worker)
+        listed_at = self._listed_at.get(worker.runtime)
+        if record is None or listed_at is None or listed_at > record[0]:
+            self.ledger.delete_state(key)
+
+    def _background_shell(self, worker: Worker, report: TickReport) -> Worker:
+        """The listing shows the session working or busy, but its turn ended and no turn
+        started since.
+
+        A background shell of that turn still runs. The worker keeps the state its turn
+        end gave it, so the card does not flip between idle and running: a shell that ends
+        either starts a new turn, which its turn-start hook shows, or leaves the session
+        idle in the listing. A shell that never ends, such as a dev server, would leave a
+        session that waits for the operator looking busy, so an idle or queued worker is
+        notified once after ``background_shell_mins``; a blocked one was notified at its
+        turn end. Neither the watchdog nor ``max_concurrent`` counts the time, because no
+        turn runs.
+        """
+        ended_at = self._turn_ended_at(worker)
+        limit_secs = self.config.background_shell_mins * 60
+        if (
+            ended_at is None
+            or not limit_secs
+            or worker.state not in QUIET_STATES
+            or worker.notified_state == ledger_mod.SESSION_BACKGROUND
+        ):
+            return worker
+        elapsed = time.time() - ended_at
+        if elapsed < limit_secs:
+            return worker
+        detail = (
+            f"turn ended {elapsed / 60:.0f} min ago; a background shell still runs "
+            "and no new turn started"
+        )
+        if self._notify(report, worker.name, worker.state, worker.url, worker.repository,
+                        role=worker.role, detail=detail):
+            worker = self.ledger.update(worker, notified_state=ledger_mod.SESSION_BACKGROUND)
+        return worker
+
+    def _question_to_notify(self, worker: Worker) -> ledger_mod.PermissionPrompt | None:
+        """The worker's newest ask question, open or answered, while no permission prompt
+        is open; a permission prompt is what the worker waits for then."""
+        if any(
+            prompt.kind == ledger_mod.PROMPT_PERMISSION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        ):
+            return None
+        return self.ledger.latest_question(worker)
 
     def _failure_reset(self, worker: Worker, session: Session) -> float | None:
         """The reset time of a failure the listing shows, placed after the failure.
@@ -2620,12 +3143,26 @@ class Runner:
     def _resolve_done(
         self, worker: Worker, context: RepositoryContext | None
     ) -> tuple[str, str | None]:
-        """A `done` session ended its turn. The status file, when the role has one, says more.
+        """A `done` session ended its turn. Its report, its question or its status file say more.
 
-        Without a question in the status file, the worker is idle: it waits for events on
-        the items it follows, and the operator may look at what the turn left. A status
-        file that this worker did not write says nothing about this turn.
+        A report of `done` or `failed` from this turn ends the worker, as the status file's
+        `complete` and `aborted` do. A question that the ask tool recorded and that is still
+        open blocks it. Otherwise the status file decides, when the role has one (it is
+        deprecated, and goes away in a later release). Without any of them, the worker is
+        idle: it waits for events on the items it follows, and the operator may look at
+        what the turn left. A status file that this worker did not write says nothing about
+        this turn.
         """
+        reported = self._reported_outcome(worker)
+        if reported is not None:
+            return reported
+        if any(
+            prompt.kind == ledger_mod.PROMPT_QUESTION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        ):
+            # From now on a new turn, such as one the operator starts in the session, ends it.
+            self.ledger.settle_questions(worker)
+            return ledger_mod.BLOCKED, ASKED
         try:
             role = context.role(worker.role) if context and context.usable else None
         except ConfigError:
@@ -2658,6 +3195,42 @@ class Runner:
             return ledger_mod.FAILED, "aborted"
         return ledger_mod.BLOCKED, "status file did not name a known state — go look"
 
+    def _reported_outcome(self, worker: Worker) -> tuple[str, str] | None:
+        """The end that the worker's report of this turn asks for, or None."""
+        if worker.report_state not in (ledger_mod.REPORT_DONE, ledger_mod.REPORT_FAILED):
+            return None
+        turn_start = max(worker.last_wake_at or 0.0, worker.created_at) - REPORT_TURN_MARGIN_SECS
+        if worker.reported_at is None or worker.reported_at < turn_start:
+            return None
+        if worker.report_state == ledger_mod.REPORT_DONE:
+            return ledger_mod.DONE, "reported done"
+        # The summary is session text. It is kept on the card and in `status`, and left
+        # out of the notification, as the status file's stop reason is.
+        if worker.report_summary:
+            self.ledger.update(worker, last_error=f"failed: {worker.report_summary}"[:500])
+        return ledger_mod.FAILED, "reported failed"
+
+    def follow_reported_pull_request(self, worker: Worker, url: str) -> str | None:
+        """Make *url*, a pull request link that *worker* reported, its card's link, and
+        follow that pull request as :meth:`_follow_pull_requests` does. The item key that it
+        follows, or None when no configured source follows it."""
+        if url != worker.pr_url:
+            worker = self.ledger.update(worker, pr_url=url)
+        for config in self.config.sources:
+            source = self.source(config.name)
+            if source is None or not source.has_pull_requests:
+                continue
+            item = source.item_for(url)
+            if item is None:
+                continue
+            followed = {(s.source, s.item) for s in self.ledger.subscriptions_of(worker)}
+            with self.ledger.transaction():
+                if (item.source, item.key) not in followed:
+                    self.ledger.subscribe(worker, item, PULL_REQUEST_KINDS)
+                self.ledger.set_state(f"{FOLLOWS_PULL_REQUEST_PREFIX}{worker.id}", item.key)
+            return item.key
+        return None
+
     def _is_stopped(self, worker: Worker, session: Session) -> bool:
         try:
             return self.runtime(worker.runtime).is_stopped(session)
@@ -2668,6 +3241,10 @@ class Runner:
 
     def _deliver(self, report: TickReport, *, crash_after_wake: bool = False) -> None:
         """Wake each idle worker once, for every event waiting in its inbox."""
+        # A summary clone that a request of this tick ended no longer waits for a note, and
+        # it no longer holds a place under the global cap: its original must not be woken
+        # for it now.
+        self._forget_summary_waits()
         idle_before = {w.id for w in self.ledger.workers_in_state([ledger_mod.IDLE])}
         result = delivery_mod.Delivery(
             self.ledger,
@@ -2681,6 +3258,7 @@ class Runner:
             prepare=self._refresh_item_checkout,
             resume_hold=self._resume_hold,
             awaits_answer=self._awaits_answer,
+            refresh=lambda worker, message: self._refresh_session(worker, message, report),
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -2700,6 +3278,92 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+        for worker, detail in result.capped:
+            if not self._notify(report, worker.name, "daily-cap", worker.url,
+                                worker.repository, role=worker.role, detail=detail):
+                # The next tick sends it again, as for a session's new state.
+                self.ledger.delete_state(f"{delivery_mod.CAP_NOTIFIED_PREFIX}{worker.id}")
+
+    def _refresh_session(
+        self, worker: Worker, message: str, report: TickReport
+    ) -> delivery_mod.Refresh:
+        """Stop *worker*'s session and start a fresh one in its worktree, with *message*.
+
+        The old session is stopped and kept, for `claude --resume`, so two sessions never
+        run in one worktree. A session that an earlier, interrupted refresh started there
+        is taken as it is. AgentRuntimeError or ConfigError when the refresh fails; the
+        worker then keeps its old session.
+        """
+        context = self.context_for_worker(worker)
+        if context is None or not context.usable:
+            raise ConfigError(f"repository '{worker.repository}' is unavailable")
+        role = context.role(worker.role)
+        if role.runtime != worker.runtime:
+            raise ConfigError(
+                f"{worker.handle}: the role now names runtime '{role.runtime}', but this "
+                f"worker was created on '{worker.runtime}'"
+            )
+        runtime = self.runtime(worker.runtime)
+        if not runtime.capabilities.in_place_wake or not self._loads_mod(runtime):
+            return delivery_mod.Refresh(
+                keep="a fresh session would not load the chargehand mod, which gives the "
+                "handoff note"
+            )
+        exclude = self._sessions_owned_by_other_workers(worker) | self._session_ids(worker)
+        listed = self.sessions(worker.runtime, refresh=True)
+        found = self._find_worker_session(worker, exclude=exclude)
+        current = next((s for s in listed if s.id == worker.session_id), None)
+        if (
+            found is None and current is not None and not runtime.is_stopped(current)
+            and current.state in (runtime_mod.WORKING, runtime_mod.BLOCKED)
+        ):
+            # The operator may have started a turn in it since this tick's listing.
+            return delivery_mod.Refresh(busy="the session has a turn or a prompt")
+        if not self._stop_session(worker):
+            raise AgentRuntimeError(f"session {worker.session_id} did not stop")
+        # What the old session posted while it stopped is older than the fresh session.
+        read = self.ledger.get(worker.id) or worker
+        if found is not None:
+            return delivery_mod.Refresh(session=found, read=read)
+        runtime.check_role(role, worker.worktree_path)
+        originals = ancestors(self.ledger, worker)
+        prompt = refresh_prompt(
+            worker, worker.prompt or role.prompt, message,
+            where=(
+                "the clone prompt" if worker.prompt
+                else f"{role.source or 'role ' + role.name}.prompt"
+            ),
+        )
+        spec = self._launch_spec(worker, role, prompt, originals)
+        # As in a launch: the launch writes a new token for the fresh session, and its
+        # hooks and its mod's hello find the worker by that token. Until the fresh
+        # session's ids are recorded, a post from any session id counts as the worker's.
+        self.ledger.update(worker, session_id=None, session_uuid=None)
+        try:
+            result = runtime.launch(spec, warn=report.warnings.append)
+            self.sessions(worker.runtime, refresh=True)
+            found = self._find_worker_session(worker, exclude=exclude)
+            if found is None:
+                raise AgentRuntimeError(
+                    f"started a fresh session for {worker.handle} but it did not appear in "
+                    f"the session listing of runtime {worker.runtime}; the launch printed: "
+                    f"{sanitize.one_line(result.output, limit=200)!r}"
+                )
+        except (AgentRuntimeError, ConfigError):
+            # Back to the stopped session, which the next wake resumes or refreshes again.
+            current_row = self.ledger.get(worker.id) or worker
+            self.ledger.update(
+                current_row, session_id=worker.session_id, session_uuid=worker.session_uuid
+            )
+            raise
+        return delivery_mod.Refresh(session=found, prompted=True, read=read)
+
+    @staticmethod
+    def _loads_mod(runtime: Runtime) -> bool:
+        """Whether a launch of *runtime* loads the chargehand mod: a runtime that ships it
+        names the plugin directories its launch passes."""
+        plugin_dirs = getattr(runtime, "plugin_dirs", None)
+        return callable(plugin_dirs) and bool(plugin_dirs())
 
     def _listed_session(self, worker: Worker) -> Session | None:
         """*worker*'s session as this tick's listing shows it, or None. No new call."""
@@ -2735,7 +3399,8 @@ class Runner:
         """Whether blocked *worker* waits for the answer to a question, which a reply gives.
 
         No permission prompt is open, and this tick's listing shows the session's turn
-        ended: with a question, or `done` when the status file asked one. A turn that runs,
+        ended: with a question, or `done` when the ask tool or the status file asked one. A
+        question of the ask tool is resolved by the board's answer first. A turn that runs,
         a dialog that waits and a failed turn do not count. No new call.
         """
         if worker.state != ledger_mod.BLOCKED or not worker.session_id:
@@ -3000,9 +3665,13 @@ class Runner:
         working = 0
         open_workers = 0
         per_route: dict[str, int] = {}
+        # A wake in a session's outbox is a turn about to start.
+        sending = self.ledger.outbox_workers()
         for worker in self.ledger.live_workers():
             open_workers += 1
-            is_working = worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
+            is_working = (
+                worker.state in (ledger_mod.LAUNCHING, ledger_mod.RUNNING) or worker.id in sending
+            )
             if is_working:
                 working += 1
                 per_route[worker.repository] = per_route.get(worker.repository, 0) + 1
@@ -3451,6 +4120,10 @@ class Runner:
                 )
             originals = ancestors(self.ledger, worker)
             parent = originals[0] if originals else None
+            if worker.clone_mode == ledger_mod.CLONE_SUMMARY:
+                worker = self._summary_start(context, worker, parent, runtime, report)
+                if worker.state == ledger_mod.FAILED:
+                    return worker
             prompt = launch_prompt(
                 worker,
                 worker.prompt or role.prompt,
@@ -3460,21 +4133,7 @@ class Runner:
                     else f"{role.source or 'role ' + role.name}.prompt"
                 ),
             )
-            spec = LaunchSpec(
-                worktree=worker.worktree_path,
-                name=worker.handle,
-                prompt=prompt,
-                options=role.options,
-                model=worker.model or role.model,
-                effort=worker.effort or role.effort,
-                read_paths=(
-                    (item_checkout_path(worker),)
-                    if role.checkout == roles_mod.CHECKOUT_ITEM else ()
-                ),
-                # Two workers never write one tree: a clone's file tools stay out of its
-                # original's worktree, whatever its permission mode.
-                protected_paths=tuple(original.worktree_path for original in originals),
-            )
+            spec = self._launch_spec(worker, role, prompt, originals)
             if worker.clone_mode == ledger_mod.CLONE_FULL:
                 if parent is None or not parent.session_uuid or parent.gc_done:
                     return self._fail_worker(
@@ -3521,6 +4180,114 @@ class Runner:
         report.launched.append(worker.handle)
         return worker
 
+    def _summary_start(
+        self,
+        context: RepositoryContext,
+        clone: Worker,
+        original: Worker | None,
+        runtime: Runtime,
+        report: TickReport,
+    ) -> Worker:
+        """Get a summary clone ready for its launch: copy its original's handoff note into
+        the clone's own, once the note is current.
+
+        A stale note of an original that a wake can reach is asked for again first: one
+        inbox entry, which delivery turns into a wake line, while the clone waits with
+        :class:`SummaryWait`. After :data:`SUMMARY_WAIT_SECS`, or when no wake can reach the
+        original, the clone starts from the stored note and its card says so; without any
+        note it fails. The copy makes the clone's read tool independent of the original: a
+        later note of the original, or its discard, does not change what the clone reads.
+        The note is session text: it goes from row to row and never into a log line.
+        """
+        if original is None:
+            return self._fail_worker(
+                clone, context, "the worker it clones is no longer recorded", report,
+                notify_detail="the original is gone",
+            )
+        if not (runtime.capabilities.in_place_wake and self._loads_mod(runtime)):
+            # Without the mod the session has no tool that gives the note. A copy of the mod
+            # that could not be written may work on a later attempt.
+            raise AgentRuntimeError(
+                f"{clone.handle}: a session of runtime {clone.runtime} would not load the "
+                f"chargehand mod, whose tool gives the handoff note"
+            )
+        key = f"{SUMMARY_STATE_PREFIX}{clone.id}"
+        dedupe = summary_request_id(clone)
+        stale = None
+        if not note_is_current(original):
+            reachable = can_be_asked_for_a_note(original)
+            if reachable and time.time() - clone.created_at < SUMMARY_WAIT_SECS:
+                if self._ask_for_note(original, clone, dedupe):
+                    log.info("%s: asked %s for a current handoff note", clone.handle,
+                             original.handle)
+                reason = (
+                    f"waits for a current handoff note of {original.id_handle}, which "
+                    f"chargehand asked it for"
+                )
+                self.ledger.set_state(key, reason)
+                raise SummaryWait(f"{clone.handle} {reason}")
+            if not original.handoff_note:
+                self.ledger.drop_pending(original.id, ledger_mod.HANDOFF_SOURCE, dedupe)
+                self.ledger.delete_state(key)
+                return self._fail_worker(
+                    clone, context, f"{original.id_handle} wrote no handoff note to start from",
+                    report, notify_detail="no handoff note to start from",
+                )
+            stale = (
+                f"started from the stored handoff note of {original.id_handle}, which is "
+                f"older than its last turn"
+            )
+            if reachable:
+                stale += f"; no current note came within {SUMMARY_WAIT_SECS // 60} minutes"
+        # A current note came without the wake, such as in a turn for another event.
+        self.ledger.drop_pending(original.id, ledger_mod.HANDOFF_SOURCE, dedupe)
+        clone = self.ledger.update(
+            clone, handoff_note=original.handoff_note, handoff_at=original.handoff_at
+        )
+        if stale is None:
+            self.ledger.delete_state(key)
+        else:
+            self.ledger.set_state(key, stale)
+            report.warnings.append(f"{clone.handle}: {stale}")
+            log.info("%s: %s", clone.handle, stale)
+        return clone
+
+    def _ask_for_note(self, original: Worker, clone: Worker, dedupe: str) -> bool:
+        """Put the request for a current handoff note into *original*'s inbox, once per
+        clone. Delivery wakes it as for any event, under the same caps."""
+        now = time.time()
+        key = original.item or original.handle
+        return self.ledger.enqueue(original.id, Event(
+            source=ledger_mod.HANDOFF_SOURCE,
+            kind=ledger_mod.HANDOFF_KIND,
+            item=WorkItem(source=ledger_mod.HANDOFF_SOURCE, key=key, ref=original.item_id or key),
+            actor=ledger_mod.HANDOFF_SOURCE,
+            occurred_at=now,
+            dedupe_id=dedupe,
+            # The wake line is "handoff: <pointer>", so the pointer says in plain words
+            # what the turn is for; it is a plain identifier, as every pointer.
+            pointer=summary_request_pointer(clone),
+        ), now=now)
+
+    def _launch_spec(
+        self, worker: Worker, role: Role, prompt: str, originals: Sequence[Worker]
+    ) -> LaunchSpec:
+        return LaunchSpec(
+            worktree=worker.worktree_path,
+            name=worker.handle,
+            prompt=prompt,
+            options=role.options,
+            model=worker.model or role.model,
+            effort=worker.effort or role.effort,
+            read_paths=(
+                (item_checkout_path(worker),)
+                if role.checkout == roles_mod.CHECKOUT_ITEM else ()
+            ),
+            # Two workers never write one tree: a clone's file tools stay out of its
+            # original's worktree, whatever its permission mode.
+            protected_paths=tuple(original.worktree_path for original in originals),
+        )
+
     def _find_worker_session(self, worker: Worker, *, exclude: Collection[str] = ()) -> Session | None:
         """The worker's session in the current listing, by worktree or by name.
 
@@ -3537,11 +4304,12 @@ class Runner:
         return found
 
     def _sessions_owned_by_other_workers(self, worker: Worker) -> set[str]:
+        # The rows name the sessions that a refresh replaced, which keep the worktree.
         return {
             other.session_id
             for other in self.ledger.recent_workers(200)
             if other.session_id and other.id != worker.id and other.runtime == worker.runtime
-        }
+        } | self.ledger.session_ids_of_others(worker)
 
     def _attach_command(self, worker: Worker) -> str:
         try:
@@ -3606,7 +4374,26 @@ class Runner:
             problem = self._collect(worker, report)
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
+        self._record_work_at_risk()
         self._forget_checkout_heads()
+        self._forget_summary_waits()
+
+    def _forget_summary_waits(self) -> None:
+        """Drop what an ended summary clone left: its card line, and its request for a
+        current note in its original's inbox, which would otherwise still wake the
+        original for a clone that no longer waits."""
+        for key in self.ledger.all_state():
+            if not key.startswith(SUMMARY_STATE_PREFIX):
+                continue
+            worker_id = key.removeprefix(SUMMARY_STATE_PREFIX)
+            clone = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            if clone is not None and not clone.is_terminal and not clone.gc_done:
+                continue
+            if clone is not None and clone.parent_id is not None:
+                self.ledger.drop_pending(
+                    clone.parent_id, ledger_mod.HANDOFF_SOURCE, summary_request_id(clone)
+                )
+            self.ledger.delete_state(key)
 
     def _collect(
         self, worker: Worker, report: TickReport, *, force: bool = False, **changes: object
@@ -3707,14 +4494,19 @@ class Runner:
         log.info("%s: archived to %s; worktree and session removed", worker.handle, dest)
 
     def _forget_checkout_heads(self) -> None:
-        """Drop the records of each worker whose worktree is gone, by any path."""
+        """Drop the records of each worker whose worktree is gone, by any path, and the
+        records that only a live worker needs once it has ended."""
         for key in self.ledger.all_state():
-            prefix = next((p for p in WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            live_only = next((p for p in LIVE_WORKER_STATE_PREFIXES if key.startswith(p)), None)
+            prefix = live_only or next(
+                (p for p in (*WORKER_STATE_PREFIXES, WORK_AT_RISK_PREFIX) if key.startswith(p)),
+                None,
+            )
             if prefix is None:
                 continue
             worker_id = key.removeprefix(prefix)
             worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
-            if worker is None or worker.gc_done:
+            if worker is None or worker.gc_done or (live_only and worker.is_terminal):
                 self.ledger.delete_state(key)
 
     def _close_out_finished_issues(self, report: TickReport) -> None:

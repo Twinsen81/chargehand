@@ -7,9 +7,14 @@
 // An action is a POST with the daemon's token, which the operator pastes once and this
 // browser keeps in localStorage for this origin. It is sent only in the Authorization
 // header, never in a URL. The board has no chat: a conversation goes through attach.
+// The field next to it shows whether the daemon accepts the stored token: the page checks
+// it with POST /api/token on load, on Enter, when the field loses focus with a new value,
+// and when the daemon was restarted or unreachable, as a restart can bring a new token file.
 //
 // A permission prompt shows on its card with Allow, Deny and Always allow while the
-// session's hook waits in the daemon; after that only the session can answer it.
+// session's hook waits in the daemon; after that only the session can answer it. A question
+// that a worker asked with its ask tool shows with its options and a one-line answer field;
+// the answer reaches the worker as a reply, as its next turn.
 //
 // Within a column the cards are grouped by repository. The names, icons, pins and the
 // collapsed and hidden repositories are the board's own state in the ledger; the daemon
@@ -21,6 +26,11 @@
 // Clone opens a form that the daemon fills: the worker's prompt template, model and effort,
 // and whether full mode (a copy of the session) is possible now. The prompt is the one
 // multi-line text the page sends; the daemon checks and caps it as the command line does.
+//
+// A worker action also shows its outcome on its card: pending, then ok or refused with the
+// daemon's board wording, until the next action on that card or a dismiss. The daemon
+// tells what Discard, Retry and Archive would lose, from its last tick, so the
+// confirmation dialog can say it before the click.
 'use strict';
 
 const POLL_MS = 1000;
@@ -28,6 +38,9 @@ const STALE_AFTER_MS = 5000;
 // How long the page follows a request that the daemon has not applied yet.
 const FOLLOW_MS = 15 * 60 * 1000;
 const TOKEN_KEY = 'chargehand.token';
+const TOKEN_STATES = {
+  none: 'no token', checking: 'checking', accepted: 'token accepted', invalid: 'token not valid',
+};
 const TERMINAL_KEY = 'chargehand.terminal';
 const REPLY_MAX = 500;
 const SHOW_HIDDEN_KEY = 'chargehand.showHidden';
@@ -41,6 +54,12 @@ const ACTION_LABELS = {
 const CLONE_MODE_HINTS = {
   fresh: 'Nothing from the old session: a new session with the prompt below',
   full: 'A copy of the old conversation, which goes on with the prompt below',
+  summary: 'A new session that first reads the handoff note of the old worker, then the prompt below',
+};
+const CLONE_ORIGIN_HINTS = {
+  fresh: 'Started fresh from the branch of ',
+  full: 'Started with a copy of the conversation of ',
+  summary: 'Started from the handoff note and the branch of ',
 };
 const FORCED = new Set(['continue', 'retry', 'discard', 'archive']);
 const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
@@ -60,6 +79,10 @@ let lastOk = 0;
 let latest = null;
 // The last rendered signature of each card, by worker id.
 const signatures = new Map();
+// The outcome of the last action on each card, by worker id: { kind, text }.
+const cardStatus = new Map();
+// How many actions this page sent for each card, by worker id; it outlives a dismiss.
+const cardActionSequence = new Map();
 // The repository headings of each column, by column key and repository name.
 const groupNodes = new Map();
 
@@ -264,7 +287,7 @@ function cardChildren(c, now) {
   top.append(el('span', 'chip state ' + c.state, shown));
   if (c.parent) {
     const parent = el('span', 'chip clone', 'clone of ' + c.parent.handle);
-    parent.title = (c.clone_mode === 'full' ? 'Started with a copy of the conversation of ' : 'Started fresh from the branch of ') +
+    parent.title = (CLONE_ORIGIN_HINTS[c.clone_mode] || CLONE_ORIGIN_HINTS.fresh) +
       c.parent.handle + ', in a worktree of its own';
     top.append(parent);
   }
@@ -307,6 +330,16 @@ function cardChildren(c, now) {
   } else if (c.waiting_for) {
     nodes.push(el('div', 'alert', c.waiting_for));
   }
+  if (c.report) {
+    const report = el('div', 'report ' + c.report.state);
+    report.append(el('span', 'who', 'report ' + c.report.state + (c.report.summary ? ': ' : '')));
+    if (c.report.summary) report.append(c.report.summary);
+    for (const url of c.report.links || []) {
+      if (safeUrl(url)) report.append(' ', link(url, url));
+    }
+    if (c.report.summary) report.title = c.report.summary;
+    nodes.push(report);
+  }
   if (c.problem) nodes.push(el('div', 'note', c.problem));
   if (c.state === 'parked') {
     nodes.push(el('div', 'note', typeof c.reset_at === 'number'
@@ -314,6 +347,7 @@ function cardChildren(c, now) {
       : 'parked; no reset time given, continue resumes it'));
   }
   if (c.queue_reason) nodes.push(el('div', 'note', c.queue_reason));
+  if (c.clone_start) nodes.push(el('div', 'note', c.clone_start));
   if (c.job && (c.job.active || c.job.error)) {
     const job = el('div', 'note job ' + c.job.state, jobText(c.job));
     if (c.job.result_path) job.title = c.job.result_path;
@@ -326,6 +360,13 @@ function cardChildren(c, now) {
     nodes.push(archived);
   }
 
+  if (Array.isArray(c.sessions) && c.sessions.length > 1) {
+    const parts = c.sessions.map((s) => s.kind + ' ' + (s.id || '?') + ' ' + clock(s.started_at, true) +
+      (s.current ? ' (current)' : ''));
+    const sessions = el('div', 'note sessions', 'sessions: ' + parts.join(' · '));
+    sessions.title = 'A refresh starts a fresh session for this worker; the earlier ones are stopped and kept';
+    nodes.push(sessions);
+  }
   if (c.last_prompt) nodes.push(snippet('prompt', 'prompt', c.last_prompt));
   if (c.last_answer) nodes.push(snippet('answer', 'answer', c.last_answer));
 
@@ -342,12 +383,76 @@ function cardChildren(c, now) {
     attach.title = c.attach;
     nodes.push(attach);
   }
+  const status = cardStatus.get(String(c.id));
+  if (status) nodes.push(statusNode(c.id, status));
   nodes.push(cardActions(c));
   return nodes;
 }
 
+function statusNode(id, status) {
+  const box = el('div', 'status ' + status.kind);
+  const text = el('span', null, status.text);
+  text.title = status.text;
+  const dismiss = boardButton('×', 'Dismiss', () => {
+    cardStatus.delete(String(id));
+    rerender();
+  });
+  dismiss.className = 'dismiss';
+  box.append(text, dismiss);
+  return box;
+}
+
+function setCardStatus(id, kind, text) {
+  cardStatus.set(String(id), { kind, text });
+  rerender();
+}
+
+// The card's words for an outcome: the board wording of a refusal when the daemon gives one.
+function statusText(outcome) {
+  if (outcome.pending) return 'pending: waits for the next tick';
+  if (outcome.ok) return 'done' + (outcome.message ? ': ' + outcome.message : '');
+  return 'refused: ' + (outcome.board_message || outcome.message || 'no reason given');
+}
+
+function rerender() {
+  if (latest) renderColumns(latest.columns, latest.generated_at);
+}
+
+function questionNode(c) {
+  const p = c.permission_prompt;
+  const box = el('div', 'prompt question');
+  box.append(el('div', 'alert', 'question: ' + p.tool_input));
+  const answer = (text) => send('/api/workers/' + encodeURIComponent(c.id) + '/answer',
+    { prompt: p.id, text }, 'answer ' + c.handle);
+  if (p.options && p.options.length) {
+    const row = el('div', 'answers');
+    for (const option of p.options) {
+      const button = boardButton(option, 'Answer with this option', () => answer(option));
+      button.className = 'answer option';
+      row.append(button);
+    }
+    box.append(row);
+  }
+  const line = el('div', 'answer-line');
+  const input = el('input');
+  input.type = 'text';
+  input.maxLength = REPLY_MAX;
+  input.placeholder = 'Or type the answer, one line';
+  const submit = () => {
+    const text = input.value.trim();
+    if (text) answer(text);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+  line.append(input, boardButton('Answer', 'Send this line as the answer', submit));
+  box.append(line);
+  return box;
+}
+
 function promptNode(c) {
   const p = c.permission_prompt;
+  if (p.kind === 'question') return questionNode(c);
   const box = el('div', 'prompt');
   box.append(el('div', 'alert', 'permission: ' + p.tool_name));
   if (p.tool_input) {
@@ -461,7 +566,7 @@ function groupNode(columnKey, g) {
 function signature(c) {
   // The age is refreshed separately, so it is not part of the signature.
   const { updated_at, ...rest } = c;
-  return JSON.stringify(rest);
+  return JSON.stringify([rest, cardStatus.get(String(c.id)) || null]);
 }
 
 function renderColumns(columns, now) {
@@ -522,6 +627,10 @@ function render(model) {
   renderHealth(model.health, now);
   renderStats(model.columns);
   renderControls(model);
+  const shown = new Set(model.columns.flatMap((column) => column.cards.map((c) => String(c.id))));
+  for (const id of [...cardStatus.keys()]) {
+    if (!shown.has(id)) cardStatus.delete(id);
+  }
   renderColumns(model.columns, now);
 }
 
@@ -560,7 +669,56 @@ function token() {
   return localStorage.getItem(TOKEN_KEY) || '';
 }
 
+function showTokenState(name) {
+  const state = $('token-state');
+  state.className = 'token-state ' + name;
+  state.textContent = TOKEN_STATES[name];
+  $('token').className = 'token-' + name;
+  // A notice that asked for the token is out of date once the daemon accepts it.
+  if (name === 'accepted' && tokenNoticeShown) notice('');
+}
+
+// True while the notice asks for a valid token; any later notice replaces that one.
+let tokenNoticeShown = false;
+// Each check gets a number, so the answer to an older check cannot replace a newer state.
+let tokenCheck = 0;
+// Set when the daemon did not answer, so the next good poll checks the token again.
+let tokenRecheck = false;
+// When the daemon that answered the last poll started; a new value is a restart.
+let daemonStartedAt = null;
+
+async function checkToken() {
+  const check = ++tokenCheck;
+  tokenRecheck = false;
+  if (!token()) {
+    showTokenState('none');
+    return;
+  }
+  showTokenState('checking');
+  let status = 0;
+  try {
+    status = (await post('/api/token', {})).status;
+  } catch (error) {
+    status = 0;
+  }
+  if (check !== tokenCheck) return;
+  if (status === 204) showTokenState('accepted');
+  else if (status === 401) showTokenState('invalid');
+  else tokenRecheck = true;
+}
+
+function post(path, body) {
+  return fetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    credentials: 'omit',
+    headers: { 'Authorization': 'Bearer ' + token(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
 function notice(text, kind) {
+  tokenNoticeShown = false;
   const box = $('notice');
   box.className = 'notice ' + (kind || '');
   box.textContent = text;
@@ -573,7 +731,8 @@ function describe(outcome) {
   return what + ': ' + (outcome.ok ? 'ok' : 'refused') + (outcome.message ? ' · ' + outcome.message : '');
 }
 
-async function follow(outcome) {
+// *onOutcome*, when given, gets each state of the request as the card shows it.
+async function follow(outcome, onOutcome) {
   const deadline = Date.now() + FOLLOW_MS;
   let current = outcome;
   while (current.pending && Date.now() < deadline) {
@@ -586,27 +745,31 @@ async function follow(outcome) {
       // The daemon may be restarting; keep asking until the deadline.
     }
     notice(describe(current), current.pending ? 'pending' : current.ok ? 'ok' : 'bad');
+    if (onOutcome) onOutcome(current);
   }
 }
 
-async function send(path, body, what) {
+async function send(path, body, what, onOutcome) {
+  // An answer that is not a request outcome ends the card's pending state too.
+  const failed = (text) => {
+    if (onOutcome) onOutcome({ pending: false, ok: false, message: text });
+  };
   if (!token()) {
     notice('Paste the token first: the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    tokenNoticeShown = true;
     $('token').focus();
+    failed('no token');
     return;
   }
   notice(what + ': sending', 'pending');
+  // The operator can save another token while the action waits for its answer.
+  const sent = token();
   let response;
   try {
-    response = await fetch(path, {
-      method: 'POST',
-      cache: 'no-store',
-      credentials: 'omit',
-      headers: { 'Authorization': 'Bearer ' + token(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-    });
+    response = await post(path, body);
   } catch (error) {
     notice(what + ': the daemon is unreachable', 'bad');
+    failed('the daemon is unreachable');
     return;
   }
   let payload = {};
@@ -615,12 +778,25 @@ async function send(path, body, what) {
   } catch (error) {
     payload = {};
   }
+  const current = sent === token();
   if (response.status === 401) {
+    if (current) {
+      tokenCheck++;
+      showTokenState('invalid');
+    }
     notice('The token is not valid. Paste the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
+    tokenNoticeShown = true;
+    failed('the token is not valid');
     return;
+  }
+  // The daemon checks the Host (403) before the token, and every later answer passed both.
+  if (response.status !== 403 && current) {
+    tokenCheck++;
+    showTokenState('accepted');
   }
   if (!response.ok) {
     notice(what + ': ' + (payload.error || 'HTTP ' + response.status), 'bad');
+    failed(payload.error || 'HTTP ' + response.status);
     return;
   }
   if (payload.prompt !== undefined) {
@@ -634,7 +810,22 @@ async function send(path, body, what) {
     return;
   }
   notice(describe(payload), payload.pending ? 'pending' : payload.ok ? 'ok' : 'bad');
-  if (payload.pending) follow(payload);
+  if (onOutcome) onOutcome(payload);
+  if (payload.pending) follow(payload, onOutcome);
+}
+
+// What the confirmation dialog of Discard, Retry or Archive says about the work they would
+// lose, when the card knows of it.
+function riskWarning(c, name, force) {
+  const risk = c.work_at_risk;
+  if (!risk || !['discard', 'retry', 'archive'].includes(name)) return '';
+  const said = ' ' + risk.text.charAt(0).toUpperCase() + risk.text.slice(1);
+  if (!force) {
+    return said + ': without force the daemon refuses this. Tick force and press ' +
+      ACTION_LABELS[name] + ' again to ' + (name === 'archive' ? 'archive it anyway.' : 'throw that work away.');
+  }
+  return said + (name === 'archive' ? '; force is ticked: the archive keeps the files, not the commits.'
+    : '; force is ticked, so that work is lost.');
 }
 
 function workerAction(c, name, force) {
@@ -652,14 +843,28 @@ function workerAction(c, name, force) {
     send(path, { terminal: $('terminal').value || 'iterm2' }, what);
     return;
   }
+  const risk = riskWarning(c, name, force);
   if (name === 'discard' &&
       !window.confirm('Discard ' + c.handle + '? This removes its session, its worktree and its local branch' +
-        (force ? ', even with unpushed or uncommitted work.' : '.'))) return;
+        (force && !risk ? ', even with unpushed or uncommitted work.' : '.') + risk)) return;
   if (name === 'cancel' && !window.confirm('Cancel ' + c.handle + '? Its session stops; the worktree stays.')) return;
   if (name === 'archive' &&
       !window.confirm('Archive ' + c.handle + '? ' + (c.column === 'closed' ? '' : 'It is cancelled first. ') +
-        ARCHIVE_NOTE + (force ? ' Unpushed commits and uncommitted changes are not kept as commits.' : ''))) return;
-  send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''));
+        ARCHIVE_NOTE + (force && !risk ? ' Unpushed commits and uncommitted changes are not kept as commits.' : '') +
+        risk)) return;
+  // Retry asks only when the card knows of work it would lose.
+  if (name === 'retry' && risk &&
+      !window.confirm('Retry ' + c.handle + '? It removes the worktree and clears the worker.' + risk)) return;
+  // Two actions on one card can both wait for a tick; only the newer one may set the line.
+  const sequence = (cardActionSequence.get(String(c.id)) || 0) + 1;
+  cardActionSequence.set(String(c.id), sequence);
+  const latestAction = () => cardActionSequence.get(String(c.id)) === sequence;
+  setCardStatus(c.id, 'pending', 'sending');
+  send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''),
+    (outcome) => {
+      if (!latestAction()) return;
+      setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome));
+    });
 }
 
 function personalise(kind, key, body, what) {
@@ -819,7 +1024,8 @@ async function openClone(c) {
   const panel = $('panel');
   const modes = el('div', 'modes');
   const radios = {};
-  for (const mode of ['fresh', 'full']) {
+  const refused = { full: form.full_refused, summary: form.summary_refused };
+  for (const mode of form.choices || ['fresh', 'full']) {
     const label = el('label', 'mode');
     const radio = el('input');
     radio.type = 'radio';
@@ -827,7 +1033,7 @@ async function openClone(c) {
     radio.value = mode;
     radio.disabled = !form.modes.includes(mode);
     radio.checked = mode === 'fresh';
-    label.title = radio.disabled ? (form.full_refused || '') : CLONE_MODE_HINTS[mode];
+    label.title = radio.disabled ? (refused[mode] || '') : (CLONE_MODE_HINTS[mode] || '');
     label.append(radio, ' ' + mode);
     radios[mode] = radio;
     modes.append(label);
@@ -858,11 +1064,14 @@ async function openClone(c) {
   const fields = [field('mode', modes), field('prompt', prompt), field('model', model), field('effort', effort)];
   if (form.item) fields.push(field('wakes on', kinds));
   const extra = [];
-  if (form.full_refused) extra.push(el('div', 'note', 'full: ' + form.full_refused));
+  for (const mode of Object.keys(refused)) {
+    if (refused[mode] && radios[mode]) extra.push(el('div', 'note', mode + ': ' + refused[mode]));
+  }
   // Only what differs from the role goes into the request, as on the command line.
   const role = form.role_values || {};
   const submit = () => {
-    const body = { mode: radios.full.checked ? 'full' : 'fresh' };
+    const chosen = Object.keys(radios).find((mode) => radios[mode].checked);
+    const body = { mode: chosen || 'fresh' };
     if (prompt.value.trim() && prompt.value.trim() !== (role.prompt || '').trim()) body.prompt = prompt.value;
     if (model.value.trim() && model.value.trim() !== role.model) body.model = model.value.trim();
     if (effort.value && effort.value !== role.effort) body.effort = effort.value;
@@ -924,15 +1133,28 @@ function openNewWorker() {
 function setupControls() {
   const input = $('token');
   input.value = token();
-  input.addEventListener('change', () => {
+  const save = () => {
     const value = input.value.trim();
     if (value) localStorage.setItem(TOKEN_KEY, value);
     else localStorage.removeItem(TOKEN_KEY);
+    checkToken();
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    save();
+  });
+  // Enter has saved the value already; a change that is not saved yet comes from leaving
+  // the field.
+  input.addEventListener('change', () => {
+    if (input.value.trim() !== token()) save();
   });
   $('token-forget').addEventListener('click', () => {
     localStorage.removeItem(TOKEN_KEY);
     input.value = '';
+    checkToken();
   });
+  checkToken();
   $('terminal').addEventListener('change', () => localStorage.setItem(TERMINAL_KEY, $('terminal').value));
   const showHidden = $('show-hidden');
   showHidden.checked = localStorage.getItem(SHOW_HIDDEN_KEY) === '1';
@@ -956,7 +1178,12 @@ async function poll() {
     const refresh = $('refresh');
     refresh.textContent = 'updated ' + new Date(model.generated_at * 1000).toLocaleTimeString();
     refresh.classList.remove('stale');
+    const started = model.health && model.health.started_at;
+    if (daemonStartedAt !== null && started !== daemonStartedAt && token()) tokenRecheck = true;
+    daemonStartedAt = started;
+    if (tokenRecheck) checkToken();
   } catch (error) {
+    if (token()) tokenRecheck = true;
     if (Date.now() - lastOk > STALE_AFTER_MS) {
       $('refresh').textContent = 'daemon unreachable';
       $('refresh').classList.add('stale');

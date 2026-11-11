@@ -112,6 +112,19 @@ def test_an_unrecognised_state_is_preserved_not_guessed():
     assert session.raw_state == "reticulating"
 
 
+def test_a_busy_status_is_kept_beside_the_state():
+    listed = parse_sessions(json.dumps([
+        {"id": "a", "state": "done", "status": "busy"},
+        {"id": "b", "state": "working", "status": "busy"},
+        {"id": "c", "state": "done", "status": "idle"},
+        {"id": "d", "state": "done"},
+    ]))
+
+    assert [(s.state, s.busy) for s in listed] == [
+        ("done", True), ("working", True), ("done", False), ("done", False),
+    ]
+
+
 def test_a_session_without_any_identifier_is_dropped():
     assert parse_sessions('[{"state": "working"}]') == []
 
@@ -543,3 +556,38 @@ def test_an_import_step_about_the_status_line_is_done_when_the_settings_run_the_
 
     assert claude_mod.ClaudeRuntime.import_step_done({**step, "kind": "launchd"}) is None
     assert claude_mod.ClaudeRuntime.import_step_done({**step, "settings": None}) is None
+
+
+# ----- AskUserQuestion ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("deny_rules", [(), ("Bash(rm -rf *)",), ("AskUserQuestion",)])
+def test_every_launch_settings_payload_denies_ask_user_question(deny_rules):
+    """A worker asks with the mod's ask tool; no configured deny list drops the rule."""
+    settings = claude_mod.launch_settings({}, deny_rules)
+
+    deny = settings["permissions"]["deny"]
+    assert deny.count("AskUserQuestion") == 1
+    assert set(deny_rules) <= set(deny)
+
+
+def test_a_launch_and_a_fork_both_deny_ask_user_question(claude_state, tmp_path):
+    from chargehand.runtime import LaunchSpec
+
+    # No deny rules from the configuration, as with `pass_deny_rules_at_launch = false`.
+    runtime = claude_mod.ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)), deny_rules=())
+    worktree = tmp_path / "w"
+    worktree.mkdir()
+    spec = LaunchSpec(worktree=worktree, name="implementer/ABC-1", prompt="go")
+
+    runtime.launch(spec)
+    claude_state.set(sessions=[{
+        "id": "s1", "sessionId": "11111111-2222-3333-4444-555555555555", "name": "x",
+        "kind": "background", "state": "done",
+    }])
+    runtime.fork(spec, session_id="s1", session_uuid="11111111-2222-3333-4444-555555555555")
+
+    (fork,) = claude_state.read()["forks"]
+    for argv in (claude_state.launches[0]["argv"], fork["argv"]):
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        assert "AskUserQuestion" in settings["permissions"]["deny"]

@@ -1,0 +1,5 @@
+{
+  "name": "chargehand",
+  "version": "0.1.0",
+  "description": "The chargehand worker channel: its tools, wakes from the outbox, turn reports and usage readings."
+}

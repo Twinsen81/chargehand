@@ -73,7 +73,9 @@ chargehand tick                             # run a tick now
   and chooses `chargehand continue <ITEM> --force`, which accepts it, or `discard`. Give
   the user both; run neither.
 - `session_state` is what Claude Code reports: `working`, `blocked`, `done`,
-  `failed`, `stopped`, `missing`, `unknown`.
+  `failed`, `stopped`, `missing`, `unknown`. `background` means the turn ended but a
+  background shell of that turn still runs, so Claude Code lists the session as busy;
+  the worker keeps the state of its turn end, usually `idle`.
 - `waiting: true` means the session asked something. Why it is waiting is the question
   itself, which only the session shows; tell the user to attach.
 - `recent` lists workers that have ended. None of them is waiting for an answer.
@@ -84,5 +86,5 @@ chargehand tick                             # run a tick now
 - A finished turn makes a worker `idle`, not `done`, for every role: it waits for
   events. `idle` does not mean "succeeded"; the user may look at what the turn left.
   `idle` and `queued` send no notification; `status` and the board show them.
-  A worker becomes `done` when its item is closed, or when a status file says
-  `complete`.
+  A worker becomes `done` when its item is closed, when its session reports `done`
+  with the `report` tool, or when a status file (deprecated) says `complete`.

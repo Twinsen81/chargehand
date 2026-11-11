@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 13
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -55,13 +55,15 @@ TERMINAL = (DONE, FAILED, CANCELLED)
 WORKER_STATES = NON_TERMINAL + TERMINAL
 
 # Session states as reported by Claude Code, plus `missing` for a session that has
-# disappeared from the listing entirely.
+# disappeared from the listing entirely, and `background` for a session that the listing
+# shows busy after its turn ended, while no new turn started: a background shell runs.
 SESSION_WORKING = "working"
 SESSION_BLOCKED = "blocked"
 SESSION_DONE = "done"
 SESSION_FAILED = "failed"
 SESSION_STOPPED = "stopped"
 SESSION_MISSING = "missing"
+SESSION_BACKGROUND = "background"
 
 LAST_STEP = 4
 
@@ -69,12 +71,16 @@ LAST_STEP = 4
 # a retry, or a clone. Rows copied from a version 1 ledger carry `migrated`. A wake
 # continues the same session, so each wake has its own `wake` row: the daily wake cap
 # counts them. A clone in full mode starts with a copy of its original's conversation,
-# which is a `fork` row.
+# which is a `fork` row. A wake past the role's refresh limit starts a fresh session for
+# the same worker instead, which is a `refresh` row; the daily wake cap counts it too.
 SESSION_INITIAL = "initial"
 SESSION_ADOPTED = "adopted"
 SESSION_MIGRATED = "migrated"
 SESSION_WAKE = "wake"
 SESSION_FORK = "fork"
+SESSION_REFRESH = "refresh"
+# The rows that count against the daily wake cap.
+WAKE_KINDS = (SESSION_WAKE, SESSION_REFRESH)
 
 # How a worker came to exist. Only `source` workers are held to one per role and item.
 ORIGIN_SOURCE = "source"
@@ -82,10 +88,12 @@ ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
 
-# How much of its original's session a clone gets: nothing, or a copy of the conversation.
+# How much of its original's session a clone gets: nothing, a copy of the conversation, or
+# the original's handoff note, which the clone's new session reads through a tool.
 CLONE_FRESH = "fresh"
 CLONE_FULL = "full"
-CLONE_MODES = (CLONE_FRESH, CLONE_FULL)
+CLONE_SUMMARY = "summary"
+CLONE_MODES = (CLONE_FRESH, CLONE_FULL, CLONE_SUMMARY)
 
 # Where a control request came from: the command line or the board. Both record the same
 # kinds and arguments; the tick applies them alike.
@@ -101,6 +109,28 @@ REPLY_SOURCE = "board"
 REPLY_KIND = "reply"
 REPLY_LIMIT = 500
 
+# A wake that a worker asked for with request_wake waits in its inbox as an event of this
+# source and kind, due at the time it named. Its pointer is chargehand's own identifier.
+# One timer per worker waits at a time: a new request replaces the one that waits.
+TIMER_SOURCE = "timer"
+TIMER_KIND = "timer"
+TIMER_POINTER = "request_wake"
+
+# A summary clone whose original's handoff note is older than the original's last turn
+# asks the original for a current note: an event of this source and kind in the
+# original's inbox, which delivery turns into a wake line. Its pointer is chargehand's own
+# identifier, which names the clone.
+HANDOFF_SOURCE = "clone"
+HANDOFF_KIND = "handoff"
+
+# What a worker's session last reported with the report tool. `done` and `failed` end the
+# worker at the end of the turn that reported them; the other states are card text only.
+REPORT_WORKING = "working"
+REPORT_DONE = "done"
+REPORT_FAILED = "failed"
+REPORT_NEEDS_INPUT = "needs-input"
+REPORT_STATES = (REPORT_WORKING, REPORT_DONE, REPORT_FAILED, REPORT_NEEDS_INPUT)
+
 # What the board keeps per repository and per worker: names and icons the operator chose,
 # pins, and the folded and hidden repositories. The page reads it and nothing else does, so
 # the configured names, the handles and the session names never change with it.
@@ -110,6 +140,20 @@ BOARD_FIELDS: dict[str, tuple[str, ...]] = {
     BOARD_REPOSITORY: ("name", "icon", "pinned", "collapsed", "hidden"),
     BOARD_WORKER: ("name", "icon", "pinned"),
 }
+
+# A message for a live session, which the session's chargehand mod takes and submits as its
+# next turn once it is idle: the wake into a live process. One open message per worker, at
+# most: a new event while one is `pending` goes into it; once the mod has `taken` it, new
+# events wait for the next wake. `submitted`: the mod's submit started the turn, and that
+# is when the wake is recorded and its inbox entries are delivered. `dropped`: the message
+# no longer goes out (its session changed, the mod refused it or never took it), and its
+# entries wait in the inbox for the next wake.
+OUTBOX_PENDING = "pending"
+OUTBOX_TAKEN = "taken"
+OUTBOX_SUBMITTED = "submitted"
+OUTBOX_DROPPED = "dropped"
+OUTBOX_OPEN = (OUTBOX_PENDING, OUTBOX_TAKEN)
+OUTBOX_STATES = OUTBOX_OPEN + (OUTBOX_SUBMITTED, OUTBOX_DROPPED)
 
 # A prompt a session shows the operator. A permission prompt is answered allow or deny; the
 # record also holds a question with its own options, so that both use one card. A prompt is
@@ -128,7 +172,9 @@ ALLOW = "allow"
 DENY = "deny"
 # Who resolved or cancelled a prompt: a click on the board, a rule the operator recorded
 # from the board, or the session itself (answered in the terminal, superseded, or stopped).
+# A question is also resolved by a reply, from the board or the command line.
 RESOLVED_BY_BOARD = "board"
+RESOLVED_BY_REPLY = "reply"
 RESOLVED_BY_RULE = "rule"
 RESOLVED_BY_SESSION = "session"
 
@@ -204,6 +250,16 @@ _WORKER_COLUMNS = (
     "prompt",
     "model",
     "effort",
+    "mod_session",
+    "mod_seen_at",
+    "context_tokens",
+    "context_percent",
+    "report_state",
+    "report_summary",
+    "report_links",
+    "reported_at",
+    "handoff_note",
+    "handoff_at",
 )
 
 _LIVE = ", ".join(repr(s) for s in NON_TERMINAL)
@@ -264,7 +320,21 @@ CREATE TABLE IF NOT EXISTS workers (
     clone_mode       TEXT,
     prompt           TEXT,
     model            TEXT,
-    effort           TEXT
+    effort           TEXT,
+    -- The session whose chargehand mod said hello last, and when: only that session takes
+    -- its wakes from the outbox. And the session's context window as the mod last read it.
+    mod_session      TEXT,
+    mod_seen_at      REAL,
+    context_tokens   INTEGER,
+    context_percent  REAL,
+    -- The last report of its session (REPORT_STATES, a summary, a JSON list of links), and
+    -- its handoff note. Untrusted session text, cleaned and capped when stored.
+    report_state     TEXT,
+    report_summary   TEXT,
+    report_links     TEXT,
+    reported_at      REAL,
+    handoff_note     TEXT,
+    handoff_at       REAL
 );
 
 -- The structural guarantee against a duplicate launch: a start event arrives again on
@@ -286,7 +356,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_uuid TEXT,
     kind         TEXT    NOT NULL,
     started_at   REAL    NOT NULL,
-    ended_at     REAL
+    ended_at     REAL,
+    -- The transcript of a session that a refresh replaced, as its hooks reported it.
+    transcript_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS sessions_worker ON sessions (worker_id);
@@ -300,7 +372,8 @@ CREATE TABLE IF NOT EXISTS requests (
     applied_at  REAL,
     ok          INTEGER,
     message     TEXT,
-    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}'
+    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}',
+    reason      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS requests_pending ON requests (applied_at);
@@ -343,6 +416,8 @@ CREATE TABLE IF NOT EXISTS inbox (
     pointer      TEXT    NOT NULL,
     queued_at    REAL    NOT NULL,
     delivered_at REAL,
+    -- An entry that waits for this time before a wake takes it, such as a timer.
+    due_at       REAL,
     UNIQUE (worker_id, source, dedupe_id)
 );
 
@@ -402,6 +477,26 @@ CREATE TABLE IF NOT EXISTS permission_rules (
     created_at   REAL    NOT NULL,
     PRIMARY KEY (worker_id, tool_name, input_digest)
 );
+
+-- The wake of a live session: a message its chargehand mod takes and submits; see
+-- OUTBOX_STATES. `entries` is a JSON list of the inbox rows it delivers. The text is
+-- chargehand's own wake message, built from kinds and checked pointers.
+CREATE TABLE IF NOT EXISTS outbox (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id    INTEGER NOT NULL REFERENCES workers (id),
+    session_uuid TEXT    NOT NULL,
+    text         TEXT    NOT NULL,
+    entries      TEXT    NOT NULL DEFAULT '[]',
+    state        TEXT    NOT NULL,
+    reason       TEXT,
+    created_at   REAL    NOT NULL,
+    updated_at   REAL    NOT NULL,
+    taken_at     REAL,
+    submitted_at REAL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_one_open ON outbox (worker_id)
+    WHERE state IN ('pending', 'taken');
 
 -- Where each source's last poll stopped.
 CREATE TABLE IF NOT EXISTS cursors (
@@ -537,6 +632,51 @@ ALTER TABLE workers ADD COLUMN effort TEXT;
 {_SCHEMA}
 """
 
+# Version 10 adds the outbox, which the schema creates, and what the chargehand mod reports
+# on the worker. Like version 8, the version 1 copy creates the table with them.
+_MIGRATE_V9_TO_V10 = f"""
+ALTER TABLE workers ADD COLUMN mod_session TEXT;
+ALTER TABLE workers ADD COLUMN mod_seen_at REAL;
+ALTER TABLE workers ADD COLUMN context_tokens INTEGER;
+ALTER TABLE workers ADD COLUMN context_percent REAL;
+{_SCHEMA}
+"""
+
+# Version 11 adds the worker's last report and its handoff note, and the due time of an
+# inbox entry. Every version from 2 on has a workers table without the new columns; only a
+# version 3 file or a later one has an inbox, which a version 2 file gets whole from the
+# schema of its step to version 3.
+_V11_WORKER_COLUMNS = """
+ALTER TABLE workers ADD COLUMN report_state TEXT;
+ALTER TABLE workers ADD COLUMN report_summary TEXT;
+ALTER TABLE workers ADD COLUMN report_links TEXT;
+ALTER TABLE workers ADD COLUMN reported_at REAL;
+ALTER TABLE workers ADD COLUMN handoff_note TEXT;
+ALTER TABLE workers ADD COLUMN handoff_at REAL;
+"""
+_MIGRATE_V10_TO_V11 = f"""
+{_V11_WORKER_COLUMNS}
+ALTER TABLE inbox ADD COLUMN due_at REAL;
+{_SCHEMA}
+"""
+_MIGRATE_V2_V10_TO_V11 = f"""
+{_V11_WORKER_COLUMNS}
+{_SCHEMA}
+"""
+
+# Version 12 keeps the transcript path of a session that a refresh replaced, on its row.
+# Every version from 2 on has a sessions table without it; the version 1 copy creates the
+# table with it.
+_MIGRATE_V11_TO_V12 = """
+ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+"""
+
+# Version 13 keeps the machine-readable reason of a refused request, for the board. Every
+# version has a requests table without it, the version 1 one included.
+_MIGRATE_V12_TO_V13 = """
+ALTER TABLE requests ADD COLUMN reason TEXT;
+"""
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -583,6 +723,16 @@ class Worker:
     prompt: str | None = None
     model: str | None = None
     effort: str | None = None
+    mod_session: str | None = None
+    mod_seen_at: float | None = None
+    context_tokens: int | None = None
+    context_percent: float | None = None
+    report_state: str | None = None
+    report_summary: str | None = None
+    report_links: str | None = None
+    reported_at: float | None = None
+    handoff_note: str | None = None
+    handoff_at: float | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -642,6 +792,7 @@ class SessionRecord:
     kind: str
     started_at: float
     ended_at: float | None
+    transcript_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -712,6 +863,37 @@ class Subscription:
 
 
 @dataclass(frozen=True)
+class OutboxMessage:
+    id: int
+    worker_id: int
+    session_uuid: str
+    text: str
+    entries: tuple[int, ...]
+    state: str
+    reason: str | None
+    created_at: float
+    updated_at: float
+    taken_at: float | None
+    submitted_at: float | None
+
+    @property
+    def is_open(self) -> bool:
+        return self.state in OUTBOX_OPEN
+
+
+def _row_to_outbox(row: sqlite3.Row) -> OutboxMessage:
+    data = dict(row)
+    try:
+        entries = json.loads(data["entries"])
+    except (TypeError, ValueError):
+        entries = []
+    if not isinstance(entries, list):
+        entries = []
+    data["entries"] = tuple(e for e in entries if isinstance(e, int) and not isinstance(e, bool))
+    return OutboxMessage(**data)
+
+
+@dataclass(frozen=True)
 class InboxEntry:
     id: int
     worker_id: int
@@ -725,6 +907,7 @@ class InboxEntry:
     pointer: str
     queued_at: float
     delivered_at: float | None
+    due_at: float | None = None
 
 
 def _row_to_subscription(row: Mapping[str, Any]) -> Subscription:
@@ -807,17 +990,28 @@ class Ledger:
         # schema but keeps its own requests table, which gains the request origin. Up to
         # version 3 the schema creates the prompts table whole, so only 4 to 6 alter it.
         script = {
-            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V12_TO_V13,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
-            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
+            + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11
+            + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9,
-            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
-            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
-            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9,
-            8: _MIGRATE_V8_TO_V9,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
+            5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
+            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10
+            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11
+            + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
+            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            11: _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            12: _MIGRATE_V12_TO_V13,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1065,6 +1259,15 @@ class Ledger:
         ).fetchone()
         return _row_to_worker(row) if row else None
 
+    def worker_by_session_row(self, session_id: str) -> Worker | None:
+        """The newest worker that a session row names *session_id* for, in any state."""
+        row = self._conn.execute(
+            "SELECT w.* FROM workers w JOIN sessions s ON s.worker_id = w.id "
+            "WHERE s.session_id = ? ORDER BY w.id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return _row_to_worker(row) if row else None
+
     def worker_by_worktree(self, worktree: str) -> Worker | None:
         row = self._conn.execute(
             "SELECT * FROM workers WHERE worktree = ? ORDER BY id DESC LIMIT 1", (worktree,)
@@ -1119,14 +1322,26 @@ class Ledger:
         # stays open: a hook touches the row before it records a prompt, so a row read
         # later knows of it. The end of a launch (`launching` -> `running`) cancels
         # nothing: the first dialog of a session can come before the tick confirms it.
+        # A question that the ask tool recorded is no dialog of the session: a write of
+        # `running` cancels it only once the turn that asked it has ended (it is settled),
+        # because a permission prompt answered later in the same turn also writes `running`.
         if "state" not in changes:
             return
         state = changes["state"]
         if state == BLOCKED or (worker.state == LAUNCHING and state == RUNNING):
             return
+        if state != RUNNING:
+            self.resolve_permission_prompts(worker, now=changes["updated_at"])
+            return
         self.resolve_permission_prompts(
-            worker, now=changes["updated_at"],
-            recorded_by=worker.updated_at if state == RUNNING else None,
+            worker, now=changes["updated_at"], recorded_by=worker.updated_at,
+            kind=PROMPT_PERMISSION,
+        )
+        self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE worker_id = ? AND kind = ? AND state = ? AND released_at IS NOT NULL",
+            (PROMPT_CANCELLED, RESOLVED_BY_SESSION, changes["updated_at"], worker.id,
+             PROMPT_QUESTION, PROMPT_OPEN),
         )
 
     @staticmethod
@@ -1206,19 +1421,80 @@ class Ledger:
         return [PermissionPrompt(**dict(row)) for row in rows]
 
     def resolve_permission_prompts(
-        self, worker: Worker, *, now: float | None = None, recorded_by: float | None = None
+        self,
+        worker: Worker,
+        *,
+        now: float | None = None,
+        recorded_by: float | None = None,
+        kind: str | None = None,
     ) -> int:
-        """Cancel the worker's open prompts, or those recorded by *recorded_by*: its session
-        no longer shows them."""
+        """Cancel the worker's open prompts, or those recorded by *recorded_by*, or those of
+        *kind*: its session no longer shows them."""
         stamp = time.time() if now is None else now
         cursor = self._conn.execute(
             "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ?, "
             "released_at = COALESCE(released_at, ?) WHERE worker_id = ? AND state = ? "
-            "AND (? IS NULL OR created_at <= ?)",
+            "AND (? IS NULL OR created_at <= ?) AND (? IS NULL OR kind = ?)",
             (PROMPT_CANCELLED, RESOLVED_BY_SESSION, stamp, stamp, worker.id, PROMPT_OPEN,
-             recorded_by, recorded_by),
+             recorded_by, recorded_by, kind, kind),
         )
         return cursor.rowcount
+
+    def record_question(
+        self, worker: Worker, question: str, options: Sequence[str], *, now: float | None = None
+    ) -> int:
+        """Record an open question of *worker* with its *options*; it replaces an older one.
+
+        The question is a prompt of kind `question`: the board shows it in the same card as
+        a permission prompt, and the operator's answer resolves it. No hook waits for it.
+        Its `released_at` says when the turn that asked it ended (:meth:`settle_questions`).
+        """
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            self.resolve_permission_prompts(worker, now=stamp, kind=PROMPT_QUESTION)
+            cursor = self._conn.execute(
+                "INSERT INTO permission_prompts (worker_id, tool_name, tool_input, created_at, "
+                "kind, options) VALUES (?, ?, ?, ?, ?, ?)",
+                (worker.id, "ask", question, stamp, PROMPT_QUESTION, json.dumps(list(options))),
+            )
+        return int(cursor.lastrowid)
+
+    def latest_question(self, worker: Worker) -> PermissionPrompt | None:
+        """The worker's newest question, in any state."""
+        row = self._conn.execute(
+            "SELECT * FROM permission_prompts WHERE worker_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (worker.id, PROMPT_QUESTION),
+        ).fetchone()
+        return PermissionPrompt(**dict(row)) if row else None
+
+    def settle_questions(self, worker: Worker, *, now: float | None = None) -> None:
+        """Record that the turn which asked the worker's open questions has ended."""
+        self._conn.execute(
+            "UPDATE permission_prompts SET released_at = ? WHERE worker_id = ? AND kind = ? "
+            "AND state = ? AND released_at IS NULL",
+            (time.time() if now is None else now, worker.id, PROMPT_QUESTION, PROMPT_OPEN),
+        )
+
+    def answer_questions(self, worker: Worker, *, by: str, now: float | None = None) -> int:
+        """Resolve every open question of *worker*: a reply answers them."""
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE worker_id = ? AND kind = ? AND state = ?",
+            (PROMPT_RESOLVED, by, time.time() if now is None else now, worker.id,
+             PROMPT_QUESTION, PROMPT_OPEN),
+        )
+        return cursor.rowcount
+
+    def answer_question(self, prompt_id: int, *, by: str, now: float | None = None) -> bool:
+        """Resolve an open question. False when it was answered or cancelled before."""
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "UPDATE permission_prompts SET state = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE id = ? AND kind = ? AND state = ?",
+            (PROMPT_RESOLVED, by, stamp, prompt_id, PROMPT_QUESTION, PROMPT_OPEN),
+        )
+        return cursor.rowcount == 1
 
     def cancel_permission_prompt(self, prompt_id: int, *, now: float | None = None) -> bool:
         """Cancel one open prompt that its session no longer shows. False when it was not open."""
@@ -1335,10 +1611,38 @@ class Ledger:
     def wakes_since(self, worker: Worker, since: float) -> int:
         return int(
             self._conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND started_at >= ?",
-                (worker.id, SESSION_WAKE, since),
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind IN (?, ?) "
+                "AND started_at >= ?",
+                (worker.id, *WAKE_KINDS, since),
             ).fetchone()[0]
         )
+
+    def keep_session_transcript(self, worker: Worker, session_id: str, path: str) -> None:
+        """Keep *path* on the rows that started *session_id*, once a refresh replaces it."""
+        self._conn.execute(
+            "UPDATE sessions SET transcript_path = ? WHERE worker_id = ? AND session_id = ? "
+            "AND kind != ?",
+            (path, worker.id, session_id, SESSION_WAKE),
+        )
+
+    def wakes_in_session(self, worker: Worker) -> int:
+        """The wakes of *worker* since its newest session row other than a wake."""
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE worker_id = ? AND kind = ? AND id > "
+                "(SELECT COALESCE(MAX(id), 0) FROM sessions WHERE worker_id = ? AND kind != ?)",
+                (worker.id, SESSION_WAKE, worker.id, SESSION_WAKE),
+            ).fetchone()[0]
+        )
+
+    def session_ids_of_others(self, worker: Worker) -> set[str]:
+        """Every session id that a session row gives another worker of *worker*'s runtime."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT s.session_id FROM sessions s JOIN workers w ON w.id = s.worker_id "
+            "WHERE s.worker_id != ? AND w.runtime = ? AND s.session_id IS NOT NULL",
+            (worker.id, worker.runtime),
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def sessions_of(self, worker: Worker) -> list[SessionRecord]:
         rows = self._conn.execute(
@@ -1439,12 +1743,49 @@ class Ledger:
         )
         return cursor.rowcount > 0
 
-    def inbox(self, worker: Worker, *, pending_only: bool = True) -> list[InboxEntry]:
+    def inbox(
+        self, worker: Worker, *, pending_only: bool = True, now: float | None = None
+    ) -> list[InboxEntry]:
+        """The worker's inbox; with *pending_only*, the entries that a wake may take now:
+        not delivered, and due."""
         query = "SELECT * FROM inbox WHERE worker_id = ?"
+        params: list[object] = [worker.id]
         if pending_only:
-            query += " AND delivered_at IS NULL"
-        rows = self._conn.execute(query + " ORDER BY id", (worker.id,)).fetchall()
+            query += " AND delivered_at IS NULL AND (due_at IS NULL OR due_at <= ?)"
+            params.append(time.time() if now is None else now)
+        rows = self._conn.execute(query + " ORDER BY id", params).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
+
+    def put_timer(
+        self, worker: Worker, *, due_at: float, item: str, item_ref: str, now: float | None = None
+    ) -> int:
+        """Put a timer that is due at *due_at* into the worker's inbox, instead of the one
+        that waits."""
+        stamp = time.time() if now is None else now
+        with self.transaction():
+            self._conn.execute(
+                "DELETE FROM inbox WHERE worker_id = ? AND source = ? AND kind = ? "
+                "AND delivered_at IS NULL",
+                (worker.id, TIMER_SOURCE, TIMER_KIND),
+            )
+            cursor = self._conn.execute(
+                """
+                INSERT INTO inbox (worker_id, source, kind, item, item_ref, actor, occurred_at,
+                                   dedupe_id, pointer, queued_at, due_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (worker.id, TIMER_SOURCE, TIMER_KIND, item, item_ref, TIMER_SOURCE, stamp,
+                 f"timer:{stamp!r}", TIMER_POINTER, stamp, due_at),
+            )
+        return int(cursor.lastrowid)
+
+    def pending_timer(self, worker: Worker) -> InboxEntry | None:
+        row = self._conn.execute(
+            "SELECT * FROM inbox WHERE worker_id = ? AND source = ? AND kind = ? "
+            "AND delivered_at IS NULL ORDER BY id DESC LIMIT 1",
+            (worker.id, TIMER_SOURCE, TIMER_KIND),
+        ).fetchone()
+        return InboxEntry(**dict(row)) if row else None
 
     def delivered_at(self, worker: Worker, at: float) -> list[InboxEntry]:
         """The inbox entries of *worker* that one wake delivered: those marked at *at*."""
@@ -1453,6 +1794,15 @@ class Ledger:
             (worker.id, at),
         ).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
+
+    def drop_pending(self, worker_id: int, source: str, dedupe_id: str) -> bool:
+        """Remove one entry from a worker's inbox that no wake has taken yet."""
+        cursor = self._conn.execute(
+            "DELETE FROM inbox WHERE worker_id = ? AND source = ? AND dedupe_id = ? "
+            "AND delivered_at IS NULL",
+            (worker_id, source, dedupe_id),
+        )
+        return cursor.rowcount > 0
 
     def mark_delivered(self, entries: Iterable[InboxEntry], *, now: float | None = None) -> None:
         ids = [entry.id for entry in entries]
@@ -1463,6 +1813,146 @@ class Ledger:
             f"({', '.join('?' * len(ids))})",
             (time.time() if now is None else now, *ids),
         )
+
+    # ----- the outbox ----------------------------------------------------------
+
+    def outbox_message(self, worker: Worker) -> OutboxMessage | None:
+        """The open outbox message of *worker*, pending or taken, or None."""
+        row = self._conn.execute(
+            "SELECT * FROM outbox WHERE worker_id = ? AND state IN (?, ?) ORDER BY id DESC LIMIT 1",
+            (worker.id, *OUTBOX_OPEN),
+        ).fetchone()
+        return _row_to_outbox(row) if row else None
+
+    def get_outbox(self, message_id: int) -> OutboxMessage | None:
+        row = self._conn.execute("SELECT * FROM outbox WHERE id = ?", (message_id,)).fetchone()
+        return _row_to_outbox(row) if row else None
+
+    def put_outbox(
+        self,
+        worker: Worker,
+        *,
+        session_uuid: str,
+        text: str,
+        entries: Iterable[int],
+        now: float | None = None,
+    ) -> OutboxMessage | None:
+        """The pending message for *worker*'s session, with *text* and *entries*.
+
+        A pending message gets the new text and entries; an open message of another
+        session is dropped first. None while the session's mod holds a taken one: new
+        events wait for the next wake.
+        """
+        stamp = time.time() if now is None else now
+        ids = json.dumps(sorted(set(entries)))
+        with self.transaction():
+            current = self.outbox_message(worker)
+            if current is not None and current.session_uuid != session_uuid:
+                self._drop(current.id, "the session changed", stamp)
+                current = None
+            if current is not None and current.state == OUTBOX_TAKEN:
+                return None
+            if current is not None:
+                self._conn.execute(
+                    "UPDATE outbox SET text = ?, entries = ?, updated_at = ? WHERE id = ?",
+                    (text, ids, stamp, current.id),
+                )
+                message_id = current.id
+            else:
+                message_id = self._conn.execute(
+                    "INSERT INTO outbox (worker_id, session_uuid, text, entries, state, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (worker.id, session_uuid, text, ids, OUTBOX_PENDING, stamp, stamp),
+                ).lastrowid
+        return self.get_outbox(int(message_id))
+
+    def take_outbox(
+        self,
+        worker: Worker,
+        *,
+        session_uuid: str,
+        retake_after: float,
+        now: float | None = None,
+    ) -> OutboxMessage | None:
+        """Hand the open message of *session_uuid* to its mod, or None when there is none.
+
+        A pending message becomes taken. A taken one is handed out again once
+        *retake_after* seconds have passed without a confirm: the mod that took it may have
+        been reloaded before it submitted the text.
+        """
+        stamp = time.time() if now is None else now
+        # The mod of every live session polls; an empty outbox takes no write lock.
+        current = self.outbox_message(worker)
+        if current is None or current.session_uuid != session_uuid:
+            return None
+        if current.state == OUTBOX_TAKEN and (current.taken_at or 0.0) > stamp - retake_after:
+            return None
+        # Only as read: a delivery or a second poll that changed it in between wins.
+        cursor = self._conn.execute(
+            "UPDATE outbox SET state = ?, taken_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = ? AND taken_at IS ? AND updated_at = ?",
+            (OUTBOX_TAKEN, stamp, stamp, current.id, current.state, current.taken_at,
+             current.updated_at),
+        )
+        return self.get_outbox(current.id) if cursor.rowcount else None
+
+    def submit_outbox(self, message_id: int, now: float | None = None) -> OutboxMessage | None:
+        """Mark a taken message submitted. The message when this call did it, else None."""
+        stamp = time.time() if now is None else now
+        cursor = self._conn.execute(
+            "UPDATE outbox SET state = ?, submitted_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = ?",
+            (OUTBOX_SUBMITTED, stamp, stamp, message_id, OUTBOX_TAKEN),
+        )
+        return self.get_outbox(message_id) if cursor.rowcount else None
+
+    def drop_outbox(self, message_id: int, reason: str, now: float | None = None) -> bool:
+        """Drop an open message, so its entries wait for the next wake; False when it was not open."""
+        return self._drop(message_id, reason, time.time() if now is None else now)
+
+    def _drop(self, message_id: int, reason: str, now: float) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE outbox SET state = ?, reason = ?, updated_at = ? "
+            "WHERE id = ? AND state IN (?, ?)",
+            (OUTBOX_DROPPED, reason[:300], now, message_id, *OUTBOX_OPEN),
+        )
+        return bool(cursor.rowcount)
+
+    def outbox_workers(self) -> set[int]:
+        """The ids of the workers whose open outbox message may still start a turn.
+
+        A paused or ended worker gets no wake from its outbox, so its message holds no
+        working slot.
+        """
+        waking = [state for state in NON_TERMINAL if state != PAUSED]
+        rows = self._conn.execute(
+            f"SELECT DISTINCT o.worker_id FROM outbox o JOIN workers w ON w.id = o.worker_id "
+            f"WHERE o.state IN (?, ?) AND w.state IN ({', '.join('?' * len(waking))})",
+            (*OUTBOX_OPEN, *waking),
+        ).fetchall()
+        return {int(row["worker_id"]) for row in rows}
+
+    def stale_outbox(self) -> list[OutboxMessage]:
+        """The open messages of workers that are paused or ended: none of them goes out."""
+        rows = self._conn.execute(
+            f"SELECT o.* FROM outbox o JOIN workers w ON w.id = o.worker_id "
+            f"WHERE o.state IN (?, ?) AND w.state IN ({', '.join('?' * (1 + len(TERMINAL)))}) "
+            f"ORDER BY o.id",
+            (*OUTBOX_OPEN, PAUSED, *TERMINAL),
+        ).fetchall()
+        return [_row_to_outbox(row) for row in rows]
+
+    def inbox_entries(self, worker: Worker, ids: Iterable[int]) -> list[InboxEntry]:
+        """The inbox rows of *worker* with *ids* that are not delivered yet."""
+        wanted = list(ids)
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            f"SELECT * FROM inbox WHERE worker_id = ? AND delivered_at IS NULL AND id IN "
+            f"({', '.join('?' * len(wanted))}) ORDER BY id",
+            (worker.id, *wanted),
+        ).fetchall()
+        return [InboxEntry(**dict(row)) for row in rows]
 
     # ----- seen events and cursors ------------------------------------------
 
@@ -1566,10 +2056,15 @@ class Ledger:
         row = self._conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
         return self._request_to_dict(row) if row else None
 
-    def complete_request(self, request_id: int, *, ok: bool, message: str) -> None:
+    def complete_request(
+        self, request_id: int, *, ok: bool, message: str, reason: dict[str, Any] | None = None
+    ) -> None:
+        """*reason* is the machine-readable form of a refusal, for the board; *message*
+        stays the command line's text."""
         self._conn.execute(
-            "UPDATE requests SET applied_at = ?, ok = ?, message = ? WHERE id = ?",
-            (time.time(), 1 if ok else 0, message, request_id),
+            "UPDATE requests SET applied_at = ?, ok = ?, message = ?, reason = ? WHERE id = ?",
+            (time.time(), 1 if ok else 0, message,
+             json.dumps(reason, sort_keys=True) if reason else None, request_id),
         )
 
     @staticmethod
@@ -1579,6 +2074,11 @@ class Ledger:
             data["args"] = json.loads(data["args"])
         except (TypeError, ValueError):
             data["args"] = {}
+        try:
+            reason = json.loads(data.get("reason") or "null")
+        except ValueError:
+            reason = None
+        data["reason"] = reason if isinstance(reason, dict) else None
         return data
 
     def prune_requests(self, older_than_secs: float = 7 * 24 * 3600) -> int:
@@ -1770,6 +2270,7 @@ __all__ = [
     "SessionRecord",
     "Subscription",
     "InboxEntry",
+    "OutboxMessage",
     "PermissionPrompt",
     "Job",
     "Ledger",

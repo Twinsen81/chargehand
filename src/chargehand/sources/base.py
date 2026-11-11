@@ -170,5 +170,14 @@ class Source(abc.ABC):
         """
         return None
 
+    def item_for(self, text: str) -> WorkItem | None:
+        """The item that *text* names in this source's own terms, or None when it names none.
+
+        A worker asks to follow an item by its URL or identifier. *text* is untrusted: an
+        override accepts only the plain shapes its source uses for its items, and makes no
+        call.
+        """
+        return None
+
     def describe(self) -> str:
         return f"{self.name} ({self.type})"

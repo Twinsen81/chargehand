@@ -375,7 +375,7 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
         lines.append("no live workers")
     else:
         header = (
-            f"  {'ITEM':<14} {'ROLE':<12} {'STATE':<10} {'SESSION':<9} {'AGE':>6} {'STEP':>4}  DETAIL"
+            f"  {'ITEM':<14} {'ROLE':<12} {'STATE':<10} {'SESSION':<10} {'AGE':>6} {'STEP':>4}  DETAIL"
         )
         lines.append(header)
         for worker in workers:
@@ -393,7 +393,7 @@ def _render_table(status: dict[str, object], *, verbose: bool) -> str:
             lines.append(
                 f"  {shown:<14} "
                 f"{sanitize.scrub_identifier(str(worker['role'])):<12} {worker['state']:<10} "
-                f"{str(worker['session_state'] or '-'):<9} "
+                f"{str(worker['session_state'] or '-'):<10} "
                 f"{_elapsed(worker['created_at']):>6} {worker['step']:>4}  "
                 f"{sanitize.one_line(str(detail), limit=70)}"
             )
@@ -506,6 +506,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             sessions=list_sessions,
             report=_log_report,
             on_config=apply_level,
+            usage_poller=lambda daemon: usage_mod.UsagePoller(lambda: daemon.config),
         )
         daemon.start()
     except ChargehandError as exc:
@@ -1039,7 +1040,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_item(clone)
     clone.add_argument(
         "--mode", required=True, choices=ledger_mod.CLONE_MODES,
-        help="fresh: nothing from the old session; full: a copy of its conversation",
+        help="fresh: nothing from the old session; full: a copy of its conversation; "
+             "summary: a new session that reads the old worker's handoff note first",
     )
     prompt = clone.add_mutually_exclusive_group()
     prompt.add_argument("--prompt", metavar="TEXT",

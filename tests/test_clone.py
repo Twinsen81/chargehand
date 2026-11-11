@@ -18,7 +18,9 @@ from pathlib import Path
 import pytest
 
 from chargehand import board, claude as claude_mod, ledger as ledger_mod
-from chargehand import usage as usage_mod
+from chargehand import clone as clone_mod
+from chargehand import delivery as delivery_mod
+from chargehand import usage as usage_mod, worker_tokens
 from chargehand.cli import EXIT_ERROR, EXIT_OK, build_parser, build_status, main
 from chargehand.config import ServeConfig
 from chargehand.errors import LaunchAborted
@@ -215,12 +217,20 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
         "--resume", original.session_uuid, "--fork-session", "--bg", "-n", clone.handle,
         "--permission-mode", "manual", "--model", "sonnet", "--effort", "low",
     ]
-    assert argv[12:14] == ["--settings", str(settings)]
+    assert argv[12:16] == [
+        "--plugin-dir", str(claude_mod.installed_mod_dir()), "--settings", str(settings),
+    ]
     assert settings != claude_mod.settings_file_for(original.worktree_path)
     written = json.loads(settings.read_text())
     assert "Stop" in written["hooks"] and "the-daemon-token" not in " ".join(argv)
+    # The copy gets a token of its own, and cannot speak as the original.
+    token = worker_tokens.read(clone.worktree_path)
+    assert token and token != worker_tokens.read(original.worktree_path)
+    assert written["hooks"]["Stop"][0]["hooks"][0]["headers"] == {"Authorization": f"Bearer {token}"}
+    assert "the-daemon-token" not in settings.read_text()
     # The file tools are denied in the original's worktree, in every permission mode.
     deny = written["permissions"]["deny"]
+    assert f"Read(/{worker_tokens.token_dir()}/**)" in deny
     for path in {str(original.worktree_path), os.path.realpath(original.worktree)}:
         assert f"Edit(/{path}/**)" in deny and f"Write(/{path}/**)" in deny
     assert not any(clone.worktree in rule for rule in deny)
@@ -487,7 +497,7 @@ def test_a_retry_of_a_clone_whose_original_is_gone_says_so(harness):
 
 @pytest.mark.parametrize("body, error", [
     ({}, "mode must be one of fresh, full"),
-    ({"mode": "summary"}, "mode must be one of fresh, full"),
+    ({"mode": "partial"}, "mode must be one of fresh, full, summary"),
     ({"mode": "fresh", "prompt": 5}, "prompt must be text"),
     ({"mode": "fresh", "prompt": "x" * (16 * 1024 + 1)}, "longer than 16 KiB"),
     ({"mode": "fresh", "prompt": "about {title}"}, "unknown template variable {title}"),
@@ -527,7 +537,10 @@ def test_the_clone_form_starts_with_the_role_values_and_says_when_full_is_not_po
     assert form["prompt"] == "work on {item} in {worktree}"
     assert (form["model"], form["effort"], form["item"]) == ("haiku", "low", "ABC-1")
     assert form["efforts"] == ["low", "medium", "high", "xhigh", "max"]
-    assert (form["modes"], form["full_refused"], form["subscribe"]) == (["fresh", "full"], None, [])
+    assert (form["modes"], form["full_refused"], form["subscribe"]) == (
+        ["fresh", "full", "summary"], None, []
+    )
+    assert (form["choices"], form["summary_refused"]) == (["fresh", "full", "summary"], None)
     assert form["prompt_limit"] == 16 * 1024
     assert form["role_values"] == {
         "prompt": "work on {item} in {worktree}", "model": "haiku", "effort": "low",
@@ -537,6 +550,7 @@ def test_the_clone_form_starts_with_the_role_values_and_says_when_full_is_not_po
     _, busy = get(daemon, f"/api/workers/{original.id}/clone")
     assert busy["modes"] == ["fresh"]
     assert "is running" in busy["full_refused"]
+    assert "once it is idle" in busy["summary_refused"]
 
     harness.ledger.update(original, state=ledger_mod.CANCELLED, gc_done=1)
     assert get(daemon, f"/api/workers/{original.id}/clone")[0] == 409
@@ -674,7 +688,7 @@ def test_the_clone_command_parses_its_options():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["clone", "ABC-1"])
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["clone", "ABC-1", "--mode", "summary"])
+        build_parser().parse_args(["clone", "ABC-1", "--mode", "partial"])
     with pytest.raises(SystemExit):
         build_parser().parse_args(["clone", "ABC-1", "--mode", "fresh", "--prompt", "a", "--prompt-file", "b"])
 
@@ -761,3 +775,414 @@ def test_a_clone_is_not_held_by_the_one_worker_per_role_and_item_rule(harness):
     assert {first.origin, second.origin} == {"clone"}
     assert len({original.worktree, first.worktree, second.worktree}) == 3
     assert Path(first.worktree).name == f"ABC-1-{first.id}"
+
+
+# ----- summary mode -----------------------------------------------------------------------
+
+NOTE = "OPEN-POINTS-MARKER: alpha, beta"
+
+
+def with_note(harness, worker, note=NOTE, *, current=True):
+    """*worker* with a handoff note written in its last turn, or before it."""
+    worker = harness.ledger.get(worker.id)
+    at = time.time() if current else worker.working_since - 60
+    return harness.ledger.update(worker, handoff_note=note, handoff_at=at)
+
+
+def handoff_entries(harness, worker, *, pending_only=False):
+    return [
+        entry for entry in harness.ledger.inbox(worker, pending_only=pending_only)
+        if (entry.source, entry.kind) == (ledger_mod.HANDOFF_SOURCE, ledger_mod.HANDOFF_KIND)
+    ]
+
+
+def clones_of(harness, original):
+    return [w for w in harness.ledger.recent_workers(50) if w.parent_id == original.id]
+
+
+def test_clone_args_and_the_command_line_accept_summary():
+    assert clone_mod.clone_args({"mode": "summary"}) == {"mode": "summary"}
+    args = build_parser().parse_args(["clone", "implementer/ABC-1#3", "--mode", "summary"])
+    assert args.mode == "summary"
+
+
+def test_the_board_and_the_command_line_record_the_same_summary_clone(daemon, harness, config_file):
+    original = original_worker(harness)
+
+    status, _ = post(daemon, f"/api/workers/{original.id}/clone", {"mode": "summary"})
+    assert run(["clone", original.target, "--mode", "summary", "--no-wait"], config_file) == EXIT_OK
+
+    assert status == 202
+    board_row, cli_row = harness.ledger.pending_requests()
+    assert board_row["args"] == cli_row["args"] == {"mode": "summary"}
+
+
+def test_the_clone_form_says_when_summary_is_not_possible(daemon, harness):
+    original = original_worker(harness)
+
+    # Idle, without a note: a wake can ask it for one.
+    _, form = get(daemon, f"/api/workers/{original.id}/clone")
+    assert "summary" in form["modes"] and form["summary_refused"] is None
+
+    # Running, without a note: the refusal says that it has none yet.
+    harness.ledger.update(original, state=ledger_mod.RUNNING)
+    _, bare = get(daemon, f"/api/workers/{original.id}/clone")
+    assert bare["summary_refused"] == (
+        f"{original.id_handle} is running and has no handoff note yet, so clone it in summary "
+        f"mode once it is idle"
+    )
+
+    harness.ledger.update(with_note(harness, original, current=False), state=ledger_mod.RUNNING)
+    _, busy = get(daemon, f"/api/workers/{original.id}/clone")
+    assert "summary" not in busy["modes"]
+    assert busy["summary_refused"] == (
+        f"{original.id_handle} is running and its handoff note is older than its current turn, "
+        f"so clone it in summary mode once it is idle"
+    )
+
+    # Running, but the note was written in this turn: it is current.
+    with_note(harness, original)
+    assert "summary" in get(daemon, f"/api/workers/{original.id}/clone")[1]["modes"]
+
+    harness.ledger.update(harness.ledger.get(original.id), state=ledger_mod.CANCELLED,
+                          handoff_note=None, handoff_at=None)
+    _, ended = get(daemon, f"/api/workers/{original.id}/clone")
+    assert ended["summary_refused"] == (
+        f"{original.id_handle} left no handoff note and cannot be asked for one"
+    )
+
+
+def test_a_runtime_without_the_mod_offers_no_summary_clone(daemon, harness):
+    original = original_worker(harness, role=FAKE_ROLE)
+
+    _, form = get(daemon, f"/api/workers/{original.id}/clone")
+
+    assert form["modes"] == ["fresh", "full"]
+    assert "does not load the chargehand mod" in form["summary_refused"]
+    outcome = request_clone(harness, original, mode="summary")
+    assert outcome["ok"] == 0 and "summary mode is not available" in outcome["message"]
+    assert clones_of(harness, original) == []
+
+
+def test_a_refused_summary_clone_leaves_no_worker_and_no_worktree(harness):
+    original = original_worker(harness)
+    harness.ledger.update(with_note(harness, original, current=False), state=ledger_mod.RUNNING)
+    before = {w.id for w in harness.ledger.recent_workers(50)}
+
+    outcome = request_clone(harness, harness.ledger.get(original.id), mode="summary")
+
+    assert outcome["ok"] == 0 and "once it is idle" in outcome["message"]
+    assert {w.id for w in harness.ledger.recent_workers(50)} == before
+    assert sorted(p.name for p in (harness.worktree_root / "implementer").iterdir()) == [
+        Path(original.worktree).name
+    ]
+
+
+def test_a_summary_clone_with_a_current_note_launches_a_fresh_session_at_once(harness, caplog):
+    original = with_note(harness, original_worker(harness, subscribe=("comment",)))
+    launches_before = len(harness.claude_state.launches)
+
+    with caplog.at_level("DEBUG"):
+        clone = clone_of(harness, original, mode="summary")
+
+    assert (clone.clone_mode, clone.state, clone.parent_id) == ("summary", ledger_mod.RUNNING, original.id)
+    assert len(harness.claude_state.launches) == launches_before + 1
+    launch = harness.claude_state.launches[-1]
+    argv = launch["argv"]
+    assert "--bg" in argv and "--resume" not in argv and "--fork-session" not in argv
+    assert "--plugin-dir" in argv
+    assert launch["cwd"] == os.path.realpath(clone.worktree)
+    assert fork_calls(harness) == []
+    # Branched from the original's branch, with its commit.
+    assert (clone.worktree_path / "work.txt").read_text() == "the original's work\n"
+    # A clone follows nothing by default.
+    assert [s.kinds for s in harness.ledger.subscriptions_of(clone)] == [()]
+    note, template = argv[-1].split("\n\n")
+    assert "ABC-1" in note and "read_handoff" in note and original.id_handle in note
+    assert f"You work in {clone.worktree} on branch {clone.branch}." in note
+    assert f"The worktree {original.worktree} belongs to the other worker" in note
+    assert template == f"work on ABC-1 in {clone.worktree}"
+    assert [s.kind for s in harness.ledger.sessions_of(clone)] == ["initial"]
+    # The note goes from row to row, and nowhere else.
+    assert clone.handoff_note == NOTE and clone.handoff_at == original.handoff_at
+    assert "OPEN-POINTS-MARKER" not in json.dumps(harness.claude_state.read())
+    assert "OPEN-POINTS-MARKER" not in caplog.text
+    assert all("OPEN-POINTS-MARKER" not in repr(n) for n in harness.notifier.sent)
+    # The original was not asked for anything.
+    assert handoff_entries(harness, original) == []
+    assert harness.ledger.wakes_since(original, 0) == 0
+
+
+def test_a_clone_follows_the_kinds_it_was_given_in_summary_mode(harness):
+    original = with_note(harness, original_worker(harness))
+
+    clone = clone_of(harness, original, mode="summary", subscribe=["comment", "review"])
+
+    assert [s.kinds for s in harness.ledger.subscriptions_of(clone)] == [("comment", "review")]
+
+
+def test_the_clone_reads_the_copied_note_and_a_later_note_of_the_original_does_not_change_it(
+    daemon, harness
+):
+    original = with_note(harness, original_worker(harness))
+    clone = clone_of(harness, original, mode="summary")
+
+    def call(worker, tool, **arguments):
+        payload = {"session_id": worker.session_uuid, "cwd": worker.worktree, "input": arguments}
+        # The session's own token, which its launch wrote into its worktree.
+        token = worker_tokens.read(worker.worktree_path) or worker_tokens.issue(
+            worker.worktree_path
+        )
+        status, raw = support.request(
+            daemon.port, "POST", f"/channel/tool/{tool}", body=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        assert status == 200
+        return json.loads(raw)
+
+    assert call(clone, "read_handoff")["result"] == NOTE
+    call(original, "handoff", note="a later note of the original")
+    assert harness.ledger.get(original.id).handoff_note == "a later note of the original"
+    assert call(clone, "read_handoff")["result"] == NOTE
+
+
+def test_a_stale_note_is_asked_for_first_and_the_clone_launches_after_the_new_note(harness):
+    original = with_note(harness, original_worker(harness), current=False)
+    launches_before = len(harness.claude_state.launches)
+
+    outcome = request_clone(harness, original, mode="summary")
+
+    assert outcome["ok"] == 1
+    assert "starts once its original has written a current handoff note" in outcome["message"]
+    clone = started(harness, outcome)
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
+    assert len(harness.claude_state.launches) == launches_before
+    # One request in the original's inbox, and the wake for it in the same tick.
+    (entry,) = handoff_entries(harness, original)
+    pointer = f"write-a-current-note-with-the-handoff-tool-for-clone-{clone.id}"
+    assert entry.pointer == pointer and entry.delivered_at is not None
+    assert delivery_mod.safe_pointer(pointer) == pointer
+    woken = harness.ledger.get(original.id)
+    assert woken.state == ledger_mod.RUNNING
+    assert [s.kind for s in harness.ledger.sessions_of(woken)] == ["initial", "wake"]
+    resume = harness.claude_state.read()["resumes"][-1]
+    assert resume["prompt"].splitlines()[1:] == [f"handoff: {pointer}"]
+    assert "waits for a current handoff note" in cards(harness)[0][clone.id]["clone_start"]
+
+    # Ticks without a new note: no launch, no second request, no launch attempt used.
+    for _ in range(4):
+        harness.next_tick()
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
+    assert len(harness.claude_state.launches) == launches_before
+    assert len(handoff_entries(harness, original)) == 1
+    assert [s.kind for s in harness.ledger.sessions_of(original)] == ["initial", "wake"]
+
+    # The wake's turn writes a current note: the next tick launches the clone, once.
+    with_note(harness, original, "OPEN-POINTS-MARKER: gamma")
+    harness.next_tick()
+    harness.next_tick()
+
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.RUNNING
+    assert len(harness.claude_state.launches) == launches_before + 1
+    assert clone.handoff_note == "OPEN-POINTS-MARKER: gamma"
+    assert "OPEN-POINTS-MARKER" not in harness.claude_state.launches[-1]["argv"][-1]
+    assert cards(harness)[0][clone.id]["clone_start"] is None
+
+
+def test_the_debounce_does_not_hold_the_turn_that_writes_the_note(harness):
+    original = original_worker(harness, role=ROLE + "\n[policy]\ndebounce_secs = 600\n")
+    original = with_note(harness, original, current=False)
+
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+
+    # The original is woken in the tick of the request, not 10 minutes later.
+    (entry,) = handoff_entries(harness, original)
+    assert entry.delivered_at is not None
+    assert harness.ledger.get(original.id).state == ledger_mod.RUNNING
+    assert harness.ledger.get(clone.id).state == ledger_mod.LAUNCHING
+
+
+def test_a_note_turn_held_by_the_daily_cap_keeps_the_clone_waiting(harness):
+    original = original_worker(harness, role=ROLE + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness.ledger.record_wake(original, session_id=original.session_id,
+                               session_uuid=original.session_uuid)
+    original = with_note(harness, original, current=False)
+
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    harness.next_tick()
+
+    held = harness.ledger.get(original.id)
+    assert held.state == ledger_mod.QUEUED
+    assert "daily cap" in harness.ledger.get_state(f"queue-reason:{original.id}")
+    assert len(handoff_entries(harness, original, pending_only=True)) == 1
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
+
+    # A current note that comes without that wake, as from a turn the operator started,
+    # launches the clone and takes the request back.
+    with_note(harness, original)
+    harness.next_tick()
+
+    assert harness.ledger.get(clone.id).state == ledger_mod.RUNNING
+    assert handoff_entries(harness, original) == []
+
+
+@pytest.mark.parametrize("end", ["cancel", "discard"])
+def test_an_ended_waiting_clone_takes_its_request_and_its_card_line_back(harness, end):
+    original = original_worker(harness, role=ROLE + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness.ledger.record_wake(original, session_id=original.session_id,
+                               session_uuid=original.session_uuid)
+    original = with_note(harness, original, current=False)
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    assert len(handoff_entries(harness, original, pending_only=True)) == 1
+    assert cards(harness)[0][clone.id]["clone_start"].startswith("waits for")
+
+    args = {"yes": True, "force": True} if end == "discard" else {}
+    request_id = harness.ledger.record_request(end, clone.target, **args)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert harness.ledger.get(clone.id).is_terminal
+    # The original is not woken later for a clone that no longer waits.
+    assert handoff_entries(harness, original) == []
+    assert harness.ledger.get_state(f"summary-clone:{clone.id}") is None
+    card = cards(harness)[0].get(clone.id)
+    assert card is None or card["clone_start"] is None
+
+
+def test_a_clone_cancelled_while_the_global_cap_holds_the_note_turn_wakes_nothing(harness):
+    original = with_note(harness, original_worker(harness), current=False)
+    # The cap of the request tick has room for the clone and the note turn; one more daily
+    # wake is used up, so the request waits in the original's inbox.
+    write_role(harness, ROLE + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness.ledger.record_wake(original, session_id=original.session_id,
+                               session_uuid=original.session_uuid)
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    # Then only the global cap holds it: the waiting clone takes its one place.
+    write_role(harness)
+    harness.config = dataclasses.replace(harness.config, max_concurrent=1)
+    report = harness.next_tick()
+    assert any("global cap (1/1 working)" in line for line in report.skipped)
+    assert harness.ledger.get(original.id).state == ledger_mod.QUEUED
+    assert len(handoff_entries(harness, original, pending_only=True)) == 1
+    wakes = harness.ledger.wakes_since(original, 0)
+
+    # The cancel frees the place in the same tick that delivers.
+    request_id = harness.ledger.record_request("cancel", clone.target)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert harness.ledger.wakes_since(original, 0) == wakes
+    assert handoff_entries(harness, original) == []
+    assert harness.ledger.get(original.id).state == ledger_mod.IDLE
+
+
+def test_the_wait_uses_up_no_launch_attempt_with_a_limit_of_one(harness):
+    harness.config = dataclasses.replace(harness.config, max_launch_attempts=1)
+    original = with_note(harness, original_worker(harness), current=False)
+
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    for _ in range(3):
+        harness.next_tick()
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
+
+    with_note(harness, original)
+    harness.next_tick()
+
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.RUNNING and clone.launch_attempts == 1
+
+
+def test_the_handoff_tool_says_what_a_handoff_wake_line_asks_for():
+    from chargehand import channel
+
+    description = channel.TOOLS["handoff"].description
+    assert "A wake line 'handoff: ...' asks for a current note now" in description
+    assert f"{ledger_mod.HANDOFF_KIND}: " in description
+
+
+def test_after_the_time_limit_the_clone_starts_from_the_stored_note_and_says_so(harness, monkeypatch):
+    original = with_note(harness, original_worker(harness), current=False)
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    assert clone.state == ledger_mod.LAUNCHING
+
+    monkeypatch.setattr("chargehand.tick.SUMMARY_WAIT_SECS", 0)
+    harness.next_tick()
+
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.RUNNING and clone.handoff_note == NOTE
+    assert cards(harness)[0][clone.id]["clone_start"] == (
+        f"started from the stored handoff note of {original.id_handle}, which is older than "
+        f"its last turn; no current note came within 0 minutes"
+    )
+
+
+def test_after_the_time_limit_a_clone_of_an_original_without_a_note_fails(harness, monkeypatch):
+    original = original_worker(harness)
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    assert clone.state == ledger_mod.LAUNCHING
+    assert len(handoff_entries(harness, original)) == 1
+
+    monkeypatch.setattr("chargehand.tick.SUMMARY_WAIT_SECS", 0)
+    harness.next_tick()
+
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.FAILED
+    assert "wrote no handoff note to start from" in clone.last_error
+    assert cards(harness)[0][clone.id]["clone_start"] is None
+
+
+def test_an_ended_original_with_a_stale_note_is_cloned_from_it_at_once(harness):
+    original = with_note(harness, original_worker(harness), current=False)
+    original = harness.ledger.update(original, state=ledger_mod.CANCELLED)
+
+    outcome = request_clone(harness, original, mode="summary")
+
+    clone = started(harness, outcome)
+    assert clone.state == ledger_mod.RUNNING and clone.handoff_note == NOTE
+    assert outcome["message"].endswith(
+        f"; started from the stored handoff note of {original.id_handle}, which is older than "
+        f"its last turn"
+    )
+    assert handoff_entries(harness, original) == []
+
+
+def test_no_room_under_the_global_cap_for_the_note_turn_refuses_the_clone(harness):
+    original = with_note(harness, original_worker(harness), current=False)
+    harness.config = dataclasses.replace(harness.config, max_concurrent=1)
+
+    outcome = request_clone(harness, original, mode="summary")
+
+    assert outcome["ok"] == 0 and "leaves no room for the turn" in outcome["message"]
+    assert clones_of(harness, original) == []
+
+
+def test_a_retry_of_a_summary_clone_starts_a_new_summary_clone_of_the_same_original(harness):
+    original = with_note(harness, original_worker(harness, subscribe=()))
+    clone = clone_of(harness, original, mode="summary")
+    harness.ledger.record_request("cancel", clone.target)
+    harness.next_tick()
+
+    request_id = harness.ledger.record_request("retry", clone.target, force=True)
+    harness.next_tick()
+
+    outcome = harness.ledger.get_request(request_id)
+    again = started(harness, {"ok": 1, "message": outcome["message"]})
+    assert again.id != clone.id
+    assert (again.parent_id, again.clone_mode, again.state) == (
+        original.id, "summary", ledger_mod.RUNNING
+    )
+
+
+def test_a_summary_clone_card_shows_its_first_prompt_without_the_note(harness):
+    original = with_note(harness, original_worker(harness))
+    clone = clone_of(harness, original, mode="summary")
+
+    card = cards(harness)[0][clone.id]
+
+    assert card["clone_mode"] == "summary"
+    assert card["last_prompt"].startswith("This is a new session for ABC-1")
+    assert "OPEN-POINTS-MARKER" not in json.dumps(card)

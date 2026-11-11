@@ -280,6 +280,10 @@ class CommandSource(Source):
     def describe(self) -> str:
         return f"{self.name} (command {shlex.split(self.poll_command)[0]})"
 
+    def item_for(self, text: str) -> WorkItem | None:
+        """An item key as the command's events name items: a plain identifier, its own reference."""
+        return WorkItem(source=self.name, key=text, ref=text) if sanitize.is_safe_identifier(text) else None
+
     def whoami(self) -> str:
         return self.account
 

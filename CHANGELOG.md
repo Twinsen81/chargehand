@@ -7,6 +7,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A worker whose turn ended while a background shell of that turn still runs no longer
+  flips from idle to running a few seconds after the turn end. Claude Code lists such a
+  session as busy, with the state working or done, and its listing names no background
+  shell, so each session now also posts a `UserPromptSubmit` hook when a turn starts.
+  While no turn has started since the turn end, the worker keeps the state of its turn end (idle, queued, or blocked on a
+  question), and the board and `status` show the session state `background`. When the turn
+  ended `background_shell_mins` ago (a new machine key, 30 by default, 0 for never), an
+  idle or queued worker is notified once, so a shell that never ends does not hide a
+  session that waits. The watchdog and `max_concurrent` do not count that time. Only
+  sessions launched with the new hook get this; older ones keep the old behaviour.
+- Clone in summary mode, from the card's Clone form or with `chargehand clone <ITEM>
+  --mode summary`. The clone gets its own worktree from the original's branch and a new
+  session that loads the mod; its first prompt names the item and the `read_handoff`
+  tool, never the note, and the tool gives the clone the original's handoff note, copied
+  into the clone's own row right before the launch. When the note is older than the
+  start of the original's last turn, chargehand first puts one `handoff` event into the
+  original's inbox, which wakes it under the usual caps, and the clone's launch waits
+  for a current note without using up launch attempts; after 10 minutes, or at once
+  when no wake can reach the original, it starts from the stored note and its card says
+  so, and without any note it fails. The `handoff` tool's description now says that a
+  wake line `handoff: ...` asks for a current note in that turn. A clone that ends while
+  it waits takes its event back, so the original is not woken for it later. The form
+  offers summary mode only when it can work, and says why not otherwise
+  (`summary_refused`).
+- Wake policies. A role's `debounce_secs` now takes effect: a worker's wake waits until no
+  new event has arrived for that many seconds, so a burst of comments becomes one wake,
+  but at most five times that long after the first waiting event, and its card shows until
+  when it waits. A reply from the board, a due `request_wake` timer and a summary clone's
+  request for a current handoff note do not wait, and take the waiting events along. The
+  default is 0, so a role that does not set the key wakes at the next tick as before; the
+  shipped role templates set 120. A worker that reaches its `max_wakes_per_day` stays
+  queued with the reason on its card, and one `daily-cap` notification goes out, again
+  only after its next wake. The global `max_concurrent` cap counts the working turns of
+  all repositories. The role templates say that a `/loop` that a role's prompt starts is
+  not counted by these caps.
+- Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
+  effect: once a worker's session has taken that many wakes, or holds about that many
+  tokens (the context that the mod reports, else the transcript size), its next wake stops
+  the session and starts a fresh one for the same worker in the same worktree. The first
+  prompt names the item and the tool that gives the worker's handoff note, then the role's
+  prompt and the waiting events; the note itself never reaches the prompt. A new worker
+  tool, `read_handoff`, returns the stored note to the session, and the `handoff` tool now
+  asks to be called at the end of every turn. A session that would start without the mod
+  is not refreshed. The old session is kept, stopped, for `claude --resume`, with its
+  transcript path on its row (ledger schema 12), and the board's card lists both sessions
+  under the one worker. The daily wake cap counts a refresh as a wake. Discard, retry and
+  garbage collection remove every session of a worker, and an archive holds the
+  transcript of each one.
+- Reconciliation compares a session's working directory with the worktrees by real path,
+  so a worktree root reached through a link (such as `/tmp` on macOS) no longer makes a
+  worker's session look like an orphan, and it never adopts a session that a session row
+  names for a worker but that is not its current one, such as one a refresh replaced or a
+  removal left behind; one that works again is reported once.
+- The chargehand mod, a Claude Code plugin that ships in the package and that every worker
+  session loads with `--plugin-dir` at launch and at a full-mode clone. Claude Code stores
+  the flag with the job, so the mod comes back after a stop and a resume or a respawn. The
+  sessions load a copy of it in the state directory, so the files that Claude Code writes
+  beside a mod it loads stay out of the package. It registers the worker tools that the
+  daemon lists in one registry (`report`, `ask`, `handoff`, `request_wake` and
+  `subscribe`, as `mcp__chargehand__<tool>`) and forwards each call to the daemon; the
+  launch settings allow those tools in every permission mode. It polls the worker's outbox
+  and submits the wake message as the session's next turn once the session is idle, so a
+  wake no longer stops and resumes a live process; once its worker has ended, it stops
+  polling. It posts the session start, each turn end and the session end, and after each
+  turn the session's weekly usage window. It finds the daemon through the launch
+  settings, which name the port and the token file, and has no default port. It never
+  answers a permission prompt and never submits text that the daemon did not hand it.
+- Delivery through the outbox. A worker whose session's mod said hello gets its wake as
+  one outbox message: events that come in before the mod takes it join it, a stopped
+  process is started again with `claude respawn` first, and the wake is recorded once,
+  when the mod confirms that its submit started the turn. The global cap of wakes and the
+  launch throttle count a wake in an outbox as a working turn; a stopped, paused or
+  cancelled worker's message is dropped, and its events wait. A message that the mod does
+  not take within a minute, or that the session refuses, falls back to the stop and the
+  resume. A session without the mod keeps the stop and the resume.
+- The daemon's own usage reading. Every `poll_secs` of `[usage]` (300 seconds by default,
+  at least 60, 0 turns it off) a thread of the daemon sends Claude Code's `get_usage`
+  control request to a short `claude -p` process in an empty directory under the state
+  directory, with all hooks and your MCP servers turned off and no session file, and writes
+  the weekly window of the answer with the source `get_usage`. Claude Code fetches the usage with its own sign-in: chargehand reads
+  no token and makes no network call, and the request runs no turn. So the week bar and
+  the reserves work without the status line wrapper and without a running worker. The
+  request is experimental in Claude Code: an error, a timeout, an answer without the
+  window, or a sign-in without rate limits writes nothing and logs one line. The wrapper
+  and the worker sessions stay as sources; the newest reading counts. `doctor` shows the
+  source and the age of the last reading, and warns when it is older than three poll
+  intervals.
+- Usage readings from worker sessions. The usage file now names its source (`statusline`
+  or `session`), and the `usage` object of `/api/board`, `/api/state` and `status --json`
+  carries it as `source`. A session reading keeps only the `seven_day` window, as the
+  wrapper does, and the newest reading is the one that counts.
+- The ledger keeps the outbox and, on each worker, the session whose mod said hello and the
+  session's context window as the mod last read it (schema version 10).
+- `ask` and `report` on the board. The mod's `ask(question, options)` records the question
+  with its options in the same record as a permission prompt and returns at once, telling
+  the model to end its turn; at the end of that turn the worker is blocked, and its card in
+  Needs you shows the options as buttons and a one-line answer field. The first answer
+  resolves the question and reaches the worker as a reply, as its next turn; a second one
+  is refused with 409. `AskUserQuestion` is denied for every worker at launch.
+  `report(state, summary, links)` keeps the state, the summary and the links on the worker,
+  and the card shows them; a pull request link becomes the card's link and the worker
+  follows that pull request. A report of `done` or `failed` ends the worker at the end of
+  that turn, as the status file's `complete` and `aborted` do; a report from an earlier
+  turn does not count.
+- `handoff(note)` stores the worker's handoff note (16 KiB at most) for a later session of
+  the same work; it never reaches a log line or a notification. `request_wake(after_secs)`
+  puts a timer into the worker's inbox, which delivery takes once it is due, through the
+  same admission as any wake; the daily wake cap counts it. A later request replaces the
+  timer that waits.
+- The ledger keeps each worker's last report and its handoff note, and the due time of an
+  inbox entry (schema version 11).
+- A token per worker session. Each launch and each fork writes a new token for its session
+  into a private file under the state directory (`worker-tokens/`), and the session's
+  hooks and its mod send it. The daemon maps the token, not the session id or the working
+  directory that a post names, to the worker, so one worker cannot speak for another by
+  naming its session. The token ends with its worker: the daemon refuses it once the
+  worker ended, and the file is deleted with the session's settings file. A tool call acts
+  as the token's worker, whatever session id it names; before, a tool call from a session
+  that was not the worker's was refused. A hook, a hello, a lifecycle or usage post, or an
+  outbox poll from a session that is not the worker's current one, such as a copy that a
+  resume started in the same worktree with the same settings, is ignored: the post
+  changes nothing, and the poll gets no message. Every launch's settings deny `Read` and
+  `Edit` on the board's token file and on the whole token directory, a launch without
+  hooks too; a launch with hooks also denies them on every session settings file.
+
+### Changed
+
+- A session no longer gets the board's token. Its settings file holds its own token in the
+  hooks' `Authorization` header, and the mod's environment names its own token file. The
+  `/channel/` routes refuse the board's token. `/hooks/` still accepts it from a session
+  launched before this change, maps that post by its session id and working directory as
+  before, and logs it once per session.
+
+### Deprecated
+
+- The status-file protocol (a role's `status_file`). It still works in this release and is
+  removed in a later one; a worker reports with the mod's `report` and `ask` tools instead.
+
 ### Removed
 
 - chargehand no longer runs banksman. The pool module, the reap at the start of every tick,
@@ -26,8 +166,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window's reset time has passed. The `usage` object has no `age_secs` key any more, and
   the gauge no longer turns grey because of age.
 
+### Fixed
+
+- A worker action on the board shows its outcome on its card: "pending", then "done" or
+  "refused" with the reason, until the next action on that card or a dismiss; the notice
+  under the top bar stays as it was. A Discard, Retry or Archive that is refused without
+  force says it in the board's words, for example "its worktree has uncommitted changes;
+  tick force and press Discard again". Before, the outcome showed only in the notice, in
+  the command line's words ("Re-run with --force"), and the card seemed to do nothing. The
+  outcome of such a refusal (`/api/requests/<id>`) carries a `reason` (`needs_force`, and
+  the uncommitted changes and unpushed commits at risk, or a session that did not stop)
+  and a `board_message`; the command line's messages do not change. The ledger keeps the
+  reason with the request (schema version 13).
+- The confirmation dialog of Discard, Retry and Archive says when the worktree has
+  uncommitted changes or unpushed commits, and that the action is refused without force.
+  The tick looks at the worktree of each worker that ended within the last day, once it
+  ended and then at most every ten minutes, and of a live worker after an action on it was
+  refused; a refused action looks at once. The card's `work_at_risk` shows what it found.
+  Retry asks for a confirmation only in that case.
+
 ### Added
 
+- The board confirms the pasted token. Enter, or leaving the token field, saves the token
+  and checks it at once with the new `POST /api/token`, which answers 204 for a valid
+  token and 401 for a wrong or missing one, and records no request. The state shows next
+  to the field as "no token", "checking", "token accepted" or "token not valid". The page
+  checks it again on load and when the daemon was restarted or unreachable, so a restart
+  with a new token file shows "token not valid" before the next action.
 - Clone a worker, from a card's Clone form or with `chargehand clone <ITEM> --mode
   fresh|full`. A clone is a new worker with origin `clone`, on its original's role and
   item, in a worktree of its own branched from the original's current branch, so its

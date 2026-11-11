@@ -74,6 +74,13 @@ def test_the_hard_stop_must_come_after_the_notification_limit():
         MachineConfig.parse({**MINIMAL, "max_run_hours": 10, "hard_stop_hours": 6})
 
 
+def test_the_background_shell_limit_has_a_default_and_is_never_negative():
+    assert MachineConfig.parse(MINIMAL).background_shell_mins == 30.0
+    assert MachineConfig.parse({**MINIMAL, "background_shell_mins": 0}).background_shell_mins == 0
+    with pytest.raises(ConfigError, match="background_shell_mins"):
+        MachineConfig.parse({**MINIMAL, "background_shell_mins": -1})
+
+
 def test_the_three_labels_must_differ():
     with pytest.raises(ConfigError, match="distinct"):
         MachineConfig.parse({**MINIMAL, "labels": {"queued": "x", "running": "x"}})

@@ -60,6 +60,11 @@ def gh(tmp_path, monkeypatch) -> GhState:
 @pytest.fixture
 def reviewing(tmp_path, repo, claude_state, board, gh):
     assert main(["init", "--repo", str(repo), "--role", "pr-reviewer"]) == EXIT_OK
+    # These tests wake the reviewer at the next tick; test_delivery covers the debounce.
+    role_file = repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    text = role_file.read_text(encoding="utf-8")
+    assert "\ndebounce_secs = 120\n" in text
+    role_file.write_text(text.replace("\ndebounce_secs = 120\n", "\ndebounce_secs = 0\n"))
     # The session starts in a checkout of the base branch, so the agent file is committed.
     run_git("add", ".claude/agents/pr-reviewer.md", cwd=repo)
     run_git("commit", "-m", "add the reviewer agent", cwd=repo)

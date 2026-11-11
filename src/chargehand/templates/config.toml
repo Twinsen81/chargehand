@@ -20,6 +20,10 @@ max_open_workers = 4
 max_run_hours = 6
 hard_stop_hours = 10
 
+# A turn that ended while a background shell runs: the worker stays idle, and after this
+# many minutes without a new turn you are notified. 0 never notifies.
+background_shell_mins = 30
+
 worktree_root = "~/chargehand-worktrees"
 
 # Warn when the worktree root's filesystem drops below this.
@@ -38,14 +42,17 @@ tick_interval_secs = 60
 # log_level = "info"
 
 # The part of the subscription's weekly usage window that workers leave for your own
-# sessions. The status line wrapper (`chargehand statusline`) writes the reading to
-# usage_file. No wake starts while the weekly window is above 100 minus
+# sessions. The daemon asks Claude Code for the window every poll_secs (0 turns that off;
+# the request is experimental in Claude Code), and the status line wrapper
+# (`chargehand statusline`) and the worker sessions write it too; the newest reading in
+# usage_file counts. No wake starts while the weekly window is above 100 minus
 # wake_reserve_percent, and no new worker while it is above 100 minus
 # new_worker_reserve_percent. Without a usage file there is no reserve. The newest reading
 # counts however old it is, until the window's reset time passes.
 [usage]
 wake_reserve_percent = 20
 new_worker_reserve_percent = 30
+poll_secs = 300
 
 [notify]
 # Receives CHARGEHAND_ITEM, CHARGEHAND_ROLE, CHARGEHAND_STATE, CHARGEHAND_URL,
