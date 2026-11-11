@@ -106,9 +106,11 @@ token". Workers started on the board are named by a handle with their id, such a
 `implementer/ABC-1#7`, which every command that takes an item also accepts.
 
 Attach in Terminal.app needs no macOS permission: the daemon writes a three-line shell
-script (a `#!/bin/sh` line, `rm -f -- "$0"`, and `exec claude attach <session id>`) into a
+script (a `#!/bin/sh` line, `rm -f -- "$0"`, and a line that runs `claude attach <session
+id>` in your own shell, started as an interactive one) into a
 private directory under its state directory and opens it with `/usr/bin/open -a Terminal`;
-the script deletes itself before it runs the command. iTerm2 asks for confirmation before
+the script deletes itself before it runs the command, and a `claude` that is an alias or
+a function of your shell is found, as when you type the command. iTerm2 asks for confirmation before
 it runs any file it is asked to open, so attach in iTerm2 still goes through Apple events:
 macOS asks once whether the daemon's Python may control iTerm2 (System Settings, Privacy &
 Security, Automation). macOS gives that permission to the Python interpreter binary, not

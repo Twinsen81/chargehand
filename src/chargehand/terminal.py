@@ -7,8 +7,10 @@ session id, is a plain identifier.
 
 Terminal.app is opened through LaunchServices (``/usr/bin/open``) on a script file that
 the daemon writes into a private directory, so it needs no Automation permission. The
-script deletes itself and then execs the command; a script that never ran is removed
-when the next one is written.
+script deletes itself and then runs the command in the operator's own shell, started as
+an interactive one, as a command typed into a terminal window does: a ``claude`` that is
+an alias or a function of that shell is found. A script that never ran is removed when
+the next one is written.
 
 iTerm2 asks "OK to run" for every file it is asked to open, so it is still driven
 through ``osascript`` and needs the Automation permission once. The command is never put
@@ -87,8 +89,15 @@ def open_argv(script: Path) -> list[str]:
 
 
 def script_text(command: str) -> str:
-    """The attach script: it removes itself first, so it runs at most once."""
-    return f'#!/bin/sh\nrm -f -- "$0"\nexec {command}\n'
+    """The attach script: it removes itself first, so it runs at most once.
+
+    The operator's shell runs the command, as an interactive shell: a plain ``sh`` knows
+    no alias and no function of that shell. *command* is plain words, so the single
+    quotes are all the quoting it needs. ValueError if it is not.
+    """
+    if not is_plain_command(command):
+        raise ValueError("the command is not a plain command line")
+    return f'#!/bin/sh\nrm -f -- "$0"\nexec "${{SHELL:-/bin/sh}}" -ic \'{command}\'\n'
 
 
 def script_dir() -> Path:

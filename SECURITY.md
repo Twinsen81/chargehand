@@ -304,8 +304,11 @@ public location.
   <file>`, through LaunchServices, so it needs no Automation permission. The file is in
   `attach/` under the state directory (mode 0700, created anew if missing, refused if it
   is a symbolic link), has a random name and mode 0700, is created with `O_EXCL` and
-  `O_NOFOLLOW`, and holds only `#!/bin/sh`, `rm -f -- "$0"` and `exec <command>`: it
-  deletes itself before it runs the command, and a file that never ran is removed when the
+  `O_NOFOLLOW`, and holds only `#!/bin/sh`, `rm -f -- "$0"` and
+  `exec "${SHELL:-/bin/sh}" -ic '<command>'`: it deletes itself before the operator's own
+  shell runs the command, as an interactive shell, so that a `claude` which is an alias
+  of that shell is found; the command is plain words, so the single quotes hold it whole.
+  A file that never ran is removed when the
   next one is written, after five minutes. The daemon's process sets no quarantine
   attribute, so macOS shows no dialog for the file. For iTerm2, which asks before it runs
   any file it opens, the daemon runs `/usr/bin/osascript`; the command reaches the

@@ -992,7 +992,9 @@ def test_attach_opens_terminal_on_the_cards_session_through_a_script_file(daemon
     (argv,) = opener.calls
     assert argv[:3] == [terminal.OPEN, "-a", "Terminal"]
     assert Path(argv[3]).parent == terminal.script_dir() and argv[3].endswith(".command")
-    assert opener.scripts == [f'#!/bin/sh\nrm -f -- "$0"\nexec claude attach {worker.session_id}\n']
+    assert opener.scripts == [
+        f'#!/bin/sh\nrm -f -- "$0"\nexec "${{SHELL:-/bin/sh}}" -ic \'claude attach {worker.session_id}\'\n'
+    ]
     # Recorded for the audit trail, already applied: no tick acts on it.
     assert harness.ledger.pending_requests() == []
     assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "terminal"}, "board")

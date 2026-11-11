@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -53,15 +54,50 @@ def test_terminal_opens_a_private_script_through_launchservices(tmp_path):
     script = Path(argv[3])
     assert script.parent == directory and script.name.endswith(".command")
     assert mode(directory) == 0o700 and mode(script) == 0o700
-    assert script.read_text() == '#!/bin/sh\nrm -f -- "$0"\nexec claude attach abc-123\n'
+    assert script.read_text() == (
+        '#!/bin/sh\nrm -f -- "$0"\nexec "${SHELL:-/bin/sh}" -ic \'claude attach abc-123\'\n'
+    )
 
 
 def test_the_script_deletes_itself_before_it_runs_the_command(tmp_path):
     script = terminal.write_script("true", tmp_path / "attach")
 
-    subprocess.run([str(script)], check=True)
+    subprocess.run([str(script)], check=True, env={**os.environ, "SHELL": "/bin/sh"})
 
     assert not script.exists()
+
+
+def test_the_script_hands_the_command_to_the_operators_shell_as_an_interactive_one(tmp_path):
+    seen = tmp_path / "seen"
+    shell = tmp_path / "shell"
+    shell.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {seen}\n')
+    shell.chmod(0o700)
+    script = terminal.write_script("claude attach abc-123", tmp_path / "attach")
+
+    subprocess.run([str(script)], check=True, env={**os.environ, "SHELL": str(shell)})
+
+    assert seen.read_text().splitlines() == ["-ic", "claude attach abc-123"]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_the_script_finds_a_command_that_is_an_alias_of_the_operators_shell(tmp_path):
+    # An install whose `claude` is an alias in the shell's start file: a plain sh finds none.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("alias claude='echo ran'\n")
+    script = terminal.write_script("claude attach abc-123", tmp_path / "attach")
+
+    result = subprocess.run(
+        [str(script)], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env={**os.environ, "HOME": str(home), "SHELL": shutil.which("bash")},
+    )
+
+    assert (result.returncode, result.stdout.strip()) == (0, "ran attach abc-123")
+
+
+def test_the_script_takes_only_a_plain_command():
+    with pytest.raises(ValueError):
+        terminal.script_text("claude attach 'x'; rm -rf ~")
 
 
 def test_each_script_has_its_own_unguessable_name(tmp_path):

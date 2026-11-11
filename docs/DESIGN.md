@@ -1251,9 +1251,11 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   for minutes, and records an `attach` request that is already applied, for the audit
   trail. Only a command of plain words whose last word is a plain identifier is accepted.
   Terminal.app is opened through LaunchServices (`open -a Terminal`) on a script file in a
-  private directory under the state directory, which deletes itself and then execs the
-  command, so it needs no Automation permission; a file that never ran is removed when the
-  next one is written. iTerm2 asks for confirmation before it runs a file it is asked to
+  private directory under the state directory, which deletes itself and then runs the
+  command in the operator's own shell, started as an interactive one
+  (`exec "${SHELL:-/bin/sh}" -ic '<command>'`), so it needs no Automation permission and
+  finds a `claude` that is an alias or a function of that shell, as a typed command does;
+  a file that never ran is removed when the next one is written, after five minutes. iTerm2 asks for confirmation before it runs a file it is asked to
   open, so it is opened through `osascript`, with the command as an argument of the
   AppleScript, never part of its source, and needs the Automation permission once. The
   board has no chat: anything that needs a conversation goes through attach.
