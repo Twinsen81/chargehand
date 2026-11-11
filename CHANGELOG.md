@@ -136,6 +136,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Attach opens Terminal.app by default; iTerm2 stays a choice on the page, listed second.
+  Attach in Terminal.app no longer needs the Automation permission. The daemon writes a
+  three-line shell script (`#!/bin/sh`, `rm -f -- "$0"`, `exec claude attach <session
+  id>`, mode 0700) into `attach/` under the state directory (mode 0700) and opens it with
+  `/usr/bin/open -a Terminal`. The script deletes itself before it runs the command, and a
+  script that never ran is removed when the next one is written. Attach in iTerm2 still
+  runs `osascript`, because iTerm2 asks for confirmation before it runs a file that it is
+  asked to open; its error now also says that Terminal needs no permission. The session id
+  must be a plain identifier for both.
 - A session no longer gets the board's token. Its settings file holds its own token in the
   hooks' `Authorization` header, and the mod's environment names its own token file. The
   `/channel/` routes refuse the board's token. `/hooks/` still accepts it from a session

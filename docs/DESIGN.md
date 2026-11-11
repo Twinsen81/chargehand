@@ -1234,12 +1234,17 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   dialog or a session that failed or stopped, keeps the reply in its inbox until it is
   idle again, and the answer says what to do first: answer the prompt, or `continue`.
   Attach opens a terminal window that runs the card's attach command (`claude attach
-  <session id>`): iTerm2 or Terminal.app, chosen on the page, through `osascript`, on
-  macOS only. The daemon's request thread runs it at once, because the tick can be busy
-  with a launch for minutes, and records an `attach` request that is already applied, for
-  the audit trail. The command reaches the AppleScript as an argument, never as part of
-  its source, and only a command of plain words is accepted. The board has no chat:
-  anything that needs a conversation goes through attach.
+  <session id>`): Terminal.app by default, or iTerm2 chosen on the page, on macOS only.
+  The daemon's request thread runs it at once, because the tick can be busy with a launch
+  for minutes, and records an `attach` request that is already applied, for the audit
+  trail. Only a command of plain words whose last word is a plain identifier is accepted.
+  Terminal.app is opened through LaunchServices (`open -a Terminal`) on a script file in a
+  private directory under the state directory, which deletes itself and then execs the
+  command, so it needs no Automation permission; a file that never ran is removed when the
+  next one is written. iTerm2 asks for confirmation before it runs a file it is asked to
+  open, so it is opened through `osascript`, with the command as an argument of the
+  AppleScript, never part of its source, and needs the Automation permission once. The
+  board has no chat: anything that needs a conversation goes through attach.
 - **Clone.** A clone is a new worker made from an existing one, for a second opinion, a
   retry with another prompt, or another model. `POST /api/workers/<id>/clone` takes
   `mode` (`fresh`: nothing from the old session; `full`: a copy of its conversation;

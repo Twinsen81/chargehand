@@ -94,16 +94,27 @@ buttons do what the control commands do: start a worker from a role, with an opt
 item and the event kinds on it that wake the worker; pause, continue, cancel, retry or
 discard a worker; reply to a worker with one line of text, which reaches it as an event,
 the way a comment would, and answers a question that ended the worker's turn; attach,
-which opens an iTerm2 or Terminal.app window (chosen on the page) running `claude attach`
-on the worker's session; and pause or resume a repository or all of them. The buttons
-need the daemon's token: paste the content of the token file into the token field once
-and press Enter, or leave the field, and the browser keeps it for the page. The page
-checks the token at once and shows its state next to the field: "no token", "checking",
-"token accepted" or "token not valid". It checks again when the page loads and when the
-daemon was restarted or unreachable, so a restart with a new token file shows "token not
-valid" without running an action; "Forget token" removes it and shows "no token".
-Workers started on the board are named by a handle with their id, such as
+which opens a Terminal.app window (the default) or an iTerm2 window (chosen on the page)
+running `claude attach` on the worker's session; and pause or resume a repository or all
+of them. The buttons need the daemon's token: paste the content of the token file into the
+token field once and press Enter, or leave the field, and the browser keeps it for the
+page. The page checks the token at once and shows its state next to the field: "no token",
+"checking", "token accepted" or "token not valid". It checks again when the page loads and
+when the daemon was restarted or unreachable, so a restart with a new token file shows
+"token not valid" without running an action; "Forget token" removes it and shows "no
+token". Workers started on the board are named by a handle with their id, such as
 `implementer/ABC-1#7`, which every command that takes an item also accepts.
+
+Attach in Terminal.app needs no macOS permission: the daemon writes a three-line shell
+script (a `#!/bin/sh` line, `rm -f -- "$0"`, and `exec claude attach <session id>`) into a
+private directory under its state directory and opens it with `/usr/bin/open -a Terminal`;
+the script deletes itself before it runs the command. iTerm2 asks for confirmation before
+it runs any file it is asked to open, so attach in iTerm2 still goes through Apple events:
+macOS asks once whether the daemon's Python may control iTerm2 (System Settings, Privacy &
+Security, Automation). macOS gives that permission to the Python interpreter binary, not
+to chargehand, so every background job that runs on that Python can then read and type
+into every iTerm2 session, and macOS asks again after a Python upgrade. Terminal needs no
+permission; if you do not want to give it, keep Terminal on the page.
 
 Clone on a card starts a new worker from that one, in a worktree of its own branched from
 the worker's current branch, so its commits carry over and the two never write the same
