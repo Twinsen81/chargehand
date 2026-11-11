@@ -3055,6 +3055,11 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+        for worker, detail in result.capped:
+            if not self._notify(report, worker.name, "daily-cap", worker.url,
+                                worker.repository, role=worker.role, detail=detail):
+                # The next tick sends it again, as for a session's new state.
+                self.ledger.delete_state(f"{delivery_mod.CAP_NOTIFIED_PREFIX}{worker.id}")
 
     def _refresh_session(
         self, worker: Worker, message: str, report: TickReport
