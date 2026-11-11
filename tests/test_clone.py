@@ -19,6 +19,7 @@ import pytest
 
 from chargehand import board, claude as claude_mod, ledger as ledger_mod
 from chargehand import clone as clone_mod
+from chargehand import delivery as delivery_mod
 from chargehand import usage as usage_mod, worker_tokens
 from chargehand.cli import EXIT_ERROR, EXIT_OK, build_parser, build_status, main
 from chargehand.config import ServeConfig
@@ -950,12 +951,14 @@ def test_a_stale_note_is_asked_for_first_and_the_clone_launches_after_the_new_no
     assert len(harness.claude_state.launches) == launches_before
     # One request in the original's inbox, and the wake for it in the same tick.
     (entry,) = handoff_entries(harness, original)
-    assert entry.pointer == f"for-clone-{clone.id}" and entry.delivered_at is not None
+    pointer = f"write-a-current-note-with-the-handoff-tool-for-clone-{clone.id}"
+    assert entry.pointer == pointer and entry.delivered_at is not None
+    assert delivery_mod.safe_pointer(pointer) == pointer
     woken = harness.ledger.get(original.id)
     assert woken.state == ledger_mod.RUNNING
     assert [s.kind for s in harness.ledger.sessions_of(woken)] == ["initial", "wake"]
     resume = harness.claude_state.read()["resumes"][-1]
-    assert resume["prompt"].splitlines()[1:] == [f"handoff: for-clone-{clone.id}"]
+    assert resume["prompt"].splitlines()[1:] == [f"handoff: {pointer}"]
     assert "waits for a current handoff note" in cards(harness)[0][clone.id]["clone_start"]
 
     # Ticks without a new note: no launch, no second request, no launch attempt used.

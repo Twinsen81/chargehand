@@ -357,6 +357,11 @@ def summary_request_id(clone: Worker) -> str:
     return f"handoff:clone-{clone.id}"
 
 
+def summary_request_pointer(clone: Worker) -> str:
+    """The pointer of *clone*'s request for a current note: chargehand's own words."""
+    return f"write-a-current-note-with-the-handoff-tool-for-clone-{clone.id}"
+
+
 class SummaryWait(ChargehandError):
     """A summary clone's launch waits for a current handoff note of its original."""
 
@@ -4045,7 +4050,9 @@ class Runner:
             actor=ledger_mod.HANDOFF_SOURCE,
             occurred_at=now,
             dedupe_id=dedupe,
-            pointer=f"for-clone-{clone.id}",
+            # The wake line is "handoff: <pointer>", so the pointer says in plain words
+            # what the turn is for; it is a plain identifier, as every pointer.
+            pointer=summary_request_pointer(clone),
         ), now=now)
 
     def _launch_spec(

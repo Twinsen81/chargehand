@@ -543,7 +543,8 @@ idempotent, and the row's `step` advances after each one.
    the end of the turn is never compared, because a note written in a turn is always
    older than its end. When the note is not current and a wake can reach the original
    (it has a session and is not ended or paused), this step waits: it puts one inbox
-   entry of kind `handoff` with the pointer `for-clone-<id>` into the original's inbox,
+   entry of kind `handoff` with the pointer
+   `write-a-current-note-with-the-handoff-tool-for-clone-<id>` into the original's inbox,
    once per clone, and delivery wakes the original with it under the usual caps; the
    `handoff` tool's description says that a wake line `handoff: ...` asks for a current
    note in that turn. Waiting uses up no launch attempt, and the clone's card shows the
