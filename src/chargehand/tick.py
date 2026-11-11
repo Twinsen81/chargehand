@@ -168,10 +168,19 @@ REPORT_TURN_MARGIN_SECS = 5.0
 # the question records no question, so it never covers one. A new turn, a turn end that
 # waits for events and the end of the worker drop the record.
 NOTIFIED_QUESTION_PREFIX = "notified-question:"
+# The end of a worker's last turn, while no turn has started since: the time and the
+# session, kept under this prefix and the worker id. A turn-end hook writes it. A hook that
+# shows another session state, and a listing that no longer shows the session working or
+# busy, drop it; a later wake makes it void. While it holds, a listing that shows the
+# session working, or done but busy, sees a background shell of the ended turn, not a new
+# turn: Claude Code lists a session with a live background shell so, and names no shell.
+TURN_ENDED_PREFIX = "turn-ended:"
 # Records per worker that only a live worker needs: garbage collection drops them once the
 # worker has ended (cancelled, discarded, closed). Not in WORKER_STATE_PREFIXES, whose
 # records say that a worker has an item checkout.
-LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX,)
+LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX, TURN_ENDED_PREFIX)
+# The worker states a turn end leaves, which a background shell of that turn keeps.
+TURN_END_STATES = (ledger_mod.IDLE, ledger_mod.QUEUED, ledger_mod.BLOCKED)
 QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
 
 # The worker states that are never notified. A worker that waits for events ends a turn
@@ -2756,6 +2765,12 @@ class Runner:
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
+            busy = observed == runtime_mod.WORKING or (
+                observed == runtime_mod.DONE and session is not None and session.busy
+            )
+            if busy and self._turn_ended_at(worker) is not None:
+                # The turn ended, and the process is still busy: a background shell runs.
+                observed = ledger_mod.SESSION_BACKGROUND
             waiting = session.waiting_for if session else None
             # The listed state only, never its waiting text: that quotes the agent.
             log.log(
@@ -2784,6 +2799,9 @@ class Runner:
                 if written is None:
                     continue
                 worker = written
+            if observed not in (runtime_mod.WORKING, ledger_mod.SESSION_BACKGROUND):
+                # The background shell ended, or the listing has caught up with the turn end.
+                self._drop_turn_end(worker)
 
             try:
                 worker = self._apply_session_state(worker, observed, report, session=session)
@@ -2828,6 +2846,14 @@ class Runner:
         if hook.observed is not None and current.state not in HOOK_FROZEN_STATES:
             changes["session_state"] = hook.observed
         current = self.ledger.update(current, **changes)
+        turn_ended_key = f"{TURN_ENDED_PREFIX}{current.id}"
+        if hook.kind == runtime_mod.HOOK_TURN_END:
+            self.ledger.set_state(
+                turn_ended_key, json.dumps({"at": stamp, "session": current.session_id})
+            )
+        elif hook.observed is not None:
+            # A new turn, a prompt in a turn, a new session or a failed turn.
+            self.ledger.delete_state(turn_ended_key)
         if hook.kind == runtime_mod.HOOK_PERMISSION:
             # A session shows one permission dialog at a time; an older open prompt was
             # answered in the session. A question that the ask tool recorded stays open.
@@ -2880,6 +2906,8 @@ class Runner:
             # `stop` keeps the session, and a stopped Claude Code session still lists the
             # state of its last turn, often `done`. Only a live process ends the pause.
             return worker
+        if observed == ledger_mod.SESSION_BACKGROUND:
+            return self._background_shell(worker, report)
         if observed == runtime_mod.WORKING:
             target_state = ledger_mod.RUNNING
             if worker.state != ledger_mod.RUNNING:
@@ -2974,6 +3002,81 @@ class Runner:
                 self.ledger.set_state(f"{PENDING_NOTIFICATION_PREFIX}{worker.id}", detail or "")
         elif observed == runtime_mod.WORKING and worker.notified_state != observed:
             worker = self.ledger.update(worker, notified_state=observed)
+        return worker
+
+    def _turn_ended_at(self, worker: Worker) -> float | None:
+        """When the last turn of *worker*'s current session ended, while no turn has started
+        since and the worker is in the state that turn end left; else None."""
+        if worker.state not in TURN_END_STATES:
+            return None
+        record = self._turn_end_record(worker)
+        if record is None or record[1] != worker.session_id:
+            return None
+        ended_at = record[0]
+        if worker.last_wake_at is not None and worker.last_wake_at >= ended_at:
+            # A wake started a turn after it.
+            return None
+        try:
+            runtime = self.runtime(worker.runtime)
+        except ConfigError:
+            return None
+        if not worker.worktree or not runtime.reports_turn_starts(worker.worktree_path):
+            # Without the hook, a turn the operator starts in the session looks the same.
+            return None
+        return ended_at
+
+    def _turn_end_record(self, worker: Worker) -> tuple[float, str | None] | None:
+        raw = self.ledger.get_state(f"{TURN_ENDED_PREFIX}{worker.id}")
+        if not raw:
+            return None
+        try:
+            record = json.loads(raw)
+            return float(record["at"]), record.get("session")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return None
+
+    def _drop_turn_end(self, worker: Worker) -> None:
+        """Drop the turn-end record of *worker* when the tick's listing is newer than it."""
+        key = f"{TURN_ENDED_PREFIX}{worker.id}"
+        if self.ledger.get_state(key) is None:
+            return
+        record = self._turn_end_record(worker)
+        listed_at = self._listed_at.get(worker.runtime)
+        if record is None or listed_at is None or listed_at > record[0]:
+            self.ledger.delete_state(key)
+
+    def _background_shell(self, worker: Worker, report: TickReport) -> Worker:
+        """The listing shows the session working or busy, but its turn ended and no turn
+        started since.
+
+        A background shell of that turn still runs. The worker keeps the state its turn
+        end gave it, so the card does not flip between idle and running: a shell that ends
+        either starts a new turn, which its turn-start hook shows, or leaves the session
+        idle in the listing. A shell that never ends, such as a dev server, would leave a
+        session that waits for the operator looking busy, so an idle or queued worker is
+        notified once after ``background_shell_mins``; a blocked one was notified at its
+        turn end. Neither the watchdog nor ``max_concurrent`` counts the time, because no
+        turn runs.
+        """
+        ended_at = self._turn_ended_at(worker)
+        limit_secs = self.config.background_shell_mins * 60
+        if (
+            ended_at is None
+            or not limit_secs
+            or worker.state not in QUIET_STATES
+            or worker.notified_state == ledger_mod.SESSION_BACKGROUND
+        ):
+            return worker
+        elapsed = time.time() - ended_at
+        if elapsed < limit_secs:
+            return worker
+        detail = (
+            f"turn ended {elapsed / 60:.0f} min ago; a background shell still runs "
+            "and no new turn started"
+        )
+        if self._notify(report, worker.name, worker.state, worker.url, worker.repository,
+                        role=worker.role, detail=detail):
+            worker = self.ledger.update(worker, notified_state=ledger_mod.SESSION_BACKGROUND)
         return worker
 
     def _question_to_notify(self, worker: Worker) -> ledger_mod.PermissionPrompt | None:

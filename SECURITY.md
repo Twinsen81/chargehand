@@ -187,10 +187,10 @@ public location.
   launch with hooks also denies them on every session settings file. The mod still reads
   its own token file, because a `Read` deny rule does not bind the mod's own file reads
   (observed with Claude Code 2.1.322).
-- **Session hooks.** Launched sessions post their start, turn ends, failures,
-  notifications and permission prompts to `POST /hooks/<event>` on that port, with the
-  session's token in the `Authorization` header; a post without a valid token changes
-  nothing. A session launched before sessions had their own token posts with the board's
+- **Session hooks.** Launched sessions post their start, the start and end of each turn,
+  failures, notifications and permission prompts to `POST /hooks/<event>` on that port,
+  with the session's token in the `Authorization` header; a post without a valid token
+  changes nothing. A session launched before sessions had their own token posts with the board's
   token, which `/hooks` still accepts, and the daemon logs that once per session. The token
   is never on a command line, where other users of the machine could read it with `ps`:
   the settings of a launch with hooks are in a file of mode 0600 in a directory of mode
@@ -198,10 +198,12 @@ public location.
   file, not the token, and runs its script with `python -I`, so nothing in the worktree
   is imported. The settings file is deleted when its session is removed. A post moves
   only the live worker whose token it carries. The daemon answers every post but a
-  permission prompt with an empty object, so it never keeps a turn running and never
-  adds text to the model's context. The payload is untrusted: the
-  last answer, the tool input and the other fields are cleaned of terminal control
-  sequences and capped when stored, never reach a notification or a prompt, and
+  permission prompt with an empty object, so it never keeps a turn running, never
+  blocks a prompt and never adds text to the model's context. The turn-start post
+  (`UserPromptSubmit`) carries the prompt, which the daemon never reads or stores. The
+  payload is untrusted: the last answer, the tool input and the other fields are cleaned
+  of terminal control sequences and capped when stored, never reach a notification or a
+  prompt, and
   `GET /api/state` returns them as JSON data for the page to escape. `status --json`
   names the last hook event and the reset time, but no payload text.
 - **Permission decisions come from the operator only.** The daemon holds a session's

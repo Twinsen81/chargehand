@@ -463,6 +463,10 @@ class MachineConfig:
     max_open_workers: int = 4
     max_run_hours: float = 6.0
     hard_stop_hours: float = 10.0
+    # How long a session may stay listed as working after its turn ended, with no new turn,
+    # before the operator is notified: a background shell that never ends, such as a dev
+    # server, would hide a session that waits. 0 never notifies.
+    background_shell_mins: float = 30.0
     min_free_disk_gb: float = 30.0
     max_launch_attempts: int = 3
     notify: NotifyConfig = field(default_factory=NotifyConfig)
@@ -486,6 +490,7 @@ class MachineConfig:
         "max_open_attempts",
         "max_run_hours",
         "hard_stop_hours",
+        "background_shell_mins",
         "min_free_disk_gb",
         "max_launch_attempts",
         "worktree_root",
@@ -589,6 +594,9 @@ class MachineConfig:
             max_open_workers=max_open,
             max_run_hours=max_run,
             hard_stop_hours=hard_stop,
+            background_shell_mins=_as_number(
+                data.get("background_shell_mins", 30.0), "config.background_shell_mins", minimum=0
+            ),
             min_free_disk_gb=_as_number(
                 data.get("min_free_disk_gb", 30.0), "config.min_free_disk_gb", minimum=0
             ),

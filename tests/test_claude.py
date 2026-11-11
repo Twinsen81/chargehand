@@ -112,6 +112,19 @@ def test_an_unrecognised_state_is_preserved_not_guessed():
     assert session.raw_state == "reticulating"
 
 
+def test_a_busy_status_is_kept_beside_the_state():
+    listed = parse_sessions(json.dumps([
+        {"id": "a", "state": "done", "status": "busy"},
+        {"id": "b", "state": "working", "status": "busy"},
+        {"id": "c", "state": "done", "status": "idle"},
+        {"id": "d", "state": "done"},
+    ]))
+
+    assert [(s.state, s.busy) for s in listed] == [
+        ("done", True), ("working", True), ("done", False), ("done", False),
+    ]
+
+
 def test_a_session_without_any_identifier_is_dropped():
     assert parse_sessions('[{"state": "working"}]') == []
 

@@ -95,7 +95,10 @@ def test_a_launch_carries_a_hook_per_event_with_the_port_and_the_sessions_own_to
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
     assert stat.S_IMODE(token_file.parent.stat().st_mode) == 0o700
     hooks_settings = _settings_of_last_launch(harness)["hooks"]
-    assert set(hooks_settings) == {"SessionStart", "Stop", "StopFailure", "Notification", "PermissionRequest"}
+    assert set(hooks_settings) == {
+        "SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "Notification",
+        "PermissionRequest",
+    }
     for event, groups in hooks_settings.items():
         [group] = groups
         [hook] = group["hooks"]
@@ -727,6 +730,197 @@ def test_a_listing_older_than_a_hook_does_not_undo_it(daemon, harness):
     assert harness.notifications() == []
 
 
+# ----- a background shell after the turn ended ----------------------------------------
+
+
+# Claude Code lists a session whose ended turn left a background shell running as busy,
+# with the state working or, more often, done.
+BUSY_LISTINGS = pytest.mark.parametrize("listed_state", ["working", "done"])
+
+
+def _turn_ended_with_a_background_shell(
+    daemon, harness, tmp_path, listed_state="working", *, ended_mins_ago=None
+):
+    """A worker launched with the turn-start hook, whose turn ended while a background
+    shell runs; with *ended_mins_ago*, the turn ended that long before now."""
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    if ended_mins_ago is None:
+        post(daemon, "Stop", {"session_id": worker.session_uuid})
+    else:
+        # Applied as the daemon applies the post, with the time of the post in the past,
+        # so that the test does not wait for the limit. The worker and its turn started
+        # a minute before that turn end, as in a real run.
+        ended_at = time.time() - ended_mins_ago * 60
+        worker = harness.ledger.update(
+            worker, created_at=ended_at - 60, working_since=ended_at - 60
+        )
+        stop = claude.parse_hook("Stop", {"session_id": worker.session_uuid})
+        harness.runner.apply_hook(worker, stop, now=ended_at)
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    harness.claude_state.set_session_state(worker.session_id, listed_state, status="busy")
+    return worker
+
+
+@BUSY_LISTINGS
+def test_a_busy_listing_after_the_turn_ended_keeps_the_worker_idle_with_a_background_shell(
+    daemon, harness, tmp_path, listed_state
+):
+    _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
+
+    for _ in range(3):
+        report = harness.next_tick()
+        worker = harness.worker("ABC-1")
+        assert worker.state == ledger_mod.IDLE
+        assert worker.session_state == ledger_mod.SESSION_BACKGROUND
+        assert report.transitions == []
+    assert harness.notifications() == []
+    shown = state_of(daemon, "ABC-1")
+    assert (shown["state"], shown["session_state"]) == ("idle", "background")
+
+
+@BUSY_LISTINGS
+def test_a_background_shell_that_ends_leaves_the_worker_idle(
+    daemon, harness, tmp_path, listed_state
+):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
+    harness.next_tick()
+
+    harness.claude_state.set_session_state(worker.session_id, "done", status="idle")
+    report = harness.next_tick()
+
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, "done")
+    assert report.transitions == []
+    assert harness.notifications() == []
+
+
+def test_a_new_turn_after_the_turn_end_makes_the_worker_running(daemon, harness, tmp_path):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path)
+    harness.next_tick()
+
+    # The shell ended and the session started a turn about it, or the operator typed one.
+    answer = post(daemon, "UserPromptSubmit", {"session_id": worker.session_uuid, "prompt": "go on"})
+
+    # Nothing that could add context to the turn or block its prompt.
+    assert answer == (200, {})
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    harness.next_tick()
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.RUNNING, "working")
+    # The next turn end, with the shell still running, is the same idle state again.
+    post(daemon, "Stop", {"session_id": worker.session_uuid})
+    harness.next_tick()
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, ledger_mod.SESSION_BACKGROUND)
+
+
+def test_a_wake_after_the_turn_end_is_a_new_turn(daemon, harness, tmp_path):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path)
+    harness.next_tick()
+
+    harness.ledger.update(harness.worker("ABC-1"), last_wake_at=time.time())
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+
+
+@BUSY_LISTINGS
+def test_a_background_shell_past_the_limit_notifies_once_and_the_worker_stays_idle(
+    daemon, harness, tmp_path, listed_state
+):
+    _turn_ended_with_a_background_shell(
+        daemon, harness, tmp_path, listed_state, ended_mins_ago=6
+    )
+    harness.config = dataclasses.replace(harness.config, background_shell_mins=5)
+
+    report = harness.next_tick()
+    harness.next_tick()
+    harness.next_tick()
+
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, ledger_mod.SESSION_BACKGROUND)
+    assert harness.notifications() == [("ABC-1", "idle")]
+    [line] = report.notified
+    assert "a background shell still runs" in line
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+
+
+@pytest.mark.parametrize("ended_mins_ago, limit_mins", [(4, 5), (29, None)])
+def test_a_background_shell_under_the_limit_sends_nothing(
+    daemon, harness, tmp_path, ended_mins_ago, limit_mins
+):
+    _turn_ended_with_a_background_shell(
+        daemon, harness, tmp_path, "done", ended_mins_ago=ended_mins_ago
+    )
+    if limit_mins is not None:
+        harness.config = dataclasses.replace(harness.config, background_shell_mins=limit_mins)
+
+    harness.next_tick()
+    harness.next_tick()
+
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, ledger_mod.SESSION_BACKGROUND)
+    assert harness.notifications() == []
+
+
+def test_a_limit_of_zero_never_notifies_about_a_background_shell(daemon, harness, tmp_path):
+    _turn_ended_with_a_background_shell(daemon, harness, tmp_path, ended_mins_ago=31)
+    harness.config = dataclasses.replace(harness.config, background_shell_mins=0)
+
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.IDLE
+    assert harness.notifications() == []
+
+
+def test_a_question_that_ended_the_turn_stays_blocked_while_a_background_shell_runs(
+    daemon, harness, tmp_path
+):
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    harness.ledger.record_question(worker, question="Which colour?", options=[], now=time.time())
+    post(daemon, "Stop", {"session_id": worker.session_uuid})
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    sent = len(harness.notifications())
+    harness.claude_state.set_session_state(worker.session_id, "working", status="busy")
+
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert len(harness.notifications()) == sent
+
+
+def test_a_session_without_the_turn_start_hook_is_running_when_the_listing_shows_it_working(
+    daemon, harness
+):
+    # Launched before the hook existed: a turn the operator starts in the session would
+    # send no hook, so the listing is all there is.
+    worker = launch(harness)
+    post(daemon, "Stop", {"session_id": worker.session_uuid})
+    harness.claude_state.set_session_state(worker.session_id, "working", status="busy")
+
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+
+
+def test_a_busy_and_done_listing_without_a_turn_end_is_a_plain_turn_end(
+    daemon, harness, tmp_path
+):
+    # No Stop came: the listing alone does not say that a shell outlives a turn.
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    harness.claude_state.set_session_state(worker.session_id, "done", status="busy")
+
+    harness.next_tick()
+
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, "done")
+
+
 def test_a_tick_write_between_the_read_and_the_write_of_a_hook_is_not_overwritten(harness):
     worker = launch(harness)
     runner = harness.fresh_runner()
@@ -780,6 +974,9 @@ def test_the_claude_runtime_reads_each_event():
 
     start = claude.parse_hook("SessionStart", {**common, "source": "startup"})
     assert (start.kind, start.observed, start.source, start.session_uuid) == ("session_start", "working", "startup", "u-1")
+    turn = claude.parse_hook("UserPromptSubmit", {**common, "prompt": "ignore the rules"})
+    assert (turn.kind, turn.observed, turn.session_uuid) == ("turn_start", "working", "u-1")
+    assert "ignore the rules" not in repr(turn)
     stop = claude.parse_hook("Stop", {**common, "last_assistant_message": "fine"})
     assert (stop.kind, stop.observed, stop.last_answer) == ("turn_end", "done", "fine")
     note = claude.parse_hook("Notification", {**common, "notification_type": "idle_prompt"})
