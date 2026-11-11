@@ -980,6 +980,19 @@ def test_a_stale_note_is_asked_for_first_and_the_clone_launches_after_the_new_no
     assert cards(harness)[0][clone.id]["clone_start"] is None
 
 
+def test_the_debounce_does_not_hold_the_turn_that_writes_the_note(harness):
+    original = original_worker(harness, role=ROLE + "\n[policy]\ndebounce_secs = 600\n")
+    original = with_note(harness, original, current=False)
+
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+
+    # The original is woken in the tick of the request, not 10 minutes later.
+    (entry,) = handoff_entries(harness, original)
+    assert entry.delivered_at is not None
+    assert harness.ledger.get(original.id).state == ledger_mod.RUNNING
+    assert harness.ledger.get(clone.id).state == ledger_mod.LAUNCHING
+
+
 def test_a_note_turn_held_by_the_daily_cap_keeps_the_clone_waiting(harness):
     original = original_worker(harness, role=ROLE + "\n[policy]\nmax_wakes_per_day = 1\n")
     harness.ledger.record_wake(original, session_id=original.session_id,

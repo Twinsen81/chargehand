@@ -599,6 +599,31 @@ def test_a_due_timer_does_not_wait_for_the_debounce_and_takes_the_burst_along(
     harness.ledger.close()
 
 
+def test_a_clones_request_for_a_note_does_not_wait_for_the_debounce_and_takes_the_burst_along(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 600\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    now = time.time()
+    comment_at(harness, reviewer, 1, now)
+    assert deliver_at(harness, now + 1).woken == []
+    harness.ledger.enqueue(reviewer.id, Event(
+        source=ledger_mod.HANDOFF_SOURCE, kind=ledger_mod.HANDOFF_KIND,
+        item=WorkItem(ledger_mod.HANDOFF_SOURCE, "PR-7", "PR-7"),
+        actor=ledger_mod.HANDOFF_SOURCE, occurred_at=now, dedupe_id="handoff:clone-9",
+        pointer="for-clone-9",
+    ), now=now)
+
+    assert [w.id for w in deliver_at(harness, now + 2).woken] == [reviewer.id]
+    assert resumes(harness)[-1]["prompt"].splitlines()[1:] == [
+        "comment: https://example.invalid/c1", "handoff: for-clone-9",
+    ]
+    harness.ledger.close()
+
+
 def test_a_steady_stream_of_events_holds_the_wake_at_most_five_debounce_windows(
     tmp_path, repo, claude_state, board
 ):

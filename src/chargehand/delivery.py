@@ -11,7 +11,8 @@ events in its inbox goes through these steps:
 2. Debounce and admit. The wake waits until no new event has arrived for the role's
    ``debounce_secs``, so a burst becomes one wake, and at most
    :data:`DEBOUNCE_MAX_HOLD_FACTOR` times that after the oldest waiting event; a reply
-   from the board and a due timer do not wait. Then the global cap on working turns,
+   from the board, a due timer and a summary clone's request for a current handoff note
+   do not wait. Then the global cap on working turns,
    across all repositories, the role's daily wake cap and the usage reserve. A worker that waits becomes
    ``queued`` and keeps its events. A worker that reaches its daily cap is notified
    once, until its next wake.
@@ -223,6 +224,14 @@ def safe_pointer(pointer: str) -> str | None:
 def safe_kind(kind: str) -> str:
     """The kind when it is a plain lower-case name, otherwise ``UNKNOWN_KIND``."""
     return kind if sanitize.is_event_kind(kind) else UNKNOWN_KIND
+
+
+# The inbox entries, besides a reply from the board, whose wake the debounce does not
+# hold: a due timer, and a summary clone's request for a current handoff note.
+UNDEBOUNCED = frozenset((
+    (ledger_mod.TIMER_SOURCE, ledger_mod.TIMER_KIND),
+    (ledger_mod.HANDOFF_SOURCE, ledger_mod.HANDOFF_KIND),
+))
 
 
 def is_reply(entry: InboxEntry) -> bool:
@@ -625,12 +634,12 @@ class Delivery:
 
         The wake waits until no new event has arrived for ``debounce_secs``, so a burst
         becomes one wake, but not longer than ``DEBOUNCE_MAX_HOLD_FACTOR`` times that
-        after the oldest waiting event. A reply from the board and a due timer do not
-        wait: the operator waits for the answer, and the worker chose the time itself.
-        The wake then takes the events of the burst along.
+        after the oldest waiting event. A reply from the board, a due timer and a
+        summary clone's request for a current handoff note do not wait: the operator waits
+        for the answer, the worker chose the time itself, and the clone's launch waits for
+        the note. The wake then takes the events of the burst along.
         """
-        timer = (ledger_mod.TIMER_SOURCE, ledger_mod.TIMER_KIND)
-        if any(is_reply(entry) or (entry.source, entry.kind) == timer for entry in entries):
+        if any((entry.source, entry.kind) in UNDEBOUNCED or is_reply(entry) for entry in entries):
             return None
         try:
             debounce = self._policy(worker).debounce_secs

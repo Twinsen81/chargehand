@@ -846,8 +846,10 @@ wake waits first for the role's `debounce_secs` (0 by default): until no new eve
 arrived for that long, so a burst of review comments becomes one wake, but at most five
 times that long after the oldest waiting event, so a steady stream of events, such as CI
 results during a long run, does not hold the worker for ever. A reply from the
-board and a due `request_wake` timer do not wait, because the operator waits for the
-answer and the worker chose the time itself; the waiting events go along with them. The
+board, a due `request_wake` timer and a summary clone's request for a current handoff
+note (section 5) do not wait, because the operator waits for the answer, the worker chose
+the time itself, and the clone's launch waits for the note; the waiting events go along
+with them. The
 wake must then pass admission: the number of working turns below `max_concurrent`, counted
 over the workers of all repositories, the role's
 `max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
