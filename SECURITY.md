@@ -55,15 +55,21 @@ public location.
   and caps it like a hook post, and it changes a worker only through the hook transitions.
   The worker tools keep what they are given as untrusted text: a question and its options,
   a report's summary and links (only plain http(s) URLs, and only a pull request link
-  becomes the card's link), and the handoff note. The board renders them as text, no log
-  line or notification carries them, and no prompt that chargehand writes includes them.
+  becomes the card's link), and the handoff note. The board renders them as text, and no
+  notification carries them. No prompt that chargehand writes includes them, and no log
+  line carries them, with one exception that the operator makes: an option that the
+  operator clicks is sent as the operator's answer, so it reaches the session that wrote
+  it as the reply line of its next wake, and the log line of that wake. A question and
+  its options are stored without the characters that a reader cannot see (zero-width and
+  other format characters, the tag block, variation selectors), so a button sends what it
+  shows.
   `read_handoff` gives the note back only as a tool result, to a session of the worker
   whose token the post carries, so a fresh session after a refresh reads it as session
   data, not as a prompt.
   A report of `done` or `failed` can end the worker whose token the post carries, as its
   status file could. A timer from `request_wake` is a wake with
   chargehand's own pointer, under the same caps as any wake. The answer to a question is
-  the operator's line, sent as a reply.
+  the operator's line, or the option that the operator clicked, sent as a reply.
 - **Command source output.** The commands of a `command` source are the operator's own,
   but what they print comes from the system they poll. chargehand runs them without a
   shell, with a timeout and a cap on the output, and checks every line against a closed

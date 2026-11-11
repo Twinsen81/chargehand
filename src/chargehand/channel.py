@@ -157,7 +157,12 @@ def _ask(call: ToolCall) -> ToolResult:
     """Put the question and its options on the board; the answer comes as the next wake."""
     question = call.arguments.get("question")
     options = call.arguments.get("options", [])
-    text = sanitize.one_line(question, limit=QUESTION_LIMIT) if isinstance(question, str) else ""
+    # Without the characters that the operator cannot see: an option that the operator
+    # clicks goes back to the session as the operator's own answer.
+    text = (
+        sanitize.one_line(sanitize.visible(question), limit=QUESTION_LIMIT)
+        if isinstance(question, str) else ""
+    )
     if not text:
         return ToolResult("question must be a non-empty question.", is_error=True)
     if not isinstance(options, list) or len(options) > MAX_OPTIONS or not all(
@@ -167,7 +172,8 @@ def _ask(call: ToolCall) -> ToolResult:
             f"options must be a list of at most {MAX_OPTIONS} short answers.", is_error=True
         )
     kept = list(dict.fromkeys(
-        line for option in options if (line := sanitize.one_line(option, limit=OPTION_LIMIT))
+        line for option in options
+        if (line := sanitize.one_line(sanitize.visible(option), limit=OPTION_LIMIT))
     ))
     call.ledger.record_question(call.worker, text, kept)
     log.info("%s: asked a question with %d option(s)", call.worker.handle, len(kept))

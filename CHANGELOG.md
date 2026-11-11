@@ -110,7 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ask` and `report` on the board. The mod's `ask(question, options)` records the question
   with its options in the same record as a permission prompt and returns at once, telling
   the model to end its turn; at the end of that turn the worker is blocked, and its card in
-  Needs you shows the options as buttons and a one-line answer field. The first answer
+  Needs you shows the options as buttons and a one-line answer field. A question and
+  its options are stored without the characters that a reader cannot see, so a button
+  sends what it shows. The first answer
   resolves the question and reaches the worker as a reply, as its next turn; a second one
   is refused with 409. A session whose process starts again without a turn, as after a
   respawn, keeps its open question. `AskUserQuestion` is denied for every worker at launch.

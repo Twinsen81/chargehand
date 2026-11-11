@@ -956,7 +956,9 @@ posts nothing; it has no default port. It is the transport of the agent channel:
 - A tool call goes to `POST /channel/tool/<name>`, and the daemon's answer is the result.
   `report` keeps the state, a one-line summary (300 characters) and up to ten plain
   http(s) links on the worker (see "report" above). `ask(question, options)` records an
-  open question with up to ten options, in the same record as a permission prompt, and
+  open question with up to ten options, without the characters that a reader cannot see,
+  because an option that the operator clicks goes back as the operator's answer, in the
+  same record as a permission prompt, and
   returns at once with a result that tells the model to end its turn; at the end of that
   turn the worker is `blocked`. A newer question replaces an older one. A blocking ask is
   not built: a main-conversation tool call that runs over two minutes moves to a
@@ -1608,7 +1610,8 @@ not a record of what workers did: nothing a session wrote reaches it.
   the first eight characters of the session id, and the worker, or "no live worker" with
   the cwd; a refused post names its status. One line per accepted label or status write,
   with the status before and after. One line per wake, with the `kind: pointer` lines of
-  its message, and the line of a reply from the board, which is the operator's own text.
+  its message, and the line of a reply from the board, which is the operator's own text
+  or the option of a question that the operator clicked.
   A WARNING heartbeat for a tick longer than the interval, or one that began
   more than two intervals after the previous one ended. An idle tick writes no report line.
 - **One key.** Every line about a worker starts with its handle, `role/item`.
