@@ -19,7 +19,7 @@
 #   CHARGEHAND_DETAIL  a short chargehand-generated reason
 #
 # There is no question text and no agent output here on purpose: this payload usually
-# crosses a third-party relay. To read the question, attach to the session.
+# crosses a third-party relay. To read the question, open the board or attach to the session.
 #
 # Exit non-zero when a notification did not go out. The runner logs it and sends a
 # session's new state again on the next tick.

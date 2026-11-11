@@ -1041,10 +1041,13 @@ blocked (session failed)`); `follow:` lines name the pull requests that workers 
 follow. `serve` prints the changes that a session hook makes in the same lines, and nothing
 for a hook that changes nothing.
 
-**Questions stay in the session.** There is no tracker polling and no reply parsing: the
-session asks, the runner notifies you and marks the issue blocked, and you answer in Claude
-Code's agent view (`claude agents`). The session continues with
-its full context, and the next tick flips the label back.
+**Questions reach you on the board or in the session.** There is no tracker polling and
+no reply parsing. A worker asks with its `ask` tool: the runner notifies you and marks the
+issue blocked, and you answer on the worker's card (see "Permission prompts on the
+board" above). A question that a
+session asks as plain text, and a dialog of its own, are answered in Claude Code's agent
+view (`claude agents`), or with a reply from the card. The session continues with its
+full context, and the next tick flips the label back.
 
 **Watchdog.** Background sessions have no spend cap, so the runner enforces wall-clock limits:
 notify after `max_run_hours`, stop the session after `hard_stop_hours`.

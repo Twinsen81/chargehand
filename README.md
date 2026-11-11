@@ -28,7 +28,8 @@ It runs on your own Mac, the one you already work on, not in a cloud.
    skill, or a plain prompt. A *role* file under `.chargehand/roles/` holds that, and a
    repository may enable several roles.
 4. When a session needs you, the runner notices, notifies you, and marks the issue
-   "blocked". You answer in Claude Code's own agent view; the session continues.
+   "blocked". You answer on the board, or in Claude Code's own agent view; the session
+   continues.
 5. When the session finishes, the runner clears the label and later removes the worktree.
 
 You steer it with a CLI: `status`, `watch`, `pause`, `cancel`, `retry`. A daemon,
@@ -250,8 +251,8 @@ lease them through a lease tool such as [banksman](https://github.com/Twinsen81/
 chargehand does not call it and needs no setting for it.
 
 Steer it with `status`, `watch`, `logs`, `pause`, `cancel`, `stop`, `continue`, `retry`
-and `discard`. Answers to a session's questions go through Claude Code's own agent view
-(`claude agents`), not through this CLI. It is a plain CLI, so it works over SSH too if
+and `discard`. Answers to a session's questions go through the board, or through Claude
+Code's own agent view (`claude agents`), not through this CLI. It is a plain CLI, so it works over SSH too if
 you want to reach the machine from elsewhere, but nothing depends on that.
 
 To move your setup to another machine or user account, run `chargehand export setup.zip`
