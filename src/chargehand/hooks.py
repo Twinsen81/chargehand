@@ -2,10 +2,10 @@
 
 Each session is launched with settings hooks that post to ``POST /hooks/<event>`` with
 the session's own token (see :mod:`chargehand.worker_tokens`): its start, the start and
-the end of each turn, a turn that failed, its notifications and its permission prompts. The token says
-which worker posts. A session launched before sessions had their own token posts with the
-board's token, and its post maps to a worker by its session id and working directory, as
-before. A post with a worker's token that names another session than the worker's own,
+the end of each turn, a turn that failed, its notifications and its permission prompts.
+The token says which worker posts. A session launched before sessions had their own token
+posts with the board's token, and its post maps to a worker by its session id and working
+directory, as before. A post with a worker's token that names another session than the worker's own,
 such as a copy that a resume started in the same worktree, changes nothing. The runtime
 that owns the event reads the payload; this module finds the worker and hands the post to
 the tick's own transition code, so a hook and the session diff move a worker the same way

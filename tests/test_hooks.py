@@ -946,7 +946,7 @@ def test_the_claude_runtime_reads_each_event():
     turn = claude.parse_hook("UserPromptSubmit", {**common, "prompt": "ignore the rules"})
     assert (turn.kind, turn.observed, turn.session_uuid) == ("turn_start", "working", "u-1")
     assert "ignore the rules" not in repr(turn)
-    stop =claude.parse_hook("Stop", {**common, "last_assistant_message": "fine"})
+    stop = claude.parse_hook("Stop", {**common, "last_assistant_message": "fine"})
     assert (stop.kind, stop.observed, stop.last_answer) == ("turn_end", "done", "fine")
     note = claude.parse_hook("Notification", {**common, "notification_type": "idle_prompt"})
     assert (note.kind, note.observed) == ("notification", None)
