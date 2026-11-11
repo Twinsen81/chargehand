@@ -544,11 +544,14 @@ idempotent, and the row's `step` advances after each one.
    (it has a session and is not ended or paused), this step waits: it puts one inbox
    entry of kind `handoff` with the pointer `for-clone-<id>` into the original's inbox,
    once per clone, and delivery wakes the original with it under the usual caps; the
-   wake line `handoff: for-clone-<id>` and the `handoff` tool's request to be called at
-   the end of every turn make that turn write a current note. A waiting tick gives its
-   launch attempt back and shows the reason on the clone's card. After 10 minutes from
+   `handoff` tool's description says that a wake line `handoff: ...` asks for a current
+   note in that turn. Waiting uses up no launch attempt, and the clone's card shows the
+   reason. After 10 minutes from
    the clone's creation, or at once when no wake can reach the original, the clone
-   starts from the stored note and its card says so; without any note it fails.
+   starts from the stored note and its card says so; without any note it fails. A
+   summary clone that ends while it waits (cancel, discard, a failure) takes its inbox
+   entry back from the original and its line off its card, so the original is not woken
+   for it later.
    Starting inside a linked worktree means Claude Code does not create one of its own.
 6. Find the new session in the listing by name or working directory and record its ids.
    `state = running`. Looking it up rather than scraping the launch output is what makes
@@ -1196,9 +1199,9 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   template, model and effort (its role's, or for a clone the ones chosen for it), the
   effort levels, the item, `choices` with every mode, `modes` with `full` only while a
   copy is possible and `summary` only while a start from the handoff note is, and
-  `full_refused` and `summary_refused` with the reason otherwise. The form has a mode choice, the prompt as a
-  text area, the model, the effort and, for a worker with an item, the event kinds,
-  empty by default. A card offers Clone while the worker's worktree or branch exists:
+  `full_refused` and `summary_refused` with the reason otherwise. The form has a mode
+  choice, the prompt as a text area, the model, the effort and, for a worker with an
+  item, the event kinds, empty by default. A card offers Clone while the worker's worktree or branch exists:
   not after garbage collection or an archive, nor while an archive of it runs.
   The tick checks the request again and refuses it, before any ledger row or worktree
   exists, when the repository is paused or unavailable, when the original's branch is
@@ -1210,9 +1213,8 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   has no note and no wake can reach it, or when the note is not current and the global
   cap leaves no room for the original's turn next to the clone's launch (the waiting
   clone counts as launching); and in every mode when a cap or the usage reserve for new
-  workers holds it. A clone has
-  origin `clone`, the original's role and item, and the id handle; the
-  one-worker-per-role-and-item rule does not hold it. It gets a new worktree and branch
+  workers holds it. A clone has origin `clone`, the original's role and item, and the
+  id handle; the one-worker-per-role-and-item rule does not hold it. It gets a new worktree and branch
   (`<item>-<id>`) from the original's current branch (section 5), so the two never
   write the same tree; when the original's worktree has uncommitted changes, the answer
   says that they are not in the clone. By default it follows no event kinds, so it

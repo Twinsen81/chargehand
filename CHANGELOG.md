@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   original's inbox, which wakes it under the usual caps, and the clone's launch waits
   for a current note without using up launch attempts; after 10 minutes, or at once
   when no wake can reach the original, it starts from the stored note and its card says
-  so, and without any note it fails. The form offers summary mode only when it can work,
-  and says why not otherwise (`summary_refused`).
+  so, and without any note it fails. The `handoff` tool's description now says that a
+  wake line `handoff: ...` asks for a current note in that turn. A clone that ends while
+  it waits takes its event back, so the original is not woken for it later. The form
+  offers summary mode only when it can work, and says why not otherwise
+  (`summary_refused`).
 
 - Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
   effect: once a worker's session has taken that many wakes, or holds about that many
