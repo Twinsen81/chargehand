@@ -27,8 +27,9 @@ before; only their cards leave the page until the operator asks to see them.
 
 A clone of a worker is a request like the others. ``GET /api/workers/<id>/clone`` answers
 what its form starts with: the prompt template, model and effort the worker started with,
-and whether a copy of its session, or a start from its handoff note, is possible now. The edited prompt is operator text: it is
-checked and capped by :func:`chargehand.clone.clone_args`, as the command line checks it.
+and whether a copy of its session, or a start from its handoff note, is possible now.
+The edited prompt is operator text: it is checked and capped by
+:func:`chargehand.clone.clone_args`, as the command line checks it.
 A clone's card follows its original's in a repository group of one column.
 
 An archive of a worker, or of every worker of a repository, is a request like the others;
@@ -1087,7 +1088,7 @@ def card(
         # What a summary clone waits for, or that it started from an older note.
         "clone_start": (
             sanitize.one_line(note, limit=LINE_LIMIT)
-            if worker.clone_mode == ledger_mod.CLONE_SUMMARY
+            if worker.clone_mode == ledger_mod.CLONE_SUMMARY and not worker.is_terminal
             and (note := ledger.get_state(f"{SUMMARY_STATE_PREFIX}{worker.id}"))
             else None
         ),

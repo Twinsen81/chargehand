@@ -351,6 +351,12 @@ def summary_refusal(worker: Worker, *, loads_mod: bool | None = None) -> str | N
     return None
 
 
+def summary_request_id(clone: Worker) -> str:
+    """The dedupe id of the one request for a current note that *clone* puts into its
+    original's inbox."""
+    return f"handoff:clone-{clone.id}"
+
+
 class SummaryWait(ChargehandError):
     """A summary clone's launch waits for a current handoff note of its original."""
 
@@ -1454,6 +1460,10 @@ class Runner:
             created = getattr(exc, "worker", None)
             if created is None:
                 raise
+            # The row starts with its first attempt counted. Waiting for the note is not an
+            # attempt, so reconciliation counts the launch once it really runs.
+            row = self.ledger.get(created.id) or created
+            self.ledger.update(row, launch_attempts=max(0, row.launch_attempts - 1))
             report.skipped.append(str(exc))
             return True, (
                 f"created {created.handle}; its session starts once its original has written "
@@ -3974,7 +3984,7 @@ class Runner:
                 f"chargehand mod, whose tool gives the handoff note"
             )
         key = f"{SUMMARY_STATE_PREFIX}{clone.id}"
-        dedupe = f"handoff:clone-{clone.id}"
+        dedupe = summary_request_id(clone)
         stale = None
         if not note_is_current(original):
             reachable = can_be_asked_for_a_note(original)
@@ -4135,6 +4145,24 @@ class Runner:
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
         self._forget_checkout_heads()
+        self._forget_summary_waits()
+
+    def _forget_summary_waits(self) -> None:
+        """Drop what an ended summary clone left: its card line, and its request for a
+        current note in its original's inbox, which would otherwise still wake the
+        original for a clone that no longer waits."""
+        for key in self.ledger.all_state():
+            if not key.startswith(SUMMARY_STATE_PREFIX):
+                continue
+            worker_id = key.removeprefix(SUMMARY_STATE_PREFIX)
+            clone = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            if clone is not None and not clone.is_terminal and not clone.gc_done:
+                continue
+            if clone is not None and clone.parent_id is not None:
+                self.ledger.drop_pending(
+                    clone.parent_id, ledger_mod.HANDOFF_SOURCE, summary_request_id(clone)
+                )
+            self.ledger.delete_state(key)
 
     def _collect(
         self, worker: Worker, report: TickReport, *, force: bool = False, **changes: object

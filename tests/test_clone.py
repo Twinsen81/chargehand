@@ -946,7 +946,7 @@ def test_a_stale_note_is_asked_for_first_and_the_clone_launches_after_the_new_no
     assert outcome["ok"] == 1
     assert "starts once its original has written a current handoff note" in outcome["message"]
     clone = started(harness, outcome)
-    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 1
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
     assert len(harness.claude_state.launches) == launches_before
     # One request in the original's inbox, and the wake for it in the same tick.
     (entry,) = handoff_entries(harness, original)
@@ -962,7 +962,7 @@ def test_a_stale_note_is_asked_for_first_and_the_clone_launches_after_the_new_no
     for _ in range(4):
         harness.next_tick()
     clone = harness.ledger.get(clone.id)
-    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 1
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
     assert len(harness.claude_state.launches) == launches_before
     assert len(handoff_entries(harness, original)) == 1
     assert [s.kind for s in harness.ledger.sessions_of(original)] == ["initial", "wake"]
@@ -994,7 +994,7 @@ def test_a_note_turn_held_by_the_daily_cap_keeps_the_clone_waiting(harness):
     assert "daily cap" in harness.ledger.get_state(f"queue-reason:{original.id}")
     assert len(handoff_entries(harness, original, pending_only=True)) == 1
     clone = harness.ledger.get(clone.id)
-    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 1
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
 
     # A current note that comes without that wake, as from a turn the operator started,
     # launches the clone and takes the request back.
@@ -1003,6 +1003,54 @@ def test_a_note_turn_held_by_the_daily_cap_keeps_the_clone_waiting(harness):
 
     assert harness.ledger.get(clone.id).state == ledger_mod.RUNNING
     assert handoff_entries(harness, original) == []
+
+
+@pytest.mark.parametrize("end", ["cancel", "discard"])
+def test_an_ended_waiting_clone_takes_its_request_and_its_card_line_back(harness, end):
+    original = original_worker(harness, role=ROLE + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness.ledger.record_wake(original, session_id=original.session_id,
+                               session_uuid=original.session_uuid)
+    original = with_note(harness, original, current=False)
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    assert len(handoff_entries(harness, original, pending_only=True)) == 1
+    assert cards(harness)[0][clone.id]["clone_start"].startswith("waits for")
+
+    args = {"yes": True, "force": True} if end == "discard" else {}
+    request_id = harness.ledger.record_request(end, clone.target, **args)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert harness.ledger.get(clone.id).is_terminal
+    # The original is not woken later for a clone that no longer waits.
+    assert handoff_entries(harness, original) == []
+    assert harness.ledger.get_state(f"summary-clone:{clone.id}") is None
+    card = cards(harness)[0].get(clone.id)
+    assert card is None or card["clone_start"] is None
+
+
+def test_the_wait_uses_up_no_launch_attempt_with_a_limit_of_one(harness):
+    harness.config = dataclasses.replace(harness.config, max_launch_attempts=1)
+    original = with_note(harness, original_worker(harness), current=False)
+
+    clone = started(harness, request_clone(harness, original, mode="summary"))
+    for _ in range(3):
+        harness.next_tick()
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.LAUNCHING and clone.launch_attempts == 0
+
+    with_note(harness, original)
+    harness.next_tick()
+
+    clone = harness.ledger.get(clone.id)
+    assert clone.state == ledger_mod.RUNNING and clone.launch_attempts == 1
+
+
+def test_the_handoff_tool_says_what_a_handoff_wake_line_asks_for():
+    from chargehand import channel
+
+    description = channel.TOOLS["handoff"].description
+    assert "A wake line 'handoff: ...' asks for a current note now" in description
+    assert f"{ledger_mod.HANDOFF_KIND}: " in description
 
 
 def test_after_the_time_limit_the_clone_starts_from_the_stored_note_and_says_so(harness, monkeypatch):
