@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -714,9 +715,18 @@ def cancelled(harness, identifier="ABC-1"):
     return harness.ledger.get(worker.id)
 
 
-def at_risk(harness, worker):
+def record(harness, worker):
     raw = harness.ledger.get_state(f"{tick_mod.WORK_AT_RISK_PREFIX}{worker.id}")
     return json.loads(raw) if raw else None
+
+
+def at_risk(harness, worker):
+    """The facts the tick recorded, or None when it found nothing to lose."""
+    found = record(harness, worker)
+    if found is None:
+        return None
+    found.pop("checked_at")
+    return found if any(found[k] for k in ("uncommitted_changes", "unpushed_commits", "uninspected")) else None
 
 
 DIRTY = {"place": "worktree", "uncommitted_changes": True, "unpushed_commits": 0, "uninspected": False}
@@ -770,36 +780,62 @@ def test_a_refusal_that_force_does_not_override_has_no_reason(harness):
     assert apply_request(harness, "pause")["reason"] is None
 
 
-def test_the_tick_keeps_the_card_facts_of_an_ended_worker_current(harness):
-    worker = cancelled(harness)
-    assert at_risk(harness, worker) is None
-
+def test_the_tick_looks_at_an_ended_worker_once_it_ended_and_then_once_per_interval(harness, monkeypatch):
+    worker = launch(harness)
     (worker.worktree_path / "progress.log").write_text("notes\n")
-    harness.next_tick()
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
     assert at_risk(harness, worker) == DIRTY
+    checked_at = record(harness, worker)["checked_at"]
 
+    looks = []
+    look = tick_mod.Runner._work_at_risk
+    # Each tick of the harness builds a new runner, so the class is patched.
+    monkeypatch.setattr(
+        tick_mod.Runner, "_work_at_risk", lambda self, w: looks.append(w.id) or look(self, w)
+    )
     (worker.worktree_path / "progress.log").unlink()
-    harness.next_tick()
-    assert at_risk(harness, worker) is None
+    for _ in range(3):
+        harness.next_tick()
+    assert looks == [] and at_risk(harness, worker) == DIRTY
 
+    harness.runner._record_work_at_risk(now=checked_at + tick_mod.WORK_AT_RISK_REFRESH_SECS + 1)
+    assert looks == [worker.id]
+    assert at_risk(harness, worker) is None and record(harness, worker) is not None
+
+    # A refusal looks at once, whatever the interval.
     (worker.worktree_path / "progress.log").write_text("notes\n")
-    harness.next_tick()
+    assert apply_request(harness, "discard", "ABC-1")["ok"] == 0
+    assert at_risk(harness, worker) == DIRTY
     assert apply_request(harness, "discard", "ABC-1", force=True)["ok"] == 1
-    assert at_risk(harness, worker) is None
+    assert record(harness, worker) is None
+
+
+def test_the_record_of_a_worker_that_left_the_closed_window_is_dropped(harness):
+    worker = cancelled(harness)
+    assert record(harness, worker) is not None
+    harness.ledger._conn.execute(
+        "UPDATE workers SET finished_at = ? WHERE id = ?",
+        (time.time() - tick_mod.WORK_AT_RISK_WINDOW_SECS - 60, worker.id),
+    )
+
+    harness.runner._record_work_at_risk()
+
+    assert record(harness, worker) is None
 
 
 def test_a_live_worker_is_looked_at_only_after_a_refusal(harness):
     worker = launch(harness)
     (worker.worktree_path / "scratch.txt").write_text("in progress\n")
     harness.next_tick()
-    assert at_risk(harness, worker) is None
+    assert record(harness, worker) is None
 
     assert apply_request(harness, "archive", "ABC-1")["ok"] == 0
     assert at_risk(harness, worker) == DIRTY
+    checked_at = record(harness, worker)["checked_at"]
 
     (worker.worktree_path / "scratch.txt").unlink()
-    harness.next_tick()
-    assert at_risk(harness, worker) is None
+    harness.runner._record_work_at_risk(now=checked_at + tick_mod.WORK_AT_RISK_REFRESH_SECS + 1)
+    assert record(harness, worker) is None
     (worker.worktree_path / "scratch.txt").write_text("in progress\n")
     harness.next_tick()
-    assert at_risk(harness, worker) is None
+    assert record(harness, worker) is None

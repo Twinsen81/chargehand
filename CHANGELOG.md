@@ -155,9 +155,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason with the request (schema version 13).
 - The confirmation dialog of Discard, Retry and Archive says when the worktree has
   uncommitted changes or unpushed commits, and that the action is refused without force.
-  The tick looks at the worktree of each worker that ended within the last day, and of a
-  live worker after an action on it was refused, and the card's `work_at_risk` shows what
-  it found. Retry asks for a confirmation only in that case.
+  The tick looks at the worktree of each worker that ended within the last day, once it
+  ended and then at most every ten minutes, and of a live worker after an action on it was
+  refused; a refused action looks at once. The card's `work_at_risk` shows what it found.
+  Retry asks for a confirmation only in that case.
 
 ### Added
 

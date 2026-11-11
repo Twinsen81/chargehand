@@ -1134,8 +1134,10 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   of the worker shows the outcome of its last action, "pending", then "done" or "refused"
   with that text, until the next action or a dismiss. The board model makes no git call,
   so the tick records what each worker that ended within the last day, and a live worker
-  whose action it refused, holds in its worktree; the card's `work_at_risk` carries it,
-  and the confirmation dialog of Discard, Retry and Archive says it.
+  whose action it refused, holds in its worktree: once the worker ended or the action was
+  refused, then at most every ten minutes, because each look runs git twice in the
+  worktree. The card's `work_at_risk` carries it, and the confirmation dialog of Discard,
+  Retry and Archive says it. A record is dropped once its worker leaves the window.
   The page asks for the token once, keeps it in the browser's `localStorage` for this
   origin, and sends it only in the `Authorization` header, never in a URL. It checks the
   token on Enter, when the field loses focus with a new value, on load and when the

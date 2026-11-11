@@ -113,12 +113,15 @@ CHECKOUT_HEAD_PREFIX = "checkout-head:"
 # working directory is not resumed there. `continue --force` records them again.
 WORKSPACE_FILES_PREFIX = "workspace-files:"
 WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_FILES_PREFIX)
-# What a removal of a worker's worktree would lose, as `WorkAtRisk.facts` gives it, under
-# this prefix and the worker id, so that its card can warn before Discard, Retry or Archive.
-# The board model makes no git call, so the tick keeps it current: for each worker that
-# ended within the board's closed window, and for a live worker whose action it refused.
+# What a removal of a worker's worktree would lose, as `WorkAtRisk.facts` gives it with the
+# time it was found (`checked_at`), under this prefix and the worker id, so that its card can
+# warn before Discard, Retry or Archive. The board model makes no git call, so the tick
+# records it: for each worker that ended within the board's closed window, once it ended
+# and again after the refresh interval, and for a live worker whose action it refused. An
+# ended worker's worktree rarely changes, and each look runs git twice in it.
 WORK_AT_RISK_PREFIX = "work-at-risk:"
 WORK_AT_RISK_WINDOW_SECS = 24 * 3600
+WORK_AT_RISK_REFRESH_SECS = 600
 
 # A start event for a repository that no `[[repository]]` names is ignored. It is reported
 # once per source and repository; this prefix marks the ones reported.
@@ -2027,29 +2030,51 @@ class Runner:
 
     def _needs_force(self, worker: Worker, risk: WorkAtRisk, message: str) -> NeedsForce:
         """A refusal for *risk*, which the worker's card learns at once."""
-        self.ledger.set_state(f"{WORK_AT_RISK_PREFIX}{worker.id}", json.dumps(risk.facts()))
+        self._keep_work_at_risk(worker, risk, time.time())
         return NeedsForce(message, {"work": risk.facts()})
 
-    def _record_work_at_risk(self) -> None:
-        """Keep the card facts under `WORK_AT_RISK_PREFIX` current.
+    def _keep_work_at_risk(self, worker: Worker, risk: WorkAtRisk | None, now: float) -> None:
+        facts = risk.facts() if risk else WorkAtRisk("worktree", 0, False).facts()
+        self.ledger.set_state(
+            f"{WORK_AT_RISK_PREFIX}{worker.id}", json.dumps({**facts, "checked_at": now})
+        )
+
+    def _record_work_at_risk(self, now: float | None = None) -> None:
+        """Keep the card facts under `WORK_AT_RISK_PREFIX` current, at most once per
+        `WORK_AT_RISK_REFRESH_SECS` for each worker.
 
         A live session changes its worktree all the time, so a live worker is looked at
         only once an action on it was refused, until its worktree holds nothing to lose.
+        The record of a worker that is neither of these is dropped.
         """
-        recorded = {
-            int(worker_id) for key in self.ledger.all_state()
-            if key.startswith(WORK_AT_RISK_PREFIX)
-            and (worker_id := key.removeprefix(WORK_AT_RISK_PREFIX)).isdigit()
-        }
+        now = time.time() if now is None else now
+        checked: dict[int, float] = {}
+        for key, value in self.ledger.all_state().items():
+            worker_id = key.removeprefix(WORK_AT_RISK_PREFIX)
+            if key.startswith(WORK_AT_RISK_PREFIX) and worker_id.isdigit():
+                try:
+                    at = json.loads(value).get("checked_at")
+                except (ValueError, AttributeError):
+                    at = None
+                checked[int(worker_id)] = at if isinstance(at, (int, float)) else 0.0
         ended = self.ledger.terminal_workers_since(WORK_AT_RISK_WINDOW_SECS)
-        live = [worker for worker in self.ledger.live_workers() if worker.id in recorded]
+        live = [worker for worker in self.ledger.live_workers() if worker.id in checked]
         for worker in (*ended, *live):
             key = f"{WORK_AT_RISK_PREFIX}{worker.id}"
-            risk = None if worker.gc_done else self._work_at_risk(worker)
-            if risk is not None:
-                self.ledger.set_state(key, json.dumps(risk.facts()))
-            elif worker.id in recorded:
+            at = checked.pop(worker.id, None)
+            if worker.gc_done:
+                if at is not None:
+                    self.ledger.delete_state(key)
+                continue
+            if at is not None and now - at < WORK_AT_RISK_REFRESH_SECS:
+                continue
+            risk = self._work_at_risk(worker)
+            if risk is None and not worker.is_terminal:
                 self.ledger.delete_state(key)
+            else:
+                self._keep_work_at_risk(worker, risk, now)
+        for worker_id in checked:
+            self.ledger.delete_state(f"{WORK_AT_RISK_PREFIX}{worker_id}")
 
     def _remove_worktree(self, worker: Worker, *, force: bool) -> bool:
         """Remove the worktree and every branch the runner can show is its own.
