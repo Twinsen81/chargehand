@@ -586,12 +586,12 @@ recovery.
 post to the daemon: `SessionStart` with its source, `UserPromptSubmit` when a turn
 starts (its prompt is never read), `Stop` with the last answer, `StopFailure` with the
 error category, `Notification` with its type, and `PermissionRequest` with the tool and its
-input. These fire in unattended background sessions. Five of them are hooks of type `http`. Claude Code does not run an `http` hook on
-`SessionStart`, so that one is a `command` hook: it runs `hook_post.py` from the installed
-package with `python -I`, which imports nothing from the worktree, reads the session's
-token from its token file, posts its stdin to the daemon, prints nothing (the output of a `SessionStart`
-command reaches the model) and exits 0 within a few seconds, also when no daemon answers.
-The settings of a launch with hooks are in a file of mode 0600 under the state directory,
+input. These fire in unattended background sessions. Five of them are hooks of type `http`.
+Claude Code does not run an `http` hook on `SessionStart`, so that one is a `command` hook:
+it runs `hook_post.py` from the installed package with `python -I`, which imports nothing
+from the worktree, reads the session's token from its token file, posts its stdin to the
+daemon, prints nothing (the output of a `SessionStart` command reaches the model) and
+exits 0 within a few seconds, also when no daemon answers. The settings of a launch with hooks are in a file of mode 0600 under the state directory,
 one per worktree, so the token is never on a command line. The file stays while the
 session exists, because a resume, a respawn and an attach apply the saved `--settings`
 again; it is deleted when the session is removed (`discard`, `retry`, garbage collection).
@@ -751,7 +751,7 @@ window until 2026-11-03); such a message parks too.
 | Session state | Meaning | Action |
 |---|---|---|
 | `working` | A turn is running | — |
-| `background` | Listed as `working`, but the turn ended and no turn started since: a background shell runs | keep the state of the turn end; notify an `idle` or `queued` worker once after `background_shell_mins` |
+| `background` | Listed as `working`, or `done` but busy, while the turn ended and no turn started since: a background shell runs | keep the state of the turn end; notify an `idle` or `queued` worker once after `background_shell_mins` |
 | `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
 | `done` | The turn finished | a report of `done` or `failed` from this turn ends the worker; an open question from the `ask` tool blocks it; else read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the report, the question or the status file says, which is |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
@@ -1012,28 +1012,29 @@ its full context, and the next tick flips the label back.
 notify after `max_run_hours`, stop the session after `hard_stop_hours`.
 
 **Background shells.** A turn can end while a background shell that it started still
-runs. Claude Code then lists the session as `working` (`status: busy`), while its hooks
-count turns: `Stop` at the turn end, and about a minute later the idle `Notification`. The
-listing names no background shell, through Claude Code 2.1.322. Taking whichever came last
-made the card flip from idle to running a few seconds after every turn end. So a turn end
-is recorded with its time and session. While no turn has started since (no
-`UserPromptSubmit`, `SessionStart`, permission prompt or wake), a listing that shows the
-session working is read as `background`: the worker keeps the state its turn end gave it
-(`idle`, `queued`, or `blocked` for a question), and the board and `status` show that state
-with the session state `background`. A shell that ends either starts a new turn by itself,
-which `UserPromptSubmit` shows, or leaves the session idle in the listing, which drops the
+runs. Claude Code then lists the session with `status: busy`, next to `state: working` or,
+more often, `state: done`, while its hooks count turns: `Stop` at the turn end, and about a
+minute later the idle `Notification`. The listing names no background shell, through
+Claude Code 2.1.322. Taking whichever came last made the card flip from idle to running a
+few seconds after every turn end. So a turn end is recorded with its time and session.
+While no turn has started since (no `UserPromptSubmit`, `SessionStart`, permission prompt
+or wake), a listing that shows the session working, or done but busy, is read as
+`background`: the worker keeps the state its turn end gave it (`idle`, `queued`, or
+`blocked` for a question), and the board and `status` show that state with the session
+state `background`. A busy and done listing without a recorded turn end is a plain turn
+end. A shell that ends starts a new turn by itself, with a `UserPromptSubmit` (observed
+with Claude Code 2.1.322), or leaves the session idle in the listing, which drops the
 record. A shell that never ends, such as a dev server or `tail -f`, would hide a session
 that waits for the operator, so an `idle` or `queued` worker is notified once, as `idle`,
 when the turn ended `background_shell_mins` ago (30 by default; 0 never notifies). The
 worker stays `idle`, so delivery may wake it: through the outbox the mod submits the wake
-as a new turn, and a stop and resume waits while the listing shows the session working,
-which would end the shell. Neither the watchdog nor `max_concurrent` counts the time,
-because no turn runs and no usage is spent. A turn that a finished shell starts by
-itself counts once its `UserPromptSubmit` arrives; if Claude Code sends none for such a
-turn, the worker shows `background` until that turn's `Stop`. Only sessions launched with the `UserPromptSubmit`
-hook get this reading, because a resume keeps the hooks of the launch: for a session
-launched before it, a turn that the operator starts in `claude attach` sends no hook, so a
-listing that shows it working still makes the worker `running`.
+as a new turn while the shell runs. A stop and resume, for a session without the mod,
+waits while the listing shows the session working, but stops one listed as done and busy,
+which ends the shell. Neither the watchdog nor `max_concurrent` counts the time, because
+no turn runs and no usage is spent. Only sessions launched with the `UserPromptSubmit` hook
+get this reading, because a resume keeps the hooks of the launch: for a session launched
+before it, a turn that the operator starts in `claude attach` sends no hook, so a listing
+that shows it working still makes the worker `running`.
 
 **Garbage collection.** When the issue is closed or its pull request is merged or closed, the
 session and its worktree are removed — never when commits are unpushed. Low disk space is

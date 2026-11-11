@@ -61,6 +61,9 @@ class Session:
     usage_limit: bool = False
     reset_at: float | None = None
     model_limit: str | None = None
+    # The listing says the session's process is busy, whatever its turn state says: a turn
+    # runs, or a background shell of an ended turn still runs.
+    busy: bool = False
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property

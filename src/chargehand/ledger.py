@@ -56,7 +56,7 @@ WORKER_STATES = NON_TERMINAL + TERMINAL
 
 # Session states as reported by Claude Code, plus `missing` for a session that has
 # disappeared from the listing entirely, and `background` for a session that the listing
-# shows working after its turn ended, while no new turn started: a background shell runs.
+# shows busy after its turn ended, while no new turn started: a background shell runs.
 SESSION_WORKING = "working"
 SESSION_BLOCKED = "blocked"
 SESSION_DONE = "done"

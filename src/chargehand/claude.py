@@ -207,7 +207,8 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
     # Observed in Claude Code 2.1.311: after `--resume --bg`, `state` stays `working` once
     # the resumed turn has ended, while `status` drops to `idle`. A turn that runs lists
     # `status: busy`, so `idle` next to `working` is a turn that ended.
-    if state == WORKING and str(node.get("status") or "").strip().lower() == "idle":
+    status = str(node.get("status") or "").strip().lower()
+    if state == WORKING and status == "idle":
         state = DONE
     waiting = _first(node, _WAITING_KEYS)
     ended_at = _parse_time(_first(node, _ENDED_KEYS))
@@ -235,6 +236,10 @@ def parse_session(node: Mapping[str, Any]) -> Session | None:
         usage_limit=limited,
         reset_at=reset_at,
         model_limit=model_limit,
+        # Observed in Claude Code 2.1.322: a background shell that outlives its turn keeps
+        # `status: busy`, next to `state: working` or, more often, `state: done`. The
+        # listing names no such shell.
+        busy=status == "busy",
         raw=dict(node),
     )
 

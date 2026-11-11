@@ -161,10 +161,10 @@ REPORT_TURN_MARGIN_SECS = 5.0
 NOTIFIED_QUESTION_PREFIX = "notified-question:"
 # The end of a worker's last turn, while no turn has started since: the time and the
 # session, kept under this prefix and the worker id. A turn-end hook writes it. A hook that
-# shows another session state, and a listing that no longer shows the session working,
-# drop it; a later wake makes it void. While it holds, a listing that shows the session
-# working sees a background shell of the ended turn, not a new turn: Claude Code lists a
-# session with a live background shell as working, and names no such shell.
+# shows another session state, and a listing that no longer shows the session working or
+# busy, drop it; a later wake makes it void. While it holds, a listing that shows the
+# session working, or done but busy, sees a background shell of the ended turn, not a new
+# turn: Claude Code lists a session with a live background shell so, and names no shell.
 TURN_ENDED_PREFIX = "turn-ended:"
 # Records per worker that only a live worker needs: garbage collection drops them once the
 # worker has ended (cancelled, discarded, closed). Not in WORKER_STATE_PREFIXES, whose
@@ -2508,7 +2508,11 @@ class Runner:
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
-            if observed == runtime_mod.WORKING and self._turn_ended_at(worker) is not None:
+            busy = observed == runtime_mod.WORKING or (
+                observed == runtime_mod.DONE and session is not None and session.busy
+            )
+            if busy and self._turn_ended_at(worker) is not None:
+                # The turn ended, and the process is still busy: a background shell runs.
                 observed = ledger_mod.SESSION_BACKGROUND
             waiting = session.waiting_for if session else None
             # The listed state only, never its waiting text: that quotes the agent.
@@ -2785,7 +2789,8 @@ class Runner:
             self.ledger.delete_state(key)
 
     def _background_shell(self, worker: Worker, report: TickReport) -> Worker:
-        """The listing shows the session working, but its turn ended and no turn started since.
+        """The listing shows the session working or busy, but its turn ended and no turn
+        started since.
 
         A background shell of that turn still runs. The worker keeps the state its turn
         end gave it, so the card does not flip between idle and running: a shell that ends

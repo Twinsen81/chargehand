@@ -733,21 +733,27 @@ def test_a_listing_older_than_a_hook_does_not_undo_it(daemon, harness):
 # ----- a background shell after the turn ended ----------------------------------------
 
 
-def _turn_ended_with_a_background_shell(daemon, harness, tmp_path):
+# Claude Code lists a session whose ended turn left a background shell running as busy,
+# with the state working or, more often, done.
+BUSY_LISTINGS = pytest.mark.parametrize("listed_state", ["working", "done"])
+
+
+def _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state="working"):
     """A worker launched with the turn-start hook, whose turn ended while a background
-    shell runs: Claude Code lists such a session as working."""
+    shell runs."""
     _with_token(harness, tmp_path)
     worker = launch(harness)
     post(daemon, "Stop", {"session_id": worker.session_uuid})
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
-    harness.claude_state.set_session_state(worker.session_id, "working", status="busy")
+    harness.claude_state.set_session_state(worker.session_id, listed_state, status="busy")
     return worker
 
 
+@BUSY_LISTINGS
 def test_a_busy_listing_after_the_turn_ended_keeps_the_worker_idle_with_a_background_shell(
-    daemon, harness, tmp_path
+    daemon, harness, tmp_path, listed_state
 ):
-    _turn_ended_with_a_background_shell(daemon, harness, tmp_path)
+    _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
 
     for _ in range(3):
         report = harness.next_tick()
@@ -760,8 +766,11 @@ def test_a_busy_listing_after_the_turn_ended_keeps_the_worker_idle_with_a_backgr
     assert (shown["state"], shown["session_state"]) == ("idle", "background")
 
 
-def test_a_background_shell_that_ends_leaves_the_worker_idle(daemon, harness, tmp_path):
-    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path)
+@BUSY_LISTINGS
+def test_a_background_shell_that_ends_leaves_the_worker_idle(
+    daemon, harness, tmp_path, listed_state
+):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
     harness.next_tick()
 
     harness.claude_state.set_session_state(worker.session_id, "done", status="idle")
@@ -803,10 +812,11 @@ def test_a_wake_after_the_turn_end_is_a_new_turn(daemon, harness, tmp_path):
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
 
 
+@BUSY_LISTINGS
 def test_a_background_shell_past_the_limit_notifies_once_and_the_worker_stays_idle(
-    daemon, harness, tmp_path
+    daemon, harness, tmp_path, listed_state
 ):
-    _turn_ended_with_a_background_shell(daemon, harness, tmp_path)
+    _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
     harness.config = dataclasses.replace(harness.config, background_shell_mins=0.001)
     harness.next_tick()
     time.sleep(0.1)
@@ -864,6 +874,20 @@ def test_a_session_without_the_turn_start_hook_is_running_when_the_listing_shows
     harness.next_tick()
 
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+
+
+def test_a_busy_and_done_listing_without_a_turn_end_is_a_plain_turn_end(
+    daemon, harness, tmp_path
+):
+    # No Stop came: the listing alone does not say that a shell outlives a turn.
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    harness.claude_state.set_session_state(worker.session_id, "done", status="busy")
+
+    harness.next_tick()
+
+    worker = harness.worker("ABC-1")
+    assert (worker.state, worker.session_state) == (ledger_mod.IDLE, "done")
 
 
 def test_a_tick_write_between_the_read_and_the_write_of_a_hook_is_not_overwritten(harness):

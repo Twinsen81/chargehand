@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A worker whose turn ended while a background shell of that turn still runs no longer
   flips from idle to running a few seconds after the turn end. Claude Code lists such a
-  session as working, and its listing names no background shell, so each session now also
-  posts a `UserPromptSubmit` hook when a turn starts. While no turn has started since the
+  session as busy, with the state working or done, and its listing names no background
+  shell, so each session now also posts a `UserPromptSubmit` hook when a turn starts. While no turn has started since the
   turn end, the worker keeps the state of its turn end (idle, queued, or blocked on a
   question), and the board and `status` show the session state `background`. When the turn
   ended `background_shell_mins` ago (a new machine key, 30 by default, 0 for never), an
