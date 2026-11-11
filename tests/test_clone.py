@@ -920,9 +920,13 @@ def test_the_clone_reads_the_copied_note_and_a_later_note_of_the_original_does_n
 
     def call(worker, tool, **arguments):
         payload = {"session_id": worker.session_uuid, "cwd": worker.worktree, "input": arguments}
+        # The session's own token, which its launch wrote into its worktree.
+        token = worker_tokens.read(worker.worktree_path) or worker_tokens.issue(
+            worker.worktree_path
+        )
         status, raw = support.request(
             daemon.port, "POST", f"/channel/tool/{tool}", body=json.dumps(payload).encode(),
-            headers=AUTH,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
         assert status == 200
         return json.loads(raw)
