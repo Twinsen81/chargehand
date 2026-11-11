@@ -3087,7 +3087,9 @@ class Runner:
             f"turn ended {elapsed / 60:.0f} min ago; a background shell still runs "
             "and no new turn started"
         )
-        if self._notify(report, worker.name, worker.state, worker.url, worker.repository,
+        # As idle for a queued worker too: the session waits, and a held wake is no state
+        # that a notification names.
+        if self._notify(report, worker.name, ledger_mod.IDLE, worker.url, worker.repository,
                         role=worker.role, detail=detail):
             worker = self.ledger.update(worker, notified_state=ledger_mod.SESSION_BACKGROUND)
         return worker

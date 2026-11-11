@@ -1024,10 +1024,14 @@ setup script, or the tracker goes into it; that stays local and is reached throu
 state counts as notified only when the command succeeds, so a send that failed, for example
 on the first tick after a wake while the network is still down, is tried again on the next
 tick. A finished run's last notification is tried again for up to a day. Only a worker that
-needs you or ends is notified: `blocked`, `parked`, `failed`, `done` through the status file,
-and the watchdog states, and a worker that reaches its daily wake cap (`daily-cap`, once
-until its next wake; see "Delivery"). A worker that ends because its item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not, because a worker that answers
-ten comments ends ten turns; `status` and the board show it. The turn end clears the record
+needs you or ends is notified: `blocked`, `parked`, `failed`, `done` through a report or
+the status file, and the watchdog states, and a worker that reaches its daily wake cap
+(`daily-cap`, once until its next wake; see "Delivery"). A worker that ends because its
+item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not,
+because a worker that answers ten comments ends ten turns; `status` and the board show it.
+The one exception is a turn end whose background shell still runs after
+`background_shell_mins`, which is notified once, as `idle` (see "Background shells"
+below). The turn end clears the record
 of the last notified session state, so the next question is notified even when it is the
 same state as the one before.
 

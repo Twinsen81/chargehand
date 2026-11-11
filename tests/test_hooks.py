@@ -846,6 +846,24 @@ def test_a_background_shell_past_the_limit_notifies_once_and_the_worker_stays_id
     assert harness.worker("ABC-1").state == ledger_mod.IDLE
 
 
+def test_a_queued_worker_with_a_background_shell_is_notified_as_idle(daemon, harness, tmp_path):
+    _turn_ended_with_a_background_shell(daemon, harness, tmp_path, ended_mins_ago=6)
+    harness.config = dataclasses.replace(harness.config, background_shell_mins=5)
+    harness.next_tick()
+    assert harness.notifications() == [("ABC-1", "idle")]
+    # The same turn end, with a wake that admission holds: the record of the notice goes
+    # with the turn end, so the next one is for the queued worker.
+    queued = harness.ledger.update(
+        harness.worker("ABC-1"), state=ledger_mod.QUEUED, notified_state=None
+    )
+    assert queued.state == ledger_mod.QUEUED
+
+    report = harness.next_tick()
+
+    assert harness.notifications() == [("ABC-1", "idle"), ("ABC-1", "idle")]
+    assert "a background shell still runs" in report.notified[-1]
+
+
 @pytest.mark.parametrize("ended_mins_ago, limit_mins", [(4, 5), (29, None)])
 def test_a_background_shell_under_the_limit_sends_nothing(
     daemon, harness, tmp_path, ended_mins_ago, limit_mins
