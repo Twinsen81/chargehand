@@ -52,7 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt and the waiting events; the note itself never reaches the prompt. A new worker
   tool, `read_handoff`, returns the stored note to the session, and the `handoff` tool now
   asks to be called at the end of every turn. A session that would start without the mod
-  is not refreshed. The old session is kept, stopped, for `claude --resume`, with its
+  is not refreshed. The answer to a question that the session asked and a summary clone's
+  request for a current note continue the session, and the refresh comes at the next
+  wake. The old session is kept, stopped, for `claude --resume`, with its
   transcript path on its row (ledger schema 12), and the board's card lists both sessions
   under the one worker. The daily wake cap counts a refresh as a wake. Discard, retry and
   garbage collection remove every session of a worker, and an archive holds the

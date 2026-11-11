@@ -61,8 +61,9 @@ a fresh session for the same worker, through the caller: the old session is stop
 kept, and a new one starts in the same worktree. Its first prompt is chargehand's own
 text, which names the item and the tool that gives the worker's handoff note, then the
 role's prompt, then the waiting events as usual. The note itself never reaches the
-prompt: the fresh session reads it as a tool result. The resume of a parked worker and
-the answer to a question stay in the session they belong to.
+prompt: the fresh session reads it as a tool result. The resume of a parked worker, the
+answer to a question that the session asked, and a summary clone's request for a current
+note stay in the session they belong to; the refresh then comes at the next wake.
 """
 
 from __future__ import annotations
@@ -708,7 +709,10 @@ class Delivery:
         if read is None or read.state != worker.state or read.session_id != worker.session_id:
             return
         worker = read
-        if self._refresh is not None and worker.state in WAKE_STATES and entries:
+        if (
+            self._refresh is not None and worker.state in WAKE_STATES and entries
+            and not self._continues_session(worker, entries)
+        ):
             why = self._refresh_reason(worker)
             if why is not None and self._wake_fresh(worker, message, entries, why, result):
                 return
@@ -794,6 +798,30 @@ class Delivery:
             log.info("%s: woke session %s with %s", worker.handle, worker.session_id,
                      "; ".join(message.splitlines()[1:]))
         result.woken.append(worker)
+
+    def _continues_session(self, worker: Worker, entries: Sequence[InboxEntry]) -> bool:
+        """Whether this wake must go to *worker*'s own session, past any refresh limit.
+
+        Only the session that holds the conversation can use it: the answer to a question
+        that the session asked since its last wake, and a summary clone's request for a
+        note about that conversation. The refresh comes at the worker's next wake. A
+        reply that answers no question refreshes as any event does: a worker that follows
+        no item gets nothing else.
+        """
+        if any(
+            (entry.source, entry.kind) == (ledger_mod.HANDOFF_SOURCE, ledger_mod.HANDOFF_KIND)
+            for entry in entries
+        ):
+            return True
+        if not any(is_reply(entry) for entry in entries):
+            return False
+        question = self.ledger.latest_question(worker)
+        return (
+            question is not None
+            and question.state == ledger_mod.PROMPT_RESOLVED
+            and question.resolved_by in (ledger_mod.RESOLVED_BY_BOARD, ledger_mod.RESOLVED_BY_REPLY)
+            and (question.resolved_at or 0.0) >= (worker.last_wake_at or worker.created_at)
+        )
 
     def _refresh_reason(self, worker: Worker) -> str | None:
         """Why *worker*'s next wake goes to a fresh session, or None when it continues this one."""

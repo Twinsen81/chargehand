@@ -21,6 +21,7 @@ from chargehand.errors import DeliveryAborted
 from chargehand.gitutil import Git
 from chargehand.ledger import Ledger
 from chargehand.notify import Notifier
+from chargehand.sources.base import Event, WorkItem
 from chargehand.tick import HANDOFF_TOOL, Runner, TickReport
 from support import fake_source
 
@@ -549,6 +550,87 @@ def test_the_answer_to_a_question_stays_in_its_session_past_the_limit(after_two)
     assert len(launches(harness)) == 1
     assert resumes(harness)[-1]["target"] == reviewer.session_uuid
     assert resumes(harness)[-1]["prompt"].endswith(f"{delivery_mod.REPLY_PREFIX}yes")
+
+
+@pytest.mark.parametrize("listed", ["blocked", "done"])
+def test_the_answer_to_an_ask_question_stays_in_its_session_past_the_limit(after_two, listed):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    # The ask tool recorded the question, and the turn ended. The listing shows such a
+    # turn end as blocked or as done; a done one makes the answered worker idle again.
+    harness.ledger.record_question(harness.ledger.get(reviewer.id), "Which colour?", ["red"])
+    harness.claude_state.set_session_state(reviewer.session_id, listed, status="idle")
+    harness.next_tick()
+    assert harness.ledger.get(reviewer.id).state == ledger_mod.BLOCKED
+    harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="red")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 1
+    assert resumes(harness)[-1]["target"] == reviewer.session_uuid
+    assert resumes(harness)[-1]["prompt"].endswith(f"{delivery_mod.REPLY_PREFIX}red")
+    assert kinds(harness, reviewer)[-1] == "wake"
+
+
+def test_the_refresh_comes_at_the_wake_after_the_answer(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    harness.ledger.record_question(harness.ledger.get(reviewer.id), "Which colour?", ["red"])
+    end_turn(harness, reviewer)
+    harness.next_tick()
+    harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="red")
+    harness.next_tick()
+    assert len(launches(harness)) == 1
+
+    wake(harness, reviewer)
+
+    assert len(launches(harness)) == 2
+    assert kinds(harness, reviewer)[-1] == "refresh"
+
+
+def test_a_reply_that_answers_no_question_goes_to_the_fresh_session(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    end_turn(harness, reviewer)
+    harness.next_tick()
+    # A worker that follows no item gets only replies, so the limit must hold for them.
+    harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="also update the docs")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 2
+    assert kinds(harness, reviewer)[-1] == "refresh"
+
+
+def test_a_summary_clones_request_for_a_note_stays_in_the_session_past_the_limit(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    end_turn(harness, reviewer)
+    # As the launch of a summary clone asks its original: only the session that holds the
+    # conversation can write a note about it.
+    item = WorkItem(source=ledger_mod.HANDOFF_SOURCE, key="PR-7", ref="PR-7")
+    harness.ledger.enqueue(reviewer.id, Event(
+        source=ledger_mod.HANDOFF_SOURCE, kind=ledger_mod.HANDOFF_KIND, item=item,
+        actor=ledger_mod.HANDOFF_SOURCE, occurred_at=time.time(), dedupe_id="handoff:clone-99",
+        pointer="write-a-current-note-with-the-handoff-tool-for-clone-99",
+    ))
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 1
+    assert resumes(harness)[-1]["target"] == reviewer.session_uuid
+    assert resumes(harness)[-1]["prompt"].splitlines()[-1].startswith(f"{ledger_mod.HANDOFF_KIND}: ")
 
 
 # ----- a worktree root reached through a symbolic link ------------------------------------

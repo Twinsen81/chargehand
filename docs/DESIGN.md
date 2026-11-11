@@ -925,8 +925,13 @@ than the wake, and keeps the state it wrote; a post that the old session sent wh
 stopped is older, because the tick reads the worker again once the stop is confirmed. A
 crash in that window leaves the events in the inbox, and the next state diff takes the
 new session as the worker's, with the same switch as a refresh that ran to its end. The resume of
-a `parked` worker and the answer to a question stay in the session they belong to. The
-card lists the worker's sessions.
+a `parked` worker, the answer to a question that the session asked since its last wake
+(whether the listing shows that turn end as `blocked` or as `done`), and a summary
+clone's request for a current note stay in the session they belong to, because only that
+session holds the conversation they are about; the refresh then comes at the next wake.
+A reply that answers no question refreshes as any event does, so the limit also holds
+for a worker that follows no item and gets only replies. The card lists the worker's
+sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
