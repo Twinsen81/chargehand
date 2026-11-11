@@ -824,6 +824,14 @@ def test_the_clone_form_says_when_summary_is_not_possible(daemon, harness):
     _, form = get(daemon, f"/api/workers/{original.id}/clone")
     assert "summary" in form["modes"] and form["summary_refused"] is None
 
+    # Running, without a note: the refusal says that it has none yet.
+    harness.ledger.update(original, state=ledger_mod.RUNNING)
+    _, bare = get(daemon, f"/api/workers/{original.id}/clone")
+    assert bare["summary_refused"] == (
+        f"{original.id_handle} is running and has no handoff note yet, so clone it in summary "
+        f"mode once it is idle"
+    )
+
     harness.ledger.update(with_note(harness, original, current=False), state=ledger_mod.RUNNING)
     _, busy = get(daemon, f"/api/workers/{original.id}/clone")
     assert "summary" not in busy["modes"]

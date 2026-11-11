@@ -342,9 +342,13 @@ def summary_refusal(worker: Worker, *, loads_mod: bool | None = None) -> str | N
     if note_is_current(worker):
         return None
     if worker.state in FORK_BUSY_STATES:
+        why = (
+            "its handoff note is older than its current turn" if worker.handoff_note
+            else "has no handoff note yet"
+        )
         return (
-            f"{worker.id_handle} is {worker.state} and its handoff note is older than its "
-            f"current turn, so clone it in summary mode once it is idle"
+            f"{worker.id_handle} is {worker.state} and {why}, so clone it in summary mode "
+            f"once it is idle"
         )
     if not worker.handoff_note and not can_be_asked_for_a_note(worker):
         return f"{worker.id_handle} left no handoff note and cannot be asked for one"
