@@ -292,23 +292,24 @@ public location.
   are still supervised and still notify, so hiding cannot silence a blocked worker.
 - **Attach runs a terminal on this machine.** `POST /api/workers/<id>/attach` opens an
   iTerm2 or Terminal.app window that runs the worker's attach command. The terminal is one
-  of those two names; the command must be plain words and its last word, the session id,
-  a plain identifier, so a shell that runs it finds no metacharacter. For Terminal.app the
+  of those two names; the command must be plain words and its last word, the session id, a
+  plain identifier, so a shell that runs it finds no metacharacter. For Terminal.app the
   daemon writes the command into a script file and runs `/usr/bin/open -a Terminal
   <file>`, through LaunchServices, so it needs no Automation permission. The file is in
-  `attach/` under the state directory (mode 0700, created anew if missing, refused if it is
-  a symbolic link), has a random name and mode 0700, is created with `O_EXCL` and
+  `attach/` under the state directory (mode 0700, created anew if missing, refused if it
+  is a symbolic link), has a random name and mode 0700, is created with `O_EXCL` and
   `O_NOFOLLOW`, and holds only `#!/bin/sh`, `rm -f -- "$0"` and `exec <command>`: it
   deletes itself before it runs the command, and a file that never ran is removed when the
-  next one is written, after five minutes. The daemon's process sets no quarantine attribute, so macOS shows no
-  dialog for the file. For iTerm2, which asks before it runs any file it opens, the daemon
-  runs `/usr/bin/osascript`; the command reaches the AppleScript as an argument, never
-  inside the script's source, so no text in it can change the script. macOS asks once
-  whether the daemon's process may control iTerm2 (Privacy & Security, Automation). macOS
-  gives that grant to the Python interpreter binary, not to chargehand: every background
-  job that runs on that Python can then read and type into every iTerm2 session, and a
-  Python upgrade asks again. Terminal.app, the default, needs no grant. The
-  board embeds no chat: a conversation with a session happens in that terminal.
+  next one is written, after five minutes. The daemon's process sets no quarantine
+  attribute, so macOS shows no dialog for the file. For iTerm2, which asks before it runs
+  any file it opens, the daemon runs `/usr/bin/osascript`; the command reaches the
+  AppleScript as an argument, never inside the script's source, so no text in it can
+  change the script. macOS asks once whether the daemon's process may control iTerm2
+  (Privacy & Security, Automation). macOS gives that grant to the Python interpreter
+  binary, not to chargehand: every background job that runs on that Python can then read
+  and type into every iTerm2 session, and a Python upgrade asks again. Terminal.app, the
+  default, needs no grant. The board embeds no chat: a conversation with a session happens
+  in that terminal.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need
   `--verbose-titles`; agent output needs `logs`. A pull-request URL a session reports is
