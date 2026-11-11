@@ -2,7 +2,9 @@
 
 A clone starts from its original's current branch in a worktree of its own, so the two
 never write the same tree. In ``fresh`` mode it gets nothing from the original's session;
-in ``full`` mode its session starts as a copy of the original's conversation. The operator
+in ``full`` mode its session starts as a copy of the original's conversation; in
+``summary`` mode a new session starts, whose first prompt names the item and the tool that
+gives the original's handoff note, so the session reads the note as a tool result. The operator
 may give it another prompt template, model and effort, and chooses the event kinds it
 follows on the original's item; by default it follows none, so only a reply reaches it.
 
