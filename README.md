@@ -342,7 +342,13 @@ The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or end
 blocked, parked, failed, done through a report or the status file, or stopped by the
 watchdog. A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
-are not notified; `chargehand status` shows them. As shipped it
+are not notified; `chargehand status` shows them. A turn can end while a background shell
+that it started still runs; Claude Code then lists the session as working, and the board
+and `status` show the worker as idle with the session state `background`. When no new turn
+has started 30 minutes after that turn end (`background_shell_mins` in the machine
+configuration; 0 turns it off), you are notified once, because a shell that never ends,
+such as a dev server, can hide a session that waits for you. This applies to workers
+launched by this release or a later one. As shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an
 email, and a push service, and you can enable more than one. The hook receives only the
