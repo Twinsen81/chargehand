@@ -75,6 +75,8 @@ let latest = null;
 const signatures = new Map();
 // The outcome of the last action on each card, by worker id: { kind, text }.
 const cardStatus = new Map();
+// How many actions this page sent for each card, by worker id; it outlives a dismiss.
+const cardActionSequence = new Map();
 // The repository headings of each column, by column key and repository name.
 const groupNodes = new Map();
 
@@ -845,10 +847,17 @@ function workerAction(c, name, force) {
         risk)) return;
   // Retry asks only when the card knows of work it would lose.
   if (name === 'retry' && risk &&
-      !window.confirm('Retry ' + c.handle + '? It removes the worktree and starts a new worker.' + risk)) return;
+      !window.confirm('Retry ' + c.handle + '? It removes the worktree and clears the worker.' + risk)) return;
+  // Two actions on one card can both wait for a tick; only the newer one may set the line.
+  const sequence = (cardActionSequence.get(String(c.id)) || 0) + 1;
+  cardActionSequence.set(String(c.id), sequence);
+  const latestAction = () => cardActionSequence.get(String(c.id)) === sequence;
   setCardStatus(c.id, 'pending', 'sending');
   send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''),
-    (outcome) => setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome)));
+    (outcome) => {
+      if (!latestAction()) return;
+      setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome));
+    });
 }
 
 function personalise(kind, key, body, what) {

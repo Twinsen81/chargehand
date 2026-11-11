@@ -11,12 +11,14 @@ import dataclasses
 import functools
 import json
 import re
+import shutil
 import subprocess
 import time
 
 import pytest
 
 from chargehand import board, ledger as ledger_mod, terminal
+from chargehand import tick as tick_mod
 from chargehand.cli import EXIT_OK, main
 from chargehand.config import NotifyConfig
 from conftest import run_git
@@ -698,7 +700,8 @@ def test_the_card_tells_what_discard_would_lose(daemon, harness):
     run_git("add", "notes.txt", cwd=worktree)
     run_git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-m", "work", cwd=worktree)
     (worktree / "progress.log").write_text("notes\n")
-    harness.next_tick()
+    # The tick looks again once the refresh interval has passed since its last look.
+    harness.runner._record_work_at_risk(now=time.time() + tick_mod.WORK_AT_RISK_REFRESH_SECS + 1)
 
     assert card_of(daemon, worker)["work_at_risk"] == {
         "place": "worktree", "uncommitted_changes": True, "unpushed_commits": 1,
@@ -776,6 +779,62 @@ def test_the_confirmation_dialog_warns_about_the_work_the_card_knows_of():
     action = script[script.index("function workerAction("):script.index("function personalise(")]
     assert action.count("risk)) return;") == 3
     assert "name === 'retry' && risk &&" in action
+    # A retry does not always start a new worker: a worker that does not drive the queue
+    # label waits for its next start event.
+    assert "It removes the worktree and clears the worker." in action
+    assert "starts a new worker" not in action
+
+
+def test_an_older_action_on_a_card_cannot_replace_the_outcome_of_a_newer_one():
+    script = (board.asset_dir() / "board.js").read_text()
+    action = script[script.index("function workerAction("):script.index("function personalise(")]
+    assert "if (!latestAction()) return;" in action
+    # A dismiss drops the line, not the count, so an old outcome stays ignored after it.
+    status = script[script.index("function statusNode("):script.index("function setCardStatus(")]
+    assert "cardActionSequence" not in status
+
+
+NODE_RACE = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const grab = (head) => {
+  const start = src.indexOf(head);
+  return src.slice(start, src.indexOf('\n}\n', start) + 3);
+};
+const constant = (name) => {
+  const start = src.indexOf('const ' + name + ' =');
+  return src.slice(start, src.indexOf(';\n', start) + 2);
+};
+const window = { confirm: () => true };
+const $ = () => ({ value: '' });
+const sent = [];
+function send(path, body, what, onOutcome) { sent.push(onOutcome); }
+// The constants live in the eval's scope, so the stub that writes the card line does too.
+eval(['FORCED', 'ACTION_LABELS', 'ARCHIVE_NOTE', 'cardStatus', 'cardActionSequence'].map(constant).join('')
+  + 'function setCardStatus(id, kind, text) { cardStatus.set(String(id), { kind, text }); }'
+  + grab('function statusText(') + grab('function riskWarning(') + grab('function workerAction(')
+  + ';globalThis.run = (c, name, force) => workerAction(c, name, force);'
+  + 'globalThis.status = (id) => cardStatus.get(String(id));');
+const c = { id: 7, handle: 'implementer/ABC-1#7', column: 'closed', work_at_risk: null };
+run(c, 'discard', false);
+run(c, 'discard', true);
+const [first, second] = sent;
+second({ pending: false, ok: true, message: 'discarded #7' });
+first({ pending: false, ok: false, message: 'cli text', board_message: 'its worktree has uncommitted changes' });
+console.log(JSON.stringify(status(7)));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_late_refusal_of_an_older_action_leaves_the_newer_outcome_on_the_card(tmp_path):
+    runner = tmp_path / "race.js"
+    runner.write_text(NODE_RACE)
+    out = subprocess.run(
+        ["node", str(runner), str(board.asset_dir() / "board.js")],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    assert json.loads(out) == {"kind": "ok", "text": "done: discarded #7"}
 
 
 # ----- the handle on the command line -------------------------------------------------------
