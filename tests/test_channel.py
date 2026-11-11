@@ -510,7 +510,7 @@ def test_a_session_that_starts_again_keeps_the_question_it_asked(daemon, harness
 
 
 @pytest.mark.parametrize("listed", ["blocked", "done"])
-def test_a_reply_from_the_command_line_answers_an_ask_question(daemon, harness, listed):
+def test_a_plain_reply_answers_an_ask_question(daemon, harness, listed):
     worker = launch(harness)
     post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
     turn_end(daemon, harness, worker)

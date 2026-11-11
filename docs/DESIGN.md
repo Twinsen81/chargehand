@@ -718,8 +718,8 @@ holds. The card shows its options as buttons and a one-line answer field. The fi
 resolves the record (`resolved`, by the board) and is recorded as a `reply` request, so the
 tick puts it into the worker's inbox and delivery wakes the worker with it, through the
 exception for a blocked worker whose turn ended with a question; a second answer gets 409.
-Any reply, from the card's Reply or from `chargehand reply`, answers the question the same
-way. A question is cancelled when the worker leaves `blocked` by another path: a pause, an
+A reply from the card's Reply answers the question the same way; the command line has
+no reply command. A question is cancelled when the worker leaves `blocked` by another path: a pause, an
 end, or a new turn once the turn that asked it has ended, such as one that the operator
 starts in `claude attach`. A permission prompt of the same turn, and its answer, leave it
 open, and so does a session whose process starts again without a turn, as after a

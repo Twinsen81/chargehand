@@ -172,7 +172,7 @@ ALLOW = "allow"
 DENY = "deny"
 # Who resolved or cancelled a prompt: a click on the board, a rule the operator recorded
 # from the board, or the session itself (answered in the terminal, superseded, or stopped).
-# A question is also resolved by a reply, from the board or the command line.
+# A question is also resolved by a reply.
 RESOLVED_BY_BOARD = "board"
 RESOLVED_BY_REPLY = "reply"
 RESOLVED_BY_RULE = "rule"
