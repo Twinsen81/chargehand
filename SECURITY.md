@@ -304,7 +304,10 @@ public location.
   dialog for the file. For iTerm2, which asks before it runs any file it opens, the daemon
   runs `/usr/bin/osascript`; the command reaches the AppleScript as an argument, never
   inside the script's source, so no text in it can change the script. macOS asks once
-  whether the daemon's process may control iTerm2 (Privacy & Security, Automation). The
+  whether the daemon's process may control iTerm2 (Privacy & Security, Automation). macOS
+  gives that grant to the Python interpreter binary, not to chargehand: every background
+  job that runs on that Python can then read and type into every iTerm2 session, and a
+  Python upgrade asks again. Terminal.app, the default, needs no grant. The
   board embeds no chat: a conversation with a session happens in that terminal.
 - **Untrusted text stays out of routine output.** `status` and `watch` print identifiers,
   states, timings, and URLs only. Titles and a session's waiting text need

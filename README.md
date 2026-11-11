@@ -110,8 +110,11 @@ Attach in Terminal.app needs no macOS permission: the daemon writes a one-line s
 and opens it with `/usr/bin/open -a Terminal`; the script deletes itself before it runs
 the command. iTerm2 asks for confirmation before it runs any file it is asked to open, so
 attach in iTerm2 still goes through Apple events: macOS asks once whether the daemon's
-Python may control iTerm2 (System Settings, Privacy & Security, Automation). If you do not
-want to give that permission, choose Terminal on the page.
+Python may control iTerm2 (System Settings, Privacy & Security, Automation). macOS gives
+that permission to the Python interpreter binary, not to chargehand, so every background
+job that runs on that Python can then read and type into every iTerm2 session, and macOS
+asks again after a Python upgrade. Terminal needs no permission; if you do not want to
+give it, keep Terminal on the page.
 
 Clone on a card starts a new worker from that one, in a worktree of its own branched from
 the worker's current branch, so its commits carry over and the two never write the same
