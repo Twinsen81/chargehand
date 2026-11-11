@@ -96,7 +96,8 @@ max_workers = 2
 # events, and you are notified once.
 max_wakes_per_day = 12
 # A wake waits until no new event has arrived for this many seconds, so a burst of
-# comments becomes one wake. A reply from the board does not wait. 0 wakes at the next
+# comments becomes one wake, but at most five times this after the first waiting
+# event. A reply from the board does not wait. 0 wakes at the next
 # tick, which is the default.
 debounce_secs = 120
 # A /loop that the role's prompt starts runs its own turns in the session; chargehand

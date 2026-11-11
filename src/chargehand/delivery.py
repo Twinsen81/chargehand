@@ -9,9 +9,10 @@ events in its inbox goes through these steps:
    itself. A reply that the operator typed on the board is the one exception: its line
    carries the operator's text, cleaned to one line.
 2. Debounce and admit. The wake waits until no new event has arrived for the role's
-   ``debounce_secs``, so a burst becomes one wake; a reply from the board and a due
-   timer do not wait. Then the global cap on working turns, across all repositories,
-   the role's daily wake cap and the usage reserve. A worker that waits becomes
+   ``debounce_secs``, so a burst becomes one wake, and at most
+   :data:`DEBOUNCE_MAX_HOLD_FACTOR` times that after the oldest waiting event; a reply
+   from the board and a due timer do not wait. Then the global cap on working turns,
+   across all repositories, the role's daily wake cap and the usage reserve. A worker that waits becomes
    ``queued`` and keeps its events. A worker that reaches its daily cap is notified
    once, until its next wake.
 3. Check and prepare, through the caller: a worker whose worktree must not host its
@@ -88,6 +89,11 @@ WORKING_STATES = (ledger_mod.LAUNCHING, ledger_mod.RUNNING)
 
 # The daily wake cap counts the wakes of this window, which moves with the clock.
 WAKE_CAP_WINDOW_SECS = 24 * 3600
+
+# The debounce holds a wake at most this many times the role's debounce_secs after the
+# oldest waiting event, so a steady stream of events, such as CI results during a long
+# run, cannot hold the worker for ever.
+DEBOUNCE_MAX_HOLD_FACTOR = 5
 
 # No wake while the weekly window is above 100 minus this percentage.
 DEFAULT_WAKE_RESERVE_PERCENT = 20.0
@@ -618,9 +624,10 @@ class Delivery:
         """When the role's debounce lets *entries* go, or None when they may go now.
 
         The wake waits until no new event has arrived for ``debounce_secs``, so a burst
-        becomes one wake. A reply from the board and a due timer do not wait: the operator
-        waits for the answer, and the worker chose the time itself. The wake then takes
-        the events of the burst along.
+        becomes one wake, but not longer than ``DEBOUNCE_MAX_HOLD_FACTOR`` times that
+        after the oldest waiting event. A reply from the board and a due timer do not
+        wait: the operator waits for the answer, and the worker chose the time itself.
+        The wake then takes the events of the burst along.
         """
         timer = (ledger_mod.TIMER_SOURCE, ledger_mod.TIMER_KIND)
         if any(is_reply(entry) or (entry.source, entry.kind) == timer for entry in entries):
@@ -632,7 +639,8 @@ class Delivery:
             return None
         if debounce <= 0:
             return None
-        until = max(entry.queued_at for entry in entries) + debounce
+        arrived = [entry.queued_at for entry in entries]
+        until = min(max(arrived) + debounce, min(arrived) + DEBOUNCE_MAX_HOLD_FACTOR * debounce)
         return until if self._clock() < until else None
 
     def _admitted(self, worker: Worker, result: DeliveryResult) -> bool:
@@ -1012,6 +1020,7 @@ __all__ = [
     "CONFIRM_DROPPED",
     "CONFIRM_RECORDED",
     "CONFIRM_UNKNOWN",
+    "DEBOUNCE_MAX_HOLD_FACTOR",
     "DEFAULT_NEW_WORKER_RESERVE_PERCENT",
     "DEFAULT_WAKE_RESERVE_PERCENT",
     "Delivery",

@@ -578,6 +578,50 @@ def test_a_reply_from_the_board_does_not_wait_for_the_debounce_and_takes_the_bur
     harness.ledger.close()
 
 
+def test_a_due_timer_does_not_wait_for_the_debounce_and_takes_the_burst_along(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 600\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    now = time.time()
+    comment_at(harness, reviewer, 1, now)
+    harness.ledger.put_timer(
+        harness.ledger.get(reviewer.id), due_at=now, item="PR-7", item_ref="PR-7", now=now - 60
+    )
+
+    assert [w.id for w in deliver_at(harness, now + 1).woken] == [reviewer.id]
+    assert resumes(harness)[-1]["prompt"].splitlines()[1:] == [
+        "comment: https://example.invalid/c1", "timer: request_wake",
+    ]
+    harness.ledger.close()
+
+
+def test_a_steady_stream_of_events_holds_the_wake_at_most_five_debounce_windows(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\ndebounce_secs = 30\n")
+    harness = build(tmp_path, repo, claude_state, board)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    harness.next_tick()
+    first = time.time()
+    longest = delivery_mod.DEBOUNCE_MAX_HOLD_FACTOR * 30
+    # One event every 20 seconds: the 30-second window never passes on its own.
+    for number in range(longest // 20 + 1):
+        at = first + 20 * number
+        comment_at(harness, reviewer, number, at)
+        if at < first + longest:
+            assert deliver_at(harness, at).woken == [], at
+
+    assert deliver_at(harness, first + longest - 1).woken == []
+    assert [w.id for w in deliver_at(harness, first + longest).woken] == [reviewer.id]
+    assert len(resumes(harness)[-1]["prompt"].splitlines()) == 1 + longest // 20 + 1
+    harness.ledger.close()
+
+
 @pytest.mark.parametrize("name", ["implementer", "pr-reviewer"])
 def test_the_shipped_roles_debounce_and_say_that_a_loop_is_not_counted(name):
     text = (paths.templates_dir() / "roles" / f"{name}.toml").read_text(encoding="utf-8")

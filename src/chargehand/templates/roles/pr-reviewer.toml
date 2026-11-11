@@ -75,7 +75,8 @@ max_workers = 4
 # at the cap stays queued with its events, and you are notified once.
 max_wakes_per_day = 12
 # A wake waits until no new event has arrived for this many seconds, so a burst of
-# review comments becomes one wake. A reply from the board does not wait.
+# review comments becomes one wake, but at most five times this after the first waiting
+# event. A reply from the board does not wait.
 debounce_secs = 120
 # A /loop that the role's prompt starts runs its own turns in the session; chargehand
 # does not start them. The debounce and the daily wake cap do not count them, and no cap
