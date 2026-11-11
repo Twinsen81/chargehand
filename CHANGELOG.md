@@ -360,7 +360,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Attach in Terminal.app no longer needs the Automation permission. The daemon writes a
+- Attach opens Terminal.app by default; iTerm2 stays a choice on the page, listed second.
+  Attach in Terminal.app no longer needs the Automation permission. The daemon writes a
   script file (`exec claude attach <session id>`, mode 0700) into `attach/` under the
   state directory (mode 0700) and opens it with `/usr/bin/open -a Terminal`. The script
   deletes itself before it runs the command, and a script that never ran is removed when

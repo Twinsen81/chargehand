@@ -32,8 +32,9 @@ from chargehand import paths, sanitize
 
 ITERM2 = "iterm2"
 TERMINAL_APP = "terminal"
-TERMINALS = (ITERM2, TERMINAL_APP)
-DEFAULT_TERMINAL = ITERM2
+# The first is the default and comes first on the board: it needs no macOS permission.
+TERMINALS = (TERMINAL_APP, ITERM2)
+DEFAULT_TERMINAL = TERMINAL_APP
 
 OPEN = "/usr/bin/open"
 OSASCRIPT = "/usr/bin/osascript"

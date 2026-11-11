@@ -840,7 +840,7 @@ function workerAction(c, name, force) {
     return;
   }
   if (name === 'attach') {
-    send(path, { terminal: $('terminal').value || 'iterm2' }, what);
+    send(path, { terminal: $('terminal').value || 'terminal' }, what);
     return;
   }
   const risk = riskWarning(c, name, force);

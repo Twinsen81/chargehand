@@ -1015,6 +1015,18 @@ def test_attach_opens_iterm2_on_the_cards_session(daemon, harness, opener):
     assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "iterm2"}, "board")
 
 
+def test_attach_without_a_terminal_name_opens_terminal(daemon, harness, opener):
+    unqueued(harness)
+    worker = board_worker(harness)
+
+    status, answer = post(daemon, f"/api/workers/{worker.id}/attach")
+
+    assert status == 200 and answer["ok"] is True
+    (argv,) = opener.calls
+    assert argv[:3] == [terminal.OPEN, "-a", "Terminal"]
+    assert row(harness, answer["id"]) == ("attach", worker.handle, {"terminal": "terminal"}, "board")
+
+
 def test_attach_is_refused_without_a_live_session_and_off_macos(daemon, harness, opener, monkeypatch):
     unqueued(harness)
     worker = board_worker(harness)
@@ -1131,7 +1143,7 @@ def test_a_card_offers_the_actions_its_state_can_take(harness):
         "name": "test", "roles": ["implementer"], "paused": False, "display_name": None,
         "icon": None, "icon_glyph": None, "pinned": False, "collapsed": False, "hidden": False,
     }]
-    assert page["terminals"] == ["iterm2", "terminal"]
+    assert page["terminals"] == ["terminal", "iterm2"]
     card = next(c for column in page["columns"] for c in column["cards"])
     assert (card["handle"], card["origin"]) == (worker.handle, "board")
 

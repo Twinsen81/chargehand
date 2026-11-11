@@ -1234,7 +1234,7 @@ status file, takes the answer as a reply, and one that shows a prompt takes it o
   dialog or a session that failed or stopped, keeps the reply in its inbox until it is
   idle again, and the answer says what to do first: answer the prompt, or `continue`.
   Attach opens a terminal window that runs the card's attach command (`claude attach
-  <session id>`): iTerm2 or Terminal.app, chosen on the page, on macOS only. The daemon's
+  <session id>`): Terminal.app by default, or iTerm2 chosen on the page, on macOS only. The daemon's
   request thread runs it at once, because the tick can be busy with a launch for minutes,
   and records an `attach` request that is already applied, for the audit trail. Only a
   command of plain words whose last word is a plain identifier is accepted. Terminal.app
