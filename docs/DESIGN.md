@@ -783,7 +783,9 @@ typed on the board (section 7) is the one line that carries text:
 `reply from the operator: <line>`, cleaned to one line of at most 500 characters. The role
 prompts and the `pr-reviewer` agent file say what each kind asks the worker to do. The
 wake waits first for the role's `debounce_secs` (0 by default): until no new event has
-arrived for that long, so a burst of review comments becomes one wake. A reply from the
+arrived for that long, so a burst of review comments becomes one wake, but at most five
+times that long after the oldest waiting event, so a steady stream of events, such as CI
+results during a long run, does not hold the worker for ever. A reply from the
 board and a due `request_wake` timer do not wait, because the operator waits for the
 answer and the worker chose the time itself; the waiting events go along with them. The
 wake must then pass admission: the number of working turns below `max_concurrent`, counted
@@ -942,7 +944,8 @@ state counts as notified only when the command succeeds, so a send that failed, 
 on the first tick after a wake while the network is still down, is tried again on the next
 tick. A finished run's last notification is tried again for up to a day. Only a worker that
 needs you or ends is notified: `blocked`, `parked`, `failed`, `done` through the status file,
-and the watchdog states. A worker that ends because its item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not, because a worker that answers
+and the watchdog states, and a worker that reaches its daily wake cap (`daily-cap`, once
+until its next wake; see "Delivery"). A worker that ends because its item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not, because a worker that answers
 ten comments ends ten turns; `status` and the board show it. The turn end clears the record
 of the last notified session state, so the next question is notified even when it is the
 same state as the one before.

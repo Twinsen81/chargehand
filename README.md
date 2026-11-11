@@ -218,8 +218,8 @@ within `max_concurrent`.
 Three limits keep wakes from using up the week. `max_concurrent` in the machine
 configuration caps the working turns of all repositories together, launches and wakes. In
 a role's `[policy]`, `debounce_secs` holds a wake until no new event has arrived for that
-many seconds, so a burst of review comments becomes one wake; it is 0 by default, and the
-role templates set 120. A reply from the board does not wait. `max_wakes_per_day` (12 by
+many seconds, so a burst of review comments becomes one wake, and at most five times that
+long after the first waiting event; it is 0 by default, and the role templates set 120. A reply from the board does not wait. `max_wakes_per_day` (12 by
 default) caps the wakes of one worker over the last 24 hours: a worker at its cap stays in
 Queued with the reason on its card, and you are notified once. Each card shows the wakes in
 that window and an estimate of the tokens in the worker's session. A `/loop` that a role's

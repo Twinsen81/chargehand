@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Wake policies. A role's `debounce_secs` now takes effect: a worker's wake waits until no
   new event has arrived for that many seconds, so a burst of comments becomes one wake,
-  and its card shows until when it waits. A reply from the board and a due `request_wake`
+  but at most five times that long after the first waiting event, and its card shows until
+  when it waits. A reply from the board and a due `request_wake`
   timer do not wait, and take the waiting events along. The default is 0, so a role that
   does not set the key wakes at the next tick as before; the shipped role templates set
   120. A worker that reaches its `max_wakes_per_day` stays queued with the reason on its
