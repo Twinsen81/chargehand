@@ -14,9 +14,11 @@ the session start, each turn end and the session end, through the same transitio
 session hooks. ``/channel/usage`` carries the session's rate-limit windows and its context
 window after each turn.
 
-Every route is a POST, so it needs the daemon's token. A post names its session by id and
-working directory and maps to a worker as a hook does; a post that maps to no live worker
-changes nothing. Everything a post carries is untrusted session output: it is cleaned and
+Every route is a POST with the token of the worker's own session (see
+:mod:`chargehand.worker_tokens`), and the token, not the session id or the working
+directory that the post names, says which worker calls. The board's token is refused here,
+and so is the token of a worker that ended, except by the outbox, which tells the mod to
+stop polling. Everything a post carries is untrusted session output: it is cleaned and
 capped, and no tool argument reaches a log line, a notification or a prompt.
 """
 
@@ -36,8 +38,8 @@ from chargehand import ledger as ledger_mod
 from chargehand import runtime as runtime_mod
 from chargehand import sanitize, usage
 from chargehand.ledger import Ledger, Worker
-from chargehand.runtime import Hook, Runtime
-from chargehand.serve import HTTPError, Request, Response, Routes
+from chargehand.runtime import Runtime
+from chargehand.serve import AUTH_WORKER, HTTPError, Request, Response, Routes
 from chargehand.tick import HANDOFF_TOOL, TickReport
 
 log = logging.getLogger(__name__)
@@ -339,12 +341,12 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in REGISTRY}
 
 
 def register_routes(routes: Routes) -> None:
-    routes.add("POST", f"{PREFIX}/hello", hello)
-    routes.add("POST", f"{PREFIX}/tool", call_tool, prefix=True)
-    routes.add("POST", f"{PREFIX}/outbox", take)
-    routes.add("POST", f"{PREFIX}/outbox/confirm", confirm)
-    routes.add("POST", f"{PREFIX}/lifecycle", lifecycle, prefix=True)
-    routes.add("POST", f"{PREFIX}/usage", record_usage)
+    routes.add("POST", f"{PREFIX}/hello", hello, auth=AUTH_WORKER)
+    routes.add("POST", f"{PREFIX}/tool", call_tool, prefix=True, auth=AUTH_WORKER)
+    routes.add("POST", f"{PREFIX}/outbox", take, auth=AUTH_WORKER)
+    routes.add("POST", f"{PREFIX}/outbox/confirm", confirm, auth=AUTH_WORKER)
+    routes.add("POST", f"{PREFIX}/lifecycle", lifecycle, prefix=True, auth=AUTH_WORKER)
+    routes.add("POST", f"{PREFIX}/usage", record_usage, auth=AUTH_WORKER)
 
 
 # ----- mapping a post to its worker --------------------------------------------------
@@ -373,20 +375,32 @@ def _text(payload: Mapping[str, Any], key: str, limit: int) -> str | None:
     return sanitize.one_line(value, limit=limit) or None
 
 
-def _worker(request: Request, payload: Mapping[str, Any]) -> tuple[Ledger, Worker, type[Runtime]]:
-    """The live worker of the posting session, as a hook finds it; 404 when there is none."""
+def _worker(
+    request: Request, payload: Mapping[str, Any] | None = None
+) -> tuple[Ledger, Worker, type[Runtime]]:
+    """The live worker whose token the post carries; 401 when it ended.
+
+    With *payload*, the post must also come from the worker's own session (see
+    :func:`chargehand.hooks.is_own_session`), else 404, as for a session no worker has.
+    """
     ledger = request.ledger()
-    probe = Hook(
-        kind=runtime_mod.HOOK_NOTIFICATION, event="channel",
-        session_uuid=_text(payload, "session_id", 100), cwd=_text(payload, "cwd", 1000),
-    )
-    for runtime in _runtimes():
-        worker = hooks.find_worker(ledger, probe, runtime.name)
-        if worker is not None:
-            return ledger, worker, runtime
-    log.info("channel %s from session %s: no live worker has this session",
-             sanitize.one_line(request.path, limit=80), hooks.session_prefix(probe))
-    raise HTTPError(404, "no live worker has this session")
+    caller = request.caller
+    if caller is None:
+        raise HTTPError(401, "a valid worker token is required")
+    worker = ledger.get(caller.id)
+    if worker is None or worker.is_terminal:
+        raise HTTPError(401, "this worker has ended")
+    runtime = next((r for r in _runtimes() if r.name == worker.runtime), None)
+    if runtime is None:
+        raise HTTPError(404, "this worker's runtime has no channel")
+    if payload is not None:
+        session = _text(payload, "session_id", 100)
+        if not hooks.is_own_session(worker, session):
+            log.info("%s: channel %s from session %s, which is not the worker's session",
+                     worker.handle, sanitize.one_line(request.path, limit=80),
+                     (session or "-")[:hooks.SESSION_PREFIX])
+            raise HTTPError(404, "this is not the worker's session")
+    return ledger, worker, runtime
 
 
 def _session(payload: Mapping[str, Any]) -> str:
@@ -421,7 +435,7 @@ def call_tool(request: Request) -> Response:
     arguments = payload.get("input", {})
     if not isinstance(arguments, Mapping):
         raise HTTPError(400, "input is not a JSON object")
-    ledger, worker, _ = _worker(request, payload)
+    ledger, worker, _ = _worker(request)
     # The arguments are session output: the log names the tool, never what it was given.
     log.info("%s: tool %s", worker.handle, tool.name)
     try:
@@ -436,7 +450,7 @@ def take(request: Request) -> Response:
     """The worker's wake message for the mod to submit, or none."""
     payload = _payload(request)
     session = _session(payload)
-    ended = request.ledger().latest_worker_by_session_uuid(session)
+    ended = request.ledger().get(request.caller.id) if request.caller is not None else None
     if ended is not None and ended.is_terminal:
         # The worker is done, failed or cancelled, and its session may live on. The answer
         # tells the mod to stop polling, so this is said once per load of the mod, instead
@@ -444,7 +458,7 @@ def take(request: Request) -> Response:
         log.info("%s: its session %s polled its outbox after the worker ended (%s); the mod "
                  "stops polling", ended.handle, session[:8], ended.state)
         return Response.json({"message": None, "ended": True})
-    ledger, worker, _ = _worker(request, payload)
+    ledger, worker, _ = _worker(request)
     if worker.state in NO_WAKE_STATES:
         return Response.json({"message": None})
     message = delivery_mod.take_outbox(ledger, worker, session)
@@ -463,7 +477,7 @@ def confirm(request: Request) -> Response:
         raise HTTPError(400, "id must be the id of the message")
     if not isinstance(submitted, bool):
         raise HTTPError(400, "submitted must be true or false")
-    ledger, worker, _ = _worker(request, payload)
+    ledger, worker, _ = _worker(request)
     outcome, written = delivery_mod.confirm_outbox(ledger, worker, message_id, submitted=submitted)
     if outcome == delivery_mod.CONFIRM_UNKNOWN:
         raise HTTPError(404, "no such message for this worker")
@@ -480,14 +494,10 @@ def confirm(request: Request) -> Response:
 def lifecycle(request: Request) -> Response:
     event = request.path[len(f"{PREFIX}/lifecycle"):].strip("/")
     payload = _payload(request)
-    runtimes = [runtime for runtime in _runtimes() if event in runtime.channel_events]
-    for runtime in runtimes:
-        hook = runtime.parse_channel(event, payload)
-        if hook is not None:
-            break
-    else:
+    ledger, worker, runtime = _worker(request, payload)
+    hook = runtime.parse_channel(event, payload) if event in runtime.channel_events else None
+    if hook is None:
         raise HTTPError(404, "not found")
-    ledger, worker, _ = _worker(request, payload)
     report = TickReport()
     try:
         request.daemon.runner(ledger).apply_hook(worker, hook, report)
