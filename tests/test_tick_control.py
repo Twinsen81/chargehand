@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -703,3 +704,138 @@ def test_a_permission_prompt_of_the_respawned_session_stays_open(harness, monkey
     [prompt] = harness.ledger.open_permission_prompts(harness.worker("ABC-1"))
     assert json.loads(prompt.tool_input) == {"command": "date"}
     assert harness.ledger.get_permission_prompt(old).state == "cancelled"
+
+
+# ----- refusals that force overrides: the reason for the board -------------------------------
+
+
+def cancelled(harness, identifier="ABC-1"):
+    worker = launch(harness, identifier)
+    assert apply_request(harness, "cancel", identifier)["ok"] == 1
+    return harness.ledger.get(worker.id)
+
+
+def record(harness, worker):
+    raw = harness.ledger.get_state(f"{tick_mod.WORK_AT_RISK_PREFIX}{worker.id}")
+    return json.loads(raw) if raw else None
+
+
+def at_risk(harness, worker):
+    """The facts the tick recorded, or None when it found nothing to lose."""
+    found = record(harness, worker)
+    if found is None:
+        return None
+    found.pop("checked_at")
+    return found if any(found[k] for k in ("uncommitted_changes", "unpushed_commits", "uninspected")) else None
+
+
+DIRTY = {"place": "worktree", "uncommitted_changes": True, "unpushed_commits": 0, "uninspected": False}
+
+
+def test_a_refused_discard_retry_and_archive_carry_the_reason_and_keep_the_cli_text(harness):
+    worker = cancelled(harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    texts = {
+        "discard": f"{worker.name}: its worktree has uncommitted changes. Re-run with --force to "
+                   f"discard anyway.",
+        "retry": f"{worker.name}: its worktree has uncommitted changes. Push or discard it first "
+                 f"(`chargehand discard {harness.ledger.target_for(worker)} --yes`).",
+        "archive": f"{worker.name}: its worktree has uncommitted changes. Commit and push that work "
+                   f"first, or archive with force: the archive keeps the files, not the commits.",
+    }
+
+    for kind, text in texts.items():
+        result = apply_request(harness, kind, "ABC-1")
+        assert (result["ok"], result["message"]) == (0, text), kind
+        assert result["reason"] == {"needs_force": True, "work": DIRTY}, kind
+
+    run_git("add", "-A", cwd=worker.worktree_path)
+    run_git("commit", "-m", "wip", cwd=worker.worktree_path)
+    result = apply_request(harness, "discard", "ABC-1")
+    assert result["message"].endswith(
+        "its worktree holds 1 unpushed commit(s). Re-run with --force to discard anyway."
+    )
+    assert result["reason"]["work"] == {
+        "place": "worktree", "uncommitted_changes": False, "unpushed_commits": 1, "uninspected": False,
+    }
+    assert worker.worktree_path.exists()
+
+
+def test_a_discard_whose_session_did_not_stop_needs_force(harness):
+    launch(harness)
+    harness.claude_state.set(stop_returncode=1)
+
+    result = apply_request(harness, "discard", "ABC-1")
+
+    assert result["ok"] == 0 and "re-run with --force" in result["message"]
+    assert result["reason"] == {"needs_force": True, "session_running": True}
+
+
+def test_a_refusal_that_force_does_not_override_has_no_reason(harness):
+    launch(harness)
+
+    result = apply_request(harness, "retry", "ABC-1")
+
+    assert result["ok"] == 0 and result["reason"] is None
+    assert apply_request(harness, "pause")["reason"] is None
+
+
+def test_the_tick_looks_at_an_ended_worker_once_it_ended_and_then_once_per_interval(harness, monkeypatch):
+    worker = launch(harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
+    assert at_risk(harness, worker) == DIRTY
+    checked_at = record(harness, worker)["checked_at"]
+
+    looks = []
+    look = tick_mod.Runner._work_at_risk
+    # Each tick of the harness builds a new runner, so the class is patched.
+    monkeypatch.setattr(
+        tick_mod.Runner, "_work_at_risk", lambda self, w: looks.append(w.id) or look(self, w)
+    )
+    (worker.worktree_path / "progress.log").unlink()
+    for _ in range(3):
+        harness.next_tick()
+    assert looks == [] and at_risk(harness, worker) == DIRTY
+
+    harness.runner._record_work_at_risk(now=checked_at + tick_mod.WORK_AT_RISK_REFRESH_SECS + 1)
+    assert looks == [worker.id]
+    assert at_risk(harness, worker) is None and record(harness, worker) is not None
+
+    # A refusal looks at once, whatever the interval.
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    assert apply_request(harness, "discard", "ABC-1")["ok"] == 0
+    assert at_risk(harness, worker) == DIRTY
+    assert apply_request(harness, "discard", "ABC-1", force=True)["ok"] == 1
+    assert record(harness, worker) is None
+
+
+def test_the_record_of_a_worker_that_left_the_closed_window_is_dropped(harness):
+    worker = cancelled(harness)
+    assert record(harness, worker) is not None
+    harness.ledger._conn.execute(
+        "UPDATE workers SET finished_at = ? WHERE id = ?",
+        (time.time() - tick_mod.WORK_AT_RISK_WINDOW_SECS - 60, worker.id),
+    )
+
+    harness.runner._record_work_at_risk()
+
+    assert record(harness, worker) is None
+
+
+def test_a_live_worker_is_looked_at_only_after_a_refusal(harness):
+    worker = launch(harness)
+    (worker.worktree_path / "scratch.txt").write_text("in progress\n")
+    harness.next_tick()
+    assert record(harness, worker) is None
+
+    assert apply_request(harness, "archive", "ABC-1")["ok"] == 0
+    assert at_risk(harness, worker) == DIRTY
+    checked_at = record(harness, worker)["checked_at"]
+
+    (worker.worktree_path / "scratch.txt").unlink()
+    harness.runner._record_work_at_risk(now=checked_at + tick_mod.WORK_AT_RISK_REFRESH_SECS + 1)
+    assert record(harness, worker) is None
+    (worker.worktree_path / "scratch.txt").write_text("in progress\n")
+    harness.next_tick()
+    assert record(harness, worker) is None

@@ -12,23 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A worker whose turn ended while a background shell of that turn still runs no longer
   flips from idle to running a few seconds after the turn end. Claude Code lists such a
   session as busy, with the state working or done, and its listing names no background
-  shell, so each session now also posts a `UserPromptSubmit` hook when a turn starts. While no turn has started since the
-  turn end, the worker keeps the state of its turn end (idle, queued, or blocked on a
+  shell, so each session now also posts a `UserPromptSubmit` hook when a turn starts.
+  While no turn has started since the turn end, the worker keeps the state of its turn end (idle, queued, or blocked on a
   question), and the board and `status` show the session state `background`. When the turn
   ended `background_shell_mins` ago (a new machine key, 30 by default, 0 for never), an
   idle or queued worker is notified once, so a shell that never ends does not hide a
   session that waits. The watchdog and `max_concurrent` do not count that time. Only
   sessions launched with the new hook get this; older ones keep the old behaviour.
+- Clone in summary mode, from the card's Clone form or with `chargehand clone <ITEM>
+  --mode summary`. The clone gets its own worktree from the original's branch and a new
+  session that loads the mod; its first prompt names the item and the `read_handoff`
+  tool, never the note, and the tool gives the clone the original's handoff note, copied
+  into the clone's own row right before the launch. When the note is older than the
+  start of the original's last turn, chargehand first puts one `handoff` event into the
+  original's inbox, which wakes it under the usual caps, and the clone's launch waits
+  for a current note without using up launch attempts; after 10 minutes, or at once
+  when no wake can reach the original, it starts from the stored note and its card says
+  so, and without any note it fails. The `handoff` tool's description now says that a
+  wake line `handoff: ...` asks for a current note in that turn. A clone that ends while
+  it waits takes its event back, so the original is not woken for it later. The form
+  offers summary mode only when it can work, and says why not otherwise
+  (`summary_refused`).
 - Wake policies. A role's `debounce_secs` now takes effect: a worker's wake waits until no
   new event has arrived for that many seconds, so a burst of comments becomes one wake,
   but at most five times that long after the first waiting event, and its card shows until
-  when it waits. A reply from the board and a due `request_wake`
-  timer do not wait, and take the waiting events along. The default is 0, so a role that
-  does not set the key wakes at the next tick as before; the shipped role templates set
-  120. A worker that reaches its `max_wakes_per_day` stays queued with the reason on its
-  card, and one `daily-cap` notification goes out, again only after its next wake. The
-  global `max_concurrent` cap counts the working turns of all repositories. The role
-  templates say that a `/loop` that a role's prompt starts is not counted by these caps.
+  when it waits. A reply from the board, a due `request_wake` timer and a summary clone's
+  request for a current handoff note do not wait, and take the waiting events along. The
+  default is 0, so a role that does not set the key wakes at the next tick as before; the
+  shipped role templates set 120. A worker that reaches its `max_wakes_per_day` stays
+  queued with the reason on its card, and one `daily-cap` notification goes out, again
+  only after its next wake. The global `max_concurrent` cap counts the working turns of
+  all repositories. The role templates say that a `/loop` that a role's prompt starts is
+  not counted by these caps.
 - Session refresh. A role's `refresh_after_wakes` and `refresh_after_tokens` now take
   effect: once a worker's session has taken that many wakes, or holds about that many
   tokens (the context that the mod reports, else the transcript size), its next wake stops
@@ -150,6 +165,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown: the newest reading holds wakes and new workers however old it is, until the
   window's reset time has passed. The `usage` object has no `age_secs` key any more, and
   the gauge no longer turns grey because of age.
+
+### Fixed
+
+- A worker action on the board shows its outcome on its card: "pending", then "done" or
+  "refused" with the reason, until the next action on that card or a dismiss; the notice
+  under the top bar stays as it was. A Discard, Retry or Archive that is refused without
+  force says it in the board's words, for example "its worktree has uncommitted changes;
+  tick force and press Discard again". Before, the outcome showed only in the notice, in
+  the command line's words ("Re-run with --force"), and the card seemed to do nothing. The
+  outcome of such a refusal (`/api/requests/<id>`) carries a `reason` (`needs_force`, and
+  the uncommitted changes and unpushed commits at risk, or a session that did not stop)
+  and a `board_message`; the command line's messages do not change. The ledger keeps the
+  reason with the request (schema version 13).
+- The confirmation dialog of Discard, Retry and Archive says when the worktree has
+  uncommitted changes or unpushed commits, and that the action is refused without force.
+  The tick looks at the worktree of each worker that ended within the last day, once it
+  ended and then at most every ten minutes, and of a live worker after an action on it was
+  refused; a refused action looks at once. The card's `work_at_risk` shows what it found.
+  Retry asks for a confirmation only in that case.
 
 ### Added
 

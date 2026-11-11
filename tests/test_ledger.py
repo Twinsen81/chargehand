@@ -1291,6 +1291,65 @@ def test_every_older_ledger_gains_the_transcript_path_of_a_session(tmp_path, ver
         assert row.transcript_path == "/t/s9.jsonl"
 
 
+# ----- version 13: the reason of a refused request --------------------------------------
+
+V12_SCHEMA = V11_SCHEMA.replace("PRAGMA user_version = 11;", "") + """
+ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+PRAGMA user_version = 12;
+"""
+
+
+def test_a_refused_request_keeps_its_reason_next_to_its_message(ledger):
+    refused = ledger.record_request("discard", "ABC-1")
+    plain = ledger.record_request("retry", "ABC-1")
+    reason = {"needs_force": True, "work": {"uncommitted_changes": True}}
+
+    ledger.complete_request(refused, ok=False, message="Re-run with --force", reason=reason)
+    ledger.complete_request(plain, ok=False, message="cancel it first")
+
+    assert ledger.get_request(refused)["reason"] == reason
+    assert ledger.get_request(refused)["message"] == "Re-run with --force"
+    assert ledger.get_request(plain)["reason"] is None
+
+
+def test_a_version_twelve_ledger_keeps_its_requests_and_gains_their_reason(tmp_path):
+    path = tmp_path / "v12.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(V12_SCHEMA)
+    conn.execute(
+        "INSERT INTO requests (id, kind, target, args, created_at, applied_at, ok, message, origin) "
+        "VALUES (3, 'discard', 'ABC-1', '{}', 1.0, 2.0, 0, 'refused', 'board')"
+    )
+    conn.commit()
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        old = ledger.get_request(3)
+        assert (old["message"], old["origin"], old["reason"]) == ("refused", "board", None)
+        new = ledger.record_request("discard", "ABC-1")
+        ledger.complete_request(new, ok=False, message="m", reason={"needs_force": True})
+        assert ledger.get_request(new)["reason"] == {"needs_force": True}
+
+
+@pytest.mark.parametrize(
+    "version_schema",
+    ["V1_SCHEMA", "V2_SCHEMA", "V3_SCHEMA", "V4_SCHEMA", "V5_SCHEMA", "V6_SCHEMA", "V7_SCHEMA",
+     "V8_SCHEMA", "V9_SCHEMA", "V10_SCHEMA", "V11_SCHEMA"],
+)
+def test_every_older_ledger_gains_the_reason_of_a_request(tmp_path, version_schema):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(globals()[version_schema])
+    conn.close()
+
+    with Ledger(path) as ledger:
+        assert ledger._conn.execute("PRAGMA user_version").fetchone()[0] == ledger_mod.SCHEMA_VERSION
+        request_id = ledger.record_request("archive", "ABC-1")
+        ledger.complete_request(request_id, ok=False, message="m", reason={"needs_force": True})
+        assert ledger.get_request(request_id)["reason"] == {"needs_force": True}
+
+
 def test_the_wakes_in_a_session_start_again_after_each_session_row(ledger):
     worker = make(ledger)
     ledger.record_session(worker, kind=ledger_mod.SESSION_INITIAL, session_id="s1", session_uuid="u1")

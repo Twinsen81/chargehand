@@ -30,7 +30,7 @@ from typing import Any
 from chargehand import paths, sanitize
 from chargehand.sources.base import Event, WorkItem
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Worker lifecycle. A worker that a start rule created occupies its (role, item) pair
 # until it reaches a terminal state. `running` is a turn in progress. `idle`: the turn
@@ -88,10 +88,12 @@ ORIGIN_BOARD = "board"
 ORIGIN_CLONE = "clone"
 ORIGINS = (ORIGIN_SOURCE, ORIGIN_BOARD, ORIGIN_CLONE)
 
-# How much of its original's session a clone gets: nothing, or a copy of the conversation.
+# How much of its original's session a clone gets: nothing, a copy of the conversation, or
+# the original's handoff note, which the clone's new session reads through a tool.
 CLONE_FRESH = "fresh"
 CLONE_FULL = "full"
-CLONE_MODES = (CLONE_FRESH, CLONE_FULL)
+CLONE_SUMMARY = "summary"
+CLONE_MODES = (CLONE_FRESH, CLONE_FULL, CLONE_SUMMARY)
 
 # Where a control request came from: the command line or the board. Both record the same
 # kinds and arguments; the tick applies them alike.
@@ -113,6 +115,13 @@ REPLY_LIMIT = 500
 TIMER_SOURCE = "timer"
 TIMER_KIND = "timer"
 TIMER_POINTER = "request_wake"
+
+# A summary clone whose original's handoff note is older than the original's last turn
+# asks the original for a current note: an event of this source and kind in the
+# original's inbox, which delivery turns into a wake line. Its pointer is chargehand's own
+# identifier, which names the clone.
+HANDOFF_SOURCE = "clone"
+HANDOFF_KIND = "handoff"
 
 # What a worker's session last reported with the report tool. `done` and `failed` end the
 # worker at the end of the turn that reported them; the other states are card text only.
@@ -363,7 +372,8 @@ CREATE TABLE IF NOT EXISTS requests (
     applied_at  REAL,
     ok          INTEGER,
     message     TEXT,
-    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}'
+    origin      TEXT    NOT NULL DEFAULT '{REQUEST_CLI}',
+    reason      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS requests_pending ON requests (applied_at);
@@ -659,6 +669,12 @@ _MIGRATE_V2_V10_TO_V11 = f"""
 # table with it.
 _MIGRATE_V11_TO_V12 = """
 ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+"""
+
+# Version 13 keeps the machine-readable reason of a refused request, for the board. Every
+# version has a requests table without it, the version 1 one included.
+_MIGRATE_V12_TO_V13 = """
+ALTER TABLE requests ADD COLUMN reason TEXT;
 """
 
 
@@ -974,24 +990,28 @@ class Ledger:
         # schema but keeps its own requests table, which gains the request origin. Up to
         # version 3 the schema creates the prompts table whole, so only 4 to 6 alter it.
         script = {
-            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6,
+            1: _MIGRATE_V1_TO_V2 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V12_TO_V13,
             2: _MIGRATE_V2_TO_V3 + _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6
             + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V2_V10_TO_V11
-            + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             3: _MIGRATE_V3_TO_V4 + _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
             4: _MIGRATE_V4_TO_V5 + _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8
-            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
             5: _MIGRATE_V5_TO_V6 + _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9
-            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             6: _MIGRATE_V6_TO_V7 + _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10
-            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
             7: _MIGRATE_V7_TO_V8 + _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11
-            + _MIGRATE_V11_TO_V12,
-            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
-            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
-            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12,
-            11: _MIGRATE_V11_TO_V12,
+            + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            8: _MIGRATE_V8_TO_V9 + _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12
+            + _MIGRATE_V12_TO_V13,
+            9: _MIGRATE_V9_TO_V10 + _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            10: _MIGRATE_V10_TO_V11 + _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            11: _MIGRATE_V11_TO_V12 + _MIGRATE_V12_TO_V13,
+            12: _MIGRATE_V12_TO_V13,
         }.get(version, _SCHEMA)
         try:
             self._conn.executescript(
@@ -1775,6 +1795,15 @@ class Ledger:
         ).fetchall()
         return [InboxEntry(**dict(row)) for row in rows]
 
+    def drop_pending(self, worker_id: int, source: str, dedupe_id: str) -> bool:
+        """Remove one entry from a worker's inbox that no wake has taken yet."""
+        cursor = self._conn.execute(
+            "DELETE FROM inbox WHERE worker_id = ? AND source = ? AND dedupe_id = ? "
+            "AND delivered_at IS NULL",
+            (worker_id, source, dedupe_id),
+        )
+        return cursor.rowcount > 0
+
     def mark_delivered(self, entries: Iterable[InboxEntry], *, now: float | None = None) -> None:
         ids = [entry.id for entry in entries]
         if not ids:
@@ -2027,10 +2056,15 @@ class Ledger:
         row = self._conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
         return self._request_to_dict(row) if row else None
 
-    def complete_request(self, request_id: int, *, ok: bool, message: str) -> None:
+    def complete_request(
+        self, request_id: int, *, ok: bool, message: str, reason: dict[str, Any] | None = None
+    ) -> None:
+        """*reason* is the machine-readable form of a refusal, for the board; *message*
+        stays the command line's text."""
         self._conn.execute(
-            "UPDATE requests SET applied_at = ?, ok = ?, message = ? WHERE id = ?",
-            (time.time(), 1 if ok else 0, message, request_id),
+            "UPDATE requests SET applied_at = ?, ok = ?, message = ?, reason = ? WHERE id = ?",
+            (time.time(), 1 if ok else 0, message,
+             json.dumps(reason, sort_keys=True) if reason else None, request_id),
         )
 
     @staticmethod
@@ -2040,6 +2074,11 @@ class Ledger:
             data["args"] = json.loads(data["args"])
         except (TypeError, ValueError):
             data["args"] = {}
+        try:
+            reason = json.loads(data.get("reason") or "null")
+        except ValueError:
+            reason = None
+        data["reason"] = reason if isinstance(reason, dict) else None
         return data
 
     def prune_requests(self, older_than_secs: float = 7 * 24 * 3600) -> int:

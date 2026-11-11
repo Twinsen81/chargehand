@@ -26,6 +26,11 @@
 // Clone opens a form that the daemon fills: the worker's prompt template, model and effort,
 // and whether full mode (a copy of the session) is possible now. The prompt is the one
 // multi-line text the page sends; the daemon checks and caps it as the command line does.
+//
+// A worker action also shows its outcome on its card: pending, then ok or refused with the
+// daemon's board wording, until the next action on that card or a dismiss. The daemon
+// tells what Discard, Retry and Archive would lose, from its last tick, so the
+// confirmation dialog can say it before the click.
 'use strict';
 
 const POLL_MS = 1000;
@@ -49,6 +54,12 @@ const ACTION_LABELS = {
 const CLONE_MODE_HINTS = {
   fresh: 'Nothing from the old session: a new session with the prompt below',
   full: 'A copy of the old conversation, which goes on with the prompt below',
+  summary: 'A new session that first reads the handoff note of the old worker, then the prompt below',
+};
+const CLONE_ORIGIN_HINTS = {
+  fresh: 'Started fresh from the branch of ',
+  full: 'Started with a copy of the conversation of ',
+  summary: 'Started from the handoff note and the branch of ',
 };
 const FORCED = new Set(['continue', 'retry', 'discard', 'archive']);
 const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
@@ -68,6 +79,10 @@ let lastOk = 0;
 let latest = null;
 // The last rendered signature of each card, by worker id.
 const signatures = new Map();
+// The outcome of the last action on each card, by worker id: { kind, text }.
+const cardStatus = new Map();
+// How many actions this page sent for each card, by worker id; it outlives a dismiss.
+const cardActionSequence = new Map();
 // The repository headings of each column, by column key and repository name.
 const groupNodes = new Map();
 
@@ -272,7 +287,7 @@ function cardChildren(c, now) {
   top.append(el('span', 'chip state ' + c.state, shown));
   if (c.parent) {
     const parent = el('span', 'chip clone', 'clone of ' + c.parent.handle);
-    parent.title = (c.clone_mode === 'full' ? 'Started with a copy of the conversation of ' : 'Started fresh from the branch of ') +
+    parent.title = (CLONE_ORIGIN_HINTS[c.clone_mode] || CLONE_ORIGIN_HINTS.fresh) +
       c.parent.handle + ', in a worktree of its own';
     top.append(parent);
   }
@@ -332,6 +347,7 @@ function cardChildren(c, now) {
       : 'parked; no reset time given, continue resumes it'));
   }
   if (c.queue_reason) nodes.push(el('div', 'note', c.queue_reason));
+  if (c.clone_start) nodes.push(el('div', 'note', c.clone_start));
   if (c.job && (c.job.active || c.job.error)) {
     const job = el('div', 'note job ' + c.job.state, jobText(c.job));
     if (c.job.result_path) job.title = c.job.result_path;
@@ -367,8 +383,39 @@ function cardChildren(c, now) {
     attach.title = c.attach;
     nodes.push(attach);
   }
+  const status = cardStatus.get(String(c.id));
+  if (status) nodes.push(statusNode(c.id, status));
   nodes.push(cardActions(c));
   return nodes;
+}
+
+function statusNode(id, status) {
+  const box = el('div', 'status ' + status.kind);
+  const text = el('span', null, status.text);
+  text.title = status.text;
+  const dismiss = boardButton('×', 'Dismiss', () => {
+    cardStatus.delete(String(id));
+    rerender();
+  });
+  dismiss.className = 'dismiss';
+  box.append(text, dismiss);
+  return box;
+}
+
+function setCardStatus(id, kind, text) {
+  cardStatus.set(String(id), { kind, text });
+  rerender();
+}
+
+// The card's words for an outcome: the board wording of a refusal when the daemon gives one.
+function statusText(outcome) {
+  if (outcome.pending) return 'pending: waits for the next tick';
+  if (outcome.ok) return 'done' + (outcome.message ? ': ' + outcome.message : '');
+  return 'refused: ' + (outcome.board_message || outcome.message || 'no reason given');
+}
+
+function rerender() {
+  if (latest) renderColumns(latest.columns, latest.generated_at);
 }
 
 function questionNode(c) {
@@ -519,7 +566,7 @@ function groupNode(columnKey, g) {
 function signature(c) {
   // The age is refreshed separately, so it is not part of the signature.
   const { updated_at, ...rest } = c;
-  return JSON.stringify(rest);
+  return JSON.stringify([rest, cardStatus.get(String(c.id)) || null]);
 }
 
 function renderColumns(columns, now) {
@@ -580,6 +627,10 @@ function render(model) {
   renderHealth(model.health, now);
   renderStats(model.columns);
   renderControls(model);
+  const shown = new Set(model.columns.flatMap((column) => column.cards.map((c) => String(c.id))));
+  for (const id of [...cardStatus.keys()]) {
+    if (!shown.has(id)) cardStatus.delete(id);
+  }
   renderColumns(model.columns, now);
 }
 
@@ -680,7 +731,8 @@ function describe(outcome) {
   return what + ': ' + (outcome.ok ? 'ok' : 'refused') + (outcome.message ? ' · ' + outcome.message : '');
 }
 
-async function follow(outcome) {
+// *onOutcome*, when given, gets each state of the request as the card shows it.
+async function follow(outcome, onOutcome) {
   const deadline = Date.now() + FOLLOW_MS;
   let current = outcome;
   while (current.pending && Date.now() < deadline) {
@@ -693,14 +745,20 @@ async function follow(outcome) {
       // The daemon may be restarting; keep asking until the deadline.
     }
     notice(describe(current), current.pending ? 'pending' : current.ok ? 'ok' : 'bad');
+    if (onOutcome) onOutcome(current);
   }
 }
 
-async function send(path, body, what) {
+async function send(path, body, what, onOutcome) {
+  // An answer that is not a request outcome ends the card's pending state too.
+  const failed = (text) => {
+    if (onOutcome) onOutcome({ pending: false, ok: false, message: text });
+  };
   if (!token()) {
     notice('Paste the token first: the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
     tokenNoticeShown = true;
     $('token').focus();
+    failed('no token');
     return;
   }
   notice(what + ': sending', 'pending');
@@ -711,6 +769,7 @@ async function send(path, body, what) {
     response = await post(path, body);
   } catch (error) {
     notice(what + ': the daemon is unreachable', 'bad');
+    failed('the daemon is unreachable');
     return;
   }
   let payload = {};
@@ -727,6 +786,7 @@ async function send(path, body, what) {
     }
     notice('The token is not valid. Paste the content of ' + ((latest && latest.token_file) || 'the token file') + '.', 'bad');
     tokenNoticeShown = true;
+    failed('the token is not valid');
     return;
   }
   // The daemon checks the Host (403) before the token, and every later answer passed both.
@@ -736,6 +796,7 @@ async function send(path, body, what) {
   }
   if (!response.ok) {
     notice(what + ': ' + (payload.error || 'HTTP ' + response.status), 'bad');
+    failed(payload.error || 'HTTP ' + response.status);
     return;
   }
   if (payload.prompt !== undefined) {
@@ -749,7 +810,22 @@ async function send(path, body, what) {
     return;
   }
   notice(describe(payload), payload.pending ? 'pending' : payload.ok ? 'ok' : 'bad');
-  if (payload.pending) follow(payload);
+  if (onOutcome) onOutcome(payload);
+  if (payload.pending) follow(payload, onOutcome);
+}
+
+// What the confirmation dialog of Discard, Retry or Archive says about the work they would
+// lose, when the card knows of it.
+function riskWarning(c, name, force) {
+  const risk = c.work_at_risk;
+  if (!risk || !['discard', 'retry', 'archive'].includes(name)) return '';
+  const said = ' ' + risk.text.charAt(0).toUpperCase() + risk.text.slice(1);
+  if (!force) {
+    return said + ': without force the daemon refuses this. Tick force and press ' +
+      ACTION_LABELS[name] + ' again to ' + (name === 'archive' ? 'archive it anyway.' : 'throw that work away.');
+  }
+  return said + (name === 'archive' ? '; force is ticked: the archive keeps the files, not the commits.'
+    : '; force is ticked, so that work is lost.');
 }
 
 function workerAction(c, name, force) {
@@ -767,14 +843,28 @@ function workerAction(c, name, force) {
     send(path, { terminal: $('terminal').value || 'iterm2' }, what);
     return;
   }
+  const risk = riskWarning(c, name, force);
   if (name === 'discard' &&
       !window.confirm('Discard ' + c.handle + '? This removes its session, its worktree and its local branch' +
-        (force ? ', even with unpushed or uncommitted work.' : '.'))) return;
+        (force && !risk ? ', even with unpushed or uncommitted work.' : '.') + risk)) return;
   if (name === 'cancel' && !window.confirm('Cancel ' + c.handle + '? Its session stops; the worktree stays.')) return;
   if (name === 'archive' &&
       !window.confirm('Archive ' + c.handle + '? ' + (c.column === 'closed' ? '' : 'It is cancelled first. ') +
-        ARCHIVE_NOTE + (force ? ' Unpushed commits and uncommitted changes are not kept as commits.' : ''))) return;
-  send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''));
+        ARCHIVE_NOTE + (force && !risk ? ' Unpushed commits and uncommitted changes are not kept as commits.' : '') +
+        risk)) return;
+  // Retry asks only when the card knows of work it would lose.
+  if (name === 'retry' && risk &&
+      !window.confirm('Retry ' + c.handle + '? It removes the worktree and clears the worker.' + risk)) return;
+  // Two actions on one card can both wait for a tick; only the newer one may set the line.
+  const sequence = (cardActionSequence.get(String(c.id)) || 0) + 1;
+  cardActionSequence.set(String(c.id), sequence);
+  const latestAction = () => cardActionSequence.get(String(c.id)) === sequence;
+  setCardStatus(c.id, 'pending', 'sending');
+  send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''),
+    (outcome) => {
+      if (!latestAction()) return;
+      setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome));
+    });
 }
 
 function personalise(kind, key, body, what) {
@@ -934,7 +1024,8 @@ async function openClone(c) {
   const panel = $('panel');
   const modes = el('div', 'modes');
   const radios = {};
-  for (const mode of ['fresh', 'full']) {
+  const refused = { full: form.full_refused, summary: form.summary_refused };
+  for (const mode of form.choices || ['fresh', 'full']) {
     const label = el('label', 'mode');
     const radio = el('input');
     radio.type = 'radio';
@@ -942,7 +1033,7 @@ async function openClone(c) {
     radio.value = mode;
     radio.disabled = !form.modes.includes(mode);
     radio.checked = mode === 'fresh';
-    label.title = radio.disabled ? (form.full_refused || '') : CLONE_MODE_HINTS[mode];
+    label.title = radio.disabled ? (refused[mode] || '') : (CLONE_MODE_HINTS[mode] || '');
     label.append(radio, ' ' + mode);
     radios[mode] = radio;
     modes.append(label);
@@ -973,11 +1064,14 @@ async function openClone(c) {
   const fields = [field('mode', modes), field('prompt', prompt), field('model', model), field('effort', effort)];
   if (form.item) fields.push(field('wakes on', kinds));
   const extra = [];
-  if (form.full_refused) extra.push(el('div', 'note', 'full: ' + form.full_refused));
+  for (const mode of Object.keys(refused)) {
+    if (refused[mode] && radios[mode]) extra.push(el('div', 'note', mode + ': ' + refused[mode]));
+  }
   // Only what differs from the role goes into the request, as on the command line.
   const role = form.role_values || {};
   const submit = () => {
-    const body = { mode: radios.full.checked ? 'full' : 'fresh' };
+    const chosen = Object.keys(radios).find((mode) => radios[mode].checked);
+    const body = { mode: chosen || 'fresh' };
     if (prompt.value.trim() && prompt.value.trim() !== (role.prompt || '').trim()) body.prompt = prompt.value;
     if (model.value.trim() && model.value.trim() !== role.model) body.model = model.value.trim();
     if (effort.value && effort.value !== role.effort) body.effort = effort.value;
