@@ -8,8 +8,12 @@ events in its inbox goes through these steps:
    http(s) URL or a plain identifier is kept; the worker fetches what a pointer names
    itself. A reply that the operator typed on the board is the one exception: its line
    carries the operator's text, cleaned to one line.
-2. Admit. The global cap on working turns, the role's daily wake cap and the usage
-   reserve. A worker that is not admitted becomes ``queued`` and keeps its events.
+2. Debounce and admit. The wake waits until no new event has arrived for the role's
+   ``debounce_secs``, so a burst becomes one wake; a reply from the board and a due
+   timer do not wait. Then the global cap on working turns, across all repositories,
+   the role's daily wake cap and the usage reserve. A worker that waits becomes
+   ``queued`` and keeps its events. A worker that reaches its daily cap is notified
+   once, until its next wake.
 3. Check and prepare, through the caller: a worker whose worktree must not host its
    session again is paused with a fault, and one whose item checkout cannot be brought
    up to date waits like one a cap holds.
@@ -95,6 +99,9 @@ WEEKLY_WINDOW = "seven_day"
 # Why a held worker waits, as the board shows it: this prefix and the worker id, in the
 # ledger's state table. Written where delivery holds a wake, removed once it goes.
 QUEUE_REASON_PREFIX = "queue-reason:"
+# A worker whose daily cap was notified: this prefix and the worker id, in the same table.
+# Removed at the worker's next wake, so a worker that stays at its cap is notified once.
+CAP_NOTIFIED_PREFIX = "cap-notified:"
 
 # How often a session's chargehand mod polls its outbox; its hello answer says so.
 OUTBOX_POLL_SECS = 5
@@ -318,6 +325,7 @@ def _record_wake(
         # keeps its own reset time.
         written = ledger.update(ledger.get(worker.id) or worker, **wake_fields)
     ledger.delete_state(f"{QUEUE_REASON_PREFIX}{worker.id}")
+    ledger.delete_state(f"{CAP_NOTIFIED_PREFIX}{worker.id}")
     return written
 
 
@@ -469,6 +477,9 @@ class DeliveryResult:
     held: list[str] = field(default_factory=list)
     # Workers that a wake fault paused, each with the phrase for its notification.
     faults: list[tuple[Worker, str]] = field(default_factory=list)
+    # Workers that reached their daily cap since their last wake, each with the phrase
+    # for its notification.
+    capped: list[tuple[Worker, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -595,8 +606,34 @@ class Delivery:
             return
         if not worker.session_id:
             return
+        until = self._debounced_until(worker, entries)
+        if until is not None:
+            at = time.strftime("%H:%M:%S", time.localtime(until))
+            self._hold(worker, f"wake held by the debounce until {at}", result)
+            return
         if self._admitted(worker, result):
             self._wake(worker, message, entries, result)
+
+    def _debounced_until(self, worker: Worker, entries: Sequence[InboxEntry]) -> float | None:
+        """When the role's debounce lets *entries* go, or None when they may go now.
+
+        The wake waits until no new event has arrived for ``debounce_secs``, so a burst
+        becomes one wake. A reply from the board and a due timer do not wait: the operator
+        waits for the answer, and the worker chose the time itself. The wake then takes
+        the events of the burst along.
+        """
+        timer = (ledger_mod.TIMER_SOURCE, ledger_mod.TIMER_KIND)
+        if any(is_reply(entry) or (entry.source, entry.kind) == timer for entry in entries):
+            return None
+        try:
+            debounce = self._policy(worker).debounce_secs
+        except ConfigError:
+            # Admission reports the role that does not load.
+            return None
+        if debounce <= 0:
+            return None
+        until = max(entry.queued_at for entry in entries) + debounce
+        return until if self._clock() < until else None
 
     def _admitted(self, worker: Worker, result: DeliveryResult) -> bool:
         """Admission, the worktree guard and the refresh; False when the wake must wait."""
@@ -634,10 +671,14 @@ class Delivery:
             str(worker.id)
             for worker in self.ledger.workers_in_state([ledger_mod.QUEUED, ledger_mod.PARKED])
         } | {str(worker_id) for worker_id in answering}
+        live = {str(worker.id) for worker in self.ledger.live_workers()}
         for key in self.ledger.all_state():
             if (
                 key.startswith(QUEUE_REASON_PREFIX)
                 and key.removeprefix(QUEUE_REASON_PREFIX) not in waiting
+            ) or (
+                key.startswith(CAP_NOTIFIED_PREFIX)
+                and key.removeprefix(CAP_NOTIFIED_PREFIX) not in live
             ):
                 self.ledger.delete_state(key)
 
@@ -940,6 +981,13 @@ class Delivery:
         now = self._clock()
         wakes = self.ledger.wakes_since(worker, now - WAKE_CAP_WINDOW_SECS)
         if wakes >= policy.max_wakes_per_day:
+            notified = f"{CAP_NOTIFIED_PREFIX}{worker.id}"
+            if self.ledger.get_state(notified) is None:
+                self.ledger.set_state(notified, str(now))
+                result.capped.append(
+                    (worker, f"{wakes} wakes in 24 hours, the role's daily cap is "
+                             f"{policy.max_wakes_per_day}")
+                )
             return f"wake held by the daily cap ({wakes}/{policy.max_wakes_per_day})"
         provider = self._provider(worker)
         reading = self._usage(provider) if provider else None
@@ -959,6 +1007,7 @@ class Delivery:
 
 
 __all__ = [
+    "CAP_NOTIFIED_PREFIX",
     "CONFIRM_ALREADY",
     "CONFIRM_DROPPED",
     "CONFIRM_RECORDED",

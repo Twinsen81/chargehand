@@ -92,3 +92,14 @@ close_on = ["done"]
 [policy]
 # How many workers of this role may be open at once, across repositories.
 max_workers = 2
+# Wakes of one worker over the last 24 hours. A worker at the cap stays queued with its
+# events, and you are notified once.
+max_wakes_per_day = 12
+# A wake waits until no new event has arrived for this many seconds, so a burst of
+# comments becomes one wake. A reply from the board does not wait. 0 wakes at the next
+# tick, which is the default.
+debounce_secs = 120
+# A /loop that the role's prompt starts runs its own turns in the session; chargehand
+# does not start them. The debounce and the daily wake cap do not count them, and no cap
+# stops them. While such a turn runs, the worker is working and holds one slot of the
+# machine's max_concurrent.
