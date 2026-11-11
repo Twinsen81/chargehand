@@ -173,12 +173,11 @@ def test_the_copy_follows_the_package_and_keeps_what_claude_code_wrote(tmp_path)
 # ----- the lifecycle posts ------------------------------------------------------------
 
 
-def test_a_session_start_post_reads_as_the_session_start_hook():
+def test_a_session_start_post_changes_no_state():
+    # The mod posts it at every load of its module, and a reload starts no turn.
     hook = claude.parse_mod_post("session_start", {"session_id": "u1", "cwd": "/w"})
 
-    assert (hook.kind, hook.observed, hook.session_uuid, hook.cwd) == (
-        runtime_mod.HOOK_SESSION_START, runtime_mod.WORKING, "u1", "/w",
-    )
+    assert (hook.observed, hook.session_uuid, hook.cwd) == (None, "u1", "/w")
     assert hook.event == "mod:session_start"
 
 

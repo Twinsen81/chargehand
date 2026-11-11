@@ -2843,15 +2843,21 @@ class Runner:
             changes["last_error"] = (
                 f"{'usage limit' if hook.usage_limit else 'turn failed'}: {hook.error or 'unknown'}"
             )
-        if hook.observed is not None and current.state not in HOOK_FROZEN_STATES:
-            changes["session_state"] = hook.observed
+        observed = hook.observed
+        if hook.kind == runtime_mod.HOOK_SESSION_START and self._waits_for_its_answer(current):
+            # The session's process started again, as after a respawn or an attach to a
+            # stopped session. No turn started, so the question that the worker asked
+            # stays open for the operator; a turn start or the listing shows a real turn.
+            observed = None
+        if observed is not None and current.state not in HOOK_FROZEN_STATES:
+            changes["session_state"] = observed
         current = self.ledger.update(current, **changes)
         turn_ended_key = f"{TURN_ENDED_PREFIX}{current.id}"
         if hook.kind == runtime_mod.HOOK_TURN_END:
             self.ledger.set_state(
                 turn_ended_key, json.dumps({"at": stamp, "session": current.session_id})
             )
-        elif hook.observed is not None:
+        elif observed is not None:
             # A new turn, a prompt in a turn, a new session or a failed turn.
             self.ledger.delete_state(turn_ended_key)
         if hook.kind == runtime_mod.HOOK_PERMISSION:
@@ -2864,13 +2870,13 @@ class Runner:
                 current, tool_name=hook.tool_name or "unknown", tool_input=hook.tool_input or "",
                 now=stamp,
             )
-        if hook.observed is None:
+        if observed is None:
             return current
         for _ in range(HOOK_WRITE_ATTEMPTS):
             if current.state in HOOK_FROZEN_STATES:
                 return current
             try:
-                return self._apply_session_state(current, hook.observed, report, hook=hook)
+                return self._apply_session_state(current, observed, report, hook=hook)
             except _RowChanged:
                 current = self.ledger.get(worker.id)
                 if current is None or current.is_terminal:
@@ -2878,6 +2884,13 @@ class Runner:
         log.warning("%s: the hook %s lost every write to the tick; the next diff applies it",
                     current.handle, hook.event)
         return current
+
+    def _waits_for_its_answer(self, worker: Worker) -> bool:
+        """Whether *worker* is blocked on a question that it asked with the ask tool."""
+        return worker.state == ledger_mod.BLOCKED and any(
+            prompt.kind == ledger_mod.PROMPT_QUESTION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        )
 
     def _apply_session_state(
         self,

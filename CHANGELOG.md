@@ -76,7 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and submits the wake message as the session's next turn once the session is idle, so a
   wake no longer stops and resumes a live process; once its worker has ended, it stops
   polling. It posts the session start, each turn end and the session end, and after each
-  turn the session's weekly usage window. It finds the daemon through the launch
+  turn the session's weekly usage window; only a turn end changes a worker's state,
+  because the mod's session start also comes when Claude Code loads the mod again. It
+  finds the daemon through the launch
   settings, which name the port and the token file, and has no default port. It never
   answers a permission prompt and never submits text that the daemon did not hand it.
 - Delivery through the outbox. A worker whose session's mod said hello gets its wake as
@@ -110,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the model to end its turn; at the end of that turn the worker is blocked, and its card in
   Needs you shows the options as buttons and a one-line answer field. The first answer
   resolves the question and reaches the worker as a reply, as its next turn; a second one
-  is refused with 409. `AskUserQuestion` is denied for every worker at launch.
+  is refused with 409. A session whose process starts again without a turn, as after a
+  respawn, keeps its open question. `AskUserQuestion` is denied for every worker at launch.
   `report(state, summary, links)` keeps the state, the summary and the links on the worker,
   and the card shows them; a pull request link becomes the card's link and the worker
   follows that pull request. A report of `done` or `failed` ends the worker at the end of

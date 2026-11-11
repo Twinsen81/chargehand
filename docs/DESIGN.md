@@ -722,7 +722,8 @@ Any reply, from the card's Reply or from `chargehand reply`, answers the questio
 way. A question is cancelled when the worker leaves `blocked` by another path: a pause, an
 end, or a new turn once the turn that asked it has ended, such as one that the operator
 starts in `claude attach`. A permission prompt of the same turn, and its answer, leave it
-open. Every worker launches with
+open, and so does a session whose process starts again without a turn, as after a
+respawn or an attach to a stopped session. Every worker launches with
 `AskUserQuestion` denied in its launch settings, beside the configured deny rules, so no
 configuration drops it: the session asks through `ask` instead.
 `--resume` re-applies the settings of the launch, so a worker launched before the hooks
@@ -730,7 +731,7 @@ existed is followed by the diff alone.
 
 | Post | Effect |
 |---|---|
-| `SessionStart` | the worker is `running` |
+| `SessionStart` | the worker is `running`; a worker that is `blocked` on a question it asked with `ask` stays as it is |
 | `UserPromptSubmit` | the worker is `running` |
 | `Stop` | as a `done` session: the worker's report or open question, then the status file, then `idle` |
 | `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one; a limit of one model family also sets the board's model-limit badge |
@@ -981,9 +982,13 @@ posts nothing; it has no default port. It is the transport of the agent channel:
 Every post carries the session's own token, which says which worker posts. A tool call
 acts as that worker whatever session id it names; a hello, a lifecycle or usage post, or
 an outbox poll from a session that is not the worker's current one is ignored (see "A
-token per session"). The channel refuses the board's token. A lifecycle post goes through the same transitions as the hook it matches, and
-the settings hooks stay, because permission prompts and usage limits come only from them,
-so one turn end can arrive twice and the transitions take it once. The mod never answers
+token per session"). The channel refuses the board's token. A turn end goes through the
+same transition as the `Stop` hook, and the settings hooks stay, because permission
+prompts and usage limits come only from them, so one turn end can arrive twice and the
+transitions take it once. The session start and the session end of the mod change no
+state: the mod posts a session start at every load of its module, also when Claude Code
+loads the module again after a change of the mod's folder, and that starts no session
+and no turn. The `SessionStart` hook of the settings reports a session's start. The mod never answers
 a permission prompt and never submits text that the daemon did not hand it; the wake
 message carries kinds and pointers only.
 

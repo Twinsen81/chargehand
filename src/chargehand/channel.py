@@ -10,9 +10,9 @@ serves the same list.
 The other routes carry the rest of the mod's work. ``/channel/outbox`` hands the worker's
 wake message to the mod, and ``/channel/outbox/confirm`` records the wake once its submit
 started the turn (see :mod:`chargehand.delivery`). ``/channel/lifecycle/<event>`` reports
-the session start, each turn end and the session end, through the same transitions as the
-session hooks. ``/channel/usage`` carries the session's rate-limit windows and its context
-window after each turn.
+the session start, each turn end and the session end; a turn end goes through the same
+transition as the session hook's, and the other two change no state. ``/channel/usage``
+carries the session's rate-limit windows and its context window after each turn.
 
 Every route is a POST with the token of the worker's own session (see
 :mod:`chargehand.worker_tokens`), and the token, not the session id or the working

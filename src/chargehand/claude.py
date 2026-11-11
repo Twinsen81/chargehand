@@ -1197,13 +1197,15 @@ def mod_env(port: int, token_file: Path) -> dict[str, str]:
 def parse_mod_post(event: str, payload: Mapping[str, Any]) -> Hook | None:
     """A lifecycle post of the chargehand mod, read into a :class:`~chargehand.runtime.Hook`.
 
-    Every post carries ``session_id`` and ``cwd``. The session start reads as the
-    SessionStart hook does. A turn end with ``reason`` ``answer`` reads as the Stop hook
-    does, with ``answer`` as the last answer; a turn that the model refused, that an error
-    ended or that was interrupted changes no state here, because the settings hooks report
-    those with what the mod does not see (the failure, the usage limit). The session end
-    changes no state: the listing shows what is left of the process. Each text is
-    untrusted, and is cleaned and capped here.
+    Every post carries ``session_id`` and ``cwd``. A turn end with ``reason`` ``answer``
+    reads as the Stop hook does, with ``answer`` as the last answer; a turn that the model
+    refused, that an error ended or that was interrupted changes no state here, because
+    the settings hooks report those with what the mod does not see (the failure, the usage
+    limit). The session start changes no state: the mod posts it at every load of its
+    module, and a reload starts no session and no turn; the SessionStart hook of the
+    settings reports a session's start. The session end changes no state: the listing
+    shows what is left of the process. Each text is untrusted, and is cleaned and capped
+    here.
     """
     if event not in MOD_EVENTS or not isinstance(payload, Mapping):
         return None
@@ -1212,11 +1214,7 @@ def parse_mod_post(event: str, payload: Mapping[str, Any]) -> Hook | None:
         "session_uuid": _text(payload, "session_id", 100),
         "cwd": _text(payload, "cwd", 1000),
     }
-    if event == MOD_SESSION_START:
-        return Hook(kind=HOOK_SESSION_START, observed=WORKING, **common)
-    if event == MOD_TURN_COMPLETE:
-        if payload.get("reason") != "answer":
-            return Hook(kind=HOOK_NOTIFICATION, **common)
+    if event == MOD_TURN_COMPLETE and payload.get("reason") == "answer":
         return Hook(kind=HOOK_TURN_END, observed=DONE,
                     last_answer=_text(payload, "answer", LAST_ANSWER_LIMIT), **common)
     return Hook(kind=HOOK_NOTIFICATION, **common)

@@ -443,6 +443,48 @@ def test_a_new_turn_after_the_question_ended_its_turn_cancels_it(daemon, harness
     assert turn_end(daemon, harness, worker).state == ledger_mod.IDLE
 
 
+def session_hook(daemon, worker, event, **extra):
+    """A settings hook of *worker*'s session, posted with the session's own token."""
+    body = {"session_id": worker.session_uuid, "cwd": worker.worktree, "hook_event_name": event, **extra}
+    status, _ = support.request(
+        daemon.port, "POST", f"/hooks/{event}", body=json.dumps(body).encode(),
+        headers=as_(worker_tokens.read(worker.worktree_path)),
+    )
+    assert status == 200
+
+
+def test_a_reload_of_the_mod_starts_no_turn(daemon, harness):
+    worker = launch(harness)
+    assert turn_end(daemon, harness, worker).state == ledger_mod.IDLE
+
+    # The mod posts its session start at every load of its module.
+    assert post(daemon, "lifecycle/session_start", of(worker))[0] == 200
+
+    after = harness.ledger.get(worker.id)
+    assert (after.state, after.last_hook) == (ledger_mod.IDLE, "mod:session_start")
+
+
+def test_a_session_that_starts_again_keeps_the_question_it_asked(daemon, harness):
+    worker = launch(harness)
+    post(daemon, "tool/ask", of(worker, input={"question": "Which colour?"}))
+    assert turn_end(daemon, harness, worker).state == ledger_mod.BLOCKED
+    (question,) = harness.ledger.open_permission_prompts(worker)
+
+    # A reload of the mod, and a process that starts again, as after a respawn or an
+    # attach to a stopped session: neither starts a turn.
+    post(daemon, "lifecycle/session_start", of(worker))
+    session_hook(daemon, worker, "SessionStart", source="resume")
+
+    assert harness.ledger.get(worker.id).state == ledger_mod.BLOCKED
+    assert [p.id for p in harness.ledger.open_permission_prompts(worker)] == [question.id]
+
+    # A turn that starts in it cancels the question, as before.
+    session_hook(daemon, worker, "UserPromptSubmit")
+
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+    assert harness.ledger.open_permission_prompts(worker) == []
+
+
 @pytest.mark.parametrize("listed", ["blocked", "done"])
 def test_a_reply_from_the_command_line_answers_an_ask_question(daemon, harness, listed):
     worker = launch(harness)
