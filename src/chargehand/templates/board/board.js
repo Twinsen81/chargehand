@@ -83,8 +83,19 @@ const signatures = new Map();
 const cardStatus = new Map();
 // How many actions this page sent for each card, by worker id; it outlives a dismiss.
 const cardActionSequence = new Map();
+// What the operator put into a card and has not sent yet, by worker id: the line in the
+// answer field of a question, { prompt, text }, and the tick of force. A card is built
+// again whenever its data changes, and the new nodes start from this.
+const cardDraft = new Map();
+// The answer field that each card shows now, by worker id, so that a card built again
+// while the operator types can give the focus to its new field.
+const answerFields = new Map();
 // The repository headings of each column, by column key and repository name.
 const groupNodes = new Map();
+
+function keepDraft(id, part) {
+  cardDraft.set(String(id), { ...(cardDraft.get(String(id)) || {}), ...part });
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -438,6 +449,11 @@ function questionNode(c) {
   input.type = 'text';
   input.maxLength = REPLY_MAX;
   input.placeholder = 'Or type the answer, one line';
+  // A line typed for another question is not this question's answer.
+  const draft = (cardDraft.get(String(c.id)) || {}).answer;
+  if (draft && draft.prompt === p.id) input.value = draft.text;
+  input.addEventListener('input', () => keepDraft(c.id, { answer: { prompt: p.id, text: input.value } }));
+  answerFields.set(String(c.id), input);
   const submit = () => {
     const text = input.value.trim();
     if (text) answer(text);
@@ -492,6 +508,8 @@ function cardActions(c) {
     const label = el('label', 'force');
     force = el('input');
     force.type = 'checkbox';
+    force.checked = Boolean((cardDraft.get(String(c.id)) || {}).force);
+    force.addEventListener('change', () => keepDraft(c.id, { force: force.checked }));
     force.title = FORCE_HINT;
     label.append(force, ' force');
     label.title = FORCE_HINT;
@@ -588,9 +606,18 @@ function renderColumns(columns, now) {
         }
         const sig = signature(c);
         if (signatures.get(id) !== sig) {
+          const before = answerFields.get(id);
+          const typing = before && document.activeElement === before
+            ? [before.selectionStart, before.selectionEnd] : null;
+          answerFields.delete(id);
           card.className = 'card' + (c.hidden ? ' hidden-repository' : '');
           card.replaceChildren(...cardChildren(c, now));
           signatures.set(id, sig);
+          const field = answerFields.get(id);
+          if (typing && field) {
+            field.focus();
+            field.setSelectionRange(typing[0], typing[1]);
+          }
         }
         wanted.push(card);
       }
@@ -630,6 +657,12 @@ function render(model) {
   const shown = new Set(model.columns.flatMap((column) => column.cards.map((c) => String(c.id))));
   for (const id of [...cardStatus.keys()]) {
     if (!shown.has(id)) cardStatus.delete(id);
+  }
+  for (const id of [...cardDraft.keys()]) {
+    if (!shown.has(id)) cardDraft.delete(id);
+  }
+  for (const id of [...answerFields.keys()]) {
+    if (!shown.has(id)) answerFields.delete(id);
   }
   renderColumns(model.columns, now);
 }
@@ -859,6 +892,8 @@ function workerAction(c, name, force) {
   const sequence = (cardActionSequence.get(String(c.id)) || 0) + 1;
   cardActionSequence.set(String(c.id), sequence);
   const latestAction = () => cardActionSequence.get(String(c.id)) === sequence;
+  // The tick of force is for the one action that it was set for.
+  if (FORCED.has(name)) keepDraft(c.id, { force: false });
   setCardStatus(c.id, 'pending', 'sending');
   send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''),
     (outcome) => {

@@ -811,8 +811,10 @@ const $ = () => ({ value: '' });
 const sent = [];
 function send(path, body, what, onOutcome) { sent.push(onOutcome); }
 // The constants live in the eval's scope, so the stub that writes the card line does too.
-eval(['FORCED', 'ACTION_LABELS', 'ARCHIVE_NOTE', 'cardStatus', 'cardActionSequence'].map(constant).join('')
+eval(['FORCED', 'ACTION_LABELS', 'ARCHIVE_NOTE', 'cardStatus', 'cardActionSequence', 'cardDraft']
+  .map(constant).join('')
   + 'function setCardStatus(id, kind, text) { cardStatus.set(String(id), { kind, text }); }'
+  + grab('function keepDraft(')
   + grab('function statusText(') + grab('function riskWarning(') + grab('function workerAction(')
   + ';globalThis.run = (c, name, force) => workerAction(c, name, force);'
   + 'globalThis.status = (id) => cardStatus.get(String(id));');
@@ -836,6 +838,145 @@ def test_a_late_refusal_of_an_older_action_leaves_the_newer_outcome_on_the_card(
     ).stdout
 
     assert json.loads(out) == {"kind": "ok", "text": "done: discarded #7"}
+
+
+# The page with a small stand-in for the DOM: enough to build a card, to type into it, and
+# to build it again from a model that changed.
+NODE_RERENDER = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const byId = new Map();
+class El {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this.parent = null; this.className = '';
+    this.dataset = {}; this.style = {}; this.listeners = {}; this.textContent = '';
+    this.value = ''; this.checked = false; this.hidden = false; this._id = '';
+    this.classList = { add() {}, remove() {} };
+  }
+  set id(v) { this._id = v; byId.set(v, this); }
+  get id() { return this._id; }
+  append(...nodes) {
+    for (const n of nodes) if (n instanceof El) { n.remove(); n.parent = this; this.children.push(n); }
+  }
+  replaceChildren(...nodes) {
+    for (const c of this.children) c.parent = null;
+    this.children = [];
+    this.append(...nodes);
+  }
+  remove() {
+    if (!this.parent) return;
+    this.parent.children.splice(this.parent.children.indexOf(this), 1);
+    this.parent = null;
+  }
+  insertBefore(node, ref) {
+    node.remove(); node.parent = this;
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i < 0) this.children.push(node); else this.children.splice(i, 0, node);
+  }
+  addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); }
+  fire(name) { for (const fn of this.listeners[name] || []) fn({ key: '' }); }
+  focus() { document.activeElement = this; }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  has(cls) { return String(this.className).split(/\s+/).includes(cls); }
+  *walk() { for (const c of this.children) { yield c; yield* c.walk(); } }
+  querySelectorAll(sel) {
+    return sel === '.card, .group' ? [...this.walk()].filter((n) => n.has('card') || n.has('group')) : [];
+  }
+  querySelector() { return new El('stub'); }
+}
+const root = new El('body');
+const document = {
+  activeElement: null,
+  createElement: (tag) => new El(tag),
+  getElementById: (id) => {
+    if (!byId.has(id)) { const e = new El('div'); e.id = id; root.append(e); }
+    return byId.get(id);
+  },
+  querySelector: (sel) => {
+    const m = /^\.card\[data-id="(.*)"\]$/.exec(sel);
+    return m ? [...root.walk()].find((n) => n.has('card') && n.dataset.id === m[1]) || null : null;
+  },
+  querySelectorAll: () => [],
+};
+const window = { confirm: () => true };
+const CSS = { escape: (s) => s };
+const store = new Map([['chargehand.token', 'tok']]);
+const localStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k),
+};
+const fetch = async () => { throw new Error('no network here'); };
+const setTimeout = () => 0;
+eval(src + ';globalThis.page = { render, workerAction };');
+const question = (id) => ({
+  id, kind: 'question', tool_name: 'ask', tool_input: 'Which colour?', created_at: 1, answers: [],
+  options: ['red', 'blue'],
+});
+const card = (changes) => Object.assign({
+  id: 7, handle: 'implementer/ABC-1#7', origin: 'board', parent: null, clone_mode: null,
+  actions: ['continue', 'cancel', 'reply', 'attach', 'discard', 'archive', 'clone'],
+  column: 'needs_you', state: 'blocked', session_state: 'done', role: 'implementer', repository: 'test',
+  item: 'ABC-1', item_url: null, pr_url: null, branch: 'b', worktree: '/w', model: null, effort: null,
+  last_prompt: null, last_answer: null, waiting_for: null, permission_prompt: question(3),
+  report: null, problem: null, wakes_today: 0, wake_cap: null, tokens_estimate: 100, sessions: [],
+  attach: 'claude attach abc', reset_at: null, queue_reason: null, clone_start: null, last_hook: 'Stop',
+  job: null, work_at_risk: null, archived_at: null, created_at: 1, updated_at: 2, finished_at: null,
+  display_name: null, icon: null, icon_glyph: null, pinned: false, repository_label: 'test', hidden: false,
+}, changes);
+const model = (c) => ({
+  generated_at: 10, usage: { known: false }, model_limit: null,
+  throttle: { working: 0, max_concurrent: 1, open: 1, max_open_workers: 5, paused: false, paused_repositories: [] },
+  health: { ticking: false }, jobs: [], job_summary: { shown: [], counts: {} },
+  columns: [{ key: 'needs_you', title: 'Needs you', hint: '', count: 1, cards: [c],
+    groups: [{ repository: 'test', display_name: null, icon: null, icon_glyph: null, pinned: false,
+      collapsed: false, hidden: false, count: 1, folded: 0 }] }],
+  repositories: [{ name: 'test', roles: ['implementer'], paused: false, pinned: false, collapsed: false, hidden: false }],
+  hidden: { repositories: [], count: 0, cards: 0, shown: false }, icons: {}, terminals: ['terminal', 'iterm2'],
+  token_file: '/t',
+});
+const find = (test) => [...root.walk()].find(test);
+const answerField = () => find((n) => n.tagName === 'input' && n.type === 'text' && n.parent && n.parent.has('answer-line'));
+const forceBox = () => find((n) => n.tagName === 'input' && n.type === 'checkbox' && n.parent && n.parent.has('force'));
+const out = {};
+
+page.render(model(card({})));
+const typed = answerField();
+typed.focus();
+typed.value = 'use the blue one';
+typed.setSelectionRange(7, 7);
+typed.fire('input');
+forceBox().checked = true;
+forceBox().fire('change');
+// The next poll reads a card whose data changed: the page builds its nodes again.
+page.render(model(card({ session_state: 'blocked', last_hook: 'Notification', tokens_estimate: 101 })));
+out.rebuilt = answerField() !== typed;
+out.answer = answerField().value;
+out.focused = document.activeElement === answerField();
+out.caret = [answerField().selectionStart, answerField().selectionEnd];
+out.force = forceBox().checked;
+// An action that used the tick takes it: it was set for that one action.
+page.workerAction(card({ session_state: 'blocked' }), 'discard', true);
+out.forceAfterAction = forceBox().checked;
+// Another question is not answered by the line typed for the first one.
+page.render(model(card({ permission_prompt: question(4) })));
+out.answerToNextQuestion = answerField().value;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_card_that_is_built_again_keeps_what_the_operator_put_into_it(tmp_path):
+    runner = tmp_path / "rerender.js"
+    runner.write_text(NODE_RERENDER)
+    out = subprocess.run(
+        ["node", str(runner), str(board.asset_dir() / "board.js")],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    assert json.loads(out.splitlines()[-1]) == {
+        "rebuilt": True, "answer": "use the blue one", "focused": True, "caret": [7, 7],
+        "force": True, "forceAfterAction": False, "answerToNextQuestion": "",
+    }
 
 
 # ----- the handle on the command line -------------------------------------------------------

@@ -112,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the model to end its turn; at the end of that turn the worker is blocked, and its card in
   Needs you shows the options as buttons and a one-line answer field. A question and
   its options are stored without the characters that a reader cannot see, so a button
-  sends what it shows. The first answer
+  sends what it shows. A line that you type into the answer field stays, with the focus,
+  when the card's data changes under it. The first answer
   resolves the question and reaches the worker as a reply, as its next turn; a second one
   is refused with 409. A session whose process starts again without a turn, as after a
   respawn, keeps its open question. `AskUserQuestion` is denied for every worker at launch.
@@ -191,7 +192,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "refused" with the reason, until the next action on that card or a dismiss; the notice
   under the top bar stays as it was. A Discard, Retry or Archive that is refused without
   force says it in the board's words, for example "its worktree has uncommitted changes;
-  tick force and press Discard again". Before, the outcome showed only in the notice, in
+  tick force and press Discard again". The tick of force now stays when the card's data
+  changes, and the action that it was set for takes it. Before, the outcome showed only in the notice, in
   the command line's words ("Re-run with --force"), and the card seemed to do nothing. The
   outcome of such a refusal (`/api/requests/<id>`) carries a `reason` (`needs_force`, and
   the uncommitted changes and unpushed commits at risk, or a session that did not stop)
