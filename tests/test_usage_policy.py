@@ -13,6 +13,7 @@ from chargehand import board as board_mod
 from chargehand import claude
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
+from chargehand import sanitize
 from chargehand import usage as usage_mod
 from chargehand.config import MachineConfig, UsageConfig
 from chargehand.delivery import (
@@ -24,6 +25,7 @@ from chargehand.delivery import (
 )
 from chargehand.errors import ConfigError
 from chargehand.tick import MODEL_LIMIT_KEY, TickReport, reset_clock
+from conftest import FAKE_CLAUDE
 from test_delivery import REVIEWER, build, emit_three, end_turn, resumes, start_reviewer, write_role
 
 MINIMAL = {"route": [{"repo": "~/code/app", "tracker": {"type": "linear", "team": "ABC"}}]}
@@ -529,10 +531,16 @@ def test_a_resume_held_by_a_failed_listing_reports_the_error(harness, monkeypatc
     held = harness.worker("ABC-1")
     assert held.state == ledger_mod.PARKED
     reason = queue_reason(harness, held)
-    assert reason.startswith("resume held, the session listing failed: ")
-    assert "agents unavailable" in reason
+    prefix = "resume held, the session listing failed: "
+    assert reason.startswith(prefix)
+    # The error names the binary, so its length depends on the checkout path: compare
+    # with the same cap that delivery applies.
+    error = f"`{FAKE_CLAUDE} agents --json --all` exited 1: fake claude: agents unavailable"
+    assert reason == prefix + sanitize.one_line(error, limit=200)
+    assert len(reason) <= len(prefix) + 200
     assert f"implementer/ABC-1: {reason.removeprefix('resume held, ')}" in report.errors
-    assert card(harness, held)["queue_reason"] == reason
+    # The card caps a line as it caps every line.
+    assert card(harness, held)["queue_reason"] == sanitize.one_line(reason, limit=board_mod.LINE_LIMIT)
 
 
 def test_a_resume_held_by_a_runtime_this_build_lacks_says_so(harness):
