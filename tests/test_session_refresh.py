@@ -3,6 +3,7 @@ the next wake starts a fresh session for the same worker, which keeps the old on
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -549,12 +550,20 @@ def test_the_resume_of_a_parked_worker_stays_in_its_session_past_the_limit(after
     assert resumes(harness)[-1]["prompt"] == delivery_mod.RESUME_MESSAGE
 
 
-def test_the_answer_to_a_question_stays_in_its_session_past_the_limit(after_two):
+def test_the_answer_to_a_status_file_question_stays_in_its_session_past_the_limit(
+    after_two, repo, tmp_path
+):
     harness = after_two
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    write_role(repo, REVIEWER.replace(
+        "\n[[start]]", f'status_file = "{status_dir}/{{item}}.json"\n\n[[start]]', 1
+    ) + "\n[policy]\nrefresh_after_wakes = 2\n")
     reviewer = start_reviewer(harness)
     wake(harness, reviewer)
     wake(harness, reviewer)
-    # The last turn ended with a plain-text question.
+    # The last turn asked in the status file, and the listing shows the turn ended.
+    (status_dir / "PR-7.json").write_text(json.dumps({"state": "needs-input"}))
     harness.claude_state.set_session_state(reviewer.session_id, "blocked", status="idle")
     harness.next_tick()
     assert harness.ledger.get(reviewer.id).state == ledger_mod.BLOCKED

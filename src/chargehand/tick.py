@@ -1843,13 +1843,9 @@ class Runner:
             runtime = self.runtime(worker.runtime)
         except ConfigError:
             return None
-        if runtime.ended_with_question(session):
-            return (
-                f"{worker.name} asked a question, and its session waits for the answer: "
-                f"send the answer as a reply"
-            )
-        if session.state == runtime_mod.DONE:
-            # Blocked by its status file, or by a role that does not load: the turn ended.
+        if session.state == runtime_mod.DONE or runtime.ended_without_dialog(session):
+            # Blocked by an ask question, its status file, or a role that does not load:
+            # the turn ended.
             return (
                 f"{worker.name}: its turn ended and its session waits, so there is nothing "
                 f"to respawn: send a reply"
@@ -2786,6 +2782,12 @@ class Runner:
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
+            if session is not None and self._turn_ended_blocked(worker, session):
+                # No dialog waits and no permission prompt is open: the listing says no more
+                # than `done`. Its report, an ask question or the status file still block.
+                log.debug("%s: the listing shows session %s as blocked with no dialog; read "
+                          "as a turn end", worker.handle, worker.session_id or "-")
+                observed = runtime_mod.DONE
             busy = observed == runtime_mod.WORKING or (
                 observed == runtime_mod.DONE and session is not None and session.busy
             )
@@ -2828,6 +2830,26 @@ class Runner:
                 worker = self._apply_session_state(worker, observed, report, session=session)
             except _RowChanged:
                 continue
+
+    def _turn_ended_blocked(self, worker: Worker, session: Session) -> bool:
+        """Whether *session* lists as ``blocked`` while its live process waits for nothing.
+
+        Claude Code lists a session ``blocked`` after a turn that ended with a plain-text
+        question, and also after some turns that ended without one. Only a dialog, an open
+        permission prompt, an ask question or the status file blocks the worker. A
+        ``blocked`` entry without a process keeps its own handling.
+        """
+        if session.state != runtime_mod.BLOCKED or self._is_stopped(worker, session):
+            return False
+        try:
+            if not self.runtime(worker.runtime).ended_without_dialog(session):
+                return False
+        except ConfigError:
+            return False
+        return not any(
+            prompt.kind == ledger_mod.PROMPT_PERMISSION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        )
 
     def _hook_is_newer(self, worker: Worker) -> bool:
         listed_at = self._listed_at.get(worker.runtime)
@@ -3441,9 +3463,10 @@ class Runner:
         """Whether blocked *worker* waits for the answer to a question, which a reply gives.
 
         No permission prompt is open, and this tick's listing shows the session's turn
-        ended: with a question, or `done` when the ask tool or the status file asked one. A
-        question of the ask tool is resolved by the board's answer first. A turn that runs,
-        a dialog that waits and a failed turn do not count. No new call.
+        ended: `done`, or `blocked` with no dialog, while the ask tool or the status file
+        asked a question. A question of the ask tool is resolved by the board's answer
+        first. A turn that runs, a dialog that waits and a failed turn do not count. No new
+        call.
         """
         if worker.state != ledger_mod.BLOCKED or not worker.session_id:
             return False
@@ -3455,7 +3478,7 @@ class Runner:
         if session.state == runtime_mod.DONE:
             return True
         try:
-            return self.runtime(worker.runtime).ended_with_question(session)
+            return self.runtime(worker.runtime).ended_without_dialog(session)
         except ConfigError:
             return False
 

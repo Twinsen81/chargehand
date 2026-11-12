@@ -334,16 +334,17 @@ def test_an_option_is_sent_as_the_operator_sees_it(daemon, harness, monkeypatch)
 PERMISSION, ANSWER_PERMISSION, ASK, STOP = "permission", "answer permission", "ask", "stop"
 LISTED_BLOCKED, LISTED_DONE, ANSWER_QUESTION = "listed blocked", "listed done", "answer question"
 STATUS_NEEDS_INPUT = "status file needs-input"
-# The details of the "blocked" notifications: a prompt or a question that the listing shows
-# first, and a question that the ask tool asked.
+# The details of the "blocked" notifications: a permission prompt or the status file's
+# needs-input, and a question that the ask tool asked.
 NEEDS_INPUT, ASKED = "needs input", tick_mod.ASKED
 
 
 @pytest.mark.parametrize("status_file, steps, notified", [
     # The duplicate first seen: the Stop hook, then the listing's views of the same turn end.
     (False, [ASK, STOP, LISTED_BLOCKED, LISTED_DONE, LISTED_BLOCKED], [ASKED]),
-    # The listing sees the question before the Stop hook comes in.
-    (False, [ASK, LISTED_BLOCKED, STOP, LISTED_BLOCKED], [NEEDS_INPUT]),
+    # The listing sees the turn end before the Stop hook comes in: `blocked` with no dialog
+    # is a turn end, and the ask question blocks.
+    (False, [ASK, LISTED_BLOCKED, STOP, LISTED_BLOCKED], [ASKED]),
     # The answer resolves the question; the tick that applies it still lists it blocked.
     (False, [ASK, STOP, LISTED_BLOCKED, ANSWER_QUESTION, LISTED_BLOCKED], [ASKED]),
     # A permission prompt, answered before the next tick, then the question: two of them.

@@ -741,8 +741,7 @@ class Delivery:
         try:
             # The runtime's own look decides, right before its stop: the operator may have
             # started a turn in the session since this tick's listing. A failed turn has
-            # ended, so a resume accepts it; so has a turn that ended with a question, so
-            # its answer accepts it.
+            # ended, so a resume accepts it.
             outcome = self._runtime(worker.runtime).wake(
                 worker.session_id, message, session_uuid=worker.session_uuid,
                 if_idle=not resume, if_ended=resume, if_asked=answer,

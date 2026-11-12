@@ -353,9 +353,9 @@ class Runtime(ABC):
         ``busy`` set. The runtime decides from its own fresh look, because the caller's
         view of the session can be older. Delivery asks this way. *if_ended* is the same,
         except that a turn that ended ``failed`` also counts as ended: the resume of a
-        worker that a usage limit parked asks this way. *if_asked* is the same, except that
-        a turn that ended with a question (see :meth:`ended_with_question`) also counts as
-        ended: a reply from the board to that question asks this way.
+        worker that a usage limit parked asks this way. *if_asked* is the same as
+        *if_idle*: a reply from the board to a question asks this way. Each of them also
+        counts a session as ended that :meth:`ended_without_dialog` accepts.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing
@@ -381,13 +381,14 @@ class Runtime(ABC):
         """Whether the listed *session* has no process left. The one rule for confirming a stop."""
         return session.state in (STOPPED, FAILED)
 
-    def ended_with_question(self, session: Session) -> bool:
-        """Whether the listed *session* is ``blocked`` because its turn ended with a question.
+    def ended_without_dialog(self, session: Session) -> bool:
+        """Whether the listed *session* is ``blocked`` while its turn ended and no dialog waits.
 
-        Then no turn runs and no dialog waits, so a stop and a resume with the answer lose
-        nothing. A permission prompt or a question dialog is still open in the session, and
-        a stop would discard it. A session without a process that still lists the question
-        counts too. A runtime that cannot tell these apart never says True.
+        Then no turn runs and nothing in the session waits for an answer, so a stop and a
+        resume lose nothing, and the listing says no more than a ``done`` one. A permission
+        prompt or a question dialog is still open in the session, and a stop would discard
+        it. A session without a process that still lists ``blocked`` counts too. A runtime
+        that cannot tell these apart never says True.
         """
         return False
 
