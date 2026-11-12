@@ -579,6 +579,39 @@ def test_only_the_first_worker_on_an_item_marks_it(wired, fake_board):
     assert mark_calls(fake_board) == [["mark", "DEMO-1", "running"]]
 
 
+@pytest.mark.parametrize("mode", ["fresh", "full"])
+def test_a_clone_of_a_command_source_worker_follows_its_item_on_that_source(
+    wired, fake_board, mode
+):
+    fake_board.add("DEMO-1")
+    wired.tick()
+    original = wired.worker("DEMO-1", "watcher")
+    wired.claude_state.set_session_state(original.session_id, "done", status="idle")
+    wired.next_tick()
+    request_id = wired.ledger.record_request(
+        "clone", original.target, origin=ledger_mod.REQUEST_BOARD, mode=mode
+    )
+    wired.next_tick()
+    outcome = wired.ledger.get_request(request_id)
+    assert outcome["ok"] == 1, outcome["message"]
+    (clone,) = [w for w in wired.ledger.live_workers() if w.origin == ledger_mod.ORIGIN_CLONE]
+
+    primary = wired.ledger.primary_subscription(clone)
+    assert (primary.source, primary.item, primary.item_ref) == ("cmd", "DEMO-1", "DEMO-1")
+    assert clone.url == original.url == "https://tracker.invalid/DEMO-1"
+
+    # The clone's turn ends: its item is still open on the command source.
+    wired.claude_state.set_session_state(clone.session_id, "done", status="idle")
+    report = wired.next_tick()
+    assert not any("item closed" in t for t in report.transitions), report.transitions
+    assert wired.ledger.get(clone.id).state == ledger_mod.IDLE
+
+    fake_board.close("DEMO-1")
+    wired.next_tick()
+    assert wired.ledger.get(clone.id).state == ledger_mod.DONE
+    assert wired.ledger.get(original.id).state == ledger_mod.DONE
+
+
 def test_retry_does_not_queue_a_command_source_item_again(wired, fake_board):
     fake_board.add("DEMO-1")
     wired.tick()
