@@ -221,6 +221,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it followed it on the repository's tracker, which does not know the item, so the item
   counted as closed. A clone of a worker that the queue label started still follows the
   tracker.
+- A false "Needs you". Claude Code's session listing sometimes shows an idle session as
+  `blocked` with `status: idle` and no `waitingFor`, also after a turn that asked
+  nothing, and the worker moved to Needs you with nothing to answer and a "blocked (needs
+  input)" notification. That listing now counts as a turn end, the same as `done`: only a
+  dialog in the session (`status: waiting`), an open permission prompt, an open question
+  of the `ask` tool or the status file's `needs-input` blocks the worker. So a question
+  that the session asks as plain text no longer blocks the worker or sends a
+  notification: the worker is idle, and a reply from the board, or any other event, wakes
+  it. The tick logs the case at DEBUG.
 
 ### Added
 
