@@ -216,6 +216,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for the board first, and `more_prompts` says how many more wait. Before, only the
   last prompt reached the board, and after its answer the worker stayed blocked with
   nothing to answer.
+- A clone of a worker that a `[[source]]` started no longer ends in its first tick with
+  "item closed". The clone follows its item on the source of its original's item; before,
+  it followed it on the repository's tracker, which does not know the item, so the item
+  counted as closed. A clone of a worker that the queue label started still follows the
+  tracker.
 
 ### Added
 

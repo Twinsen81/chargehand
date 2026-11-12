@@ -37,7 +37,7 @@ import subprocess
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from chargehand import archive as archive_mod
@@ -1627,7 +1627,7 @@ class Runner:
             f"of {len(str(values['prompt']))} characters" if values["prompt"] else "of the role",
             values["model"] or "of the role", values["effort"] or "of the role",
         )
-        item = context.item_of(original) if original.item else None
+        item = self._clone_item(original, context)
         launched: list[Worker] = []
 
         def launch() -> Worker:
@@ -1646,6 +1646,21 @@ class Runner:
             if started:
                 outcome += f"; {started}"
         return ok, outcome
+
+    def _clone_item(self, original: Worker, context: RepositoryContext) -> WorkItem | None:
+        """The item a clone of *original* works on, from the source of its primary item.
+
+        A worker that a ``[[source]]`` started has its item there, not on the repository's
+        tracker; with the tracker's name the clone would ask the wrong source whether its
+        item is open, and end in its first tick. A worker from before subscriptions
+        existed has no primary item and keeps the tracker's.
+        """
+        if not original.item:
+            return None
+        primary = None if self._drives_label(original) else self.ledger.primary_subscription(original)
+        if primary is None:
+            return context.item_of(original)
+        return replace(primary.work_item, url=original.url, hint=context.repository.name)
 
     def _summary_capable(self, original: Worker) -> bool:
         """Whether a new session of *original*'s runtime loads the chargehand mod."""
