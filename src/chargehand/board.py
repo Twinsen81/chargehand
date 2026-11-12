@@ -50,7 +50,7 @@ import logging
 import re
 import time
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from chargehand import clone as clone_mod
@@ -1108,11 +1108,8 @@ def card(
 ) -> dict[str, object]:
     role = roles.of(worker)
     live = not worker.is_terminal
-    # The newest: a session shows one dialog at a time.
-    prompt = (
-        next((p for p in reversed(list(prompts)) if p.worker_id == worker.id), None)
-        if live else None
-    )
+    own = [p for p in prompts if p.worker_id == worker.id] if live else []
+    prompt = shown_prompt(own, held)
     cap = role.policy.max_wakes_per_day if role else None
     parent = ledger.get(worker.parent_id) if worker.parent_id else None
     return {
@@ -1141,6 +1138,8 @@ def card(
             if live and worker.waiting_for else None
         ),
         "permission_prompt": permission_prompt(prompt, held) if prompt else None,
+        # The worker's other open prompts, shown one at a time after this one.
+        "more_prompts": len(own) - 1 if prompt else 0,
         "report": report_of(worker),
         "problem": (
             sanitize.one_line(worker.last_error, limit=300)
@@ -1186,6 +1185,22 @@ def work_at_risk(worker: Worker, ledger: Ledger) -> dict[str, object] | None:
         return work_facts(json.loads(raw)) if raw else None
     except ValueError:
         return None
+
+
+def shown_prompt(
+    prompts: Sequence[ledger_mod.PermissionPrompt], held: Callable[[int], bool]
+) -> ledger_mod.PermissionPrompt | None:
+    """The open prompt that a card shows, of one worker's *prompts* in the order of their ids.
+
+    Parallel tool calls each wait for their own answer, so the oldest permission prompt
+    that a hook still holds comes first, and the others follow once it is answered.
+    Without one, the newest open prompt: an ask question, or a prompt that only the
+    session can answer.
+    """
+    for prompt in prompts:
+        if prompt.kind == ledger_mod.PROMPT_PERMISSION and held(prompt.id):
+            return prompt
+    return prompts[-1] if prompts else None
 
 
 def permission_prompt(
@@ -1330,6 +1345,7 @@ __all__ = [
     "permission_prompt",
     "question_options",
     "report_of",
+    "shown_prompt",
     "target_of",
     "COLUMNS",
     "COLUMN_OF",
