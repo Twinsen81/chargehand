@@ -700,6 +700,17 @@ anew for each call). The next such post
 is allowed at once, with no card and no notification, and is recorded as resolved by the
 rule. A rule never changes the role, the repository or Claude Code's settings.
 
+A session can wait for several prompts at once: parallel tool calls of one turn post
+their `PermissionRequest` hooks within a moment, and each one waits for its own answer.
+Every open prompt is kept as its own record, and a newer post cancels no older one. Each
+held hook waits for the record that its own post wrote, so two calls with the same tool
+and input hold two records. The card shows the oldest record that a hook holds, and its
+`more_prompts` says how many other open prompts wait; once that one is answered, the next
+one shows. Without a held record, the card shows the newest open one. An answer to one
+prompt leaves the others open and answerable. The listing says only whether a session
+shows a permission dialog, not which one, so the look at the listing below cancels every
+held record of the session at once when the session no longer shows any dialog.
+
 The hook answers `{}`, so the session shows its own dialog, in three cases: the record is
 cancelled because the session no longer shows the dialog; five seconds before the
 hook's timeout; and when the daemon stops. A record is cancelled when the worker leaves
@@ -736,7 +747,7 @@ existed is followed by the diff alone.
 | `Stop` | as a `done` session: the worker's report or open question, then the status file, then `idle` |
 | `StopFailure`, usage limit | the worker is `parked`, with the reset time when the message gives one; a limit of one model family also sets the board's model-limit badge |
 | `StopFailure`, any other error | the worker is `blocked`, "session failed" |
-| `PermissionRequest` | the worker is `blocked`, the prompt is recorded with its tool and input, and the post waits for the board's answer; with a matching Always allow rule, it is allowed at once and nothing else changes |
+| `PermissionRequest` | the worker is `blocked`, the prompt is recorded with its tool and input, and the post waits for the board's answer to that prompt; older open prompts of the session stay open; with a matching Always allow rule, it is allowed at once and nothing else changes |
 | `Notification` `permission_prompt` | the worker is `blocked` |
 | `Notification`, other types | no change |
 
