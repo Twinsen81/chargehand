@@ -207,6 +207,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ended and then at most every ten minutes, and of a live worker after an action on it was
   refused; a refused action looks at once. The card's `work_at_risk` shows what it found.
   Retry asks for a confirmation only in that case.
+- Parallel tool calls in manual mode. Each `PermissionRequest` of a session now stays its
+  own prompt that the board can answer: a newer request no longer cancels an older one, and
+  each held hook waits for the answer to the prompt that its own post recorded, also when
+  two calls have the same tool and input. A prompt is cancelled only when the session
+  withdraws it: the session no longer shows a permission dialog, the worker leaves
+  `blocked`, the turn or session ends, or a stop. The card shows the oldest prompt that
+  waits for the board first, and `more_prompts` says how many more wait. Before, only the
+  last prompt reached the board, and after its answer the worker stayed blocked with
+  nothing to answer.
 
 ### Added
 
