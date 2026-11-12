@@ -1894,6 +1894,12 @@ class Runner:
                 state = {"state": ledger_mod.BLOCKED} if asked else running
                 written = self.ledger.update_if_unchanged(current, **state)
                 if written is not None:
+                    if asked:
+                        # The old process and its dialogs are gone; a write of `blocked`
+                        # cancels no prompt by itself.
+                        self.ledger.resolve_permission_prompts(
+                            written, recorded_by=respawned_at, kind=ledger_mod.PROMPT_PERMISSION
+                        )
                     return written
             # A hook of the new session wrote the state it shows. A usage limit that parked
             # it again keeps its own reset time.
@@ -2817,7 +2823,13 @@ class Runner:
         )
 
     def apply_hook(
-        self, worker: Worker, hook: Hook, report: TickReport | None = None, *, now: float | None = None
+        self,
+        worker: Worker,
+        hook: Hook,
+        report: TickReport | None = None,
+        *,
+        now: float | None = None,
+        recorded: list[int] | None = None,
     ) -> Worker | None:
         """Apply what one session hook reports to *worker* at once, as the next diff would.
 
@@ -2825,7 +2837,8 @@ class Runner:
         written only if the row still has the state and the last hook it was read with;
         otherwise the row is read again. The transition, the label and the notification
         are the session diff's own. Returns the worker as written, or None when it is no
-        longer live.
+        longer live. The id of the permission prompt that the hook records is appended to
+        *recorded*, so the caller that holds the hook holds this prompt and no other.
         """
         report = report if report is not None else TickReport()
         stamp = time.time() if now is None else now
@@ -2861,15 +2874,14 @@ class Runner:
             # A new turn, a prompt in a turn, a new session or a failed turn.
             self.ledger.delete_state(turn_ended_key)
         if hook.kind == runtime_mod.HOOK_PERMISSION:
-            # A session shows one permission dialog at a time; an older open prompt was
-            # answered in the session. A question that the ask tool recorded stays open.
-            self.ledger.resolve_permission_prompts(
-                current, now=stamp, kind=ledger_mod.PROMPT_PERMISSION
-            )
-            self.ledger.record_permission_prompt(
+            # Parallel tool calls of one turn post their requests at the same time, and each
+            # one waits for its own answer, so an older open prompt stays open.
+            prompt_id = self.ledger.record_permission_prompt(
                 current, tool_name=hook.tool_name or "unknown", tool_input=hook.tool_input or "",
                 now=stamp,
             )
+            if recorded is not None:
+                recorded.append(prompt_id)
         if observed is None:
             return current
         for _ in range(HOOK_WRITE_ATTEMPTS):

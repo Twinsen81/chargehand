@@ -245,8 +245,9 @@ def receive(request: Request) -> Response:
                  worker.handle)
         return Response.json(runtime.permission_decision(ledger_mod.ALLOW))
     report = TickReport()
+    recorded: list[int] = []
     try:
-        request.daemon.runner(ledger).apply_hook(worker, hook, report)
+        request.daemon.runner(ledger).apply_hook(worker, hook, report, recorded=recorded)
     except Exception:
         # The session must not see an error it could act on; the next diff catches up.
         log.exception("hook %s for %s failed", event, worker.handle)
@@ -254,8 +255,8 @@ def receive(request: Request) -> Response:
     # Into the daemon's log in the tick's own format, so a turn end shows there as the
     # change it made. A report with nothing in it prints nothing.
     request.daemon.report(report)
-    if held:
-        return _hold(request, ledger, runtime, worker, hook)
+    if held and recorded:
+        return _hold(request, ledger, runtime, worker, hook, recorded[-1])
     return NO_DECISION
 
 
@@ -268,9 +269,7 @@ def _allowed_by_rule(ledger: Ledger, worker: Worker, hook: Hook) -> bool:
     tool = hook.tool_name or "unknown"
     if not digest or not ledger.has_permission_rule(worker, tool, digest):
         return False
-    # A session shows one dialog at a time; an older open prompt was answered in it. A
-    # question that the ask tool recorded stays open.
-    ledger.resolve_permission_prompts(worker, kind=ledger_mod.PROMPT_PERMISSION)
+    # Parallel tool calls each wait for their own answer: an older open prompt stays open.
     ledger.record_permission_prompt(
         worker, tool_name=tool, tool_input=hook.tool_input or "", input_digest=digest,
         resolved_by=ledger_mod.RESOLVED_BY_RULE,
@@ -278,21 +277,21 @@ def _allowed_by_rule(ledger: Ledger, worker: Worker, hook: Hook) -> bool:
     return True
 
 
-def _recorded_prompt(ledger: Ledger, worker: Worker, hook: Hook) -> PermissionPrompt | None:
-    """The open prompt that applying *hook* recorded: the newest with its tool and input."""
-    tool, given = hook.tool_name or "unknown", hook.tool_input or ""
-    for prompt in reversed(ledger.open_permission_prompts(worker)):
-        if prompt.tool_name == tool and prompt.tool_input == given:
-            return prompt
-    return None
-
-
 def _hold(
-    request: Request, ledger: Ledger, runtime: type[Runtime], worker: Worker, hook: Hook
+    request: Request,
+    ledger: Ledger,
+    runtime: type[Runtime],
+    worker: Worker,
+    hook: Hook,
+    prompt_id: int,
 ) -> Response:
-    """Hold the hook until the prompt is answered or cancelled, the timeout nears, or a stop."""
-    prompt = _recorded_prompt(ledger, worker, hook)
-    if prompt is None:
+    """Hold the hook until its prompt is answered or cancelled, the timeout nears, or a stop.
+
+    The prompt is the one that this hook's own post recorded: parallel calls with the same
+    tool and input each hold their own.
+    """
+    prompt = ledger.get_permission_prompt(prompt_id)
+    if prompt is None or prompt.state != ledger_mod.PROMPT_OPEN:
         return NO_DECISION
     if hook.tool_input_digest:
         ledger.set_prompt_digest(prompt.id, hook.tool_input_digest)

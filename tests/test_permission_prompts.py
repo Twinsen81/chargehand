@@ -57,6 +57,7 @@ class Held:
 
     def __init__(self, daemon, worker, command="date > probe.txt", tool="Bash", description=None):
         self.result: tuple[int, object] | None = None
+        self.command = command
         tool_input = {"command": command}
         if description is not None:
             tool_input["description"] = description
@@ -92,14 +93,30 @@ def answer(daemon, worker, prompt_id, choice, **kwargs):
                      {"prompt": prompt_id, "answer": choice}, **kwargs)
 
 
-def card_prompt(daemon, item="ABC-1"):
+def card_of(daemon, item="ABC-1"):
     status, raw = support.request(daemon.port, "GET", "/api/board")
     assert status == 200
     for column in json.loads(raw)["columns"]:
         for card in column["cards"]:
             if card["item"] == item:
-                return card["permission_prompt"]
+                return card
     raise AssertionError(f"no card for {item}")
+
+
+def card_prompt(daemon, item="ABC-1"):
+    return card_of(daemon, item)["permission_prompt"]
+
+
+def held_prompts(daemon, harness, worker, count) -> list[ledger_mod.PermissionPrompt]:
+    """The worker's open prompts, once *count* of their hooks wait for the board."""
+    def find():
+        prompts = harness.ledger.open_permission_prompts(harness.ledger.get(worker.id))
+        held = [p for p in prompts if hooks.is_held(daemon, p.id)]
+        return held if len(held) == count else None
+
+    prompts = support.wait_for(find)
+    assert prompts is not None, f"{count} hooks were not held"
+    return prompts
 
 
 # ----- the decision -------------------------------------------------------------------
@@ -229,6 +246,125 @@ def test_the_description_of_a_bash_call_is_not_part_of_what_a_rule_matches():
     assert digest("Bash", command="date", description="a") != digest("Bash", command="date -u", description="a")
     assert digest("Bash", command="date", timeout=1) != digest("Bash", command="date", timeout=2)
     assert digest("Other", command="date", description="a") != digest("Other", command="date", description="b")
+
+
+# ----- parallel tool calls -------------------------------------------------------------
+
+
+def test_parallel_requests_of_one_session_each_wait_for_their_own_answer(daemon, harness):
+    worker = launch(harness)
+    # Ten parallel calls of one turn post their requests within a moment; two of them have
+    # the same tool and input.
+    commands = [f"curl https://example.invalid/{n}" for n in range(9)] + ["curl https://example.invalid/0"]
+    held = [Held(daemon, worker, command=command) for command in commands]
+    prompts = held_prompts(daemon, harness, worker, len(commands))
+
+    # A newer request cancelled no older one, and every hook still waits.
+    assert all(hook.answered(timeout=0) is None for hook in held)
+    assert sorted(json.loads(p.tool_input)["command"] for p in prompts) == sorted(commands)
+
+    # The card shows the oldest first and says how many more wait; each answer brings the
+    # next one, and leaves the others open and answerable.
+    decisions = {}
+    for n, prompt in enumerate(prompts):
+        card = card_of(daemon)
+        assert (card["permission_prompt"]["id"], card["more_prompts"]) == (prompt.id, len(prompts) - n - 1)
+        choice = "allow" if n % 3 else "deny"
+        assert answer(daemon, worker, prompt.id, choice)[0] == 200
+        decisions[prompt.id] = choice
+        for later in prompts[n + 1:]:
+            assert harness.ledger.get_permission_prompt(later.id).state == "open"
+            assert hooks.is_held(daemon, later.id)
+
+    expected = {"allow": ALLOWED, "deny": DENIED}
+    answered = {}
+    for hook in held:
+        status, decision = hook.answered()
+        assert status == 200
+        answered.setdefault(hook.command, []).append(decision)
+    for prompt in prompts:
+        command = json.loads(prompt.tool_input)["command"]
+        assert expected[decisions[prompt.id]] in answered[command]
+        answered[command].remove(expected[decisions[prompt.id]])
+    assert all(left == [] for left in answered.values())
+    # Each hook got the decision of its own prompt: none is left waiting, none cancelled.
+    for prompt in prompts:
+        row = harness.ledger.get_permission_prompt(prompt.id)
+        assert (row.state, row.decision, row.resolved_by) == ("resolved", decisions[prompt.id], "board")
+        assert not hooks.is_held(daemon, prompt.id)
+    card = card_of(daemon)
+    assert (card["permission_prompt"], card["more_prompts"]) == (None, 0)
+
+
+def test_two_requests_with_the_same_input_each_hold_their_own_prompt(daemon, harness):
+    worker = launch(harness)
+    first, second = Held(daemon, worker), Held(daemon, worker)
+    one, two = held_prompts(daemon, harness, worker, 2)
+
+    assert answer(daemon, worker, one.id, "deny")[0] == 200
+    # One hook has its answer; the other still waits for the second prompt.
+    assert support.wait_for(lambda: [h for h in (first, second) if h.result is not None])
+    waiting = [h for h in (first, second) if h.result is None]
+    assert len(waiting) == 1
+    assert harness.ledger.get_permission_prompt(two.id).state == "open"
+    assert answer(daemon, worker, two.id, "allow")[0] == 200
+
+    assert sorted([first.answered()[1], second.answered()[1]], key=json.dumps) == sorted(
+        [ALLOWED, DENIED], key=json.dumps,
+    )
+
+
+def test_a_later_request_leaves_a_held_prompt_open(daemon, harness):
+    worker = launch(harness)
+    first = Held(daemon, worker, command="date")
+    older = held_prompt(daemon, harness, worker)
+
+    second = Held(daemon, worker, command="uptime")
+    _, newer = held_prompts(daemon, harness, worker, 2)
+
+    assert first.answered(timeout=0.3) is None
+    assert harness.ledger.get_permission_prompt(older.id).state == "open"
+    assert card_prompt(daemon)["id"] == older.id
+    assert answer(daemon, worker, older.id, "allow")[0] == 200
+    assert first.answered() == (200, ALLOWED)
+    assert card_prompt(daemon)["id"] == newer.id
+    assert answer(daemon, worker, newer.id, "deny")[0] == 200
+    assert second.answered() == (200, DENIED)
+
+
+def test_a_call_that_a_rule_allows_leaves_a_held_prompt_open(daemon, harness):
+    worker = launch(harness)
+    first = Held(daemon, worker, command="date")
+    assert answer(daemon, worker, held_prompt(daemon, harness, worker).id, "always")[0] == 200
+    assert first.answered() == (200, ALLOWED)
+    waiting = Held(daemon, worker, command="uptime")
+    prompt = held_prompt(daemon, harness, worker)
+
+    assert Held(daemon, worker, command="date").answered(timeout=3) == (200, ALLOWED)
+
+    assert harness.ledger.get_permission_prompt(prompt.id).state == "open"
+    assert answer(daemon, worker, prompt.id, "allow")[0] == 200
+    assert waiting.answered() == (200, ALLOWED)
+
+
+def test_the_card_shows_a_held_prompt_before_one_only_the_session_can_answer(harness):
+    worker = launch(harness)
+    ledger = harness.ledger
+    released = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="a")
+    ledger.release_permission_prompt(released)
+    held = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="b")
+    later = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="c")
+    question = ledger.record_question(ledger.get(worker.id), "Which colour?", [])
+
+    def shown(holding):
+        prompt = board.shown_prompt(ledger.open_permission_prompts(worker), lambda pid: pid in holding)
+        return prompt.id if prompt else None
+
+    assert shown({held, later}) == held
+    assert shown({later}) == later
+    # No hook holds any: the newest, as a session shows its own dialogs one at a time.
+    assert shown(set()) == question
+    assert board.shown_prompt([], lambda pid: True) is None
 
 
 # ----- first writer wins ----------------------------------------------------------------
