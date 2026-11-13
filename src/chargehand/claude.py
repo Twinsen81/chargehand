@@ -25,9 +25,9 @@ shows a dialog, such as a permission prompt, reports ``state: blocked`` with
 ``status: waiting``. Reading ``status`` alone would call a session that waits for input
 idle. So ``state`` is read first, and ``status`` is only the fallback for entries that
 lack it, which is how interactive sessions appear. A session that ended its turn with a
-plain-text question reports ``state: blocked`` with ``status: idle``, and so do some
-sessions that finished; the tick reads that shape as a turn end (see
-:meth:`ClaudeRuntime.ended_without_dialog`).
+plain-text question reports ``state: blocked`` with ``status: idle`` (``busy`` while a
+background shell of that turn runs), and so do some sessions that finished; the tick reads
+that shape as a turn end (see :meth:`ClaudeRuntime.ended_without_dialog`).
 
 The aliases below are wider than what was observed, on purpose, because the output is
 not a documented contract. None of them is a guess about the shape in use.
@@ -2061,22 +2061,24 @@ class ClaudeRuntime(Runtime):
         return _listed_pid(session) is None and session.raw.get("status") in (None, "")
 
     def ended_without_dialog(self, session: Session) -> bool:
-        """``state: blocked`` with ``status: idle`` and no ``waitingFor``: the turn ended.
+        """``state: blocked`` with ``status: idle`` or ``busy`` and no ``waitingFor``: the turn ended.
 
         Every dialog lists as ``blocked`` with ``status: waiting`` and a ``waitingFor``: a
         permission prompt, an AskUserQuestion dialog, an MCP elicitation, a sandbox request
         (Claude Code 2.1.322 sets both from the same check, and lists ``waitingFor`` only
-        with ``status: waiting``). A turn that runs lists ``status: busy``. Claude Code lists
-        a session as ``blocked`` with ``status: idle`` after a turn that ended with a
-        plain-text question, and also after some turns that ended without one. The status is
-        read, not only ``waitingFor``, because ``waitingFor`` is the session's own text. A
+        with ``status: waiting``). Claude Code lists a session as ``blocked`` with
+        ``status: idle`` after a turn that ended with a plain-text question, and also after
+        some turns that ended without one. With a background shell of that turn still
+        running, the same turn end lists ``status: busy`` (observed in Claude Code
+        2.1.323), as ``done`` does then (see :attr:`Session.busy`). The status is read, not
+        only ``waitingFor``, because ``waitingFor`` is the session's own text. A
         ``blocked`` entry without a process counts too: a respawn of a blocked session that
         started no process left one. After ``claude stop`` the entry lists ``stopped``
         instead (observed in Claude Code 2.1.319), and ``continue`` respawns it first.
         """
         if session.state != BLOCKED or session.waiting_for:
             return False
-        return session.raw.get("status") == "idle" or self.is_stopped(session)
+        return session.raw.get("status") in ("idle", "busy") or self.is_stopped(session)
 
     def wake(
         self,

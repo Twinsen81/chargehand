@@ -279,15 +279,16 @@ def test_the_claude_blocked_without_dialog_rule_reads_the_status():
     parse = claude_mod.parse_session
 
     # The turn ended, with or without a plain-text question: `blocked` with `status: idle`
-    # and no `waitingFor`, or stopped since.
+    # and no `waitingFor`, `status: busy` while a background shell of that turn runs, or
+    # stopped since.
     assert runtime.ended_without_dialog(parse(live("blocked")))
+    assert runtime.ended_without_dialog(parse(session("blocked", pid=86470, status="busy")))
     assert runtime.ended_without_dialog(parse(session("blocked")))
-    # A permission prompt, an AskUserQuestion dialog or an MCP elicitation waits, or a turn
-    # runs.
+    # A permission prompt, an AskUserQuestion dialog or an MCP elicitation waits.
     assert not runtime.ended_without_dialog(parse(dialog("permission prompt")))
     assert not runtime.ended_without_dialog(parse(dialog("input needed")))
     assert not runtime.ended_without_dialog(parse(dialog("dialog open")))
-    assert not runtime.ended_without_dialog(parse(session("blocked", pid=86470, status="busy")))
+    assert not runtime.ended_without_dialog(parse(session("blocked", pid=86470, status="waiting")))
     # Any `waitingFor` names a dialog, whatever the status says.
     assert not runtime.ended_without_dialog(
         parse(session("blocked", pid=86470, status="idle", waitingFor="permission prompt"))

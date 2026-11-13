@@ -384,7 +384,8 @@ class Runtime(ABC):
         """Whether the listed *session* is ``blocked`` while its turn ended and no dialog waits.
 
         Then no turn runs and nothing in the session waits for an answer, so a stop and a
-        resume lose nothing, and the listing says no more than a ``done`` one. A permission
+        resume lose nothing, and the listing says no more than a ``done`` one; a background
+        shell of the ended turn may still run, as with ``done``. A permission
         prompt or a question dialog is still open in the session, and a stop would discard
         it. A session without a process that still lists ``blocked`` counts too. A runtime
         that cannot tell these apart never says True.

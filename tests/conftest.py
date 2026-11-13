@@ -89,12 +89,19 @@ class FakeClaudeState:
         return self.read().get("commands", [])
 
     def set_session_state(self, name: str, session_state: str, **extra) -> None:
-        """Match a session by id, by its full name, or by the item part of `role/item`."""
+        """Match a session by id, by its full name, or by the item part of `role/item`.
+
+        A live session set `blocked` with no status shows a dialog, `status: waiting`, as
+        Claude Code lists one. Keeping the earlier status would list a turn end instead:
+        `blocked` with `status: idle` or `busy` and no `waitingFor`.
+        """
         state = self.read()
         for session in state.get("sessions", []):
             full = session.get("name") or ""
             if full == name or full.endswith(f"/{name}") or session.get("id") == name:
                 session["state"] = session_state
+                if session_state == "blocked" and "status" in session and "status" not in extra:
+                    session["status"] = "waiting"
                 session.update(extra)
         self.write(state)
 

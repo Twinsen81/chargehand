@@ -231,7 +231,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notification: the worker is idle, and a reply from the board, or any other event, wakes
   it. Past the role's refresh limit, a reply while the session lists so continues the
   same session, which holds the question; any other event starts a fresh session as
-  usual. The tick logs the case at DEBUG.
+  usual. The tick logs the case at DEBUG. While a background shell of that turn still
+  runs, the same turn end lists `status: busy` instead; the worker is then idle with a
+  background shell, as after a `done` turn end, and the background-shell notice applies.
 
 ### Added
 

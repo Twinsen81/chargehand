@@ -2784,7 +2784,8 @@ class Runner:
             observed = session.state if session else ledger_mod.SESSION_MISSING
             if session is not None and self._turn_ended_blocked(worker, session):
                 # No dialog waits and no permission prompt is open: the listing says no more
-                # than `done`. Its report, an ask question or the status file still block.
+                # than `done`, busy too while a background shell of the turn runs. Its
+                # report, an ask question or the status file still block.
                 log.debug("%s: the listing shows session %s as blocked with no dialog; read "
                           "as a turn end", worker.handle, worker.session_id or "-")
                 observed = runtime_mod.DONE

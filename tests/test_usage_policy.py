@@ -486,12 +486,16 @@ def test_a_parked_session_that_runs_again_is_not_interrupted(harness):
     assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
 
 
-def test_a_parked_session_listed_blocked_without_a_dialog_resumes_after_the_reset(harness):
+@pytest.mark.parametrize("status", ["idle", "busy"])
+def test_a_parked_session_listed_blocked_without_a_dialog_resumes_after_the_reset(
+    harness, status
+):
     worker = launch(harness)
     park(harness, worker, time.time() + 3600)
     harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
-    # Claude Code lists some ended turns as blocked, with no dialog open.
-    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
+    # Claude Code lists some ended turns as blocked, with no dialog open; busy while a
+    # background shell of the turn runs.
+    harness.claude_state.set_session_state("ABC-1", "blocked", status=status)
 
     report = harness.next_tick()
 

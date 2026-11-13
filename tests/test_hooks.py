@@ -734,8 +734,9 @@ def test_a_listing_older_than_a_hook_does_not_undo_it(daemon, harness):
 
 
 # Claude Code lists a session whose ended turn left a background shell running as busy,
-# with the state working or, more often, done.
-BUSY_LISTINGS = pytest.mark.parametrize("listed_state", ["working", "done"])
+# with the state working or, more often, done; blocked with no waitingFor when the turn
+# ended with a question in plain text (observed in Claude Code 2.1.323).
+BUSY_LISTINGS = pytest.mark.parametrize("listed_state", ["working", "done", "blocked"])
 
 
 def _turn_ended_with_a_background_shell(
@@ -793,6 +794,28 @@ def test_a_background_shell_that_ends_leaves_the_worker_idle(
     assert (worker.state, worker.session_state) == (ledger_mod.IDLE, "done")
     assert report.transitions == []
     assert harness.notifications() == []
+
+
+@pytest.mark.parametrize("listed_state", ["done", "blocked"])
+def test_a_reply_wakes_a_worker_whose_turn_ended_with_a_background_shell(
+    daemon, harness, tmp_path, listed_state
+):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
+    harness.next_tick()
+
+    status, raw = support.request(
+        daemon.port, "POST", f"/api/workers/{worker.id}/reply",
+        body=json.dumps({"text": "blue"}).encode(), headers=AUTH,
+    )
+    assert status == 202
+    harness.next_tick()
+
+    outcome = harness.ledger.get_request(json.loads(raw)["id"])
+    assert outcome["ok"] == 1 and "delivery wakes the worker" in outcome["message"]
+    woken = harness.worker("ABC-1")
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, worker.wakes + 1)
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: blue" in resume["prompt"].splitlines()
 
 
 def test_a_new_turn_after_the_turn_end_makes_the_worker_running(daemon, harness, tmp_path):

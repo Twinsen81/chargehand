@@ -783,8 +783,8 @@ window until 2026-11-03); such a message parks too.
 | Session state | Meaning | Action |
 |---|---|---|
 | `working` | A turn is running | — |
-| `background` | Listed as `working`, or `done` but busy, while the turn ended and no turn started since: a background shell runs | keep the state of the turn end; notify an `idle` or `queued` worker once after `background_shell_mins` |
-| `blocked` | Needs you: a dialog in the session, such as a permission prompt (`status: waiting`) | notify, mark blocked; listed with `status: idle`, no `waitingFor` and no open permission prompt, it counts as `done` |
+| `background` | Listed as `working`, or `done` (or `blocked` with no dialog) but busy, while the turn ended and no turn started since: a background shell runs | keep the state of the turn end; notify an `idle` or `queued` worker once after `background_shell_mins` |
+| `blocked` | Needs you: a dialog in the session, such as a permission prompt (`status: waiting`) | notify, mark blocked; listed with `status: idle` or `busy`, no `waitingFor` and no open permission prompt, it counts as `done` |
 | `done` | The turn finished | a report of `done` or `failed` from this turn ends the worker; an open question from the `ask` tool blocks it; else read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the report, the question or the status file says, which is |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
@@ -825,7 +825,11 @@ as a turn end, the same as `done`, and logs that at DEBUG. Only a dialog, an ope
 permission prompt, an open question of the `ask` tool or the status file's `needs-input`
 blocks a worker; a question in plain text leaves it idle, and a reply from the board, or
 any other event, wakes it. A `blocked` entry without a process is not a turn end: it
-blocks as before. A bare `done` still says nothing about *how* a run finished.
+blocks as before. While a background shell of the ended turn still runs, the same turn
+end lists `blocked` with `status: busy` and no `waitingFor` (observed in Claude Code
+2.1.323); the runner reads it as `done` and busy, so the worker is idle with the session
+state `background` (see **Background shells**). A bare `done` still says nothing about
+*how* a run finished.
 
 A worker disambiguates that with its **report**: the mod's `report(state, summary, links)`
 tool (see "The chargehand mod" below). A report of `done` or `failed` in a turn ends the
@@ -896,14 +900,14 @@ is paused with the reason, keeps its session and its events, and you are notifie
 The one exception is a reply from the board to a `blocked` worker whose turn ended with a
 question of the `ask` tool or the status file: the reply is the answer, so it wakes the
 worker, through the same admission, with every event that waits. The session then lists
-`done`, or `state: blocked` with `status: idle` and no `waitingFor` (or `blocked` without a
-process), and no permission prompt is open in the ledger. After `claude stop` a
+`done`, or `state: blocked` with `status: idle` or `busy` and no `waitingFor` (or `blocked`
+without a process), and no permission prompt is open in the ledger. After `claude stop` a
 question-blocked session lists `stopped`; the reply then waits, and `continue` respawns the
 session first. Another event does not wake it, because only the operator answers a
 question. A dialog, such as a permission prompt or an `AskUserQuestion` dialog, lists
 `status: waiting`; a stop would discard it, so the reply waits until the turn ends. Every
-wake also accepts a session that lists `blocked` with `status: idle` and no `waitingFor`,
-because its turn has ended. An answer that admission holds
+wake also accepts a session that lists `blocked` with `status: idle` or `busy` and no
+`waitingFor`, because its turn has ended, as it accepts `done`. An answer that admission holds
 keeps the reason on the worker's card, as a queued worker does.
 
 **Session refresh.** Each wake continues the same session, so the worker keeps what it
@@ -948,7 +952,7 @@ a `parked` worker, the answer to a question that the session asked since its las
 clone's request for a current note stay in the session they belong to, because only that
 session holds the conversation they are about; the refresh then comes at the next wake.
 So does a reply from the board while the tick's listing shows the session `blocked` with
-`status: idle` and no `waitingFor`, because it may answer a question that the session
+`status: idle` or `busy` and no `waitingFor`, because it may answer a question that the session
 asked in plain text; another event to that worker refreshes as usual. Any other reply
 that answers no question refreshes as any event does, so the limit also holds for a
 worker that follows no item and gets only replies. The card lists the worker's
@@ -1080,8 +1084,8 @@ minute later the idle `Notification`. The listing names no background shell, thr
 Claude Code 2.1.322. Taking whichever came last made the card flip from idle to running a
 few seconds after every turn end. So a turn end is recorded with its time and session.
 While no turn has started since (no `UserPromptSubmit`, `SessionStart`, permission prompt
-or wake), a listing that shows the session working, or done but busy, is read as
-`background`: the worker keeps the state its turn end gave it (`idle`, `queued`, or
+or wake), a listing that shows the session working, or done (or blocked with no dialog)
+but busy, is read as `background`: the worker keeps the state its turn end gave it (`idle`, `queued`, or
 `blocked` for a question), and the board and `status` show that state with the session
 state `background`. A busy and done listing without a recorded turn end is a plain turn
 end. A shell that ends starts a new turn by itself, with a `UserPromptSubmit` (observed
@@ -1091,8 +1095,8 @@ that waits for the operator, so an `idle` or `queued` worker is notified once, a
 when the turn ended `background_shell_mins` ago (30 by default; 0 never notifies). The
 worker stays `idle`, so delivery may wake it: through the outbox the mod submits the wake
 as a new turn while the shell runs. A stop and resume, for a session without the mod,
-waits while the listing shows the session working, but stops one listed as done and busy,
-which ends the shell. Neither the watchdog nor `max_concurrent` counts the time, because
+waits while the listing shows the session working, but stops one listed as done, or
+blocked with no dialog, and busy, which ends the shell. Neither the watchdog nor `max_concurrent` counts the time, because
 no turn runs and no usage is spent. Only sessions launched with the `UserPromptSubmit` hook
 get this reading, because a resume keeps the hooks of the launch: for a session launched
 before it, a turn that the operator starts in `claude attach` sends no hook, so a listing
