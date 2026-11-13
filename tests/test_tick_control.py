@@ -511,7 +511,8 @@ def test_continue_waits_for_the_respawned_process_to_show(harness, monkeypatch):
 
 def test_continue_points_a_question_at_a_reply_and_leaves_the_session(harness):
     attempt = launch(harness)
-    # A plain-text question ended the turn: `state: blocked`, `status: idle`.
+    # The ask tool asked, and the listing shows the turn ended: `blocked`, `status: idle`.
+    harness.ledger.record_question(harness.worker("ABC-1"), "Which file next?", [])
     harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
     harness.next_tick()
     assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
@@ -520,7 +521,7 @@ def test_continue_points_a_question_at_a_reply_and_leaves_the_session(harness):
 
     assert result["ok"] == 0
     assert result["message"] == (
-        "ABC-1 asked a question, and its session waits for the answer: send the answer as a reply"
+        "ABC-1: its turn ended and its session waits, so there is nothing to respawn: send a reply"
     )
     assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert ["respawn", attempt.session_id] not in harness.claude_state.commands
@@ -593,6 +594,7 @@ def test_a_prompt_during_the_answer_to_a_question_is_notified(harness, monkeypat
     from chargehand import claude
 
     attempt = launch(harness)
+    harness.ledger.record_question(harness.worker("ABC-1"), "Which file next?", [])
     harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
     harness.next_tick()
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
@@ -617,13 +619,11 @@ def test_a_prompt_during_the_answer_to_a_question_is_notified(harness, monkeypat
     assert harness.notifications().count(("ABC-1", "blocked")) == 2
 
 
-def test_a_held_answer_does_not_notify_the_question_again(harness, monkeypatch):
+def test_a_held_answer_does_not_notify_the_question_again(harness, repo, tmp_path, monkeypatch):
     from chargehand import claude
     from chargehand.runtime import WakeResult
 
-    launch(harness)
-    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
-    harness.next_tick()
+    asked_in_the_status_file(harness, repo, tmp_path)
     monkeypatch.setattr(
         claude.ClaudeRuntime, "wake",
         lambda self, *args, **kwargs: WakeResult(False, "a turn started", busy=True),
@@ -633,7 +633,7 @@ def test_a_held_answer_does_not_notify_the_question_again(harness, monkeypatch):
     harness.next_tick()
 
     worker = harness.worker("ABC-1")
-    assert (worker.state, worker.notified_state) == (ledger_mod.BLOCKED, "blocked")
+    assert (worker.state, worker.notified_state) == (ledger_mod.BLOCKED, "done")
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
 
 

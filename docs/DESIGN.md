@@ -784,12 +784,12 @@ window until 2026-11-03); such a message parks too.
 |---|---|---|
 | `working` | A turn is running | — |
 | `background` | Listed as `working`, or `done` but busy, while the turn ended and no turn started since: a background shell runs | keep the state of the turn end; notify an `idle` or `queued` worker once after `background_shell_mins` |
-| `blocked` | Needs you: a question, a permission prompt | notify, mark blocked |
+| `blocked` | Needs you: a dialog in the session, such as a permission prompt (`status: waiting`) | notify, mark blocked; listed with `status: idle`, no `waitingFor` and no open permission prompt, it counts as `done` |
 | `done` | The turn finished | a report of `done` or `failed` from this turn ends the worker; an open question from the `ask` tool blocks it; else read the status file if configured; the worker is `idle`, which is not notified, or `blocked`, `done` or `failed` as the report, the question or the status file says, which is |
 | `failed` / `stopped` | Error, stopped, or killed with the machine | notify, mark blocked |
 
-A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without a
-question and the worker waits for events), `queued` (events wait in its inbox for a wake
+A live worker is `launching`, `running` (a turn runs), `idle` (the turn ended without an
+open question or prompt and the worker waits for events), `queued` (events wait in its inbox for a wake
 that admission held back), `blocked` (it needs you), `paused` (stopped by `stop`) or
 `parked` (a usage limit ended its turn; it waits for the reset). On the tracker, `idle`,
 `queued` and `parked` keep the blocked label, as a finished turn did before: the operator
@@ -807,21 +807,25 @@ leaves `parked` by any path, such as a turn that the operator started and that e
 no old reset time.
 
 Those states are read from a `state` field, which a background entry carries alongside a
-coarser `status`. The two disagree, and preferring the right one is load-bearing: a session
-that finished reports `state: done` with `status: idle`, while a session that asked a
-question and ended its turn reports `state: blocked` with the same `status: idle`. Reading
-`status` would call the second one finished and clear its label while it was still waiting.
+coarser `status`. The two disagree: a session that finished reports `state: done` with
+`status: idle`, and a session that shows a dialog reports `state: blocked` with
+`status: waiting` and a `waitingFor`. Every dialog does: a permission prompt, an
+`AskUserQuestion` dialog, an MCP elicitation, a sandbox request (Claude Code 2.1.322 sets
+`status: waiting` and `waitingFor` from the same check, and lists `waitingFor` only with
+that status). A session that asked a question in plain text and ended its turn reports
+`state: blocked` with `status: idle` and no `waitingFor`.
 
-That also means `done` is less ambiguous than it first appears: Claude Code distinguishes
-"ended its turn having finished" from "ended its turn having asked something". Across every
-run the smoke probe has observed, nothing that wanted input was reported `done`: not a
-direct question, not a flat statement that the session could not proceed, not a permission
-prompt. So a session that is waiting never has its label cleared. The converse does not
-hold. About one finished run in five reported `blocked` anyway, and the same prompt
-reported `done` the other four times. That is not confined to runs that hedged: a session
-told to write one file and stop has done it. `blocked` is therefore a reason to go and
-look rather than proof that anything is waiting, and a bare `done` still says nothing
-about *how* a run finished. The runner stays conservative on both counts.
+That last shape is not reliable. About one finished run in five reported `blocked` anyway,
+and the same prompt reported `done` the other four times. That is not confined to runs
+that hedged: a session told to write one file and stop has done it, and a fresh session
+listed `blocked` ten seconds after a plain answer. Moving such a worker to Needs you showed
+a card with nothing to answer and sent a notification for it. So the runner reads
+`blocked` with `status: idle`, no `waitingFor` and no open permission prompt in the ledger
+as a turn end, the same as `done`, and logs that at DEBUG. Only a dialog, an open
+permission prompt, an open question of the `ask` tool or the status file's `needs-input`
+blocks a worker; a question in plain text leaves it idle, and a reply from the board, or
+any other event, wakes it. A `blocked` entry without a process is not a turn end: it
+blocks as before. A bare `done` still says nothing about *how* a run finished.
 
 A worker disambiguates that with its **report**: the mod's `report(state, summary, links)`
 tool (see "The chargehand mod" below). A report of `done` or `failed` in a turn ends the
@@ -890,14 +894,16 @@ with them again, which costs one turn. A resume that starts a copy is a fault: t
 is paused with the reason, keeps its session and its events, and you are notified. A
 `blocked`, `paused`, `parked` or `launching` worker is not woken; its events wait.
 The one exception is a reply from the board to a `blocked` worker whose turn ended with a
-question: the reply is the answer, so it wakes the worker, through the same admission,
-with every event that waits. The session then lists `state: blocked` with `status: idle`
-(or `blocked` without a process), or `done` when the `ask` tool or the status file asked
-the question, and no permission prompt is open in the ledger. After `claude stop` a question-blocked
-session lists `stopped`; the reply then waits, and `continue` respawns the session first.
-Another event does not wake it, because only the operator answers a question. A
-permission prompt and an `AskUserQuestion` dialog list `status: waiting`; a stop would
-discard them, so the reply waits until the turn ends. An answer that admission holds
+question of the `ask` tool or the status file: the reply is the answer, so it wakes the
+worker, through the same admission, with every event that waits. The session then lists
+`done`, or `state: blocked` with `status: idle` and no `waitingFor` (or `blocked` without a
+process), and no permission prompt is open in the ledger. After `claude stop` a
+question-blocked session lists `stopped`; the reply then waits, and `continue` respawns the
+session first. Another event does not wake it, because only the operator answers a
+question. A dialog, such as a permission prompt or an `AskUserQuestion` dialog, lists
+`status: waiting`; a stop would discard it, so the reply waits until the turn ends. Every
+wake also accepts a session that lists `blocked` with `status: idle` and no `waitingFor`,
+because its turn has ended. An answer that admission holds
 keeps the reason on the worker's card, as a queued worker does.
 
 **Session refresh.** Each wake continues the same session, so the worker keeps what it
@@ -941,8 +947,11 @@ a `parked` worker, the answer to a question that the session asked since its las
 (whether the listing shows that turn end as `blocked` or as `done`), and a summary
 clone's request for a current note stay in the session they belong to, because only that
 session holds the conversation they are about; the refresh then comes at the next wake.
-A reply that answers no question refreshes as any event does, so the limit also holds
-for a worker that follows no item and gets only replies. The card lists the worker's
+So does a reply from the board while the tick's listing shows the session `blocked` with
+`status: idle` and no `waitingFor`, because it may answer a question that the session
+asked in plain text; another event to that worker refreshes as usual. Any other reply
+that answers no question refreshes as any event does, so the limit also holds for a
+worker that follows no item and gets only replies. The card lists the worker's
 sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
@@ -1056,9 +1065,10 @@ for a hook that changes nothing.
 no reply parsing. A worker asks with its `ask` tool: the runner notifies you and marks the
 issue blocked, and you answer on the worker's card (see "Permission prompts on the
 board" above). A question that a
-session asks as plain text, and a dialog of its own, are answered in Claude Code's agent
-view (`claude agents`), or with a reply from the card. The session continues with its
-full context, and the next tick flips the label back.
+session asks as plain text does not block the worker: it is idle, and a reply from the
+card answers the question. A dialog of the session's own is answered in Claude Code's
+agent view (`claude agents`). The session continues with its full context, and the next
+tick flips the label back.
 
 **Watchdog.** Background sessions have no spend cap, so the runner enforces wall-clock limits:
 notify after `max_run_hours`, stop the session after `hard_stop_hours`.
@@ -1131,8 +1141,8 @@ roles hold the item. `--route` stays accepted for `--repository`.
 before the listing shows the new process, so `continue` reads the listing again for up to
 20 seconds, and answers that no process runs only when none came in that time. A blocked
 worker whose session is live and waits for input is not respawned, because it has nothing
-to respawn: one that asked a question, or whose turn ended `done` with a question in the
-status file, takes the answer as a reply, and one that shows a prompt takes it on its card
+to respawn: one whose turn ended with a question of the `ask` tool or the status file
+takes the answer as a reply, and one that shows a prompt takes it on its card
 (a permission prompt) or in `claude attach`. The refusal says which.
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
@@ -1813,4 +1823,5 @@ Settled by launching a session through the scheduled job, with Claude Code 2.1.2
 - **A slash command works as the launch prompt**, so `prompt` can name a skill.
 - **A question asked with the `AskUserQuestion` tool reads `blocked`**, with
   `status: waiting` and `waitingFor: "input needed"`, beside the two shapes above. The
-  runner marks the run blocked and notifies, the same as for the other two.
+  runner marks the run blocked and notifies, the same as for a permission prompt. A
+  question in plain text is read as a turn end (see "Session state" above).

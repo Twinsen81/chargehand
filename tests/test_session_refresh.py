@@ -3,6 +3,7 @@ the next wake starts a fresh session for the same worker, which keeps the old on
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -549,12 +550,20 @@ def test_the_resume_of_a_parked_worker_stays_in_its_session_past_the_limit(after
     assert resumes(harness)[-1]["prompt"] == delivery_mod.RESUME_MESSAGE
 
 
-def test_the_answer_to_a_question_stays_in_its_session_past_the_limit(after_two):
+def test_the_answer_to_a_status_file_question_stays_in_its_session_past_the_limit(
+    after_two, repo, tmp_path
+):
     harness = after_two
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    write_role(repo, REVIEWER.replace(
+        "\n[[start]]", f'status_file = "{status_dir}/{{item}}.json"\n\n[[start]]', 1
+    ) + "\n[policy]\nrefresh_after_wakes = 2\n")
     reviewer = start_reviewer(harness)
     wake(harness, reviewer)
     wake(harness, reviewer)
-    # The last turn ended with a plain-text question.
+    # The last turn asked in the status file, and the listing shows the turn ended.
+    (status_dir / "PR-7.json").write_text(json.dumps({"state": "needs-input"}))
     harness.claude_state.set_session_state(reviewer.session_id, "blocked", status="idle")
     harness.next_tick()
     assert harness.ledger.get(reviewer.id).state == ledger_mod.BLOCKED
@@ -566,6 +575,50 @@ def test_the_answer_to_a_question_stays_in_its_session_past_the_limit(after_two)
     assert len(launches(harness)) == 1
     assert resumes(harness)[-1]["target"] == reviewer.session_uuid
     assert resumes(harness)[-1]["prompt"].endswith(f"{delivery_mod.REPLY_PREFIX}yes")
+
+
+def ended_blocked(harness, worker):
+    """The listing shows the session `blocked` with `status: idle` and no waitingFor, as
+    after a question in plain text; a tick reads that as a turn end."""
+    harness.claude_state.set_session_state(worker.session_id, "blocked", status="idle")
+    harness.next_tick()
+    assert harness.ledger.get(worker.id).state == ledger_mod.IDLE
+
+
+def test_a_reply_to_a_session_listed_blocked_without_a_dialog_stays_past_the_limit(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    ended_blocked(harness, reviewer)
+    harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="yes")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 1
+    assert resumes(harness)[-1]["target"] == reviewer.session_uuid
+    assert resumes(harness)[-1]["prompt"].endswith(f"{delivery_mod.REPLY_PREFIX}yes")
+    assert kinds(harness, reviewer)[-1] == "wake"
+    assert harness.ledger.inbox(reviewer) == []
+
+
+def test_an_event_to_a_session_listed_blocked_without_a_dialog_refreshes_past_the_limit(
+    after_two,
+):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    ended_blocked(harness, reviewer)
+    fake_source.feed().emit("comment", "PR-7")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 2
+    assert kinds(harness, reviewer)[-1] == "refresh"
+    assert harness.ledger.inbox(reviewer) == []
 
 
 @pytest.mark.parametrize("listed", ["blocked", "done"])

@@ -233,11 +233,14 @@ def test_a_wake_of_an_idle_session_stops_it_and_resumes_by_the_full_session_id(
     assert claude_runtime.list_sessions()[0].state == runtime_mod.WORKING
 
 
-@pytest.mark.parametrize("state", ["working", "blocked", "failed"])
+@pytest.mark.parametrize("entry", [
+    live("working"), live("failed"),
+    session("blocked", pid=86470, status="waiting", waitingFor="permission prompt"),
+], ids=["working", "failed", "dialog"])
 def test_a_wake_for_an_idle_session_leaves_a_live_turn_or_prompt_alone(
-    claude_runtime, claude_state, state
+    claude_runtime, claude_state, entry
 ):
-    claude_state.set(sessions=[live(state)])
+    claude_state.set(sessions=[entry])
 
     result = claude_runtime.wake("s1", "new events: 2", if_idle=True)
 
@@ -246,11 +249,21 @@ def test_a_wake_for_an_idle_session_leaves_a_live_turn_or_prompt_alone(
     assert "resumes" not in claude_state.read()
 
 
-@pytest.mark.parametrize("entry", [live("done"), stopped_job()])
+@pytest.mark.parametrize("entry", [live("done"), stopped_job(), live("blocked")],
+                         ids=["done", "stopped", "blocked-without-dialog"])
 def test_a_wake_for_an_idle_session_wakes_an_idle_or_stopped_one(claude_runtime, claude_state, entry):
     claude_state.set(sessions=[entry])
 
     result = claude_runtime.wake("s1", "hello", if_idle=True)
+
+    assert result.ok and not result.busy
+    assert claude_state.read()["resumes"][0]["target"] == UUID
+
+
+def test_a_resume_wakes_a_session_listed_blocked_without_a_dialog(claude_runtime, claude_state):
+    claude_state.set(sessions=[live("blocked")])
+
+    result = claude_runtime.wake("s1", "continue", if_ended=True)
 
     assert result.ok and not result.busy
     assert claude_state.read()["resumes"][0]["target"] == UUID
@@ -261,25 +274,31 @@ def dialog(waiting_for):
     return session("blocked", pid=86470, status="waiting", waitingFor=waiting_for)
 
 
-def test_the_claude_question_rule_reads_the_status():
+def test_the_claude_blocked_without_dialog_rule_reads_the_status():
     runtime = ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)))
     parse = claude_mod.parse_session
 
-    # A plain-text question ended the turn: `blocked` with `status: idle`, or stopped since.
-    assert runtime.ended_with_question(parse(live("blocked")))
-    assert runtime.ended_with_question(parse(session("blocked")))
-    # A permission prompt or an AskUserQuestion dialog waits, or a turn runs.
-    assert not runtime.ended_with_question(parse(dialog("permission prompt")))
-    assert not runtime.ended_with_question(parse(dialog("input needed")))
-    assert not runtime.ended_with_question(parse(session("blocked", pid=86470, status="busy")))
-    # The session's own text cannot make a permission prompt look like a question.
-    assert not runtime.ended_with_question(
+    # The turn ended, with or without a plain-text question: `blocked` with `status: idle`
+    # and no `waitingFor`, or stopped since.
+    assert runtime.ended_without_dialog(parse(live("blocked")))
+    assert runtime.ended_without_dialog(parse(session("blocked")))
+    # A permission prompt, an AskUserQuestion dialog or an MCP elicitation waits, or a turn
+    # runs.
+    assert not runtime.ended_without_dialog(parse(dialog("permission prompt")))
+    assert not runtime.ended_without_dialog(parse(dialog("input needed")))
+    assert not runtime.ended_without_dialog(parse(dialog("dialog open")))
+    assert not runtime.ended_without_dialog(parse(session("blocked", pid=86470, status="busy")))
+    # Any `waitingFor` names a dialog, whatever the status says.
+    assert not runtime.ended_without_dialog(
         parse(session("blocked", pid=86470, status="idle", waitingFor="permission prompt"))
     )
-    assert not runtime.ended_with_question(parse(session("blocked", waitingFor="permission prompt")))
+    assert not runtime.ended_without_dialog(
+        parse(session("blocked", pid=86470, status="idle", waitingFor="input needed"))
+    )
+    assert not runtime.ended_without_dialog(parse(session("blocked", waitingFor="permission prompt")))
     for state in ("working", "done", "failed"):
-        assert not runtime.ended_with_question(parse(live(state))), state
-        assert not runtime.ended_with_question(parse(session(state))), state
+        assert not runtime.ended_without_dialog(parse(live(state))), state
+        assert not runtime.ended_without_dialog(parse(session(state))), state
 
 
 def test_an_answer_wakes_a_session_whose_turn_ended_with_a_question(claude_runtime, claude_state):
