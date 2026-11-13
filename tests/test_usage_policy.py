@@ -502,16 +502,24 @@ def test_a_parked_session_listed_blocked_without_a_dialog_resumes_after_the_rese
     assert "implementer/ABC-1: resume after the usage reset -> running" in report.transitions
 
 
-def test_a_parked_session_with_an_open_dialog_holds_the_resume(harness):
+@pytest.mark.parametrize("listing, prompt_open", [
+    ({"status": "waiting", "waitingFor": "permission prompt"}, False),
+    # The listing may show no dialog yet while the hook already opened a prompt.
+    ({"status": "idle"}, True),
+], ids=["dialog", "open-prompt"])
+def test_a_parked_session_with_an_open_dialog_holds_the_resume(harness, listing, prompt_open):
     worker = launch(harness)
     park(harness, worker, time.time() + 3600)
     harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
-    harness.claude_state.set_session_state(
-        "ABC-1", "blocked", status="waiting", waitingFor="permission prompt"
-    )
+    harness.claude_state.set_session_state("ABC-1", "blocked", **listing)
+    if prompt_open:
+        harness.ledger.record_permission_prompt(
+            harness.worker("ABC-1"), tool_name="Bash", tool_input="{}"
+        )
 
     report = harness.next_tick()
 
+    assert harness.worker("ABC-1").state == ledger_mod.PARKED
     assert harness.claude_state.read().get("resumes", []) == []
     assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
 
