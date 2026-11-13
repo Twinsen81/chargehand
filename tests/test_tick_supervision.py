@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
 import os
 import time
 
 import pytest
 
+from chargehand import claude
 from chargehand import ledger as ledger_mod
-from chargehand.config import NotifyConfig
+from chargehand.config import NotifyConfig, ServeConfig
 from conftest import run_git
 
 
@@ -32,6 +35,101 @@ def test_a_blocked_session_marks_the_issue_blocked_and_notifies_once(harness):
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
 
     harness.next_tick()
+    assert harness.notifications().count(("ABC-1", "blocked")) == 1
+
+
+def _with_hooks(harness, tmp_path):
+    """Launches from now on carry the session hooks, the turn-start hook among them."""
+    token_file = tmp_path / "hooks.token"
+    token_file.write_text("the-daemon-token\n")
+    token_file.chmod(0o600)
+    harness.config = dataclasses.replace(
+        harness.config, serve=ServeConfig(port=4567, token_file=token_file)
+    )
+    harness.fresh_runner()
+
+
+@pytest.mark.parametrize("status", ["idle", "busy"])
+@pytest.mark.parametrize("stop_hook", [True, False], ids=["after-a-stop-hook", "without-hooks"])
+def test_a_session_listed_blocked_without_a_dialog_is_a_turn_end(
+    harness, caplog, tmp_path, stop_hook, status
+):
+    """Claude Code lists some idle sessions `blocked` with `status: idle` and no waitingFor:
+    after a plain-text question, and after turns that asked nothing. While a background
+    shell of the turn runs, the same turn end lists `status: busy`."""
+    caplog.set_level(logging.DEBUG, logger="chargehand.tick")
+    if stop_hook:
+        _with_hooks(harness, tmp_path)
+    worker = launch(harness)
+    if stop_hook:
+        harness.runner.apply_hook(
+            worker, claude.parse_hook("Stop", {"session_id": worker.session_uuid})
+        )
+    harness.claude_state.set_session_state("ABC-1", "blocked", status=status)
+
+    harness.next_tick()
+    harness.next_tick()
+
+    attempt = harness.worker("ABC-1")
+    # After a recorded turn end, a busy session runs a background shell of that turn;
+    # without one, the listing alone says no more than a plain turn end.
+    session_state = (
+        ledger_mod.SESSION_BACKGROUND if stop_hook and status == "busy" else "done"
+    )
+    assert (attempt.state, attempt.session_state) == (ledger_mod.IDLE, session_state)
+    assert harness.notifications() == []
+    assert any(
+        record.levelno == logging.DEBUG
+        and "as blocked with no dialog; read as a turn end" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("listed, prompt_open", [
+    ({"status": "waiting", "waitingFor": "permission prompt"}, False),
+    ({"status": "waiting", "waitingFor": "input needed"}, False),
+    ({"status": "waiting"}, False),
+    ({"status": "idle", "waitingFor": "permission prompt"}, False),
+    ({"status": "idle"}, True),
+    ({"status": "busy"}, True),
+], ids=[
+    "permission-dialog", "elicitation", "waiting", "waiting-for", "prompt-in-the-ledger",
+    "prompt-in-the-ledger-busy",
+])
+def test_a_dialog_or_an_open_prompt_still_blocks_and_notifies_once(harness, listed, prompt_open):
+    worker = launch(harness)
+    harness.runner.apply_hook(
+        worker, claude.parse_hook("Stop", {"session_id": worker.session_uuid})
+    )
+    if prompt_open:
+        harness.ledger.record_permission_prompt(
+            harness.worker("ABC-1"), tool_name="Bash", tool_input="{}"
+        )
+    harness.claude_state.set_session_state("ABC-1", "blocked", **listed)
+
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert harness.notifications().count(("ABC-1", "blocked")) == 1
+
+
+def test_the_status_file_still_blocks_a_session_listed_blocked_without_a_dialog(
+    harness, repo, tmp_path
+):
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    (repo / ".chargehand.toml").write_text(
+        f'base = "origin/main"\nprompt = "{{issue}}"\nstatus_file = "{status_dir}/{{issue}}.json"\n'
+    )
+    launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "needs-input"}))
+    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
+
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
     assert harness.notifications().count(("ABC-1", "blocked")) == 1
 
 

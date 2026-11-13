@@ -21,11 +21,13 @@ that ``attach``, ``logs``, ``stop`` and ``rm`` take), ``sessionId`` (a UUID), ``
 
 Those two disagree, and that difference matters more than anything else here. A session
 that finished its work reports ``state: done`` with ``status: idle``. A session that
-asked a question and ended its turn reports ``state: blocked`` with ``status: idle``.
-Reading ``status`` would call the second one finished, and the runner would clear its
-label and collect its worktree while it was still waiting for an answer. So ``state`` is
-read first, and ``status`` is only the fallback for entries that lack it, which is how
-interactive sessions appear.
+shows a dialog, such as a permission prompt, reports ``state: blocked`` with
+``status: waiting``. Reading ``status`` alone would call a session that waits for input
+idle. So ``state`` is read first, and ``status`` is only the fallback for entries that
+lack it, which is how interactive sessions appear. A session that ended its turn with a
+plain-text question reports ``state: blocked`` with ``status: idle`` (``busy`` while a
+background shell of that turn runs), and so do some sessions that finished; the tick reads
+that shape as a turn end (see :meth:`ClaudeRuntime.ended_without_dialog`).
 
 The aliases below are wider than what was observed, on purpose, because the output is
 not a documented contract. None of them is a guess about the shape in use.
@@ -2058,20 +2060,25 @@ class ClaudeRuntime(Runtime):
             return False
         return _listed_pid(session) is None and session.raw.get("status") in (None, "")
 
-    def ended_with_question(self, session: Session) -> bool:
-        """``state: blocked`` with ``status: idle``: the turn ended with a plain-text question.
+    def ended_without_dialog(self, session: Session) -> bool:
+        """``state: blocked`` with ``status: idle`` or ``busy`` and no ``waitingFor``: the turn ended.
 
-        A permission prompt and an AskUserQuestion dialog list as ``blocked`` with
-        ``status: waiting``, and a turn that runs lists ``status: busy``. The status is read,
-        not only ``waitingFor``, because ``waitingFor`` is the session's own text. A
-        ``blocked`` entry without a process counts too, unless it names a permission prompt,
-        which a reply does not answer: a respawn of a question-blocked session that started
-        no process left one. After ``claude stop`` the entry lists ``stopped`` instead
-        (observed in Claude Code 2.1.319), and ``continue`` respawns it first.
+        Every dialog lists as ``blocked`` with ``status: waiting`` and a ``waitingFor``: a
+        permission prompt, an AskUserQuestion dialog, an MCP elicitation, a sandbox request
+        (Claude Code 2.1.322 sets both from the same check, and lists ``waitingFor`` only
+        with ``status: waiting``). Claude Code lists a session as ``blocked`` with
+        ``status: idle`` after a turn that ended with a plain-text question, and also after
+        some turns that ended without one. With a background shell of that turn still
+        running, the same turn end lists ``status: busy`` (observed in Claude Code
+        2.1.323), as ``done`` does then (see :attr:`Session.busy`). The status is read, not
+        only ``waitingFor``, because ``waitingFor`` is the session's own text. A
+        ``blocked`` entry without a process counts too: a respawn of a blocked session that
+        started no process left one. After ``claude stop`` the entry lists ``stopped``
+        instead (observed in Claude Code 2.1.319), and ``continue`` respawns it first.
         """
-        if session.state != BLOCKED or "permission" in (session.waiting_for or "").lower():
+        if session.state != BLOCKED or session.waiting_for:
             return False
-        return session.raw.get("status") == "idle" or self.is_stopped(session)
+        return session.raw.get("status") in ("idle", "busy") or self.is_stopped(session)
 
     def wake(
         self,
@@ -2081,13 +2088,12 @@ class ClaudeRuntime(Runtime):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
-        if_asked: bool = False,
     ) -> WakeResult:
         """Stop the live idle process, confirm it is gone, then resume by the full session id.
 
         With *if_idle*, only a stopped session, or a live one whose last turn ended
-        ``done``, is woken. With *if_ended*, a live one whose last turn ended ``failed``
-        is woken too, and with *if_asked*, a live one whose turn ended with a question.
+        ``done``, or ``blocked`` with no dialog (see :meth:`ended_without_dialog`), is
+        woken. With *if_ended*, a live one whose last turn ended ``failed`` is woken too.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -2104,15 +2110,14 @@ class ClaudeRuntime(Runtime):
         old_pid = _listed_pid(session)
         ended = (DONE, FAILED) if if_ended else (DONE,)
         if (
-            (if_idle or if_ended or if_asked)
+            (if_idle or if_ended)
             and not self.is_stopped(session)
             and session.state not in ended
-            and not (if_asked and self.ended_with_question(session))
+            and not self.ended_without_dialog(session)
         ):
-            # A turn runs, a dialog waits, or a question waits that this message does not
-            # answer; a stop would interrupt the turn or discard the dialog. The caller's
-            # listing may be older: a leftover background shell starts a turn by itself,
-            # and the operator can answer in agent view.
+            # A turn runs or a dialog waits; a stop would interrupt the turn or discard the
+            # dialog. The caller's listing may be older: a leftover background shell starts
+            # a turn by itself, and the operator can answer in agent view.
             return WakeResult(
                 False, f"session {session_id} is {session.state}, not idle", busy=True
             )

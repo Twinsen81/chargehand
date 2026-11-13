@@ -521,6 +521,7 @@ class Delivery:
         prepare: Callable[[Worker], str | None] = lambda worker: None,
         resume_hold: Callable[[Worker], str | None] = lambda worker: None,
         awaits_answer: Callable[[Worker], bool] = lambda worker: False,
+        ended_without_dialog: Callable[[Worker], bool] = lambda worker: False,
         refresh: Callable[[Worker, str], Refresh] | None = None,
     ) -> None:
         self.ledger = ledger
@@ -547,6 +548,9 @@ class Delivery:
         # prompt is open, and the tick's listing shows no turn and no dialog. A first
         # look, as above.
         self._awaits_answer = awaits_answer
+        # Whether the tick's listing shows the worker's live session `blocked` while its
+        # turn ended and no dialog waits, as after a question in plain text.
+        self._ended_without_dialog = ended_without_dialog
         # Stops the worker's session and starts a fresh one in its worktree, whose first
         # prompt carries the message; raises AgentRuntimeError or ConfigError when it
         # fails. Without it, every wake continues the same session.
@@ -720,8 +724,6 @@ class Delivery:
         if self._wake_in_place(worker, message, entries, result):
             return
         resume = worker.state == ledger_mod.PARKED
-        # A reply answers a question that the session asked after this tick's listing too.
-        answer = not resume and any(is_reply(entry) for entry in entries)
         notified = worker.notified_state
         renotify = worker.state in (ledger_mod.PARKED, ledger_mod.BLOCKED) and notified is not None
         if renotify:
@@ -741,11 +743,10 @@ class Delivery:
         try:
             # The runtime's own look decides, right before its stop: the operator may have
             # started a turn in the session since this tick's listing. A failed turn has
-            # ended, so a resume accepts it; so has a turn that ended with a question, so
-            # its answer accepts it.
+            # ended, so a resume accepts it.
             outcome = self._runtime(worker.runtime).wake(
                 worker.session_id, message, session_uuid=worker.session_uuid,
-                if_idle=not resume, if_ended=resume, if_asked=answer,
+                if_idle=not resume, if_ended=resume,
             )
         except (AgentRuntimeError, ConfigError) as exc:
             # Nothing is known about whether the message arrived. The events stay; if it
@@ -805,8 +806,9 @@ class Delivery:
         Only the session that holds the conversation can use it: the answer to a question
         that the session asked since its last wake, and a summary clone's request for a
         note about that conversation. The refresh comes at the worker's next wake. A
-        reply that answers no question refreshes as any event does: a worker that follows
-        no item gets nothing else.
+        reply to a session that lists ``blocked`` with no dialog may answer a question in
+        plain text, so it stays too. Another reply refreshes as any event does: a worker
+        that follows no item gets nothing else.
         """
         if any(
             (entry.source, entry.kind) == (ledger_mod.HANDOFF_SOURCE, ledger_mod.HANDOFF_KIND)
@@ -815,6 +817,8 @@ class Delivery:
             return True
         if not any(is_reply(entry) for entry in entries):
             return False
+        if self._ended_without_dialog(worker):
+            return True
         question = self.ledger.latest_question(worker)
         return (
             question is not None

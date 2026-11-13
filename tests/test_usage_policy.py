@@ -13,6 +13,7 @@ from chargehand import board as board_mod
 from chargehand import claude
 from chargehand import delivery as delivery_mod
 from chargehand import ledger as ledger_mod
+from chargehand import sanitize
 from chargehand import usage as usage_mod
 from chargehand.config import MachineConfig, UsageConfig
 from chargehand.delivery import (
@@ -24,6 +25,7 @@ from chargehand.delivery import (
 )
 from chargehand.errors import ConfigError
 from chargehand.tick import MODEL_LIMIT_KEY, TickReport, reset_clock
+from conftest import FAKE_CLAUDE
 from test_delivery import REVIEWER, build, emit_three, end_turn, resumes, start_reviewer, write_role
 
 MINIMAL = {"route": [{"repo": "~/code/app", "tracker": {"type": "linear", "team": "ABC"}}]}
@@ -484,6 +486,48 @@ def test_a_parked_session_that_runs_again_is_not_interrupted(harness):
     assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
 
 
+@pytest.mark.parametrize("status", ["idle", "busy"])
+def test_a_parked_session_listed_blocked_without_a_dialog_resumes_after_the_reset(
+    harness, status
+):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    # Claude Code lists some ended turns as blocked, with no dialog open; busy while a
+    # background shell of the turn runs.
+    harness.claude_state.set_session_state("ABC-1", "blocked", status=status)
+
+    report = harness.next_tick()
+
+    after = harness.worker("ABC-1")
+    assert after.state == ledger_mod.RUNNING
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert resume["prompt"] == RESUME_MESSAGE
+    assert "implementer/ABC-1: resume after the usage reset -> running" in report.transitions
+
+
+@pytest.mark.parametrize("listing, prompt_open", [
+    ({"status": "waiting", "waitingFor": "permission prompt"}, False),
+    # The listing may show no dialog yet while the hook already opened a prompt.
+    ({"status": "idle"}, True),
+], ids=["dialog", "open-prompt"])
+def test_a_parked_session_with_an_open_dialog_holds_the_resume(harness, listing, prompt_open):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    harness.claude_state.set_session_state("ABC-1", "blocked", **listing)
+    if prompt_open:
+        harness.ledger.record_permission_prompt(
+            harness.worker("ABC-1"), tool_name="Bash", tool_input="{}"
+        )
+
+    report = harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.PARKED
+    assert harness.claude_state.read().get("resumes", []) == []
+    assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
+
+
 @pytest.mark.parametrize("listed_as, reason", [
     ("working", "the session has a turn or a prompt"),
     ("hibernating", "the session state is not recognised"),
@@ -529,10 +573,16 @@ def test_a_resume_held_by_a_failed_listing_reports_the_error(harness, monkeypatc
     held = harness.worker("ABC-1")
     assert held.state == ledger_mod.PARKED
     reason = queue_reason(harness, held)
-    assert reason.startswith("resume held, the session listing failed: ")
-    assert "agents unavailable" in reason
+    prefix = "resume held, the session listing failed: "
+    assert reason.startswith(prefix)
+    # The error names the binary, so its length depends on the checkout path: compare
+    # with the same cap that delivery applies.
+    error = f"`{FAKE_CLAUDE} agents --json --all` exited 1: fake claude: agents unavailable"
+    assert reason == prefix + sanitize.one_line(error, limit=200)
+    assert len(reason) <= len(prefix) + 200
     assert f"implementer/ABC-1: {reason.removeprefix('resume held, ')}" in report.errors
-    assert card(harness, held)["queue_reason"] == reason
+    # The card caps a line as it caps every line.
+    assert card(harness, held)["queue_reason"] == sanitize.one_line(reason, limit=board_mod.LINE_LIMIT)
 
 
 def test_a_resume_held_by_a_runtime_this_build_lacks_says_so(harness):

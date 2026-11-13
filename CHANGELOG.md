@@ -207,6 +207,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ended and then at most every ten minutes, and of a live worker after an action on it was
   refused; a refused action looks at once. The card's `work_at_risk` shows what it found.
   Retry asks for a confirmation only in that case.
+- Parallel tool calls in manual mode. Each `PermissionRequest` of a session now stays its
+  own prompt that the board can answer: a newer request no longer cancels an older one, and
+  each held hook waits for the answer to the prompt that its own post recorded, also when
+  two calls have the same tool and input. A prompt is cancelled only when the session
+  withdraws it: the session no longer shows a permission dialog, the worker leaves
+  `blocked`, the turn or session ends, or a stop. The card shows the oldest prompt that
+  waits for the board first, and `more_prompts` says how many more wait. Before, only the
+  last prompt reached the board, and after its answer the worker stayed blocked with
+  nothing to answer.
+- A clone of a worker that a `[[source]]` started no longer ends in its first tick with
+  "item closed". The clone follows its item on the source of its original's item; before,
+  it followed it on the repository's tracker, which does not know the item, so the item
+  counted as closed. A clone of a worker that the queue label started still follows the
+  tracker.
+- A false "Needs you". Claude Code's session listing sometimes shows an idle session as
+  `blocked` with `status: idle` and no `waitingFor`, also after a turn that asked
+  nothing, and the worker moved to Needs you with nothing to answer and a "blocked (needs
+  input)" notification. That listing now counts as a turn end, the same as `done`: only a
+  dialog in the session (`status: waiting`), an open permission prompt, an open question
+  of the `ask` tool or the status file's `needs-input` blocks the worker. So a question
+  that the session asks as plain text no longer blocks the worker or sends a
+  notification: the worker is idle, and a reply from the board, or any other event, wakes
+  it. Past the role's refresh limit, a reply while the session lists so continues the
+  same session, which holds the question; any other event starts a fresh session as
+  usual. The tick logs the case at DEBUG. While a background shell of that turn still
+  runs, the same turn end lists `status: busy` instead; the worker is then idle with a
+  background shell, as after a `done` turn end, and the background-shell notice applies.
 
 ### Added
 

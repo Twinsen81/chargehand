@@ -466,9 +466,23 @@ function questionNode(c) {
   return box;
 }
 
+function morePromptsNote(c) {
+  const more = Number(c.more_prompts) || 0;
+  if (more <= 0) return null;
+  return el('div', 'note', more + ' more ' + (more === 1 ? 'prompt waits' : 'prompts wait') +
+    '; each one shows here after this one is answered.');
+}
+
 function promptNode(c) {
   const p = c.permission_prompt;
-  if (p.kind === 'question') return questionNode(c);
+  const box = p.kind === 'question' ? questionNode(c) : permissionNode(c);
+  const more = morePromptsNote(c);
+  if (more) box.append(more);
+  return box;
+}
+
+function permissionNode(c) {
+  const p = c.permission_prompt;
   const box = el('div', 'prompt');
   box.append(el('div', 'alert', 'permission: ' + p.tool_name));
   if (p.tool_input) {

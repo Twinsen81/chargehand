@@ -175,7 +175,6 @@ class FakeRuntime(Runtime):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
-        if_asked: bool = False,
     ) -> WakeResult:
         session = _WORLD.find(session_id)
         _WORLD.wakes.append({"id": session_id, "message": message})

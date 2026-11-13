@@ -37,7 +37,7 @@ import subprocess
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from chargehand import archive as archive_mod
@@ -1627,7 +1627,7 @@ class Runner:
             f"of {len(str(values['prompt']))} characters" if values["prompt"] else "of the role",
             values["model"] or "of the role", values["effort"] or "of the role",
         )
-        item = context.item_of(original) if original.item else None
+        item = self._clone_item(original, context)
         launched: list[Worker] = []
 
         def launch() -> Worker:
@@ -1646,6 +1646,21 @@ class Runner:
             if started:
                 outcome += f"; {started}"
         return ok, outcome
+
+    def _clone_item(self, original: Worker, context: RepositoryContext) -> WorkItem | None:
+        """The item a clone of *original* works on, from the source of its primary item.
+
+        A worker that a ``[[source]]`` started has its item there, not on the repository's
+        tracker; with the tracker's name the clone would ask the wrong source whether its
+        item is open, and end in its first tick. A worker from before subscriptions
+        existed has no primary item and keeps the tracker's.
+        """
+        if not original.item:
+            return None
+        primary = None if self._drives_label(original) else self.ledger.primary_subscription(original)
+        if primary is None:
+            return context.item_of(original)
+        return replace(primary.work_item, url=original.url, hint=context.repository.name)
 
     def _summary_capable(self, original: Worker) -> bool:
         """Whether a new session of *original*'s runtime loads the chargehand mod."""
@@ -1828,13 +1843,9 @@ class Runner:
             runtime = self.runtime(worker.runtime)
         except ConfigError:
             return None
-        if runtime.ended_with_question(session):
-            return (
-                f"{worker.name} asked a question, and its session waits for the answer: "
-                f"send the answer as a reply"
-            )
-        if session.state == runtime_mod.DONE:
-            # Blocked by its status file, or by a role that does not load: the turn ended.
+        if session.state == runtime_mod.DONE or runtime.ended_without_dialog(session):
+            # Blocked by an ask question, its status file, or a role that does not load:
+            # the turn ended.
             return (
                 f"{worker.name}: its turn ended and its session waits, so there is nothing "
                 f"to respawn: send a reply"
@@ -1894,6 +1905,12 @@ class Runner:
                 state = {"state": ledger_mod.BLOCKED} if asked else running
                 written = self.ledger.update_if_unchanged(current, **state)
                 if written is not None:
+                    if asked:
+                        # The old process and its dialogs are gone; a write of `blocked`
+                        # cancels no prompt by itself.
+                        self.ledger.resolve_permission_prompts(
+                            written, recorded_by=respawned_at, kind=ledger_mod.PROMPT_PERMISSION
+                        )
                     return written
             # A hook of the new session wrote the state it shows. A usage limit that parked
             # it again keeps its own reset time.
@@ -2765,6 +2782,13 @@ class Runner:
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
+            if session is not None and self._turn_ended_blocked(worker, session):
+                # No dialog waits and no permission prompt is open: the listing says no more
+                # than `done`, busy too while a background shell of the turn runs. Its
+                # report, an ask question or the status file still block.
+                log.debug("%s: the listing shows session %s as blocked with no dialog; read "
+                          "as a turn end", worker.handle, worker.session_id or "-")
+                observed = runtime_mod.DONE
             busy = observed == runtime_mod.WORKING or (
                 observed == runtime_mod.DONE and session is not None and session.busy
             )
@@ -2808,6 +2832,26 @@ class Runner:
             except _RowChanged:
                 continue
 
+    def _turn_ended_blocked(self, worker: Worker, session: Session) -> bool:
+        """Whether *session* lists as ``blocked`` while its live process waits for nothing.
+
+        Claude Code lists a session ``blocked`` after a turn that ended with a plain-text
+        question, and also after some turns that ended without one. Only a dialog, an open
+        permission prompt, an ask question or the status file blocks the worker. A
+        ``blocked`` entry without a process keeps its own handling.
+        """
+        if session.state != runtime_mod.BLOCKED or self._is_stopped(worker, session):
+            return False
+        try:
+            if not self.runtime(worker.runtime).ended_without_dialog(session):
+                return False
+        except ConfigError:
+            return False
+        return not any(
+            prompt.kind == ledger_mod.PROMPT_PERMISSION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        )
+
     def _hook_is_newer(self, worker: Worker) -> bool:
         listed_at = self._listed_at.get(worker.runtime)
         return (
@@ -2817,7 +2861,13 @@ class Runner:
         )
 
     def apply_hook(
-        self, worker: Worker, hook: Hook, report: TickReport | None = None, *, now: float | None = None
+        self,
+        worker: Worker,
+        hook: Hook,
+        report: TickReport | None = None,
+        *,
+        now: float | None = None,
+        recorded: list[int] | None = None,
     ) -> Worker | None:
         """Apply what one session hook reports to *worker* at once, as the next diff would.
 
@@ -2825,7 +2875,8 @@ class Runner:
         written only if the row still has the state and the last hook it was read with;
         otherwise the row is read again. The transition, the label and the notification
         are the session diff's own. Returns the worker as written, or None when it is no
-        longer live.
+        longer live. The id of the permission prompt that the hook records is appended to
+        *recorded*, so the caller that holds the hook holds this prompt and no other.
         """
         report = report if report is not None else TickReport()
         stamp = time.time() if now is None else now
@@ -2861,15 +2912,14 @@ class Runner:
             # A new turn, a prompt in a turn, a new session or a failed turn.
             self.ledger.delete_state(turn_ended_key)
         if hook.kind == runtime_mod.HOOK_PERMISSION:
-            # A session shows one permission dialog at a time; an older open prompt was
-            # answered in the session. A question that the ask tool recorded stays open.
-            self.ledger.resolve_permission_prompts(
-                current, now=stamp, kind=ledger_mod.PROMPT_PERMISSION
-            )
-            self.ledger.record_permission_prompt(
+            # Parallel tool calls of one turn post their requests at the same time, and each
+            # one waits for its own answer, so an older open prompt stays open.
+            prompt_id = self.ledger.record_permission_prompt(
                 current, tool_name=hook.tool_name or "unknown", tool_input=hook.tool_input or "",
                 now=stamp,
             )
+            if recorded is not None:
+                recorded.append(prompt_id)
         if observed is None:
             return current
         for _ in range(HOOK_WRITE_ATTEMPTS):
@@ -3273,6 +3323,7 @@ class Runner:
             prepare=self._refresh_item_checkout,
             resume_hold=self._resume_hold,
             awaits_answer=self._awaits_answer,
+            ended_without_dialog=self._ended_without_dialog,
             refresh=lambda worker, message: self._refresh_session(worker, message, report),
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
@@ -3331,6 +3382,7 @@ class Runner:
         if (
             found is None and current is not None and not runtime.is_stopped(current)
             and current.state in (runtime_mod.WORKING, runtime_mod.BLOCKED)
+            and not runtime.ended_without_dialog(current)
         ):
             # The operator may have started a turn in it since this tick's listing.
             return delivery_mod.Refresh(busy="the session has a turn or a prompt")
@@ -3388,12 +3440,24 @@ class Runner:
             return None
         return next((s for s in listed if s.id == worker.session_id), None)
 
+    def _ended_without_dialog(self, worker: Worker) -> bool:
+        """Whether this tick's listing shows *worker*'s live session ``blocked`` while its
+        turn ended and no dialog waits, as after a plain-text question. No new call."""
+        session = self._listed_session(worker)
+        if session is None or self._is_stopped(worker, session):
+            return False
+        try:
+            return self.runtime(worker.runtime).ended_without_dialog(session)
+        except ConfigError:
+            return False
+
     def _resume_hold(self, worker: Worker) -> str | None:
         """Why this tick's listing holds the resume of parked *worker*, or None when it may go.
 
-        The listing must show the session with its turn ended, or stopped. No new call,
-        unless an action of this tick dropped the listing; AgentRuntimeError when that
-        call fails.
+        The listing must show the session with its turn ended, or stopped. A ``blocked``
+        entry with no dialog and no open permission prompt counts as ended, as in the
+        session diff. No new call, unless an action of this tick dropped the listing;
+        AgentRuntimeError when that call fails.
         """
         try:
             listed = self.sessions(worker.runtime)
@@ -3402,8 +3466,10 @@ class Runner:
         session = next((s for s in listed if s.id == worker.session_id), None)
         if session is None:
             return f"session {worker.session_id} is not in the listing"
-        if session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
-            worker, session
+        if (
+            session.state in (runtime_mod.DONE, runtime_mod.FAILED)
+            or self._is_stopped(worker, session)
+            or self._turn_ended_blocked(worker, session)
         ):
             return None
         if session.state == runtime_mod.UNKNOWN:
@@ -3414,9 +3480,10 @@ class Runner:
         """Whether blocked *worker* waits for the answer to a question, which a reply gives.
 
         No permission prompt is open, and this tick's listing shows the session's turn
-        ended: with a question, or `done` when the ask tool or the status file asked one. A
-        question of the ask tool is resolved by the board's answer first. A turn that runs,
-        a dialog that waits and a failed turn do not count. No new call.
+        ended: `done`, or `blocked` with no dialog, while the ask tool or the status file
+        asked a question. A question of the ask tool is resolved by the board's answer
+        first. A turn that runs, a dialog that waits and a failed turn do not count. No new
+        call.
         """
         if worker.state != ledger_mod.BLOCKED or not worker.session_id:
             return False
@@ -3428,7 +3495,7 @@ class Runner:
         if session.state == runtime_mod.DONE:
             return True
         try:
-            return self.runtime(worker.runtime).ended_with_question(session)
+            return self.runtime(worker.runtime).ended_without_dialog(session)
         except ConfigError:
             return False
 

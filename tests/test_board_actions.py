@@ -473,14 +473,70 @@ def test_a_reply_to_a_worker_that_delivery_does_not_wake_waits_and_says_so(daemo
     assert harness.ledger.get(worker.id).wakes == 0
 
 
-def asked(harness, worker, **listed):
-    """The listing shows *worker*'s turn ended with a question; a tick blocks the worker."""
-    # The real shape of a plain-text question: `state: blocked`, `status: idle`, no waitingFor.
-    harness.claude_state.set_session_state(worker.session_id, "blocked", **({"status": "idle"} | listed))
+def ended_blocked(harness, worker, **listed):
+    """The listing shows *worker*'s session `blocked` with `status: idle` and no waitingFor.
+
+    The real shape of a turn that ended with a plain-text question, and of some turns that
+    ended without one.
+    """
+    harness.claude_state.set_session_state(
+        worker.session_id, "blocked", **({"status": "idle"} | listed)
+    )
     harness.next_tick()
-    blocked = harness.ledger.get(worker.id)
+    return harness.ledger.get(worker.id)
+
+
+def asked(harness, worker, **listed):
+    """*worker* asked with its ask tool, and the listing shows its turn ended; a tick blocks it."""
+    harness.ledger.record_question(worker, "Which file next?", [])
+    blocked = ended_blocked(harness, worker, **listed)
     assert blocked.state == ledger_mod.BLOCKED
     return blocked
+
+
+def test_a_session_listed_blocked_without_a_dialog_leaves_the_worker_idle(daemon, harness):
+    """A plain-text question, or none: only a dialog, a prompt, an ask question or the
+    status file blocks the worker."""
+    unqueued(harness)
+    worker = board_worker(harness)
+    sent = len(harness.notifications())
+
+    idle = ended_blocked(harness, worker)
+
+    assert (idle.state, idle.session_state) == (ledger_mod.IDLE, "done")
+    assert harness.notifications()[sent:] == []
+    card = next(c for column in board.build(harness.config, harness.ledger, health={})["columns"]
+                for c in column["cards"] if c["id"] == worker.id)
+    assert card["column"] != "needs_you"
+
+
+def test_a_reply_wakes_a_worker_whose_session_lists_blocked_without_a_dialog(daemon, harness):
+    unqueued(harness)
+    worker = ended_blocked(harness, board_worker(harness))
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/reply", {"text": "change board.py next"})
+    harness.next_tick()
+
+    assert "delivery wakes the worker" in harness.ledger.get_request(answer["id"])["message"]
+    woken = harness.ledger.get(worker.id)
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, 1)
+    assert ["stop", worker.session_id] in harness.claude_state.commands
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: change board.py next" in resume["prompt"].splitlines()
+
+
+def test_an_event_wakes_a_worker_whose_session_lists_blocked_without_a_dialog(daemon, harness):
+    unqueued(harness)
+    worker = ended_blocked(harness, board_worker(harness, subscribe=["comment"]))
+    harness.board.comment("ABC-1")
+
+    harness.next_tick()
+
+    woken = harness.ledger.get(worker.id)
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, 1)
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert any(line.startswith("comment: ") for line in resume["prompt"].splitlines())
+    assert harness.ledger.inbox(worker) == []
 
 
 def test_a_reply_answers_a_worker_whose_turn_ended_with_a_question(daemon, harness):
@@ -546,10 +602,26 @@ def test_a_reply_to_a_question_whose_session_was_stopped_waits_for_continue(daem
     assert harness.ledger.inbox(worker) == []
 
 
-def test_a_held_answer_shows_why_on_its_card_until_it_goes(daemon, harness):
+def asked_in_the_status_file(harness, tmp_path):
+    """The status file says needs-input, and the listing shows the turn ended; it blocks."""
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    (harness.repo / ".chargehand.toml").write_text(
+        f'base = "origin/main"\nprompt = "{{issue}}"\n'
+        f'status_file = "{status_dir}/{{issue}}.json"\n'
+    )
+    worker = board_worker(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "needs-input"}))
+    blocked = ended_blocked(harness, worker)
+    assert blocked.state == ledger_mod.BLOCKED
+    return blocked
+
+
+def test_a_held_answer_shows_why_on_its_card_until_it_goes(daemon, harness, tmp_path):
     unqueued(harness)
     unqueued(harness, "ABC-2")
-    worker = asked(harness, board_worker(harness))
+    # The status file keeps the worker blocked while its answer waits.
+    worker = asked_in_the_status_file(harness, tmp_path)
     other = board_worker(harness, item="ABC-2")
     # The other worker's turn takes the one working slot.
     harness.config = dataclasses.replace(harness.config, max_concurrent=1)

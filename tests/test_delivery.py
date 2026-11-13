@@ -341,9 +341,11 @@ def test_a_crash_between_the_wake_and_the_ledger_write_loses_no_event(wired):
     assert wired.ledger.get(reviewer.id).wakes == 1
 
 
-@pytest.mark.parametrize("later_state", ["working", "blocked"])
+# A prompt lists `status: waiting`; `blocked` with `status: busy` and no `waitingFor` is a
+# turn end while a background shell runs.
+@pytest.mark.parametrize("later_state, status", [("working", "busy"), ("blocked", "waiting")])
 def test_a_turn_or_prompt_that_starts_after_the_listing_is_not_interrupted(
-    wired, monkeypatch, later_state
+    wired, monkeypatch, later_state, status
 ):
     """The tick's listing said done; by the wake a leftover shell or the operator started more."""
     reviewer = start_reviewer(wired)
@@ -354,7 +356,7 @@ def test_a_turn_or_prompt_that_starts_after_the_listing_is_not_interrupted(
 
     def diff_then_change(report):
         diff(report)
-        wired.claude_state.set_session_state("PR-7", later_state, status="busy")
+        wired.claude_state.set_session_state("PR-7", later_state, status=status)
 
     monkeypatch.setattr(wired.runner, "_diff_and_notify", diff_then_change)
     report = wired.runner.tick()
