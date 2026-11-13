@@ -229,7 +229,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the `ask` tool or the status file's `needs-input` blocks the worker. So a question
   that the session asks as plain text no longer blocks the worker or sends a
   notification: the worker is idle, and a reply from the board, or any other event, wakes
-  it. The tick logs the case at DEBUG.
+  it. Past the role's refresh limit, a reply while the session lists so continues the
+  same session, which holds the question; any other event starts a fresh session as
+  usual. The tick logs the case at DEBUG.
 
 ### Added
 

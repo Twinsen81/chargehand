@@ -947,8 +947,11 @@ a `parked` worker, the answer to a question that the session asked since its las
 (whether the listing shows that turn end as `blocked` or as `done`), and a summary
 clone's request for a current note stay in the session they belong to, because only that
 session holds the conversation they are about; the refresh then comes at the next wake.
-A reply that answers no question refreshes as any event does, so the limit also holds
-for a worker that follows no item and gets only replies. The card lists the worker's
+So does a reply from the board while the tick's listing shows the session `blocked` with
+`status: idle` and no `waitingFor`, because it may answer a question that the session
+asked in plain text; another event to that worker refreshes as usual. Any other reply
+that answers no question refreshes as any event does, so the limit also holds for a
+worker that follows no item and gets only replies. The card lists the worker's
 sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
