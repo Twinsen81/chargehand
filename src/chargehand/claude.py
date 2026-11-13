@@ -2086,12 +2086,11 @@ class ClaudeRuntime(Runtime):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
-        if_asked: bool = False,
     ) -> WakeResult:
         """Stop the live idle process, confirm it is gone, then resume by the full session id.
 
-        With *if_idle* or *if_asked*, only a stopped session, or a live one whose last turn
-        ended ``done``, or ``blocked`` with no dialog (see :meth:`ended_without_dialog`), is
+        With *if_idle*, only a stopped session, or a live one whose last turn ended
+        ``done``, or ``blocked`` with no dialog (see :meth:`ended_without_dialog`), is
         woken. With *if_ended*, a live one whose last turn ended ``failed`` is woken too.
 
         A resume against a running process, or by the short job id, starts a copy under a
@@ -2109,7 +2108,7 @@ class ClaudeRuntime(Runtime):
         old_pid = _listed_pid(session)
         ended = (DONE, FAILED) if if_ended else (DONE,)
         if (
-            (if_idle or if_ended or if_asked)
+            (if_idle or if_ended)
             and not self.is_stopped(session)
             and session.state not in ended
             and not self.ended_without_dialog(session)

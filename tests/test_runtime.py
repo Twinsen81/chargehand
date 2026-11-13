@@ -304,7 +304,7 @@ def test_the_claude_blocked_without_dialog_rule_reads_the_status():
 def test_an_answer_wakes_a_session_whose_turn_ended_with_a_question(claude_runtime, claude_state):
     claude_state.set(sessions=[live("blocked")])
 
-    result = claude_runtime.wake("s1", "reply from the operator: yes", if_idle=True, if_asked=True)
+    result = claude_runtime.wake("s1", "reply from the operator: yes", if_idle=True)
 
     assert result.ok and not result.busy
     assert claude_state.commands == [["stop", "s1"]]
@@ -318,7 +318,7 @@ def test_an_answer_wakes_a_session_whose_turn_ended_with_a_question(claude_runti
 def test_an_answer_leaves_a_live_turn_or_dialog_alone(claude_runtime, claude_state, entry):
     claude_state.set(sessions=[entry])
 
-    result = claude_runtime.wake("s1", "reply from the operator: yes", if_idle=True, if_asked=True)
+    result = claude_runtime.wake("s1", "reply from the operator: yes", if_idle=True)
 
     assert not result.ok and result.busy
     assert claude_state.commands == []

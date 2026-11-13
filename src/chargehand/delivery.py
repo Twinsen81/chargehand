@@ -724,8 +724,6 @@ class Delivery:
         if self._wake_in_place(worker, message, entries, result):
             return
         resume = worker.state == ledger_mod.PARKED
-        # A reply answers a question that the session asked after this tick's listing too.
-        answer = not resume and any(is_reply(entry) for entry in entries)
         notified = worker.notified_state
         renotify = worker.state in (ledger_mod.PARKED, ledger_mod.BLOCKED) and notified is not None
         if renotify:
@@ -748,7 +746,7 @@ class Delivery:
             # ended, so a resume accepts it.
             outcome = self._runtime(worker.runtime).wake(
                 worker.session_id, message, session_uuid=worker.session_uuid,
-                if_idle=not resume, if_ended=resume, if_asked=answer,
+                if_idle=not resume, if_ended=resume,
             )
         except (AgentRuntimeError, ConfigError) as exc:
             # Nothing is known about whether the message arrived. The events stay; if it

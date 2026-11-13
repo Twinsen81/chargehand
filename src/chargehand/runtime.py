@@ -344,7 +344,6 @@ class Runtime(ABC):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
-        if_asked: bool = False,
     ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
 
@@ -353,9 +352,9 @@ class Runtime(ABC):
         ``busy`` set. The runtime decides from its own fresh look, because the caller's
         view of the session can be older. Delivery asks this way. *if_ended* is the same,
         except that a turn that ended ``failed`` also counts as ended: the resume of a
-        worker that a usage limit parked asks this way. *if_asked* is the same as
-        *if_idle*: a reply from the board to a question asks this way. Each of them also
-        counts a session as ended that :meth:`ended_without_dialog` accepts.
+        worker that a usage limit parked asks this way. A reply from the board to a
+        question asks with *if_idle* too. Both also count a session as ended that
+        :meth:`ended_without_dialog` accepts.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing
