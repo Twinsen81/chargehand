@@ -2115,9 +2115,8 @@ class ClaudeRuntime(Runtime):
             and not self.ended_without_dialog(session)
         ):
             # A turn runs or a dialog waits; a stop would interrupt the turn or discard the
-            # dialog. The caller's
-            # listing may be older: a leftover background shell starts a turn by itself,
-            # and the operator can answer in agent view.
+            # dialog. The caller's listing may be older: a leftover background shell starts
+            # a turn by itself, and the operator can answer in agent view.
             return WakeResult(
                 False, f"session {session_id} is {session.state}, not idle", busy=True
             )

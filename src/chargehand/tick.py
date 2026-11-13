@@ -3322,6 +3322,7 @@ class Runner:
             prepare=self._refresh_item_checkout,
             resume_hold=self._resume_hold,
             awaits_answer=self._awaits_answer,
+            ended_without_dialog=self._ended_without_dialog,
             refresh=lambda worker, message: self._refresh_session(worker, message, report),
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
@@ -3380,6 +3381,7 @@ class Runner:
         if (
             found is None and current is not None and not runtime.is_stopped(current)
             and current.state in (runtime_mod.WORKING, runtime_mod.BLOCKED)
+            and not runtime.ended_without_dialog(current)
         ):
             # The operator may have started a turn in it since this tick's listing.
             return delivery_mod.Refresh(busy="the session has a turn or a prompt")
@@ -3436,6 +3438,17 @@ class Runner:
         except (AgentRuntimeError, ConfigError):
             return None
         return next((s for s in listed if s.id == worker.session_id), None)
+
+    def _ended_without_dialog(self, worker: Worker) -> bool:
+        """Whether this tick's listing shows *worker*'s live session ``blocked`` while its
+        turn ended and no dialog waits, as after a plain-text question. No new call."""
+        session = self._listed_session(worker)
+        if session is None or self._is_stopped(worker, session):
+            return False
+        try:
+            return self.runtime(worker.runtime).ended_without_dialog(session)
+        except ConfigError:
+            return False
 
     def _resume_hold(self, worker: Worker) -> str | None:
         """Why this tick's listing holds the resume of parked *worker*, or None when it may go.

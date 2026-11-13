@@ -521,6 +521,7 @@ class Delivery:
         prepare: Callable[[Worker], str | None] = lambda worker: None,
         resume_hold: Callable[[Worker], str | None] = lambda worker: None,
         awaits_answer: Callable[[Worker], bool] = lambda worker: False,
+        ended_without_dialog: Callable[[Worker], bool] = lambda worker: False,
         refresh: Callable[[Worker, str], Refresh] | None = None,
     ) -> None:
         self.ledger = ledger
@@ -547,6 +548,9 @@ class Delivery:
         # prompt is open, and the tick's listing shows no turn and no dialog. A first
         # look, as above.
         self._awaits_answer = awaits_answer
+        # Whether the tick's listing shows the worker's live session `blocked` while its
+        # turn ended and no dialog waits, as after a question in plain text.
+        self._ended_without_dialog = ended_without_dialog
         # Stops the worker's session and starts a fresh one in its worktree, whose first
         # prompt carries the message; raises AgentRuntimeError or ConfigError when it
         # fails. Without it, every wake continues the same session.
@@ -804,8 +808,9 @@ class Delivery:
         Only the session that holds the conversation can use it: the answer to a question
         that the session asked since its last wake, and a summary clone's request for a
         note about that conversation. The refresh comes at the worker's next wake. A
-        reply that answers no question refreshes as any event does: a worker that follows
-        no item gets nothing else.
+        reply to a session that lists ``blocked`` with no dialog may answer a question in
+        plain text, so it stays too. Another reply refreshes as any event does: a worker
+        that follows no item gets nothing else.
         """
         if any(
             (entry.source, entry.kind) == (ledger_mod.HANDOFF_SOURCE, ledger_mod.HANDOFF_KIND)
@@ -814,6 +819,8 @@ class Delivery:
             return True
         if not any(is_reply(entry) for entry in entries):
             return False
+        if self._ended_without_dialog(worker):
+            return True
         question = self.ledger.latest_question(worker)
         return (
             question is not None
