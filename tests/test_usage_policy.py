@@ -486,6 +486,36 @@ def test_a_parked_session_that_runs_again_is_not_interrupted(harness):
     assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
 
 
+def test_a_parked_session_listed_blocked_without_a_dialog_resumes_after_the_reset(harness):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    # Claude Code lists some ended turns as blocked, with no dialog open.
+    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
+
+    report = harness.next_tick()
+
+    after = harness.worker("ABC-1")
+    assert after.state == ledger_mod.RUNNING
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert resume["prompt"] == RESUME_MESSAGE
+    assert "implementer/ABC-1: resume after the usage reset -> running" in report.transitions
+
+
+def test_a_parked_session_with_an_open_dialog_holds_the_resume(harness):
+    worker = launch(harness)
+    park(harness, worker, time.time() + 3600)
+    harness.ledger.update(harness.worker("ABC-1"), reset_at=time.time() - 1)
+    harness.claude_state.set_session_state(
+        "ABC-1", "blocked", status="waiting", waitingFor="permission prompt"
+    )
+
+    report = harness.next_tick()
+
+    assert harness.claude_state.read().get("resumes", []) == []
+    assert "implementer/ABC-1: resume held, the session has a turn or a prompt" in report.skipped
+
+
 @pytest.mark.parametrize("listed_as, reason", [
     ("working", "the session has a turn or a prompt"),
     ("hibernating", "the session state is not recognised"),

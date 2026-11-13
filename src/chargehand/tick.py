@@ -3453,9 +3453,10 @@ class Runner:
     def _resume_hold(self, worker: Worker) -> str | None:
         """Why this tick's listing holds the resume of parked *worker*, or None when it may go.
 
-        The listing must show the session with its turn ended, or stopped. No new call,
-        unless an action of this tick dropped the listing; AgentRuntimeError when that
-        call fails.
+        The listing must show the session with its turn ended, or stopped. A ``blocked``
+        entry with no dialog and no open permission prompt counts as ended, as in the
+        session diff. No new call, unless an action of this tick dropped the listing;
+        AgentRuntimeError when that call fails.
         """
         try:
             listed = self.sessions(worker.runtime)
@@ -3464,8 +3465,10 @@ class Runner:
         session = next((s for s in listed if s.id == worker.session_id), None)
         if session is None:
             return f"session {worker.session_id} is not in the listing"
-        if session.state in (runtime_mod.DONE, runtime_mod.FAILED) or self._is_stopped(
-            worker, session
+        if (
+            session.state in (runtime_mod.DONE, runtime_mod.FAILED)
+            or self._is_stopped(worker, session)
+            or self._turn_ended_blocked(worker, session)
         ):
             return None
         if session.state == runtime_mod.UNKNOWN:
