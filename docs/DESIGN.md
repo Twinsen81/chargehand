@@ -1114,8 +1114,15 @@ the listing names no shell: a reply or another event that starts a turn while th
 runs ends in a new turn end, which is notified again `background_shell_mins` after it,
 while no newer turn started. The worker stays `idle`, so delivery may wake it: through the
 outbox the mod submits the wake as a new turn while the shell runs. A stop and resume, for
-a session without the mod, waits while the listing shows the session working, but stops
-one listed as done, or blocked with no dialog, and busy, which ends the shell. Neither the
+a session without the mod, would end the shell, such as a dev server or a long test run.
+So the runtime looks at the listing right before its stop, and while the session lists
+working, or done (or blocked with no dialog) but busy, the wake for events waits: the
+worker is `queued`, its card says "wake held, a background shell of session ... still
+runs", and the events stay in its inbox. Once the listing shows the session idle, the next
+tick sends the wake. The background-shell notice above still tells the operator about a
+shell that does not end. Two wakes go out at once and end the shell: a reply from the
+board, also the answer to a question that ended its turn while a shell runs, because the
+operator chose to act; and the resume of a parked worker after its usage limit. Neither the
 watchdog nor `max_concurrent` counts the time, because no turn runs and no usage is spent.
 Only sessions launched with the `UserPromptSubmit` hook get this reading, because a resume
 keeps the hooks of the launch: for a session launched before it, a turn that the operator

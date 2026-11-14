@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude, hooks, ledger as ledger_mod, worker_tokens
+from chargehand import board as board_mod, claude, delivery as delivery_mod, hooks, ledger as ledger_mod, worker_tokens
 from chargehand.config import ServeConfig
 from chargehand.runtime import Hook
 from chargehand.sources import Event, WorkItem
@@ -814,6 +814,103 @@ def test_a_reply_wakes_a_worker_whose_turn_ended_with_a_background_shell(
     assert outcome["ok"] == 1 and "delivery wakes the worker" in outcome["message"]
     woken = harness.worker("ABC-1")
     assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, worker.wakes + 1)
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: blue" in resume["prompt"].splitlines()
+
+
+def _comment(harness, worker, dedupe_id="c1"):
+    harness.ledger.enqueue(worker.id, Event(
+        source="fake", kind="comment", item=WorkItem("fake", "ABC-1", "id-ABC-1"),
+        actor="someone", occurred_at=time.time(), dedupe_id=dedupe_id,
+        pointer=f"https://example.invalid/{dedupe_id}",
+    ))
+
+
+def _card(harness, worker) -> dict:
+    model = board_mod.build(harness.config, harness.ledger, health={})
+    return next(
+        entry for column in model["columns"] for entry in column["cards"] if entry["id"] == worker.id
+    )
+
+
+@pytest.mark.parametrize("listed_state", ["done", "blocked"])
+def test_a_comment_waits_while_a_background_shell_runs_in_a_session_without_the_mod(
+    daemon, harness, tmp_path, caplog, listed_state
+):
+    # A wake without the mod stops the session, and the stop ends the shell, such as a
+    # dev server. The comment waits until the shell ends.
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
+    harness.next_tick()
+    _comment(harness, worker)
+
+    with caplog.at_level(logging.INFO, logger="chargehand"):
+        for _ in range(3):
+            harness.next_tick()
+
+    held = harness.worker("ABC-1")
+    assert (held.state, held.wakes) == (ledger_mod.QUEUED, worker.wakes)
+    assert held.session_state == ledger_mod.SESSION_BACKGROUND
+    assert ["stop", worker.session_id] not in harness.claude_state.commands
+    assert harness.claude_state.read().get("resumes", []) == []
+    assert len(harness.ledger.inbox(held)) == 1
+    reason = f"wake held, a background shell of session {worker.session_id} still runs"
+    assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") == reason
+    shown = _card(harness, held)
+    assert (shown["column"], shown["queue_reason"]) == ("queued", reason)
+    assert "woke session" not in caplog.text
+
+    # The shell ended: the listing shows the session idle, and the held wake goes out.
+    harness.claude_state.set_session_state(worker.session_id, "done", status="idle")
+    harness.next_tick()
+
+    woken = harness.worker("ABC-1")
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, worker.wakes + 1)
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "comment: https://example.invalid/c1" in resume["prompt"].splitlines()
+    assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") is None
+
+
+def test_a_comment_goes_to_the_outbox_while_a_background_shell_runs_in_a_session_with_the_mod(
+    daemon, harness, tmp_path
+):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, "done")
+    harness.ledger.update(harness.worker("ABC-1"), mod_session=worker.session_uuid)
+    harness.next_tick()
+    _comment(harness, worker)
+
+    harness.next_tick()
+
+    message = harness.ledger.outbox_message(harness.worker("ABC-1"))
+    assert message is not None and "comment: https://example.invalid/c1" in message.text
+    assert ["stop", worker.session_id] not in harness.claude_state.commands
+    assert harness.claude_state.read().get("resumes", []) == []
+
+
+def test_a_reply_wakes_a_worker_whose_question_ended_the_turn_with_a_background_shell(
+    daemon, harness, tmp_path
+):
+    # The operator chose to act, so the reply goes out at once, and the stop ends the shell.
+    _with_token(harness, tmp_path)
+    worker = launch(harness)
+    harness.ledger.record_question(worker, question="Which colour?", options=[], now=time.time())
+    post(daemon, "Stop", {"session_id": worker.session_uuid})
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    harness.claude_state.set_session_state(worker.session_id, "blocked", status="busy")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+
+    status, raw = support.request(
+        daemon.port, "POST", f"/api/workers/{worker.id}/reply",
+        body=json.dumps({"text": "blue"}).encode(), headers=AUTH,
+    )
+    assert status == 202
+    harness.next_tick()
+
+    outcome = harness.ledger.get_request(json.loads(raw)["id"])
+    assert outcome["ok"] == 1
+    woken = harness.worker("ABC-1")
+    assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, worker.wakes + 1)
+    assert ["stop", worker.session_id] in harness.claude_state.commands
     (resume,) = harness.claude_state.read()["resumes"]
     assert "reply from the operator: blue" in resume["prompt"].splitlines()
 

@@ -743,10 +743,14 @@ class Delivery:
         try:
             # The runtime's own look decides, right before its stop: the operator may have
             # started a turn in the session since this tick's listing. A failed turn has
-            # ended, so a resume accepts it.
+            # ended, so a resume accepts it. A wake for events leaves a background shell
+            # of the ended turn running, because the stop would end it. A reply from the
+            # board may end it, because the operator chose to act; the resume after a
+            # usage limit goes on as before.
             outcome = self._runtime(worker.runtime).wake(
                 worker.session_id, message, session_uuid=worker.session_uuid,
                 if_idle=not resume, if_ended=resume,
+                end_shell=resume or any(is_reply(entry) for entry in entries),
             )
         except (AgentRuntimeError, ConfigError) as exc:
             # Nothing is known about whether the message arrived. The events stay; if it
@@ -758,6 +762,14 @@ class Delivery:
             return
         if not outcome.ok:
             detail = sanitize.one_line(outcome.detail, limit=300)
+            if outcome.shell:
+                # The turn ended, but the stop would end a background shell of it, such as
+                # a dev server. The worker waits as queued, with the reason on its card,
+                # until the listing shows the session idle; the notice after
+                # background_shell_mins still tells the operator.
+                self._hold(worker, f"wake held, {detail}", result)
+                keep_notified()
+                return
             if outcome.busy:
                 # The session started a turn, or opened a prompt, after the listing this
                 # tick read. The events wait for the turn to end; the state diff of a
