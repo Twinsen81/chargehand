@@ -283,6 +283,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree counted as the worker's, and the mod polled every 5 seconds, with a hello that
   was refused with 404 each time, until the session stopped. The tick still never adopts
   or stops such a session.
+- A worker at its daily wake cap now shows "wake held by the daily cap" on its card while
+  other workers fill `max_concurrent`. Before, admission checked the global cap first, so
+  the card named the global cap and the operator waited for the wrong limit, and the
+  daily-cap notification went out only once a working slot was free. The role's daily cap
+  now comes before the global cap, and the notification is sent once when the cap is
+  reached. The README and the `implementer` and `pr-reviewer` role templates now name all
+  three wakes that skip the debounce (a reply from the board, a due `request_wake` timer
+  and a summary clone's request for a current handoff note), and say the same about a
+  `/loop`: no cap stops its turns, and while such a turn runs the worker is `running` and
+  holds one slot of `max_concurrent`.
 
 ### Added
 

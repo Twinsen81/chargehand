@@ -482,6 +482,35 @@ def test_the_global_cap_keeps_the_events_queued(tmp_path, repo, claude_state, bo
     harness.ledger.close()
 
 
+def test_a_worker_at_its_daily_cap_shows_that_cap_while_the_global_cap_is_full(
+    tmp_path, repo, claude_state, board
+):
+    write_role(repo, "reviewer", REVIEWER + "\n[policy]\nmax_wakes_per_day = 1\n")
+    harness = build(tmp_path, repo, claude_state, board, max_concurrent=1, max_open_workers=2)
+    reviewer = start_reviewer(harness)
+    end_turn(harness)
+    emit_three()
+    harness.next_tick()
+    end_turn(harness)
+    # The queue starts an implementer, which takes the one working slot.
+    harness.board.add("ABC-1")
+    harness.next_tick()
+    assert harness.worker("ABC-1", "implementer").state == ledger_mod.RUNNING
+
+    for _ in range(2):
+        fake_source.feed().emit("comment", "PR-7")
+        report = harness.next_tick()
+        assert harness.ledger.get(reviewer.id).state == ledger_mod.QUEUED
+        assert any("daily cap (1/1)" in line for line in report.skipped)
+        assert not any("global cap" in line for line in report.skipped)
+
+    reason = harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{reviewer.id}")
+    assert reason == "wake held by the daily cap (1/1)"
+    assert [n for n in harness.notifications() if n[1] == "daily-cap"] == [("PR-7", "daily-cap")]
+    assert len(resumes(harness)) == 1
+    harness.ledger.close()
+
+
 def deliver_at(harness, clock):
     """One delivery pass at *clock*, as a tick runs it."""
     return delivery_mod.Delivery(
@@ -656,6 +685,40 @@ def test_the_shipped_roles_debounce_and_say_that_a_loop_is_not_counted(name):
 
     assert role.policy.debounce_secs == 120
     assert "/loop" in text and "do not count them" in text
+
+
+def _one_line(text: str) -> str:
+    """*text* without comment marks, backticks and line breaks, for a sentence search."""
+    lines = (line.lstrip("#").strip() for line in text.splitlines())
+    return " ".join(line for line in lines if line).replace("`", "")
+
+
+ROOT = Path(__file__).parents[1]
+NO_DEBOUNCE = (
+    "A reply from the board, a due request_wake timer and a summary clone's request for a "
+    "current handoff note do not wait."
+)
+LOOP = (
+    "A /loop that a role's prompt starts runs its own turns, which chargehand does not "
+    "start: the debounce and the daily cap do not count them, and no cap stops them. While "
+    "such a turn runs, the worker is running and holds one slot of max_concurrent."
+)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ROOT / "README.md",
+        ROOT / "src" / "chargehand" / "templates" / "roles" / "implementer.toml",
+        ROOT / "src" / "chargehand" / "templates" / "roles" / "pr-reviewer.toml",
+    ],
+    ids=lambda path: path.name,
+)
+def test_the_readme_and_the_role_templates_say_the_same_about_the_debounce_and_a_loop(path):
+    text = _one_line(path.read_text(encoding="utf-8"))
+
+    assert NO_DEBOUNCE in text
+    assert LOOP in text
 
 
 def test_a_role_without_a_debounce_wakes_at_the_next_tick(wired):

@@ -891,10 +891,11 @@ board, a due `request_wake` timer and a summary clone's request for a current ha
 note (section 5) do not wait, because the operator waits for the answer, the worker chose
 the time itself, and the clone's launch waits for the note; the waiting events go along
 with them. The
-wake must then pass admission: the number of working turns below `max_concurrent`, counted
-over the workers of all repositories, the role's
-`max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
-worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
+wake must then pass admission, in this order: the role's `max_wakes_per_day` over the last
+24 hours, the number of working turns below `max_concurrent`, counted over the workers of
+all repositories, and the usage reserve: the weekly window of the worker's provider at or
+below 100 minus `wake_reserve_percent` (80 % by default). The worker's own cap comes first,
+so a worker at its daily cap shows that reason while other workers fill `max_concurrent`. No
 reading means no reserve; a reading counts however old it is, until the window's reset
 time has passed (see "Admission" in section 5). A worker that waits becomes `queued` and
 keeps its events, and the reason it waits is kept for the board. A worker that reaches its

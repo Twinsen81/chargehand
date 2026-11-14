@@ -76,9 +76,9 @@ max_workers = 4
 max_wakes_per_day = 12
 # A wake waits until no new event has arrived for this many seconds, so a burst of
 # review comments becomes one wake, but at most five times this after the first waiting
-# event. A reply from the board does not wait.
+# event. A reply from the board, a due request_wake timer and a summary clone's request
+# for a current handoff note do not wait.
 debounce_secs = 120
-# A /loop that the role's prompt starts runs its own turns in the session; chargehand
-# does not start them. The debounce and the daily wake cap do not count them, and no cap
-# stops them. While such a turn runs, the worker is working and holds one slot of the
-# machine's max_concurrent.
+# A /loop that a role's prompt starts runs its own turns, which chargehand does not
+# start: the debounce and the daily cap do not count them, and no cap stops them. While
+# such a turn runs, the worker is running and holds one slot of max_concurrent.

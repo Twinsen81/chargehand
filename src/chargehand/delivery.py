@@ -12,8 +12,8 @@ events in its inbox goes through these steps:
    ``debounce_secs``, so a burst becomes one wake, and at most
    :data:`DEBOUNCE_MAX_HOLD_FACTOR` times that after the oldest waiting event; a reply
    from the board, a due timer and a summary clone's request for a current handoff note
-   do not wait. Then the global cap on working turns,
-   across all repositories, the role's daily wake cap and the usage reserve. A worker that waits becomes
+   do not wait. Then the role's daily wake cap, the global cap on working turns across
+   all repositories, and the usage reserve. A worker that waits becomes
    ``queued`` and keeps its events. A worker that reaches its daily cap is notified
    once, until its next wake.
 3. Check and prepare, through the caller: a worker whose worktree must not host its
@@ -1061,13 +1061,6 @@ class Delivery:
 
     def _refusal(self, worker: Worker, result: DeliveryResult) -> str | None:
         """Why admission holds this wake back now, or None when it may go."""
-        # A wake in an outbox is a turn about to start.
-        sending = self.ledger.outbox_workers() - {worker.id}
-        working = sum(
-            w.state in WORKING_STATES or w.id in sending for w in self.ledger.live_workers()
-        )
-        if working >= self.max_concurrent:
-            return f"wake held by the global cap ({working}/{self.max_concurrent} working)"
         try:
             policy = self._policy(worker)
         except ConfigError as exc:
@@ -1084,6 +1077,15 @@ class Delivery:
                              f"{policy.max_wakes_per_day}")
                 )
             return f"wake held by the daily cap ({wakes}/{policy.max_wakes_per_day})"
+        # The worker's own cap comes before the global cap, so that its card names the
+        # limit it waits for, and its notification goes out while the global cap is full.
+        # A wake in an outbox is a turn about to start.
+        sending = self.ledger.outbox_workers() - {worker.id}
+        working = sum(
+            w.state in WORKING_STATES or w.id in sending for w in self.ledger.live_workers()
+        )
+        if working >= self.max_concurrent:
+            return f"wake held by the global cap ({working}/{self.max_concurrent} working)"
         provider = self._provider(worker)
         reading = self._usage(provider) if provider else None
         window = window_over_reserve(reading, reserve_percent=self.reserve_percent, now=now)
