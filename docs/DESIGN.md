@@ -630,7 +630,10 @@ worktree). The session's hooks and its mod send it, and the daemon maps the toke
 worker: the token, not the session id or the working directory that a post names, says
 which worker posts. The board's token never goes to a session. A token ends with its
 worker: the daemon refuses the token of a worker that ended (its mod's outbox poll is
-answered `ended`), a new launch in the same worktree replaces it, and the file is
+answered `ended`), except for the turn end and the usage post of the last turn of a
+worker that ended `done` or `failed` less than 120 seconds ago, from the worker's own
+session (the Stop hook of that turn can end the worker before the mod posts; the usage
+reading is recorded, and the turn end changes nothing), a new launch in the same worktree replaces it, and the file is
 deleted with the settings file when the session is removed. A tool call acts as the
 token's worker, whatever session id it names. A hook, a hello, a lifecycle or usage post,
 or an outbox poll from a session that is not the worker's current one, such as a copy
@@ -1013,7 +1016,10 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   poll is never held open: a hook runs at most 10 seconds and one fetch at most 30.
 - Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
   session's rate-limit windows to `/channel/usage`; the session end posts
-  `/channel/lifecycle/session_end`.
+  `/channel/lifecycle/session_end`. When the Stop hook of the last turn already ended the
+  worker `done` or `failed`, the daemon still takes these two posts of that turn for 120
+  seconds, from the worker's own session: it records the usage reading, changes nothing
+  for the turn end, and logs at most a DEBUG line.
 
 Every post carries the session's own token, which says which worker posts. A tool call
 acts as that worker whatever session id it names; a hello, a lifecycle or usage post, or

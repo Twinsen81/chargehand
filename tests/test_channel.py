@@ -927,3 +927,85 @@ def test_a_usage_post_without_a_weekly_window_leaves_the_reading(daemon, harness
     assert json.loads(body)["usage"]["known"] is False
     after = harness.ledger.get(worker.id)
     assert (after.context_tokens, after.context_percent) == (None, None)
+
+
+def _stop_hook(daemon, worker):
+    status, _ = support.request(
+        daemon.port, "POST", "/hooks/Stop", headers=AUTH,
+        body=json.dumps({"session_id": worker.session_uuid, "last_assistant_message": "ok"}).encode(),
+    )
+    assert status == 200
+
+
+def _last_turn(worker, **extra):
+    """The turn end and the usage reading that the mod posts at the end of a turn."""
+    usage_post = of(worker, rate_limits=[
+        {"kind": "seven_day", "percentUsed": 41.5, "resetsAt": _iso(time.time() + 86400)},
+    ], context={"tokens": 12000, "window": 200000, "percent": 6}, **extra)
+    return of(worker, reason="answer", answer="ok", **extra), usage_post
+
+
+def _ended(daemon, harness, state):
+    worker = launch(harness)
+    post(daemon, "tool/report", of(worker, input={"state": state, "summary": "x"}))
+    # The Stop hook of the last turn ends the worker before the mod posts the same turn end.
+    _stop_hook(daemon, worker)
+    ended = harness.ledger.get(worker.id)
+    assert ended.state == state
+    return ended
+
+
+@pytest.mark.parametrize("state", [ledger_mod.DONE, ledger_mod.FAILED])
+def test_the_last_turn_of_a_worker_that_ended_is_taken_quietly(daemon, harness, caplog, state):
+    ended = _ended(daemon, harness, state)
+    notified = harness.notifications()
+    turn_post, usage_post = _last_turn(ended)
+
+    with caplog.at_level("DEBUG"):
+        assert post(daemon, "lifecycle/turn_complete", turn_post) == (200, {})
+        assert post(daemon, "usage", usage_post) == (200, {"recorded": True})
+
+    assert "refused" not in caplog.text
+    assert all(r.levelname == "DEBUG" for r in caplog.records if r.name.startswith("chargehand"))
+    after = harness.ledger.get(ended.id)
+    assert after == dataclasses.replace(ended, context_tokens=12000, context_percent=6.0)
+    assert harness.notifications() == notified
+    status, body = support.request(daemon.port, "GET", "/api/state")
+    reading = json.loads(body)["usage"]
+    assert (reading["known"], reading["source"], reading["seven_day"]["used_percent"]) == (
+        True, "session", 41.5,
+    )
+
+
+def test_only_the_last_turn_posts_of_a_worker_that_ended_are_taken(daemon, harness):
+    ended = _ended(daemon, harness, ledger_mod.DONE)
+
+    for path, extra in (("hello", {}), ("tool/subscribe", {"input": {"kinds": ["comment"]}}),
+                        ("outbox/confirm", {"id": 1, "submitted": True}),
+                        ("lifecycle/session_end", {})):
+        assert post(daemon, path, of(ended, **extra))[0] == 401, path
+    assert post(daemon, "outbox", of(ended)) == (200, {"message": None, "ended": True})
+    # From another session with the worker's token: refused, as for any post after the end.
+    turn_post, usage_post = _last_turn(ended, session_id="copy-of-the-worker")
+    assert post(daemon, "lifecycle/turn_complete", turn_post)[0] == 401
+    assert post(daemon, "usage", usage_post)[0] == 401
+
+    assert harness.ledger.get(ended.id) == ended
+
+
+@pytest.mark.parametrize("why", ["past the window", "cancelled"])
+def test_the_last_turn_posts_are_refused_late_or_after_a_cancel(daemon, harness, why):
+    ended = _ended(daemon, harness, ledger_mod.DONE)
+    if why == "cancelled":
+        harness.ledger.update(ended, state=ledger_mod.CANCELLED)
+    else:
+        harness.ledger.update(ended, finished_at=time.time() - channel.FINAL_TURN_SECS - 1)
+    before = harness.ledger.get(ended.id)
+
+    turn_post, usage_post = _last_turn(ended)
+    assert post(daemon, "lifecycle/turn_complete", turn_post)[0] == 401
+    assert post(daemon, "usage", usage_post)[0] == 401
+
+    assert harness.ledger.get(ended.id) == before
+    status, body = support.request(daemon.port, "GET", "/api/state")
+    assert json.loads(body)["usage"]["known"] is False

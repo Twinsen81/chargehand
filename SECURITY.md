@@ -181,8 +181,10 @@ public location.
   to the worker, comparing in constant time. A session never gets the board's token: its
   settings hold its own token, and the mod's environment names its own token file. The
   channel routes take only a worker's token, and the board's routes only the board's
-  token. A token ends with its worker: the daemon refuses the token of a worker that ended,
-  a new launch in the same worktree replaces it, and the file is deleted when the session
+  token. A token ends with its worker: the daemon refuses the token of a worker that ended
+  (the only exception is the turn end and the usage reading of the last turn of a worker
+  that ended `done` or `failed` less than 120 seconds ago, from its own session id; they
+  record the usage reading and change no state), a new launch in the same worktree replaces it, and the file is deleted when the session
   is removed. A tool call acts as the token's worker, whatever session id it names. A
   hook, a hello, a lifecycle or usage post, or an outbox poll from a session that is not
   the worker's current one, such as a copy that a resume started in the same worktree
