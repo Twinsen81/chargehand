@@ -1288,12 +1288,22 @@ refusal says which.
   never overrides a `discard` while the current session of another live worker is in the
   worktree: that refusal carries no `reason`. The card
   of the worker shows the outcome of its last action, "pending", then "done" or "refused"
-  with that text, until the next action or a dismiss. The board model makes no git call,
+  with that text, until the next action or a dismiss. The tick also keeps the last
+  refusal of a `discard`, `retry` or `archive` from the board for each worker in the
+  ledger's state, with its time, and the card carries it as `last_refusal` (the request
+  id, the kind, the board's words or else the request's message, and the time), so the
+  line shows after a reload and in every tab. An action of these kinds that succeeds,
+  from any origin, removes the record; the tick drops it after one hour and when the
+  worker is collected. A dismiss hides it in that tab only: the page keeps the dismissed
+  request ids in `sessionStorage`. The board model makes no git call,
   so the tick records what each worker that ended within the last day, and a live worker
   whose action it refused, holds in its worktree: once the worker ended or the action was
   refused, then at most every ten minutes, because each look runs git twice in the
   worktree. The card's `work_at_risk` carries it, and the confirmation dialog of Discard,
-  Retry and Archive says it. A record is dropped once its worker leaves the window.
+  Retry and Archive says it. A record is dropped once its worker leaves the window. The
+  card's `work_checked` says whether the tick has such a record; without one, the Discard
+  and Archive dialog of a live worker says that its worktree was not checked yet and can
+  hold work that the daemon refuses to lose without force.
   The page asks for the token once, keeps it in the browser's `localStorage` for this
   origin, and sends it only in the `Authorization` header, never in a URL. It checks the
   token on Enter, when the field loses focus with a new value, on load and when the

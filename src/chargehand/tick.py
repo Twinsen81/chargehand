@@ -122,6 +122,13 @@ WORKER_STATE_PREFIXES = (CHECKOUT_HEAD_PREFIX, WORKSPACE_FILES_PREFIX)
 WORK_AT_RISK_PREFIX = "work-at-risk:"
 WORK_AT_RISK_WINDOW_SECS = 24 * 3600
 WORK_AT_RISK_REFRESH_SECS = 600
+# The last refusal of a Discard, Retry or Archive that the board sent for a worker, under
+# this prefix and the worker id: a JSON object with the request id, the kind, the time and
+# the refusal's message and reason. Every page shows it on the card, also after a reload,
+# until an action of these kinds on the worker succeeds, the worker is collected, or
+# `LAST_REFUSAL_SECS` have passed.
+LAST_REFUSAL_PREFIX = "last-refusal:"
+LAST_REFUSAL_SECS = 3600
 
 # A start event for a repository that no `[[repository]]` names is ignored. It is reported
 # once per source and repository; this prefix marks the ones reported.
@@ -218,6 +225,8 @@ ARCHIVE_REPOSITORY = "archive_repository"
 UNARCHIVE_REPOSITORY = "unarchive_repository"
 # A new worker made from an existing one; see :mod:`chargehand.clone`.
 CLONE = clone_mod.CLONE
+# The actions whose board refusal stays on the card; see `LAST_REFUSAL_PREFIX`.
+REFUSAL_KINDS = ("retry", "discard", ARCHIVE)
 
 # The worker states whose session a copy would take in the middle of something: a launch,
 # a turn in progress, or an open question or permission prompt.
@@ -1408,6 +1417,11 @@ class Runner:
             # is a second event.
             args["request_id"] = request["id"]
             args["request_origin"] = request.get("origin") or ledger_mod.REQUEST_CLI
+            # Resolved before the request applies, which can change what the target names.
+            named = (
+                self.ledger.find_worker(target, args.get("role") or None)[0]
+                if kind in REFUSAL_KINDS and target else None
+            )
             try:
                 ok, message = self._apply_request(kind, target, args, report)
             except ChargehandError as exc:
@@ -1419,10 +1433,50 @@ class Runner:
                 request["id"], ok=ok, message=message,
                 reason=message.reason if isinstance(message, NeedsForce) else None,
             )
+            if named is not None:
+                self._keep_refusal(named, request, kind, ok, message)
             report.requests.append(
                 f"{kind}{f' {target}' if target else ''} from {request.get('origin') or 'cli'}: "
                 f"{'ok' if ok else 'refused'} — {message}"
             )
+
+    def _keep_refusal(
+        self, worker: Worker, request: dict, kind: str, ok: bool, message: str
+    ) -> None:
+        """Record a board refusal of *kind* for *worker*'s card, or drop the record when
+        the action succeeded, from any origin."""
+        key = f"{LAST_REFUSAL_PREFIX}{worker.id}"
+        if ok:
+            self.ledger.delete_state(key)
+            return
+        if (request.get("origin") or ledger_mod.REQUEST_CLI) != ledger_mod.REQUEST_BOARD:
+            return
+        self.ledger.set_state(key, json.dumps({
+            "request_id": request["id"],
+            "kind": kind,
+            "at": time.time(),
+            "message": sanitize.one_line(str(message), limit=REQUEST_MESSAGE_LIMIT),
+            "reason": message.reason if isinstance(message, NeedsForce) else None,
+        }))
+
+    def _forget_refusals(self, now: float | None = None) -> None:
+        """Drop each refusal record that is older than `LAST_REFUSAL_SECS`, or whose
+        worker is collected or no longer recorded."""
+        now = time.time() if now is None else now
+        for key, value in self.ledger.all_state().items():
+            if not key.startswith(LAST_REFUSAL_PREFIX):
+                continue
+            worker_id = key.removeprefix(LAST_REFUSAL_PREFIX)
+            worker = self.ledger.get(int(worker_id)) if worker_id.isdigit() else None
+            try:
+                at = json.loads(value).get("at")
+            except (ValueError, AttributeError):
+                at = None
+            if (
+                worker is None or worker.gc_done or not isinstance(at, (int, float))
+                or now - at >= LAST_REFUSAL_SECS
+            ):
+                self.ledger.delete_state(key)
 
     def _apply_request(
         self, kind: str, target: str | None, args: dict, report: TickReport
@@ -4602,6 +4656,7 @@ class Runner:
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
         self._record_work_at_risk()
+        self._forget_refusals()
         self._forget_checkout_heads()
         self._forget_summary_waits()
 

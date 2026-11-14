@@ -28,9 +28,13 @@
 // multi-line text the page sends; the daemon checks and caps it as the command line does.
 //
 // A worker action also shows its outcome on its card: pending, then ok or refused with the
-// daemon's board wording, until the next action on that card or a dismiss. The daemon
-// tells what Discard, Retry and Archive would lose, from its last tick, so the
-// confirmation dialog can say it before the click.
+// daemon's board wording, until the next action on that card or a dismiss. The daemon also
+// keeps the last refusal of a Discard, Retry or Archive for a short time and sends it on the
+// card, so the line shows after a reload and in every tab; a dismiss hides it in this tab,
+// which keeps the dismissed request ids in sessionStorage. The daemon tells what Discard,
+// Retry and Archive would lose, from its last tick, so the confirmation dialog can say it
+// before the click. It looks at the worktree of a live worker only after a refusal, so the
+// dialog says when that worktree was not checked yet.
 'use strict';
 
 const POLL_MS = 1000;
@@ -44,6 +48,9 @@ const TOKEN_STATES = {
 const TERMINAL_KEY = 'chargehand.terminal';
 const REPLY_MAX = 500;
 const SHOW_HIDDEN_KEY = 'chargehand.showHidden';
+const DISMISSED_KEY = 'chargehand.dismissedRefusals';
+// The most dismissed request ids that this tab keeps.
+const DISMISSED_MAX = 200;
 const NAME_MAX = 60;
 const BOARD_PIN_HINT = 'Board pin: this sorts the card first and keeps it visible in a collapsed ' +
   'repository. It does not keep the session running.';
@@ -79,7 +86,8 @@ let lastOk = 0;
 let latest = null;
 // The last rendered signature of each card, by worker id.
 const signatures = new Map();
-// The outcome of the last action on each card, by worker id: { kind, text }.
+// The outcome of the last action on each card, by worker id: { kind, text, request }, where
+// request is the request id once the daemon gave one.
 const cardStatus = new Map();
 // How many actions this page sent for each card, by worker id; it outlives a dismiss.
 const cardActionSequence = new Map();
@@ -394,10 +402,41 @@ function cardChildren(c, now) {
     attach.title = c.attach;
     nodes.push(attach);
   }
-  const status = cardStatus.get(String(c.id));
+  const status = shownStatus(c);
   if (status) nodes.push(statusNode(c.id, status));
   nodes.push(cardActions(c));
   return nodes;
+}
+
+function dismissedRefusals() {
+  try {
+    const ids = JSON.parse(sessionStorage.getItem(DISMISSED_KEY) || '[]');
+    return Array.isArray(ids) ? ids : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function dismissRefusal(requestId) {
+  const ids = dismissedRefusals().filter((id) => id !== requestId);
+  ids.push(requestId);
+  try {
+    sessionStorage.setItem(DISMISSED_KEY, JSON.stringify(ids.slice(-DISMISSED_MAX)));
+  } catch (e) {
+    // Without storage the dismiss holds only until the next reload.
+  }
+}
+
+// The line a card shows: the outcome of this tab's last action on it, unless the daemon
+// has a newer refusal for it, else the daemon's refusal when this tab did not dismiss it.
+function shownStatus(c) {
+  const own = cardStatus.get(String(c.id));
+  const refusal = c.last_refusal;
+  const newer = refusal && (!own || (typeof own.request === 'number' && refusal.request_id > own.request));
+  if (newer && !dismissedRefusals().includes(refusal.request_id)) {
+    return { kind: 'bad', text: 'refused: ' + refusal.text, request: refusal.request_id };
+  }
+  return own || null;
 }
 
 function statusNode(id, status) {
@@ -406,6 +445,7 @@ function statusNode(id, status) {
   text.title = status.text;
   const dismiss = boardButton('×', 'Dismiss', () => {
     cardStatus.delete(String(id));
+    if (typeof status.request === 'number') dismissRefusal(status.request);
     rerender();
   });
   dismiss.className = 'dismiss';
@@ -413,8 +453,8 @@ function statusNode(id, status) {
   return box;
 }
 
-function setCardStatus(id, kind, text) {
-  cardStatus.set(String(id), { kind, text });
+function setCardStatus(id, kind, text, request) {
+  cardStatus.set(String(id), { kind, text, request });
   rerender();
 }
 
@@ -598,7 +638,7 @@ function groupNode(columnKey, g) {
 function signature(c) {
   // The age is refreshed separately, so it is not part of the signature.
   const { updated_at, ...rest } = c;
-  return JSON.stringify([rest, cardStatus.get(String(c.id)) || null]);
+  return JSON.stringify([rest, shownStatus(c)]);
 }
 
 function renderColumns(columns, now) {
@@ -862,10 +902,19 @@ async function send(path, body, what, onOutcome) {
 }
 
 // What the confirmation dialog of Discard, Retry or Archive says about the work they would
-// lose, when the card knows of it.
+// lose, when the card knows of it, or that the worktree of a live worker was not checked yet.
 function riskWarning(c, name, force) {
   const risk = c.work_at_risk;
-  if (!risk || !['discard', 'retry', 'archive'].includes(name)) return '';
+  if (!['discard', 'retry', 'archive'].includes(name)) return '';
+  if (!risk && c.column !== 'closed' && !c.work_checked && name !== 'retry') {
+    if (!force) {
+      return ' Its worktree was not checked yet: it can hold uncommitted changes or unpushed ' +
+        'commits, and then the daemon refuses this without force.';
+    }
+    return ' Its worktree was not checked yet; force is ticked, so uncommitted changes and ' +
+      'unpushed commits in it ' + (name === 'archive' ? 'are kept as files, not as commits.' : 'are lost.');
+  }
+  if (!risk) return '';
   const said = ' ' + risk.text.charAt(0).toUpperCase() + risk.text.slice(1);
   if (!force) {
     return said + ': without force the daemon refuses this. Tick force and press ' +
@@ -912,7 +961,8 @@ function workerAction(c, name, force) {
   send(path, FORCED.has(name) ? { force } : {}, what + (force && FORCED.has(name) ? ' --force' : ''),
     (outcome) => {
       if (!latestAction()) return;
-      setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome));
+      setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome),
+        outcome.id);
     });
 }
 
