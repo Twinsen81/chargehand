@@ -865,6 +865,43 @@ def test_the_mod_of_an_ended_worker_is_told_to_stop_polling(daemon, harness, cap
     assert sum("the mod stops polling" in r.getMessage() for r in caplog.records) == 1
 
 
+def refreshed(harness, worker):
+    """*worker* after a refresh: a fresh session replaces the one it had, which is kept."""
+    fresh = harness.ledger.update(worker, session_id="fresh", session_uuid="fresh-uuid")
+    harness.ledger.record_session(
+        fresh, kind=ledger_mod.SESSION_REFRESH, session_id="fresh", session_uuid="fresh-uuid"
+    )
+    return fresh
+
+
+def test_the_mod_of_a_replaced_session_is_told_to_stop_polling(daemon, harness, caplog):
+    worker = launch(harness)
+    fresh = refreshed(harness, worker)
+    put = harness.ledger.put_outbox(fresh, session_uuid="fresh-uuid", text="wake", entries=[])
+
+    # The kept session, resumed by hand: its mod still polls with the worker's token.
+    with caplog.at_level("INFO"):
+        status, answer = post(daemon, "outbox", of(worker))
+
+    assert (status, answer) == (200, {"message": None, "ended": True})
+    assert sum("the mod stops polling" in r.getMessage() for r in caplog.records) == 1
+    assert worker.session_uuid[:8] in caplog.text
+    # The current session takes its message; a session with no row is not told to stop.
+    assert post(daemon, "outbox", of(fresh)) == (200, {"message": {"id": put.id, "text": "wake"}})
+    assert post(daemon, "outbox", of(worker, session_id="unknown")) == (200, {"message": None})
+    assert harness.ledger.get(worker.id).state == ledger_mod.RUNNING
+
+
+def test_a_worker_without_a_session_id_tells_no_mod_to_stop(daemon, harness):
+    worker = launch(harness)
+    fresh = refreshed(harness, worker)
+    # In a launch, before the tick records the session's ids.
+    harness.ledger.update(fresh, session_id=None, session_uuid=None)
+
+    for session in (worker.session_uuid, "fresh-uuid", "unknown"):
+        assert post(daemon, "outbox", of(worker, session_id=session)) == (200, {"message": None})
+
+
 # ----- lifecycle and usage ---------------------------------------------------------
 
 

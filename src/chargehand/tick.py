@@ -1079,11 +1079,20 @@ class Runner:
         live = [w for w in self.ledger.live_workers() if w.runtime == runtime]
         # By the real path: the listing names a worktree under a linked root, such as /tmp
         # on macOS, by the path the link leads to.
-        known = {os.path.realpath(w.worktree) for w in live} | {
+        # A worker without a session id yet, in its launch, owns any session in its worktree.
+        # A worker with one owns only that session there: an earlier session of a worker,
+        # resumed in the worktree, is reported below.
+        known = {os.path.realpath(w.worktree) for w in live if not w.session_id} | {
             w.session_id for w in live if w.session_id
         }
+        current = {os.path.realpath(w.worktree) for w in live if w.session_id}
         for session in sessions:
-            if session.id in known or (session.cwd and os.path.realpath(session.cwd) in known):
+            cwd = os.path.realpath(session.cwd) if session.cwd else None
+            if session.id in known or cwd in known:
+                continue
+            if cwd in current and self.ledger.worker_by_session_row(session.id) is None:
+                # A session that no worker ever had, such as the fresh session of a refresh
+                # before its id is recorded.
                 continue
             if not self._under(root, session.cwd):
                 continue
