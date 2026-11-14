@@ -981,7 +981,7 @@ class Delivery:
             self.ledger.update(worker, mod_session=None)
             result.warnings.append(
                 f"{worker.handle}: the session did not take its wake from the outbox within "
-                f"{OUTBOX_TAKE_SECS}s; it is stopped and resumed instead"
+                f"{OUTBOX_TAKE_SECS}s; the wake goes through stop and resume instead"
             )
             return False
         try:
