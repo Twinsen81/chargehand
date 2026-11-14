@@ -2091,12 +2091,17 @@ class ClaudeRuntime(Runtime):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
+        end_shell: bool = False,
     ) -> WakeResult:
         """Stop the live idle process, confirm it is gone, then resume by the full session id.
 
         With *if_idle*, only a stopped session, or a live one whose last turn ended
         ``done``, or ``blocked`` with no dialog (see :meth:`ended_without_dialog`), is
         woken. With *if_ended*, a live one whose last turn ended ``failed`` is woken too.
+        With either, a live session that lists ``status: busy`` after its turn ended is not
+        woken unless *end_shell* is set: a background shell of that turn still runs (see
+        :attr:`Session.busy`), and the stop would end it, such as a dev server or a long
+        test run. The result then has ``busy`` and ``shell`` set.
 
         A resume against a running process, or by the short job id, starts a copy under a
         new id, and the copy works in the same worktree. Both are ruled out first, and a
@@ -2123,6 +2128,11 @@ class ClaudeRuntime(Runtime):
             # a turn by itself, and the operator can answer in agent view.
             return WakeResult(
                 False, f"session {session_id} is {session.state}, not idle", busy=True
+            )
+        if (if_idle or if_ended) and not end_shell and not self.is_stopped(session) and session.busy:
+            return WakeResult(
+                False, f"a background shell of session {session_id} still runs",
+                busy=True, shell=True,
             )
         if not self.is_stopped(session):
             stopped = self.cli.stop(session_id)
