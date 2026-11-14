@@ -1351,8 +1351,9 @@ refusal says which.
   launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a new
   clone of the same original with them, or says why it cannot. A full-mode fork is
   recorded as a `fork` session; a summary clone's session is an `initial` one (section 5
-  describes its wait for a current note). A clone's session gets `Edit` and `Write` deny
-  rules for its original's worktree in its own settings file, in every mode, and for the
+  describes its wait for a current note). A clone's session gets an `Edit` deny rule
+  (which covers Write; no `Write` rule is written) for its original's worktree in its own
+  settings file, in every mode, and for the
   worktree of every earlier original of a clone of a clone, because a copy of a copy
   names them all; the line before a full-mode prompt names them all too. A deny rule
   holds in every permission mode, so its file tools cannot change the original's tree,

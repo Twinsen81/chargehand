@@ -232,7 +232,9 @@ def test_the_full_fork_argv_names_the_clone_and_passes_the_role_options_again(ha
     deny = written["permissions"]["deny"]
     assert f"Read(/{worker_tokens.token_dir()}/**)" in deny
     for path in {str(original.worktree_path), os.path.realpath(original.worktree)}:
-        assert f"Edit(/{path}/**)" in deny and f"Write(/{path}/**)" in deny
+        assert f"Edit(/{path}/**)" in deny
+    # An `Edit` rule covers Write; Claude Code warns that a `Write` deny rule never matches.
+    assert not any(rule.startswith("Write(") for rule in deny)
     assert not any(clone.worktree in rule for rule in deny)
     # A resume reads piped text into the prompt; the copy still runs its SessionStart hook.
     assert fork["stdin"] == "devnull"
@@ -253,7 +255,8 @@ def test_a_clone_of_a_clone_protects_the_worktree_of_every_ancestor(harness, tmp
     deny = json.loads(claude_mod.settings_file_for(grandchild.worktree_path).read_text())[
         "permissions"]["deny"]
     for worktree in (original.worktree, child.worktree):
-        assert f"Edit(/{worktree}/**)" in deny and f"Write(/{worktree}/**)" in deny
+        assert f"Edit(/{worktree}/**)" in deny
+    assert not any(rule.startswith("Write(") for rule in deny)
     assert not any(grandchild.worktree in rule for rule in deny)
     prompt = fork_calls(harness)[-1]["prompt"]
     assert f"The worktrees {child.worktree} and {original.worktree} belong to other workers" in prompt
@@ -616,7 +619,8 @@ def test_a_clone_of_either_mode_is_launched_with_the_originals_worktree_protecte
     if runtime == "claude":
         argv = harness.claude_state.launches[-1]["argv"]
         deny = json.loads(argv[argv.index("--settings") + 1])["permissions"]["deny"]
-        assert f"Edit(/{original.worktree}/**)" in deny and f"Write(/{original.worktree}/**)" in deny
+        assert f"Edit(/{original.worktree}/**)" in deny
+        assert not any(rule.startswith("Write(") for rule in deny)
     else:
         assert fake_runtime.world().launches[-1]["protected_paths"] == [original.worktree]
     assert fresh.parent_id == original.id
