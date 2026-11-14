@@ -808,6 +808,37 @@ def test_the_board_words_each_reason(raw, words):
     assert answer["message"] == "the command line's text"
 
 
+@pytest.mark.parametrize("raw, words", [
+    ({"needs_force": True, "other_sessions": ["47076c61", "s9"]},
+     "sessions that are not this worker's own work in its worktree: 47076c61, s9; force stops "
+     "and removes them; tick force and press Discard again"),
+    ({"needs_force": True, "sessions_unknown": True},
+     "the session listing could not be read, so other sessions can work in its worktree; tick "
+     "force and press Discard again"),
+])
+def test_the_board_words_the_reasons_of_a_discard_that_other_sessions_refused(raw, words):
+    row = {"id": 1, "kind": "discard", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "the command line's text", "reason": raw}
+
+    answer = board.outcome(row)
+
+    assert answer["board_message"] == words
+    assert answer["reason"] == raw
+
+
+@pytest.mark.parametrize("others", [
+    [], ["ok", "bad id"], ["x" * 65], [7], "47076c61", ["a", "b", "c", "d", "e", "f"],
+])
+def test_a_reason_keeps_only_a_short_list_of_plain_session_ids(others):
+    row = {"id": 1, "kind": "discard", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "m", "reason": {"needs_force": True, "other_sessions": others}}
+
+    answer = board.outcome(row)
+
+    assert answer["reason"] == {"needs_force": True}
+    assert answer["board_message"] is None
+
+
 def test_a_reason_is_left_out_unless_force_would_override_a_refusal():
     base = {"id": 1, "kind": "discard", "target": "#1", "message": "m"}
     work = {"needs_force": True, "work": {"uncommitted_changes": True}}

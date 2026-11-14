@@ -1169,6 +1169,7 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
+                                    # or other sessions in the worktree; --force removes those too
 chargehand clone <ITEM> --mode fresh|full|summary [--prompt TEXT | --prompt-file PATH] [--model M]
                  [--effort E] [--subscribe KIND]...   # a new worker from an existing one
 chargehand tick                     # run a tick now, under the tick lock
@@ -1264,7 +1265,9 @@ refusal says which.
   and answers with the request's outcome, or with the request pending;
   `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
   A refusal that force would override (`retry`, `discard`, `archive` over uncommitted
-  changes or unpushed commits, or a `discard` whose session did not stop) also carries a
+  changes or unpushed commits, a `discard` whose session did not stop, a `discard` of a
+  worktree where sessions that are not the worker's own work, or a `discard` while the
+  session listing cannot be read) also carries a
   machine-readable `reason`, kept in the ledger with the request (schema version 13), and
   a `board_message` in the board's words ("its worktree has uncommitted changes; tick
   force and press Discard again"); its `message` stays the command line's text. The card

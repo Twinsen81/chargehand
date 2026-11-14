@@ -293,6 +293,8 @@ def _segments(request: Request, prefix: str) -> list[str]:
 
 # The card button that a refused worker action names in its board wording.
 FORCED_BUTTONS = {"retry": "Retry", "discard": "Discard", ARCHIVE: "Archive"}
+# The most session ids a refusal's reason keeps: a discard names its first ones.
+OTHER_SESSIONS_KEPT = 5
 
 
 def outcome(row: dict[str, object]) -> dict[str, object]:
@@ -361,6 +363,14 @@ def refusal_reason(raw: object) -> dict[str, object] | None:
         reason["work"] = work
     if raw.get("session_running") is True:
         reason["session_running"] = True
+    if raw.get("sessions_unknown") is True:
+        reason["sessions_unknown"] = True
+    others = raw.get("other_sessions")
+    if (
+        isinstance(others, list) and 0 < len(others) <= OTHER_SESSIONS_KEPT
+        and all(isinstance(i, str) and sanitize.is_safe_identifier(i) for i in others)
+    ):
+        reason["other_sessions"] = list(others)
     return reason
 
 
@@ -374,6 +384,13 @@ def board_refusal(kind: str, reason: dict[str, object]) -> str | None:
         why = str(work["text"])
     elif reason.get("session_running"):
         why = "the session did not stop, so its worktree is still in use"
+    elif isinstance(others := reason.get("other_sessions"), list):
+        why = (
+            f"sessions that are not this worker's own work in its worktree: "
+            f"{', '.join(others)}; force stops and removes them"
+        )
+    elif reason.get("sessions_unknown"):
+        why = "the session listing could not be read, so other sessions can work in its worktree"
     else:
         return None
     again = f"tick force and press {button} again"

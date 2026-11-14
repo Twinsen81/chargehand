@@ -247,6 +247,16 @@ KEPT_BRANCH = (
     "`git branch` in the repository lists it"
 )
 
+# How many ids of other sessions in a worktree a discard names; it counts the rest.
+OTHER_SESSIONS_SHOWN = 5
+
+
+def _id_list(ids: Sequence[str]) -> str:
+    shown = ", ".join(ids[:OTHER_SESSIONS_SHOWN])
+    more = len(ids) - OTHER_SESSIONS_SHOWN
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
 # The queue status each worker state should be reflected by on the tracker, or on the
 # item of a `[[source]]` that marks items.
 _STATUS_FOR_STATE = {
@@ -2052,6 +2062,29 @@ class Runner:
             return False, self._needs_force(
                 worker, risk, f"{worker.name}: {risk.text}. Re-run with --force to discard anyway."
             )
+        # A session that is not the worker's own can work in its worktree, such as a copy
+        # that `claude --resume` started there. It has no session row, so only the listing
+        # shows it. Looked at before the worker's own stop, so a refusal changes nothing.
+        found = self._other_sessions(worker)
+        if found is None and not force:
+            return False, NeedsForce((
+                f"{worker.name}: the session listing could not be read, so other sessions "
+                f"can work in its worktree. Re-run with --force to discard anyway."
+            ), {"sessions_unknown": True})
+        others, holders = found if found is not None else ([], [])
+        if holders:
+            # Force never stops the current session of another live worker.
+            return False, (
+                f"{worker.name}: the session of live worker "
+                f"{', '.join(holder.id_handle for holder in holders)} works in its worktree. "
+                f"Cancel that worker first."
+            )
+        ids = [sanitize.scrub_identifier(session.id) for session in others]
+        if others and not force:
+            return False, NeedsForce((
+                f"{worker.name}: other sessions work in its worktree: {_id_list(ids)}. Stop "
+                f"them, or re-run with --force to stop and remove them with the worker."
+            ), {"other_sessions": ids[:OTHER_SESSIONS_SHOWN]})
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
         if not self._stop_session(worker) and not force:
@@ -2060,6 +2093,24 @@ class Runner:
                 f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
             ), {"session_running": True})
+        also = ""
+        if others:
+            log.info(
+                "%s: discard stops and removes %s other session(s) in its worktree: %s",
+                worker.handle, len(others), ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]),
+            )
+            left = self._remove_other_sessions(worker.runtime, others)
+            gone = [i for session, i in zip(others, ids) if session.id not in left]
+            if gone:
+                also += f"; other sessions in its worktree stopped and removed: {_id_list(gone)}"
+            if left:
+                kept_ids = [sanitize.scrub_identifier(session_id) for session_id in left]
+                also += (
+                    f"; other sessions in its worktree could not be stopped and removed: "
+                    f"{_id_list(kept_ids)}; remove them by hand"
+                )
+        elif found is None:
+            also = "; the session listing could not be read, so other sessions were not looked for"
         removed = self._remove_session(worker)
         try:
             branches_removed = self._remove_worktree(worker, force=True)
@@ -2069,13 +2120,63 @@ class Runner:
             worker = self.ledger.update(worker, state=ledger_mod.CANCELLED)
             self._sync_labels(worker, context, report)
         self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
-        kept = "" if branches_removed else f"; {KEPT_BRANCH}"
+        kept = ("" if branches_removed else f"; {KEPT_BRANCH}") + also
         if not removed:
             return True, (
                 f"discarded {worker.id_handle}: worktree and branch deleted, but the session "
                 f"could not be removed; remove session {worker.session_id} by hand{kept}"
             )
         return True, f"discarded {worker.id_handle}: session removed, worktree and branch deleted{kept}"
+
+    def _other_sessions(self, worker: Worker) -> tuple[list[Session], list[Worker]] | None:
+        """The listed sessions other than *worker*'s own whose directory is in its worktree
+        or its item checkout, by real path, and the live workers whose current session is
+        one of them. None when the listing cannot be read.
+        """
+        self.invalidate_sessions(worker.runtime)
+        try:
+            sessions = self.sessions(worker.runtime, refresh=True)
+        except AgentRuntimeError:
+            return None
+        roots = (worker.worktree_path, item_checkout_path(worker))
+        own = {record.session_id for record in self.ledger.sessions_of(worker) if record.session_id}
+        if worker.session_id:
+            own.add(worker.session_id)
+        live = {
+            other.session_id: other for other in self.ledger.live_workers()
+            if other.id != worker.id and other.session_id
+        }
+        found = [
+            session for session in sessions
+            if (session.id not in own or session.id in live)
+            and any(self._under(root, session.cwd) for root in roots)
+        ]
+        holders = {live[session.id].id: live[session.id] for session in found if session.id in live}
+        return [session for session in found if session.id not in live], list(holders.values())
+
+    def _remove_other_sessions(self, runtime_name: str, sessions: list[Session]) -> list[str]:
+        """Stop *sessions*, confirm each stop with the listing, then remove the stopped ones.
+        Returns the ids that are still listed afterwards.
+        """
+        runtime = self.runtime(runtime_name)
+        ids = [session.id for session in sessions]
+        for session_id in ids:
+            runtime.stop(session_id)
+        self.invalidate_sessions(runtime_name)
+        try:
+            listed = {s.id: s for s in self.sessions(runtime_name, refresh=True)}
+        except AgentRuntimeError:
+            return ids
+        for session_id in ids:
+            session = listed.get(session_id)
+            if session is not None and runtime.is_stopped(session):
+                runtime.remove(session_id)
+        self.invalidate_sessions(runtime_name)
+        try:
+            listed = {s.id: s for s in self.sessions(runtime_name, refresh=True)}
+        except AgentRuntimeError:
+            return ids
+        return [session_id for session_id in ids if session_id in listed]
 
     def _archive_refusal(self, worker: Worker) -> str | None:
         if worker.archived_at is not None:

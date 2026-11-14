@@ -365,6 +365,148 @@ def test_discard_says_so_when_the_session_could_not_be_removed(harness):
     assert not (harness.worktree("ABC-1")).exists()
 
 
+def hand_worker(harness):
+    """A worker started by hand, with no item, then cancelled: its worktree stays."""
+    request_id = harness.ledger.record_request(
+        "new_worker", "test", origin=ledger_mod.REQUEST_BOARD, role="implementer"
+    )
+    harness.next_tick()
+    outcome = harness.ledger.get_request(request_id)
+    assert outcome["ok"] == 1, outcome["message"]
+    worker = harness.ledger.get(int(outcome["message"].rsplit("#", 1)[1]))
+    assert apply_request(harness, "cancel", worker.id_handle)["ok"] == 1
+    return harness.ledger.get(worker.id)
+
+
+def add_listed_session(harness, session_id, cwd, **extra):
+    """A session that only the listing shows, such as a copy that `claude --resume` started."""
+    sessions = harness.claude_state.sessions
+    sessions.append({
+        "id": session_id, "uuid": f"uuid-{session_id}", "cwd": str(cwd),
+        "state": "working", "status": "busy", "pid": 4242, **extra,
+    })
+    harness.claude_state.set(sessions=sessions)
+
+
+@pytest.mark.parametrize("where", ["worktree", "below", "link"])
+def test_discard_refuses_a_session_with_no_row_in_the_worktree_and_force_removes_it(
+    harness, tmp_path, where
+):
+    worker = hand_worker(harness)
+    worktree = worker.worktree_path
+    cwd = {"worktree": worktree, "below": worktree / "src", "link": tmp_path / "link"}[where]
+    if where == "below":
+        cwd.mkdir()
+    if where == "link":
+        cwd.symlink_to(worktree, target_is_directory=True)
+    add_listed_session(harness, "47076c61", cwd, name=f"implementer/{worker.id_handle}")
+    target = harness.ledger.target_for(worker)
+
+    refused = apply_request(harness, "discard", target)
+
+    assert refused["ok"] == 0
+    assert "other sessions work in its worktree: 47076c61" in refused["message"]
+    assert refused["reason"] == {"needs_force": True, "other_sessions": ["47076c61"]}
+    assert worktree.is_dir()
+    assert ["stop", "47076c61"] not in harness.claude_state.commands
+    assert ["stop", worker.session_id] in harness.claude_state.commands  # by the cancel only
+    assert harness.claude_state.commands.count(["stop", worker.session_id]) == 1
+    assert "47076c61" in [s["id"] for s in harness.claude_state.sessions]
+    assert harness.ledger.get(worker.id).gc_done == 0
+
+    forced = apply_request(harness, "discard", target, force=True)
+
+    assert forced["ok"] == 1
+    assert forced["message"].endswith(
+        "; other sessions in its worktree stopped and removed: 47076c61"
+    )
+    commands = harness.claude_state.commands
+    assert commands.index(["stop", "47076c61"]) < commands.index(["rm", "47076c61"])
+    assert harness.claude_state.sessions == []
+    assert not worktree.exists()
+    assert harness.ledger.get(worker.id).gc_done == 1
+
+
+def test_discard_leaves_a_session_outside_the_worktree_alone(harness, tmp_path):
+    worker = hand_worker(harness)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    # A sibling whose name starts with the worktree's name is not below it.
+    sibling = worker.worktree_path.with_name(worker.worktree_path.name + "-2")
+    sibling.mkdir()
+    add_listed_session(harness, "aaaa1111", elsewhere)
+    add_listed_session(harness, "bbbb2222", sibling)
+
+    result = apply_request(harness, "discard", harness.ledger.target_for(worker))
+
+    assert result["ok"] == 1 and "other sessions" not in result["message"]
+    assert [s["id"] for s in harness.claude_state.sessions] == ["aaaa1111", "bbbb2222"]
+    assert not any(c[1] in ("aaaa1111", "bbbb2222") for c in harness.claude_state.commands)
+
+
+def test_forced_discard_names_another_session_that_did_not_stop(harness):
+    worker = hand_worker(harness)
+    add_listed_session(harness, "47076c61", worker.worktree_path)
+    harness.claude_state.set(stop_state="working")
+
+    result = apply_request(harness, "discard", harness.ledger.target_for(worker), force=True)
+
+    assert result["ok"] == 1
+    assert result["message"].endswith(
+        "; other sessions in its worktree could not be stopped and removed: 47076c61; "
+        "remove them by hand"
+    )
+    assert ["rm", "47076c61"] not in harness.claude_state.commands
+
+
+def test_discard_never_stops_the_session_of_another_live_worker_in_the_worktree(harness):
+    live = launch(harness)
+    worker = hand_worker(harness)
+    sessions = harness.claude_state.sessions
+    for session in sessions:
+        if session["id"] == live.session_id:
+            session["cwd"] = str(worker.worktree_path)
+    harness.claude_state.set(sessions=sessions)
+
+    for force in (False, True):
+        result = apply_request(harness, "discard", harness.ledger.target_for(worker), force=force)
+
+        assert result["ok"] == 0 and result["reason"] is None
+        assert f"the session of live worker {live.id_handle} works in its worktree" in result["message"]
+    assert ["stop", live.session_id] not in harness.claude_state.commands
+    assert worker.worktree_path.is_dir()
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+
+
+def test_discard_refuses_without_force_when_the_listing_cannot_be_read(harness, monkeypatch):
+    worker = hand_worker(harness)
+    target = harness.ledger.target_for(worker)
+    apply = tick_mod.Runner._apply_request
+
+    def listing_fails_from_the_request_on(self, kind, *args):
+        # The tick applies no request when its own first listing fails.
+        if kind == "discard":
+            harness.claude_state.set(agents_fail=True)
+        try:
+            return apply(self, kind, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_apply_request", listing_fails_from_the_request_on)
+
+    refused = apply_request(harness, "discard", target)
+
+    assert refused["ok"] == 0 and "listing could not be read" in refused["message"]
+    assert refused["reason"] == {"needs_force": True, "sessions_unknown": True}
+    assert worker.worktree_path.is_dir()
+
+    forced = apply_request(harness, "discard", target, force=True)
+
+    assert forced["ok"] == 1
+    assert "other sessions were not looked for" in forced["message"]
+    assert not worker.worktree_path.exists()
+
+
 def test_retry_starts_a_new_session_instead_of_adopting_the_old_one(harness):
     """`stop` keeps the session, and it still carries this issue's name and worktree."""
     launch(harness)
