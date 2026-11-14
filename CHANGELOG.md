@@ -241,6 +241,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listing shows the turn ended, now says to answer the prompt on its card or in `claude
   attach`. Before, it said to send a reply, which then waited in the inbox behind the
   prompt.
+- A clone's settings file no longer denies `Write(//<original worktree>/**)`. Claude Code
+  warned at the start of every clone that this `Write` deny rule never matches. The
+  `Edit(//<original worktree>/**)` rule, as given and resolved, covers the Write tool
+  too, so the clone still cannot change the original's files with the file tools.
 
 ### Added
 
