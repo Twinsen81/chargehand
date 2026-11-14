@@ -276,6 +276,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it stops and removes them, then discards, and its outcome names them. It refuses also
   with force while the current session of another live worker works there, and without
   force when the listing cannot be read.
+- A session that a refresh replaced, resumed in place in the worktree of its live worker:
+  the tick now reports once that "an earlier session of" the worker "is working again;
+  attach to it or stop it", and the outbox poll of its mod is answered `ended`, so the mod
+  stops polling. Before, the tick said nothing, because any session in a live worker's
+  worktree counted as the worker's, and the mod polled every 5 seconds, with a hello that
+  was refused with 404 each time, until the session stopped. The tick still never adopts
+  or stops such a session.
 
 ### Added
 

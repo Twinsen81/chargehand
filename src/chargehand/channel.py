@@ -491,6 +491,12 @@ def take(request: Request) -> Response:
                  "stops polling", ended.handle, session[:8], ended.state)
         return Response.json({"message": None, "ended": True})
     ledger, worker, _ = _worker(request)
+    if _replaced(ledger, worker, session):
+        # An earlier session of the worker, which a refresh replaced, runs again, as after a
+        # resume by hand. Its outbox is the current session's, so its mod stops polling too.
+        log.info("%s: its earlier session %s polled its outbox; the mod stops polling",
+                 worker.handle, session[:8])
+        return Response.json({"message": None, "ended": True})
     if worker.state in NO_WAKE_STATES:
         return Response.json({"message": None})
     message = delivery_mod.take_outbox(ledger, worker, session)
@@ -498,6 +504,17 @@ def take(request: Request) -> Response:
         return Response.json({"message": None})
     log.info("%s: session %s took its wake message", worker.handle, session[:8])
     return Response.json({"message": {"id": message.id, "text": message.text}})
+
+
+def _replaced(ledger: Ledger, worker: Worker, session_uuid: str) -> bool:
+    """Whether *session_uuid* is an earlier session of *worker*, not its current one.
+
+    Only a session with a row counts: until a refresh records the fresh session's ids, a
+    post from any session counts as the worker's, and the fresh session's mod must go on.
+    """
+    if not worker.session_uuid or session_uuid == worker.session_uuid:
+        return False
+    return any(row.session_uuid == session_uuid for row in ledger.sessions_of(worker))
 
 
 def confirm(request: Request) -> Response:
