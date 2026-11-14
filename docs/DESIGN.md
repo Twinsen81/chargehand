@@ -1292,7 +1292,7 @@ refusal says which.
   refusal of a `discard`, `retry` or `archive` from the board for each worker in the
   ledger's state, with its time, and the card carries it as `last_refusal` (the request
   id, the kind, the board's words or else the request's message, and the time), so the
-  line shows after a reload and in every tab. An action of these kinds that succeeds,
+  line shows after a reload and in every tab. Any action on the worker that succeeds,
   from any origin, removes the record; the tick drops it after one hour and when the
   worker is collected. A dismiss hides it in that tab only: the page keeps the dismissed
   request ids in `sessionStorage`. The board model makes no git call,

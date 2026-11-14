@@ -298,8 +298,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer goes away when the page is reloaded, and a second tab shows it too. Before, only
   the tab that sent the action had it, in its memory. The daemon now keeps the last
   refusal of these actions from the board for each worker, for one hour, and the card
-  carries it as `last_refusal`, in the board's words. An action of these kinds that
-  succeeds, from the board or the command line, removes it, and so does the collection of
+  carries it as `last_refusal`, in the board's words. Any action on the worker that
+  succeeds, such as a Cancel, from the board or the command line, removes it, and so does the collection of
   the worker. A dismiss hides it in that tab. The first Discard or Archive dialog of a
   live worker now says that its worktree was not checked yet and can hold work that the
   daemon refuses to lose without force. Before, that dialog gave no warning, because the

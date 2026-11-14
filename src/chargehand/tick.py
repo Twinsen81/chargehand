@@ -125,8 +125,8 @@ WORK_AT_RISK_REFRESH_SECS = 600
 # The last refusal of a Discard, Retry or Archive that the board sent for a worker, under
 # this prefix and the worker id: a JSON object with the request id, the kind, the time and
 # the refusal's message and reason. Every page shows it on the card, also after a reload,
-# until an action of these kinds on the worker succeeds, the worker is collected, or
-# `LAST_REFUSAL_SECS` have passed.
+# until any action on the worker succeeds, the worker is collected, or `LAST_REFUSAL_SECS`
+# have passed.
 LAST_REFUSAL_PREFIX = "last-refusal:"
 LAST_REFUSAL_SECS = 3600
 
@@ -227,6 +227,8 @@ UNARCHIVE_REPOSITORY = "unarchive_repository"
 CLONE = clone_mod.CLONE
 # The actions whose board refusal stays on the card; see `LAST_REFUSAL_PREFIX`.
 REFUSAL_KINDS = ("retry", "discard", ARCHIVE)
+# The requests that name one worker. Any of them that succeeds drops its card's refusal.
+WORKER_REQUESTS = ("cancel", "stop", "continue", REPLY, CLONE, *REFUSAL_KINDS)
 
 # The worker states whose session a copy would take in the middle of something: a launch,
 # a turn in progress, or an open question or permission prompt.
@@ -1420,7 +1422,7 @@ class Runner:
             # Resolved before the request applies, which can change what the target names.
             named = (
                 self.ledger.find_worker(target, args.get("role") or None)[0]
-                if kind in REFUSAL_KINDS and target else None
+                if kind in WORKER_REQUESTS and target else None
             )
             try:
                 ok, message = self._apply_request(kind, target, args, report)
@@ -1444,12 +1446,15 @@ class Runner:
         self, worker: Worker, request: dict, kind: str, ok: bool, message: str
     ) -> None:
         """Record a board refusal of *kind* for *worker*'s card, or drop the record when
-        the action succeeded, from any origin."""
+        any action on the worker succeeded, from any origin: the card's line shows the
+        outcome of the last action."""
         key = f"{LAST_REFUSAL_PREFIX}{worker.id}"
         if ok:
             self.ledger.delete_state(key)
             return
-        if (request.get("origin") or ledger_mod.REQUEST_CLI) != ledger_mod.REQUEST_BOARD:
+        if kind not in REFUSAL_KINDS or (
+            (request.get("origin") or ledger_mod.REQUEST_CLI) != ledger_mod.REQUEST_BOARD
+        ):
             return
         self.ledger.set_state(key, json.dumps({
             "request_id": request["id"],

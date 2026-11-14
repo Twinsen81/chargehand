@@ -1137,6 +1137,7 @@ def card(
     prompt = shown_prompt(own, held)
     cap = role.policy.max_wakes_per_day if role else None
     parent = ledger.get(worker.parent_id) if worker.parent_id else None
+    work = None if worker.gc_done else ledger.get_state(f"{WORK_AT_RISK_PREFIX}{worker.id}")
     return {
         "id": worker.id,
         "handle": worker.target,
@@ -1191,8 +1192,10 @@ def card(
         ),
         "last_hook": worker.last_hook,
         "job": job_entry(job, worker, ledger) if job else None,
-        "work_at_risk": work_at_risk(worker, ledger),
-        "work_checked": work_checked(worker, ledger),
+        "work_at_risk": work_at_risk(work),
+        # The tick looks at a live worker's worktree only after it refused an action on it,
+        # so the first Discard or Archive dialog of a live worker says it was not checked.
+        "work_checked": work is not None,
         "last_refusal": last_refusal(worker, ledger, now),
         "archived_at": worker.archived_at,
         "created_at": worker.created_at,
@@ -1201,25 +1204,13 @@ def card(
     }
 
 
-def work_at_risk(worker: Worker, ledger: Ledger) -> dict[str, object] | None:
-    """What Discard, Retry or Archive would lose, as the tick last found it, or None when
-    it found nothing or does not look."""
-    if worker.gc_done:
-        return None
-    raw = ledger.get_state(f"{WORK_AT_RISK_PREFIX}{worker.id}")
+def work_at_risk(raw: str | None) -> dict[str, object] | None:
+    """What Discard, Retry or Archive would lose, from the tick's record *raw* under
+    `WORK_AT_RISK_PREFIX`, or None when it found nothing or does not look."""
     try:
         return work_facts(json.loads(raw)) if raw else None
     except ValueError:
         return None
-
-
-def work_checked(worker: Worker, ledger: Ledger) -> bool:
-    """Whether the tick looked at the worktree, so that `work_at_risk` says what it holds.
-
-    It looks at a live worker's worktree only after it refused an action on it, so the
-    first dialog of Discard or Archive on a live worker says that it was not checked.
-    """
-    return not worker.gc_done and ledger.get_state(f"{WORK_AT_RISK_PREFIX}{worker.id}") is not None
 
 
 def last_refusal(worker: Worker, ledger: Ledger, now: float) -> dict[str, object] | None:
@@ -1440,7 +1431,6 @@ __all__ = [
     "to_json",
     "tokens_estimate",
     "work_at_risk",
-    "work_checked",
     "last_refusal",
     "under_originals",
     "clone_form",

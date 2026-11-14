@@ -1188,6 +1188,35 @@ def test_a_later_ok_action_clears_the_line_and_the_live_worktree_counts_as_check
     assert harness.ledger.get_state(key) is None
 
 
+@pytest.mark.parametrize("origin", [ledger_mod.REQUEST_BOARD, ledger_mod.REQUEST_CLI])
+def test_any_later_ok_action_on_the_worker_clears_the_line(daemon, harness, origin):
+    unqueued(harness)
+    worker = board_worker(harness)
+    post(daemon, f"/api/workers/{worker.id}/retry")
+    harness.next_tick()
+    assert card_of(daemon, worker)["last_refusal"]["kind"] == "retry"
+
+    request_id = harness.ledger.record_request("cancel", worker.target, origin=origin)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert card_of(daemon, worker)["last_refusal"] is None
+    assert harness.ledger.get_state(f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}") is None
+
+
+def test_a_refused_action_of_another_kind_keeps_the_line(daemon, harness):
+    unqueued(harness)
+    worker = cancelled_board_worker(daemon, harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    post(daemon, f"/api/workers/{worker.id}/discard", {"force": False})
+    harness.next_tick()
+
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+
+    assert card_of(daemon, worker)["last_refusal"]["kind"] == "discard"
+
+
 def test_the_line_is_gone_after_its_lifetime(daemon, harness):
     unqueued(harness)
     worker = cancelled_board_worker(daemon, harness)
@@ -1308,6 +1337,17 @@ page.render(model(closed({ last_refusal: refused(6, 'its worktree has 1 unpushed
 out.newer = statusLine();
 page.render(model(closed({ last_refusal: null })));
 out.cleared = statusLine();
+// The outcome of this tab's own action wins over an older refusal of the daemon, and a
+// newer refusal, such as one sent from another tab, wins over it.
+page.setCardStatus(7, 'ok', 'done: cancel requested', 8);
+page.render(model(closed({ last_refusal: refused(6, 'its worktree has 1 unpushed commit') })));
+out.ownNewer = statusLine();
+page.render(model(closed({ last_refusal: refused(9, 'its worktree has 2 unpushed commits') })));
+out.daemonNewer = statusLine();
+// An action that has no request id yet keeps its own line.
+page.setCardStatus(7, 'pending', 'sending');
+page.render(model(closed({ last_refusal: refused(10, 'its worktree has 3 unpushed commits') })));
+out.ownSending = statusLine();
 console.log(JSON.stringify(out));
 """
 
@@ -1315,7 +1355,11 @@ console.log(JSON.stringify(out));
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 def test_the_page_draws_and_dismisses_the_daemons_refusal(tmp_path):
     runner = tmp_path / "refusal.js"
-    runner.write_text(NODE_RERENDER.split("const find = ")[0] + NODE_REFUSAL)
+    page = NODE_RERENDER.split("const find = ")[0]
+    exposed = "globalThis.page = { render, workerAction };"
+    assert page.count(exposed) == 1
+    page = page.replace(exposed, "globalThis.page = { render, workerAction, setCardStatus };")
+    runner.write_text(page + NODE_REFUSAL)
     out = subprocess.run(
         ["node", str(runner), str(board.asset_dir() / "board.js")],
         capture_output=True, text=True, check=True,
@@ -1325,6 +1369,9 @@ def test_the_page_draws_and_dismisses_the_daemons_refusal(tmp_path):
         "shown": "refused: its worktree has uncommitted changes",
         "afterDismiss": None, "afterPoll": None, "stored": [4],
         "newer": "refused: its worktree has 1 unpushed commit", "cleared": None,
+        "ownNewer": "done: cancel requested",
+        "daemonNewer": "refused: its worktree has 2 unpushed commits",
+        "ownSending": "sending",
     }
 
 
