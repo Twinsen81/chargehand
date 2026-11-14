@@ -367,6 +367,27 @@ def test_the_card_shows_a_held_prompt_before_one_only_the_session_can_answer(har
     assert board.shown_prompt([], lambda pid: True) is None
 
 
+def test_more_prompts_counts_only_the_held_prompts_that_show_after_this_one(harness):
+    worker = launch(harness)
+    ledger = harness.ledger
+    released = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="a")
+    ledger.release_permission_prompt(released)
+    held = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="b")
+    later = ledger.record_permission_prompt(worker, tool_name="Bash", tool_input="c")
+    ledger.record_question(ledger.get(worker.id), "Which colour?", [])
+
+    def more(holding):
+        prompts = ledger.open_permission_prompts(worker)
+        is_held = lambda pid: pid in holding  # noqa: E731
+        return board.more_prompts(prompts, board.shown_prompt(prompts, is_held), is_held)
+
+    # The released prompt is answered in the session, and the question shows only once
+    # no held prompt is left: neither shows on the card after the held ones.
+    assert more({held, later}) == 1
+    assert more({later}) == 0
+    assert more(set()) == 0
+
+
 # ----- first writer wins ----------------------------------------------------------------
 
 

@@ -1138,8 +1138,7 @@ def card(
             if live and worker.waiting_for else None
         ),
         "permission_prompt": permission_prompt(prompt, held) if prompt else None,
-        # The worker's other open prompts, shown one at a time after this one.
-        "more_prompts": len(own) - 1 if prompt else 0,
+        "more_prompts": more_prompts(own, prompt, held),
         "report": report_of(worker),
         "problem": (
             sanitize.one_line(worker.last_error, limit=300)
@@ -1201,6 +1200,23 @@ def shown_prompt(
         if prompt.kind == ledger_mod.PROMPT_PERMISSION and held(prompt.id):
             return prompt
     return prompts[-1] if prompts else None
+
+
+def more_prompts(
+    prompts: Sequence[ledger_mod.PermissionPrompt],
+    shown: ledger_mod.PermissionPrompt | None,
+    held: Callable[[int], bool],
+) -> int:
+    """How many of *prompts* show on the card, one at a time, once *shown* is answered.
+
+    Only a permission prompt that a hook holds: a released one is answered in the
+    session, and an ask question shows only when no held prompt is left.
+    """
+    return sum(
+        1 for prompt in prompts
+        if prompt.kind == ledger_mod.PROMPT_PERMISSION and held(prompt.id)
+        and (shown is None or prompt.id != shown.id)
+    )
 
 
 def permission_prompt(

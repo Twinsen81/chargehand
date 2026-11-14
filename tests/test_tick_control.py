@@ -545,6 +545,33 @@ def test_continue_points_a_dialog_at_its_answer_and_leaves_the_session(harness):
     assert ["respawn", attempt.session_id] not in harness.claude_state.commands
 
 
+def test_continue_points_an_open_permission_prompt_at_its_answer_when_no_dialog_is_listed(
+    harness,
+):
+    attempt = launch(harness)
+    harness.claude_state.set_session_state(
+        "ABC-1", "blocked", status="waiting", waitingFor="permission prompt"
+    )
+    harness.next_tick()
+    prompt = harness.ledger.record_permission_prompt(
+        harness.worker("ABC-1"), tool_name="Bash", tool_input='{"command": "date"}'
+    )
+    harness.ledger.release_permission_prompt(prompt)
+    # The listing shows no dialog, while the ledger still holds the open prompt: a reply
+    # would wait in the inbox behind it.
+    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle", waitingFor=None)
+
+    result = apply_request(harness, "continue", "ABC-1")
+
+    assert result["ok"] == 0
+    assert result["message"] == (
+        f"ABC-1: its session waits for the answer to a prompt. Answer a permission prompt on "
+        f"its card, or any prompt with `claude attach {attempt.session_id}`"
+    )
+    assert harness.ledger.get_permission_prompt(prompt).state == "open"
+    assert ["respawn", attempt.session_id] not in harness.claude_state.commands
+
+
 def with_status_file(repo, tmp_path):
     status_dir = tmp_path / "status"
     status_dir.mkdir(exist_ok=True)

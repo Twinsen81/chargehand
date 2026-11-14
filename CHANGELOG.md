@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   While no turn has started since the turn end, the worker keeps the state of its turn end (idle, queued, or blocked on a
   question), and the board and `status` show the session state `background`. When the turn
   ended `background_shell_mins` ago (a new machine key, 30 by default, 0 for never), an
-  idle or queued worker is notified once, so a shell that never ends does not hide a
-  session that waits. The watchdog and `max_concurrent` do not count that time. Only
+  idle or queued worker is notified once per turn end, so a shell that never ends does
+  not hide a session that waits. The watchdog and `max_concurrent` do not count that time. Only
   sessions launched with the new hook get this; older ones keep the old behaviour.
 - Clone in summary mode, from the card's Clone form or with `chargehand clone <ITEM>
   --mode summary`. The clone gets its own worktree from the original's branch and a new
@@ -213,7 +213,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two calls have the same tool and input. A prompt is cancelled only when the session
   withdraws it: the session no longer shows a permission dialog, the worker leaves
   `blocked`, the turn or session ends, or a stop. The card shows the oldest prompt that
-  waits for the board first, and `more_prompts` says how many more wait. Before, only the
+  waits for the board first, and `more_prompts` says how many more wait for the board; a
+  prompt that only the session can answer and a question of the `ask` tool are not
+  counted, because the card does not show them next. Before, only the
   last prompt reached the board, and after its answer the worker stayed blocked with
   nothing to answer.
 - A clone of a worker that a `[[source]]` started no longer ends in its first tick with
@@ -231,9 +233,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notification: the worker is idle, and a reply from the board, or any other event, wakes
   it. Past the role's refresh limit, a reply while the session lists so continues the
   same session, which holds the question; any other event starts a fresh session as
-  usual. The tick logs the case at DEBUG. While a background shell of that turn still
+  usual. The tick logs the case at DEBUG once, when the session enters it, not on every
+  tick. While a background shell of that turn still
   runs, the same turn end lists `status: busy` instead; the worker is then idle with a
   background shell, as after a `done` turn end, and the background-shell notice applies.
+- `continue` on a blocked worker with an open permission prompt in the ledger, while the
+  listing shows the turn ended, now says to answer the prompt on its card or in `claude
+  attach`. Before, it said to send a reply, which then waited in the inbox behind the
+  prompt.
 
 ### Added
 
