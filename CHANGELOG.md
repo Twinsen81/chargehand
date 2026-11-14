@@ -281,7 +281,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attach to it or stop it", and the outbox poll of its mod is answered `ended`, so the mod
   stops polling. Before, the tick said nothing, because any session in a live worker's
   worktree counted as the worker's, and the mod polled every 5 seconds, with a hello that
-  was refused with 404 each time, until the session stopped. The tick still never adopts or stops such a session.
+  was refused with 404 each time, until the session stopped. The tick still never adopts
+  or stops such a session.
 
 ### Added
 

@@ -806,6 +806,37 @@ def test_an_earlier_session_resumed_in_the_worktree_of_its_live_worker_is_report
     assert harness.claude_state.commands == commands
 
 
+@pytest.mark.parametrize("name", ["reviewer/PR-7", "implementer/PR-8", None])
+def test_a_session_no_worker_had_in_the_worktree_of_a_live_worker_is_left_alone(after_two, name):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    for _ in range(3):
+        wake(harness, reviewer)
+    fresh = harness.ledger.get(reviewer.id)
+    # A copy that no session row names, such as the fresh session of a refresh before its
+    # ids are recorded, working in the worktree under the worker's name, another one or none.
+    copy = {**listed(harness, fresh.session_id), "id": "copy", "uuid": "copy-uuid",
+            "sessionId": "copy-uuid", "state": "working", "status": "busy"}
+    if name is None:
+        copy.pop("name", None)
+    else:
+        copy["name"] = name
+    harness.claude_state.set(sessions=[*harness.claude_state.sessions, copy])
+    commands = list(harness.claude_state.commands)
+
+    for _ in range(2):
+        report = harness.next_tick()
+        assert not any("copy" in line for line in report.warnings + report.errors)
+        assert report.adopted == []
+
+    assert [w.id for w in harness.ledger.live_workers()] == [reviewer.id]
+    assert harness.ledger.worker_by_session_id("copy") is None
+    assert harness.ledger.worker_by_session_row("copy") is None
+    assert harness.ledger.get(reviewer.id).session_id == fresh.session_id
+    assert harness.claude_state.commands == commands
+    assert ("?", "orphan-session") not in harness.notifications()
+
+
 def test_a_session_in_the_worktree_of_a_worker_in_its_launch_is_not_reported(after_two):
     harness = after_two
     reviewer = start_reviewer(harness)

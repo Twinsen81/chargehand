@@ -585,7 +585,9 @@ identifier alone, for a session from before roles). Found → adopt it.
   again is reported once, also when it works in the worktree of its live worker, as after
   `claude --resume` in place. The tick does not stop it. A live worker with a session id
   owns only that session in its worktree; a worker without one yet, in its launch, owns
-  every session there. No unattended session runs outside the watchdog.
+  every session there. A session in a live worker's worktree that no row names, such as
+  the fresh session of a refresh before its ids are recorded, is neither reported nor
+  adopted. No unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
 survives reboots. A partial unique index over live rows that a start rule created makes two
@@ -642,7 +644,8 @@ token's worker, whatever session id it names. A hook, a hello, a lifecycle or us
 or an outbox poll from a session that is not the worker's current one, such as a copy
 that a resume started in the same worktree with the same settings, is ignored: the post
 changes nothing, and the poll gets no message. The poll of a session that the worker had
-earlier, which a refresh replaced, is answered `ended`. Every launch's settings deny `Read` and
+earlier, which a refresh replaced, is answered `ended`.
+Every launch's settings deny `Read` and
 `Edit` (which covers Write) on the board's token file and on the whole `worker-tokens/`
 directory, a launch without hooks too, so a session launched earlier is also denied the
 token files of sessions launched after it. A launch with hooks also denies them on every
@@ -958,7 +961,8 @@ worker, and an archive holds the transcript of each one. The launch writes a new
 for the new session, and its hooks and its mod's hello find the worker by that token, as
 during a launch; until the new ids are recorded, a post with that token from any session
 id counts as the worker's. After that, the old session's outbox poll is answered `ended`,
-so its mod stops polling when the operator resumes it. A hook that came in during the launch, such as a permission prompt, is newer
+so its mod stops polling when the operator resumes it.
+A hook that came in during the launch, such as a permission prompt, is newer
 than the wake, and keeps the state it wrote; a post that the old session sent while it
 stopped is older, because the tick reads the worker again once the stop is confirmed. A
 crash in that window leaves the events in the inbox, and the next state diff takes the
@@ -1018,7 +1022,8 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   `POST /channel/outbox/confirm` says that the turn started. Once the worker is done,
   failed or cancelled, its session can live on; the poll then answers `ended`, which the
   daemon logs once, and the mod stops polling. The same is true for an earlier session of
-  a live worker, one that a refresh replaced, when it runs again. A paused worker's mod keeps polling. The
+  a live worker, one that a refresh replaced, when it runs again.
+  A paused worker's mod keeps polling. The
   poll is never held open: a hook runs at most 10 seconds and one fetch at most 30.
 - Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
   session's rate-limit windows to `/channel/usage`; the session end posts
