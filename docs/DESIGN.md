@@ -644,19 +644,19 @@ token's worker, whatever session id it names. A hook, a hello, a lifecycle or us
 or an outbox poll from a session that is not the worker's current one, such as a copy
 that a resume started in the same worktree with the same settings, is ignored: the post
 changes nothing, and the poll gets no message. The poll of a session that the worker had
-earlier, which a refresh replaced, is answered `ended`.
-Every launch's settings deny `Read` and
-`Edit` (which covers Write) on the board's token file and on the whole `worker-tokens/`
-directory, a launch without hooks too, so a session launched earlier is also denied the
-token files of sessions launched after it. A launch with hooks also denies them on every
-file in `session-settings/` (no tool of a session reads one: Claude Code loads its
-`--settings` itself). The session's own token file is under the denied directory as well:
-the mod reads it with `$.fs.read`, which a `Read` deny rule does not bind. No `Write` rule
-is written: Claude Code 2.1.322 warns at the start that a `Write` deny rule never matches
-and to use `Edit`. Like the deny rules, this is a guardrail: a shell command of the same
-user can still read another session's file. The token is not kept in the ledger: the launch
-runs in the runtime, which has no ledger, and the daemon finds the file that holds a
-token and then the newest worker in that file's worktree, a live one first.
+earlier, which a refresh replaced, is answered `ended`. Every launch's settings deny
+`Read` and `Edit` (which covers Write) on the board's token file and on the whole
+`worker-tokens/` directory, a launch without hooks too, so a session launched earlier is
+also denied the token files of sessions launched after it. A launch with hooks also
+denies them on every file in `session-settings/` (no tool of a session reads one: Claude
+Code loads its `--settings` itself). The session's own token file is under the denied
+directory as well: the mod reads it with `$.fs.read`, which a `Read` deny rule does not
+bind. No `Write` rule is written: Claude Code 2.1.322 warns at the start that a `Write`
+deny rule never matches and to use `Edit`. Like the deny rules, this is a guardrail: a
+shell command of the same user can still read another session's file. The token is not
+kept in the ledger: the launch runs in the runtime, which has no ledger, and the daemon
+finds the file that holds a token and then the newest worker in that file's worktree, a
+live one first.
 
 How a session gets the token, observed with Claude Code 2.1.322 in `--bg` sessions that
 loaded the mod with `--plugin-dir`: a variable in the settings `env` of the launch reaches
@@ -960,25 +960,24 @@ counts, and records the wake. The old session is stopped and kept, with its row,
 worker, and an archive holds the transcript of each one. The launch writes a new token
 for the new session, and its hooks and its mod's hello find the worker by that token, as
 during a launch; until the new ids are recorded, a post with that token from any session
-id counts as the worker's. After that, the old session's outbox poll is answered `ended`,
-so its mod stops polling when the operator resumes it.
-A hook that came in during the launch, such as a permission prompt, is newer
-than the wake, and keeps the state it wrote; a post that the old session sent while it
-stopped is older, because the tick reads the worker again once the stop is confirmed. A
-crash in that window leaves the events in the inbox, and the next state diff takes the
-new session as the worker's, with the same switch as a refresh that ran to its end. The resume of
-a `parked` worker, the answer to a question that the session asked since its last wake
-(whether the listing shows that turn end as `blocked` or as `done`), and a summary
-clone's request for a current note stay in the session they belong to, because only that
-session holds the conversation they are about; the refresh then comes at the next wake.
-So does a reply from the board while the tick's listing shows the session `blocked` with
-`status: idle` or `busy` and no `waitingFor`, because it may answer a question that the session
-asked in plain text; another event to that worker refreshes as usual. Any other reply
-that answers no question refreshes as any event does. So a worker that follows no item
-and gets only replies refreshes only when the listing shows its turn end as `done`: if
+id counts as the worker's. After that, the old session's outbox poll is answered
+`ended`, so its mod stops polling when the operator resumes it. A hook that came in
+during the launch, such as a permission prompt, is newer than the wake, and keeps the
+state it wrote; a post that the old session sent while it stopped is older, because the
+tick reads the worker again once the stop is confirmed. A crash in that window leaves
+the events in the inbox, and the next state diff takes the new session as the worker's,
+with the same switch as a refresh that ran to its end. The resume of a `parked` worker,
+the answer to a question that the session asked since its last wake (whether the listing
+shows that turn end as `blocked` or as `done`), and a summary clone's request for a
+current note stay in the session they belong to, because only that session holds the
+conversation they are about; the refresh then comes at the next wake. So does a reply
+from the board while the tick's listing shows the session `blocked` with `status: idle`
+or `busy` and no `waitingFor`, because it may answer a question that the session asked
+in plain text; another event to that worker refreshes as usual. Any other reply that
+answers no question refreshes as any event does. So a worker that follows no item and
+gets only replies refreshes only when the listing shows its turn end as `done`: if
 Claude Code lists its session `blocked` with no dialog after every turn, every reply
-continues the session and the limit never applies. The card lists the worker's
-sessions.
+continues the session and the limit never applies. The card lists the worker's sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
@@ -1021,10 +1020,10 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   submitted as the session's next turn once the session is idle (`$.prompt.submit`), and
   `POST /channel/outbox/confirm` says that the turn started. Once the worker is done,
   failed or cancelled, its session can live on; the poll then answers `ended`, which the
-  daemon logs once, and the mod stops polling. The same is true for an earlier session of
-  a live worker, one that a refresh replaced, when it runs again.
-  A paused worker's mod keeps polling. The
-  poll is never held open: a hook runs at most 10 seconds and one fetch at most 30.
+  daemon logs once, and the mod stops polling. The same is true for an earlier session
+  of a live worker, one that a refresh replaced, when it runs again. A paused worker's
+  mod keeps polling. The poll is never held open: a hook runs at most 10 seconds and one
+  fetch at most 30.
 - Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
   session's rate-limit windows to `/channel/usage`; the session end posts
   `/channel/lifecycle/session_end`. When the Stop hook of the last turn already ended the
