@@ -1114,9 +1114,29 @@ the listing names no shell: a reply or another event that starts a turn while th
 runs ends in a new turn end, which is notified again `background_shell_mins` after it,
 while no newer turn started. The worker stays `idle`, so delivery may wake it: through the
 outbox the mod submits the wake as a new turn while the shell runs. A stop and resume, for
-a session without the mod, waits while the listing shows the session working, but stops
-one listed as done, or blocked with no dialog, and busy, which ends the shell. Neither the
-watchdog nor `max_concurrent` counts the time, because no turn runs and no usage is spent.
+a session without the mod, would end the shell, such as a dev server or a long test run.
+So while the session is `background`, a wake for events waits: the worker is `queued`,
+its card says "wake held, a background shell of session ... still runs", and the events
+stay in its inbox. Delivery decides from the tick's listing before admission, so a held
+wake runs no setup step of the role in the item checkout. The runtime looks again right
+before its stop, and also leaves alone a session listed done (or blocked with no dialog)
+but busy. Two holds come only from that last look, after admission, so the setup step of
+a role with an item checkout runs at each held tick: a reply while the session lists
+working (see below), and a session listed done (or blocked with no dialog) but busy with
+no recorded turn end, such as one launched without the `UserPromptSubmit` hook. That
+second worker is not `background`, so it gets no background-shell notice; its card shows
+the reason. Once the listing shows the session idle, the next tick sends the wake. The
+background-shell notice above still tells the operator about a shell that does not end.
+Two wakes go out at once and end the shell: a reply from the board, also the answer to a
+question that ended its turn while a shell runs, because the operator chose to act; and
+the resume of a parked worker after its usage limit. A reply waits too, with the same
+reason on the card, while the session lists working: at its last look the runtime cannot
+tell a background shell from a turn that the operator started. One more stop ends the
+shell: past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake that goes
+out, such as a reply or a wake of a session with the mod, first stops the session to start
+a fresh one (see **Session refresh**), and that stop does not wait for the shell. Neither
+the watchdog nor `max_concurrent` counts the time, because no turn runs and no usage is
+spent.
 Only sessions launched with the `UserPromptSubmit` hook get this reading, because a resume
 keeps the hooks of the launch: for a session launched before it, a turn that the operator
 starts in `claude attach` sends no hook, so a listing that shows it working still makes
