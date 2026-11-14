@@ -175,10 +175,14 @@ NOTIFIED_QUESTION_PREFIX = "notified-question:"
 # session working, or done but busy, sees a background shell of the ended turn, not a new
 # turn: Claude Code lists a session with a live background shell so, and names no shell.
 TURN_ENDED_PREFIX = "turn-ended:"
+# The session that the listing shows as blocked with no dialog, read as a turn end, under
+# this prefix and the worker id: the DEBUG line says so once when the session enters that
+# shape, not on every tick while it stays there. A listing of another shape drops it.
+LISTED_ENDED_PREFIX = "listed-ended-blocked:"
 # Records per worker that only a live worker needs: garbage collection drops them once the
 # worker has ended (cancelled, discarded, closed). Not in WORKER_STATE_PREFIXES, whose
 # records say that a worker has an item checkout.
-LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX, TURN_ENDED_PREFIX)
+LIVE_WORKER_STATE_PREFIXES = (NOTIFIED_QUESTION_PREFIX, TURN_ENDED_PREFIX, LISTED_ENDED_PREFIX)
 # The worker states a turn end leaves, which a background shell of that turn keeps.
 TURN_END_STATES = (ledger_mod.IDLE, ledger_mod.QUEUED, ledger_mod.BLOCKED)
 QUESTION_TURN_ENDS = frozenset((runtime_mod.DONE, runtime_mod.BLOCKED))
@@ -1843,14 +1847,21 @@ class Runner:
             runtime = self.runtime(worker.runtime)
         except ConfigError:
             return None
-        if session.state == runtime_mod.DONE or runtime.ended_without_dialog(session):
+        prompt_open = any(
+            prompt.kind == ledger_mod.PROMPT_PERMISSION
+            for prompt in self.ledger.open_permission_prompts(worker)
+        )
+        if not prompt_open and (
+            session.state == runtime_mod.DONE or runtime.ended_without_dialog(session)
+        ):
             # Blocked by an ask question, its status file, or a role that does not load:
-            # the turn ended.
+            # the turn ended. With a permission prompt open, a listing behind its hook or a
+            # released prompt, a reply would wait in the inbox.
             return (
                 f"{worker.name}: its turn ended and its session waits, so there is nothing "
                 f"to respawn: send a reply"
             )
-        if session.state == runtime_mod.BLOCKED:
+        if prompt_open or session.state == runtime_mod.BLOCKED:
             return (
                 f"{worker.name}: its session waits for the answer to a prompt. "
                 f"{self._prompt_hint(worker)}"
@@ -2782,12 +2793,12 @@ class Runner:
                         worker, session_id=session.id, session_uuid=session.uuid
                     )
             observed = session.state if session else ledger_mod.SESSION_MISSING
-            if session is not None and self._turn_ended_blocked(worker, session):
+            ended_blocked = session is not None and self._turn_ended_blocked(worker, session)
+            self._note_listed_ended(worker, ended_blocked)
+            if ended_blocked:
                 # No dialog waits and no permission prompt is open: the listing says no more
                 # than `done`, busy too while a background shell of the turn runs. Its
                 # report, an ask question or the status file still block.
-                log.debug("%s: the listing shows session %s as blocked with no dialog; read "
-                          "as a turn end", worker.handle, worker.session_id or "-")
                 observed = runtime_mod.DONE
             busy = observed == runtime_mod.WORKING or (
                 observed == runtime_mod.DONE and session is not None and session.busy
@@ -2831,6 +2842,25 @@ class Runner:
                 worker = self._apply_session_state(worker, observed, report, session=session)
             except _RowChanged:
                 continue
+
+    def _note_listed_ended(self, worker: Worker, ended_blocked: bool) -> None:
+        """Log once that the listing shows *worker*'s session blocked with no dialog.
+
+        Claude Code can list a session so for as long as it waits, and the line on every
+        tick said nothing new.
+        """
+        key = f"{LISTED_ENDED_PREFIX}{worker.id}"
+        noted = self.ledger.get_state(key)
+        if not ended_blocked:
+            if noted is not None:
+                self.ledger.delete_state(key)
+            return
+        session_id = worker.session_id or "-"
+        if noted == session_id:
+            return
+        log.debug("%s: the listing shows session %s as blocked with no dialog; read as a "
+                  "turn end", worker.handle, session_id)
+        self.ledger.set_state(key, session_id)
 
     def _turn_ended_blocked(self, worker: Worker, session: Session) -> bool:
         """Whether *session* lists as ``blocked`` while its live process waits for nothing.

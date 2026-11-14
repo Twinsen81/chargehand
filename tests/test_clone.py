@@ -777,6 +777,34 @@ def test_a_clone_is_not_held_by_the_one_worker_per_role_and_item_rule(harness):
     assert Path(first.worktree).name == f"ABC-1-{first.id}"
 
 
+@pytest.mark.parametrize("mode", ["fresh", "full"])
+def test_a_clone_of_a_queue_label_worker_follows_its_item_on_the_tracker_and_owns_no_label(
+    harness, mode
+):
+    write_role(harness, ROLE + '\n[[start]]\non = "labeled"\n')
+    harness.board.add("ABC-1")
+    harness.tick()
+    original = idle(harness, harness.worker("ABC-1"))
+    assert original.owns_label == ledger_mod.LABEL_QUEUE
+    labels = harness.labels("ABC-1")
+    assert "chargehand-blocked" in labels
+
+    clone = clone_of(harness, original, mode=mode)
+    primary = harness.ledger.primary_subscription(clone)
+
+    assert (primary.source, primary.item) == (harness.config.repositories[0].tracker.type, "ABC-1")
+    assert clone.owns_label == ledger_mod.LABEL_NONE
+    # The clone's launch and turn end leave the label as the original's turn end set it.
+    assert harness.labels("ABC-1") == labels
+    idle(harness, clone)
+    assert harness.labels("ABC-1") == labels
+
+    # The clone ends when the tracker reports the item closed.
+    harness.board.close("ABC-1")
+    harness.next_tick()
+    assert harness.ledger.get(clone.id).state == ledger_mod.DONE
+
+
 # ----- summary mode -----------------------------------------------------------------------
 
 NOTE = "OPEN-POINTS-MARKER: alpha, beta"

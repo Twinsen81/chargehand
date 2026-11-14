@@ -808,7 +808,8 @@ class Delivery:
         note about that conversation. The refresh comes at the worker's next wake. A
         reply to a session that lists ``blocked`` with no dialog may answer a question in
         plain text, so it stays too. Another reply refreshes as any event does: a worker
-        that follows no item gets nothing else.
+        that follows no item gets nothing else. Such a worker whose session lists
+        ``blocked`` with no dialog after every turn therefore never refreshes.
         """
         if any(
             (entry.source, entry.kind) == (ledger_mod.HANDOFF_SOURCE, ledger_mod.HANDOFF_KIND)

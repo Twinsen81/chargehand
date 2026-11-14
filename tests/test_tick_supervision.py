@@ -78,11 +78,32 @@ def test_a_session_listed_blocked_without_a_dialog_is_a_turn_end(
     )
     assert (attempt.state, attempt.session_state) == (ledger_mod.IDLE, session_state)
     assert harness.notifications() == []
-    assert any(
+    # Once when the session enters that shape, not on every tick while it stays there.
+    assert _turn_end_reads(caplog) == 1
+
+
+def _turn_end_reads(caplog):
+    return sum(
         record.levelno == logging.DEBUG
         and "as blocked with no dialog; read as a turn end" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_the_turn_end_read_is_logged_again_after_the_session_left_that_shape(harness, caplog):
+    caplog.set_level(logging.DEBUG, logger="chargehand.tick")
+    launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
+    harness.next_tick()
+    harness.next_tick()
+
+    harness.claude_state.set_session_state("ABC-1", "working", status="busy")
+    harness.next_tick()
+    harness.claude_state.set_session_state("ABC-1", "blocked", status="idle")
+    harness.next_tick()
+    harness.next_tick()
+
+    assert _turn_end_reads(caplog) == 2
 
 
 @pytest.mark.parametrize("listed, prompt_open", [

@@ -705,11 +705,18 @@ their `PermissionRequest` hooks within a moment, and each one waits for its own 
 Every open prompt is kept as its own record, and a newer post cancels no older one. Each
 held hook waits for the record that its own post wrote, so two calls with the same tool
 and input hold two records. The card shows the oldest record that a hook holds, and its
-`more_prompts` says how many other open prompts wait; once that one is answered, the next
-one shows. Without a held record, the card shows the newest open one. An answer to one
+`more_prompts` says how many other records that a hook holds wait; once that one is
+answered, the next one shows. A released record and a question are not counted, because
+the card does not show them next. Without a held record, the card shows the newest open
+one. An answer to one
 prompt leaves the others open and answerable. The listing says only whether a session
 shows a permission dialog, not which one, so the look at the listing below cancels every
-held record of the session at once when the session no longer shows any dialog.
+held record of the session at once when the session no longer shows any dialog. So an
+answer in `claude attach` to one prompt, while another dialog of the session still waits,
+cancels nothing: the session still shows a dialog. The answered prompt's hook stays held,
+the card can still show that prompt first, and a board answer to it is accepted but
+changes nothing in the session; the card then shows the next prompt. The record is
+cancelled once the session shows no dialog, or released before the hook's timeout.
 
 The hook answers `{}`, so the session shows its own dialog, in three cases: the record is
 cancelled because the session no longer shows the dialog; five seconds before the
@@ -821,7 +828,8 @@ that hedged: a session told to write one file and stop has done it, and a fresh 
 listed `blocked` ten seconds after a plain answer. Moving such a worker to Needs you showed
 a card with nothing to answer and sent a notification for it. So the runner reads
 `blocked` with `status: idle`, no `waitingFor` and no open permission prompt in the ledger
-as a turn end, the same as `done`, and logs that at DEBUG. Only a dialog, an open
+as a turn end, the same as `done`, and logs that at DEBUG once, when the session enters
+that shape, not on every tick while it stays there. Only a dialog, an open
 permission prompt, an open question of the `ask` tool or the status file's `needs-input`
 blocks a worker; a question in plain text leaves it idle, and a reply from the board, or
 any other event, wakes it. A `blocked` entry without a process is not a turn end: it
@@ -954,8 +962,10 @@ session holds the conversation they are about; the refresh then comes at the nex
 So does a reply from the board while the tick's listing shows the session `blocked` with
 `status: idle` or `busy` and no `waitingFor`, because it may answer a question that the session
 asked in plain text; another event to that worker refreshes as usual. Any other reply
-that answers no question refreshes as any event does, so the limit also holds for a
-worker that follows no item and gets only replies. The card lists the worker's
+that answers no question refreshes as any event does. So a worker that follows no item
+and gets only replies refreshes only when the listing shows its turn end as `done`: if
+Claude Code lists its session `blocked` with no dialog after every turn, every reply
+continues the session and the limit never applies. The card lists the worker's
 sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
@@ -1054,8 +1064,8 @@ the status file, and the watchdog states, and a worker that reaches its daily wa
 item closed is not notified. A turn end that waits for events (`idle` or `queued`) is not,
 because a worker that answers ten comments ends ten turns; `status` and the board show it.
 The one exception is a turn end whose background shell still runs after
-`background_shell_mins`, which is notified once, as `idle` (see "Background shells"
-below). The turn end clears the record
+`background_shell_mins`, which is notified once per turn end, as `idle` (see
+"Background shells" below). The turn end clears the record
 of the last notified session state, so the next question is notified even when it is the
 same state as the one before.
 
@@ -1093,7 +1103,10 @@ end is a plain turn end. A shell that ends starts a new turn by itself, with a
 listing, which drops the record. A shell that never ends, such as a dev server or
 `tail -f`, would hide a session that waits for the operator, so an `idle` or `queued`
 worker is notified once, as `idle`, when the turn ended `background_shell_mins` ago (30 by
-default; 0 never notifies). The worker stays `idle`, so delivery may wake it: through the
+default; 0 never notifies). The notice is once per turn end, not once per shell, because
+the listing names no shell: a reply or another event that starts a turn while the shell
+runs ends in a new turn end, which is notified again `background_shell_mins` after it,
+while no newer turn started. The worker stays `idle`, so delivery may wake it: through the
 outbox the mod submits the wake as a new turn while the shell runs. A stop and resume, for
 a session without the mod, waits while the listing shows the session working, but stops
 one listed as done, or blocked with no dialog, and busy, which ends the shell. Neither the
@@ -1148,7 +1161,10 @@ before the listing shows the new process, so `continue` reads the listing again 
 worker whose session is live and waits for input is not respawned, because it has nothing
 to respawn: one whose turn ended with a question of the `ask` tool or the status file
 takes the answer as a reply, and one that shows a prompt takes it on its card
-(a permission prompt) or in `claude attach`. The refusal says which.
+(a permission prompt) or in `claude attach`. A permission prompt that is open in the
+ledger counts as a prompt even while the listing shows the turn ended (a listing behind
+the prompt's hook, or a released prompt): a reply would wait in the inbox behind it. The
+refusal says which.
 
 - **One writer of side effects.** A mutating command never calls `claude`, git, or the
   tracker. It records the request in the ledger and waits for the outcome. The daemon is
@@ -1326,7 +1342,11 @@ takes the answer as a reply, and one that shows a prompt takes it on its card
   and branch (`<item>-<id>`) from the original's current branch (section 5), so the two
   never write the same tree; when the original's worktree has uncommitted changes, the
   answer says that they are not in the clone. By default it follows no event kinds, so it
-  costs nothing per comment and only a reply from the board reaches it. Its original,
+  costs nothing per comment and only a reply from the board reaches it. It follows its
+  item on the source of its original's primary item (the repository's tracker for a
+  worker that the queue label started, and for a worker from before subscriptions), ends
+  when that source reports the item closed, and never marks the item's status. Its
+  original,
   mode, prompt, model and effort are columns of its ledger row (schema version 9), so a
   launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a new
   clone of the same original with them, or says why it cannot. A full-mode fork is
