@@ -379,7 +379,7 @@ turn end that waits for events (`idle`) and a worker that ends because its item 
 are not notified; `chargehand status` shows them. A turn can end while a background shell
 that it started still runs; Claude Code then lists the session as busy, with the state
 working or done, and the board and `status` show the worker as idle with the session state
-`background`. When no new turn has started 30 minutes after that turn end (`background_shell_mins` in the machine
+`background`, or as queued when an event waits for the shell to end. When no new turn has started 30 minutes after that turn end (`background_shell_mins` in the machine
 configuration; 0 turns it off), you are notified once, because a shell that never ends,
 such as a dev server, can hide a session that waits for you. This applies to workers
 launched by this release or a later one. As shipped it

@@ -258,11 +258,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell of the ended turn, such as a dev server or a long test run, when an event such as
   a comment arrived. Now the wake waits while the session list shows the session busy
   after its turn ended: the worker is queued, its card says "wake held, a background shell
-  of session ... still runs", and the wake goes out once the session is idle. The
-  background-shell notice after `background_shell_mins` still applies. A reply from the
-  board still wakes the worker at once, also for a question asked while a shell runs,
-  because the operator chose to act. A session with the mod gets the wake through its
-  outbox as before, and its shell keeps running.
+  of session ... still runs", and the wake goes out once the session is idle. A held wake
+  runs no setup step of the role. The background-shell notice after
+  `background_shell_mins` still applies. A reply from the board still wakes the worker at
+  once, also for a question asked while a shell runs, because the operator chose to act;
+  only while the session list shows the session working, the reply waits with the same
+  reason. A session with the mod gets the wake through its outbox as before, and its
+  shell keeps running.
 
 ### Added
 

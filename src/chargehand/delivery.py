@@ -377,6 +377,11 @@ def switch_session(
     return written
 
 
+def _shell_reason(worker: Worker) -> str:
+    """The reason on the card of a worker whose wake waits for a background shell."""
+    return f"wake held, a background shell of session {worker.session_id} still runs"
+
+
 def has_mod(worker: Worker) -> bool:
     """Whether *worker*'s current session takes its wakes from the outbox."""
     return bool(worker.session_uuid) and worker.mod_session == worker.session_uuid
@@ -626,6 +631,12 @@ class Delivery:
             return
         if not worker.session_id:
             return
+        if self._shell_hold(worker, entries):
+            # A first look at the tick's listing, before admission and the refresh of the
+            # item checkout, which would run the role's setup under the shell on every
+            # tick. The runtime's wake looks again before its stop.
+            self._hold(worker, _shell_reason(worker), result)
+            return
         until = self._debounced_until(worker, entries)
         if until is not None:
             at = time.strftime("%H:%M:%S", time.localtime(until))
@@ -633,6 +644,23 @@ class Delivery:
             return
         if self._admitted(worker, result):
             self._wake(worker, message, entries, result)
+
+    def _shell_hold(self, worker: Worker, entries: Sequence[InboxEntry]) -> bool:
+        """Whether the wake must wait because the stop would end a background shell.
+
+        The tick's listing shows a background shell of the ended turn, the wake would stop
+        the session (no mod takes it from the outbox), and no reply from the board waits:
+        a reply goes out at once, because the operator chose to act.
+        """
+        if worker.session_state != ledger_mod.SESSION_BACKGROUND:
+            return False
+        if any(is_reply(entry) for entry in entries):
+            return False
+        try:
+            in_place = self._runtime(worker.runtime).capabilities.in_place_wake
+        except ConfigError:
+            in_place = False
+        return not (in_place and has_mod(worker))
 
     def _debounced_until(self, worker: Worker, entries: Sequence[InboxEntry]) -> float | None:
         """When the role's debounce lets *entries* go, or None when they may go now.
@@ -762,12 +790,13 @@ class Delivery:
             return
         if not outcome.ok:
             detail = sanitize.one_line(outcome.detail, limit=300)
-            if outcome.shell:
-                # The turn ended, but the stop would end a background shell of it, such as
-                # a dev server. The worker waits as queued, with the reason on its card,
-                # until the listing shows the session idle; the notice after
-                # background_shell_mins still tells the operator.
-                self._hold(worker, f"wake held, {detail}", result)
+            if outcome.shell or worker.session_state == ledger_mod.SESSION_BACKGROUND:
+                # The turn ended, but a background shell of it runs, such as a dev server:
+                # the stop would end it, or the listing shows the session working, which
+                # the runtime cannot tell from a turn. The worker waits as queued, with
+                # the reason on its card, until the listing shows the session idle; the
+                # notice after background_shell_mins still tells the operator.
+                self._hold(worker, _shell_reason(worker), result)
                 keep_notified()
                 return
             if outcome.busy:

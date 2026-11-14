@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import board as board_mod, claude, delivery as delivery_mod, hooks, ledger as ledger_mod, worker_tokens
+from chargehand import board as board_mod, claude, delivery as delivery_mod, hooks
+from chargehand import ledger as ledger_mod, worker_tokens
 from chargehand.config import ServeConfig
 from chargehand.runtime import Hook
 from chargehand.sources import Event, WorkItem
@@ -833,20 +834,36 @@ def _card(harness, worker) -> dict:
     )
 
 
-@pytest.mark.parametrize("listed_state", ["done", "blocked"])
+def _count_checkout_refreshes(monkeypatch) -> list[int]:
+    """Count the refreshes of the item checkout before a wake, which run the role's setup."""
+    calls: list[int] = []
+    real = Runner._refresh_item_checkout
+
+    def counting(self, worker):
+        calls.append(worker.id)
+        return real(self, worker)
+
+    monkeypatch.setattr(Runner, "_refresh_item_checkout", counting)
+    return calls
+
+
+@BUSY_LISTINGS
 def test_a_comment_waits_while_a_background_shell_runs_in_a_session_without_the_mod(
-    daemon, harness, tmp_path, caplog, listed_state
+    daemon, harness, tmp_path, caplog, monkeypatch, listed_state
 ):
     # A wake without the mod stops the session, and the stop ends the shell, such as a
     # dev server. The comment waits until the shell ends.
     worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, listed_state)
     harness.next_tick()
     _comment(harness, worker)
+    refreshes = _count_checkout_refreshes(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger="chargehand"):
         for _ in range(3):
             harness.next_tick()
 
+    # The held wake runs no setup step under the shell.
+    assert refreshes == []
     held = harness.worker("ABC-1")
     assert (held.state, held.wakes) == (ledger_mod.QUEUED, worker.wakes)
     assert held.session_state == ledger_mod.SESSION_BACKGROUND
@@ -865,9 +882,41 @@ def test_a_comment_waits_while_a_background_shell_runs_in_a_session_without_the_
 
     woken = harness.worker("ABC-1")
     assert (woken.state, woken.wakes) == (ledger_mod.RUNNING, worker.wakes + 1)
+    assert refreshes == [worker.id]
     (resume,) = harness.claude_state.read()["resumes"]
     assert "comment: https://example.invalid/c1" in resume["prompt"].splitlines()
     assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") is None
+
+
+def test_a_reply_waits_with_the_reason_while_the_listing_shows_a_background_shell_as_working(
+    daemon, harness, tmp_path
+):
+    # A session listed working cannot be told from one in a turn at the runtime's last
+    # look, so even a reply waits; the card says why.
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, "working")
+    harness.next_tick()
+
+    status, _ = support.request(
+        daemon.port, "POST", f"/api/workers/{worker.id}/reply",
+        body=json.dumps({"text": "blue"}).encode(), headers=AUTH,
+    )
+    assert status == 202
+    harness.next_tick()
+    harness.next_tick()
+
+    held = harness.worker("ABC-1")
+    assert (held.state, held.wakes) == (ledger_mod.QUEUED, worker.wakes)
+    assert harness.claude_state.read().get("resumes", []) == []
+    reason = f"wake held, a background shell of session {worker.session_id} still runs"
+    shown = _card(harness, held)
+    assert (shown["column"], shown["queue_reason"]) == ("queued", reason)
+
+    harness.claude_state.set_session_state(worker.session_id, "done", status="idle")
+    harness.next_tick()
+
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    (resume,) = harness.claude_state.read()["resumes"]
+    assert "reply from the operator: blue" in resume["prompt"].splitlines()
 
 
 def test_a_comment_goes_to_the_outbox_while_a_background_shell_runs_in_a_session_with_the_mod(
