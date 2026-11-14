@@ -1120,7 +1120,12 @@ its card says "wake held, a background shell of session ... still runs", and the
 stay in its inbox. Delivery decides from the tick's listing before admission, so a held
 wake runs no setup step of the role in the item checkout. The runtime looks again right
 before its stop, and also leaves alone a session listed done (or blocked with no dialog)
-but busy. Once the listing shows the session idle, the next tick sends the wake. The
+but busy. Two holds come only from that last look, after admission, so the setup step of
+a role with an item checkout runs at each held tick: a reply while the session lists
+working (see below), and a session listed done (or blocked with no dialog) but busy with
+no recorded turn end, such as one launched without the `UserPromptSubmit` hook. That
+second worker is not `background`, so it gets no background-shell notice; its card shows
+the reason. Once the listing shows the session idle, the next tick sends the wake. The
 background-shell notice above still tells the operator about a shell that does not end.
 Two wakes go out at once and end the shell: a reply from the board, also the answer to a
 question that ended its turn while a shell runs, because the operator chose to act; and

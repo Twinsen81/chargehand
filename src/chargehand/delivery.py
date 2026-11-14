@@ -790,12 +790,15 @@ class Delivery:
             return
         if not outcome.ok:
             detail = sanitize.one_line(outcome.detail, limit=300)
-            if outcome.shell or worker.session_state == ledger_mod.SESSION_BACKGROUND:
+            if outcome.shell or (
+                outcome.busy and worker.session_state == ledger_mod.SESSION_BACKGROUND
+            ):
                 # The turn ended, but a background shell of it runs, such as a dev server:
                 # the stop would end it, or the listing shows the session working, which
                 # the runtime cannot tell from a turn. The worker waits as queued, with
                 # the reason on its card, until the listing shows the session idle; the
-                # notice after background_shell_mins still tells the operator.
+                # notice after background_shell_mins still tells the operator. Any other
+                # failed wake, such as a copy or a failed stop, is handled below.
                 self._hold(worker, _shell_reason(worker), result)
                 keep_notified()
                 return

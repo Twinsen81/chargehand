@@ -888,6 +888,42 @@ def test_a_comment_waits_while_a_background_shell_runs_in_a_session_without_the_
     assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") is None
 
 
+@pytest.mark.parametrize("fault", ["copy", "stop"])
+def test_a_reply_whose_wake_fails_with_a_background_shell_is_a_fault_not_a_hold(
+    daemon, harness, tmp_path, fault
+):
+    # The reply may end the shell, so the wake goes out; a failure of it is no shell hold.
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, "done")
+    harness.next_tick()
+    if fault == "copy":
+        harness.claude_state.set(resume_copy_id="c0ffee12")
+    else:
+        harness.claude_state.set(stop_returncode=1)
+
+    status, _ = support.request(
+        daemon.port, "POST", f"/api/workers/{worker.id}/reply",
+        body=json.dumps({"text": "blue"}).encode(), headers=AUTH,
+    )
+    assert status == 202
+    report = harness.next_tick()
+
+    failed = harness.worker("ABC-1")
+    reason = harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}")
+    assert reason is None or "background shell" not in reason
+    assert failed.wakes == worker.wakes
+    if fault == "copy":
+        assert any("wake fault" in error for error in report.errors)
+        assert failed.state == ledger_mod.PAUSED and "copy" in failed.last_error
+        harness.next_tick()
+        # The worker stays paused: the next tick does not start another copy.
+        assert len(harness.claude_state.read()["resumes"]) == 1
+        assert harness.worker("ABC-1").state == ledger_mod.PAUSED
+    else:
+        assert any("wake failed" in error for error in report.errors)
+        assert "wake failed" in failed.last_error
+        assert harness.claude_state.read().get("resumes", []) == []
+
+
 def test_a_reply_waits_with_the_reason_while_the_listing_shows_a_background_shell_as_working(
     daemon, harness, tmp_path
 ):
