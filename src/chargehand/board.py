@@ -371,6 +371,9 @@ def refusal_reason(raw: object) -> dict[str, object] | None:
         and all(isinstance(i, str) and sanitize.is_safe_identifier(i) for i in others)
     ):
         reason["other_sessions"] = list(others)
+        more = raw.get("other_sessions_more")
+        if isinstance(more, int) and not isinstance(more, bool) and 0 < more < 10_000:
+            reason["other_sessions_more"] = more
     return reason
 
 
@@ -385,9 +388,11 @@ def board_refusal(kind: str, reason: dict[str, object]) -> str | None:
     elif reason.get("session_running"):
         why = "the session did not stop, so its worktree is still in use"
     elif isinstance(others := reason.get("other_sessions"), list):
+        more = reason.get("other_sessions_more")
+        named = ", ".join(others) + (f" and {more} more" if more else "")
         why = (
-            f"sessions that are not this worker's own work in its worktree: "
-            f"{', '.join(others)}; force stops and removes them"
+            f"sessions that are not this worker's own are in its worktree: {named}; force "
+            f"stops and removes them"
         )
     elif reason.get("sessions_unknown"):
         why = "the session listing could not be read, so other sessions can work in its worktree"

@@ -405,7 +405,7 @@ def test_discard_refuses_a_session_with_no_row_in_the_worktree_and_force_removes
     refused = apply_request(harness, "discard", target)
 
     assert refused["ok"] == 0
-    assert "other sessions work in its worktree: 47076c61" in refused["message"]
+    assert "other sessions are in its worktree: 47076c61. Remove them" in refused["message"]
     assert refused["reason"] == {"needs_force": True, "other_sessions": ["47076c61"]}
     assert worktree.is_dir()
     assert ["stop", "47076c61"] not in harness.claude_state.commands
@@ -425,6 +425,45 @@ def test_discard_refuses_a_session_with_no_row_in_the_worktree_and_force_removes
     assert harness.claude_state.sessions == []
     assert not worktree.exists()
     assert harness.ledger.get(worker.id).gc_done == 1
+
+
+def test_a_stopped_session_in_the_worktree_refuses_discard_until_it_is_removed(harness):
+    worker = hand_worker(harness)
+    # A stopped copy stays listed, without a process.
+    add_listed_session(harness, "c0ffee01", worker.worktree_path, state="done")
+    sessions = harness.claude_state.sessions
+    for session in sessions:
+        if session["id"] == "c0ffee01":
+            session.pop("pid")
+            session.pop("status")
+    harness.claude_state.set(sessions=sessions)
+    target = harness.ledger.target_for(worker)
+
+    refused = apply_request(harness, "discard", target)
+
+    assert refused["ok"] == 0
+    assert refused["reason"] == {"needs_force": True, "other_sessions": ["c0ffee01"]}
+
+    harness.claude_state.set(
+        sessions=[s for s in harness.claude_state.sessions if s["id"] != "c0ffee01"]
+    )
+    assert apply_request(harness, "discard", target)["ok"] == 1
+    assert not worker.worktree_path.exists()
+
+
+def test_a_refusal_counts_the_other_sessions_it_does_not_name(harness):
+    worker = hand_worker(harness)
+    ids = [f"copy{n}" for n in range(7)]
+    for session_id in ids:
+        add_listed_session(harness, session_id, worker.worktree_path)
+
+    refused = apply_request(harness, "discard", harness.ledger.target_for(worker))
+
+    assert refused["ok"] == 0
+    assert f"{', '.join(ids[:5])} and 2 more." in refused["message"]
+    assert refused["reason"] == {
+        "needs_force": True, "other_sessions": ids[:5], "other_sessions_more": 2,
+    }
 
 
 def test_discard_leaves_a_session_outside_the_worktree_alone(harness, tmp_path):

@@ -1266,11 +1266,13 @@ refusal says which.
   `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
   A refusal that force would override (`retry`, `discard`, `archive` over uncommitted
   changes or unpushed commits, a `discard` whose session did not stop, a `discard` of a
-  worktree where sessions that are not the worker's own work, or a `discard` while the
-  session listing cannot be read) also carries a
+  worktree where sessions that are not the worker's own are listed, running or stopped,
+  or a `discard` while the session listing cannot be read) also carries a
   machine-readable `reason`, kept in the ledger with the request (schema version 13), and
   a `board_message` in the board's words ("its worktree has uncommitted changes; tick
-  force and press Discard again"); its `message` stays the command line's text. The card
+  force and press Discard again"); its `message` stays the command line's text. Force
+  never overrides a `discard` while the current session of another live worker is in the
+  worktree: that refusal carries no `reason`. The card
   of the worker shows the outcome of its last action, "pending", then "done" or "refused"
   with that text, until the next action or a dismiss. The board model makes no git call,
   so the tick records what each worker that ended within the last day, and a live worker

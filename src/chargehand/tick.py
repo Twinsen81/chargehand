@@ -2081,10 +2081,15 @@ class Runner:
             )
         ids = [sanitize.scrub_identifier(session.id) for session in others]
         if others and not force:
+            # A stopped session still counts: it stays listed, and a respawn would run it
+            # in the worktree again, until it is removed.
+            reason: dict[str, object] = {"other_sessions": ids[:OTHER_SESSIONS_SHOWN]}
+            if len(ids) > OTHER_SESSIONS_SHOWN:
+                reason["other_sessions_more"] = len(ids) - OTHER_SESSIONS_SHOWN
             return False, NeedsForce((
-                f"{worker.name}: other sessions work in its worktree: {_id_list(ids)}. Stop "
+                f"{worker.name}: other sessions are in its worktree: {_id_list(ids)}. Remove "
                 f"them, or re-run with --force to stop and remove them with the worker."
-            ), {"other_sessions": ids[:OTHER_SESSIONS_SHOWN]})
+            ), reason)
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
         if not self._stop_session(worker) and not force:

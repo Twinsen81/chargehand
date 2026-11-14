@@ -810,8 +810,12 @@ def test_the_board_words_each_reason(raw, words):
 
 @pytest.mark.parametrize("raw, words", [
     ({"needs_force": True, "other_sessions": ["47076c61", "s9"]},
-     "sessions that are not this worker's own work in its worktree: 47076c61, s9; force stops "
+     "sessions that are not this worker's own are in its worktree: 47076c61, s9; force stops "
      "and removes them; tick force and press Discard again"),
+    ({"needs_force": True, "other_sessions": ["a1", "a2", "a3", "a4", "a5"],
+      "other_sessions_more": 2},
+     "sessions that are not this worker's own are in its worktree: a1, a2, a3, a4, a5 and 2 "
+     "more; force stops and removes them; tick force and press Discard again"),
     ({"needs_force": True, "sessions_unknown": True},
      "the session listing could not be read, so other sessions can work in its worktree; tick "
      "force and press Discard again"),
@@ -837,6 +841,15 @@ def test_a_reason_keeps_only_a_short_list_of_plain_session_ids(others):
 
     assert answer["reason"] == {"needs_force": True}
     assert answer["board_message"] is None
+
+
+@pytest.mark.parametrize("more", [0, -1, True, "2", 10_000])
+def test_a_reason_drops_a_count_of_other_sessions_that_is_not_a_small_number(more):
+    raw = {"needs_force": True, "other_sessions": ["a1"], "other_sessions_more": more}
+    row = {"id": 1, "kind": "discard", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "m", "reason": raw}
+
+    assert board.outcome(row)["reason"] == {"needs_force": True, "other_sessions": ["a1"]}
 
 
 def test_a_reason_is_left_out_unless_force_would_override_a_refusal():
