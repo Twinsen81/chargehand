@@ -267,6 +267,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chose to act; only while the session list shows the session working, the reply waits
   with the same reason. A session with the mod gets the wake through its outbox as
   before, and its shell keeps running.
+- Discard no longer deletes a worktree under a session that is not the worker's own,
+  such as a copy that `claude --resume` started in that worktree, which has no session
+  row. Before, discard removed only the worker's sessions, deleted the worktree and left
+  the copy running in a deleted directory, with no message. Discard now reads the session
+  listing first and finds every session whose directory is in the worktree or the item
+  checkout, by real path. Without force it refuses and names those sessions; with force
+  it stops and removes them, then discards, and its outcome names them. It refuses also
+  with force while the current session of another live worker works there, and without
+  force when the listing cannot be read.
 
 ### Added
 

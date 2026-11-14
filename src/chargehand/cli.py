@@ -1030,7 +1030,10 @@ def build_parser() -> argparse.ArgumentParser:
     discard = add("discard", cmd_discard, "remove the session, worktree, and local branch")
     add_item(discard)
     discard.add_argument("--yes", action="store_true", help="required: this destroys work")
-    discard.add_argument("--force", action="store_true", help="discard even with unpushed commits")
+    discard.add_argument(
+        "--force", action="store_true",
+        help="discard even with unpushed commits; stop and remove other sessions in the worktree",
+    )
     _add_request_flags(discard)
 
     clone = add(
