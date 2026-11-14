@@ -245,6 +245,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warned at the start of every clone that this `Write` deny rule never matches. The
   `Edit(//<original worktree>/**)` rule, as given and resolved, covers the Write tool
   too, so the clone still cannot change the original's files with the file tools.
+- The last turn of a worker that reports `done` or `failed`: the Stop hook ends the
+  worker, and a few milliseconds later the mod posts the same turn end and the session's
+  usage reading. The daemon refused both posts, logged them at INFO as refused, and lost
+  the usage reading of that turn. Now, for 120 seconds after a worker ends done or failed,
+  these two posts from the worker's own session are accepted: the usage reading and the
+  context figures are recorded, the turn end changes nothing, and the log has at most a
+  DEBUG line. Every other post of an ended worker, a post of a cancelled worker, and a
+  post from another session are refused as before.
 
 ### Added
 

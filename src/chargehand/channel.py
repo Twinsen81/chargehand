@@ -18,7 +18,8 @@ Every route is a POST with the token of the worker's own session (see
 :mod:`chargehand.worker_tokens`), and the token, not the session id or the working
 directory that the post names, says which worker calls. The board's token is refused here,
 and so is the token of a worker that ended, except by the outbox, which tells the mod to
-stop polling. Everything a post carries is untrusted session output: it is cleaned and
+stop polling, and by the turn end and the usage reading of the last turn of a worker that
+ended done or failed just now, from its own session. Everything a post carries is untrusted session output: it is cleaned and
 capped, and no tool argument reaches a log line, a notification or a prompt.
 """
 
@@ -72,6 +73,12 @@ HANDOFF_LIMIT = 16 * 1024
 
 # How far ahead request_wake may set its timer.
 MAX_WAKE_AFTER_SECS = 7 * 24 * 3600
+
+# How long after a worker ended done or failed the mod's posts of its last turn (the turn
+# end and the usage reading) are still taken. The Stop hook of the same turn can end the
+# worker a few milliseconds before the mod posts.
+FINAL_TURN_SECS = 120
+FINAL_TURN_STATES = (ledger_mod.DONE, ledger_mod.FAILED)
 
 
 @dataclass(frozen=True)
@@ -383,19 +390,26 @@ def _text(payload: Mapping[str, Any], key: str, limit: int) -> str | None:
 
 
 def _worker(
-    request: Request, payload: Mapping[str, Any] | None = None
+    request: Request, payload: Mapping[str, Any] | None = None, *, final_turn: bool = False
 ) -> tuple[Ledger, Worker, type[Runtime]]:
     """The live worker whose token the post carries; 401 when it ended.
 
     With *payload*, the post must also come from the worker's own session (see
     :func:`chargehand.hooks.is_own_session`), else 404, as for a session no worker has.
+
+    With *final_turn* and a *payload*, a worker that ended done or failed less than
+    :data:`FINAL_TURN_SECS` ago is also taken, when the post names the worker's own session
+    id: the mod posts the end of the last turn after the Stop hook of that turn ended the
+    worker.
     """
     ledger = request.ledger()
     caller = request.caller
     if caller is None:
         raise HTTPError(401, "a valid worker token is required")
     worker = ledger.get(caller.id)
-    if worker is None or worker.is_terminal:
+    if worker is None or (worker.is_terminal and not (
+        final_turn and payload is not None and _in_final_turn(worker, payload)
+    )):
         raise HTTPError(401, "this worker has ended")
     runtime = next((r for r in _runtimes() if r.name == worker.runtime), None)
     if runtime is None:
@@ -408,6 +422,17 @@ def _worker(
                      (session or "-")[:hooks.SESSION_PREFIX])
             raise HTTPError(404, "this is not the worker's session")
     return ledger, worker, runtime
+
+
+def _in_final_turn(worker: Worker, payload: Mapping[str, Any]) -> bool:
+    """Whether *worker* ended done or failed just now, and the post is from its session."""
+    session = _text(payload, "session_id", 100)
+    return (
+        worker.state in FINAL_TURN_STATES
+        and worker.finished_at is not None
+        and time.time() - worker.finished_at <= FINAL_TURN_SECS
+        and bool(worker.session_uuid) and session == worker.session_uuid
+    )
 
 
 def _session(payload: Mapping[str, Any]) -> str:
@@ -501,10 +526,15 @@ def confirm(request: Request) -> Response:
 def lifecycle(request: Request) -> Response:
     event = request.path[len(f"{PREFIX}/lifecycle"):].strip("/")
     payload = _payload(request)
-    ledger, worker, runtime = _worker(request, payload)
+    ledger, worker, runtime = _worker(request, payload, final_turn=event == "turn_complete")
     hook = runtime.parse_channel(event, payload) if event in runtime.channel_events else None
     if hook is None:
         raise HTTPError(404, "not found")
+    if worker.is_terminal:
+        # The end of the last turn, after the Stop hook of that turn ended the worker.
+        log.debug("%s: the end of its last turn, after the worker ended (%s)",
+                  worker.handle, worker.state)
+        return Response.json({})
     report = TickReport()
     try:
         request.daemon.runner(ledger).apply_hook(worker, hook, report)
@@ -519,7 +549,7 @@ def lifecycle(request: Request) -> Response:
 def record_usage(request: Request) -> Response:
     """Write the session's weekly window to the usage file, and keep its context window."""
     payload = _payload(request)
-    ledger, worker, runtime = _worker(request, payload)
+    ledger, worker, runtime = _worker(request, payload, final_turn=True)
     written = False
     if runtime.capabilities.usage_readings:
         written = usage.record_session_usage(
@@ -533,6 +563,8 @@ def record_usage(request: Request) -> Response:
             context_tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool)
             and tokens >= 0 else None,
             context_percent=usage.percent(context.get("percent")),
+            # The last turn of a worker that ended changes its figures, and nothing more.
+            **({"updated_at": worker.updated_at} if worker.is_terminal else {}),
         )
     return Response.json({"recorded": written})
 
