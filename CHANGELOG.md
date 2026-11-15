@@ -253,20 +253,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context figures are recorded, the turn end changes nothing, and the log has at most a
   DEBUG line. Every other post of an ended worker, a post of a cancelled worker, and a
   post from another session are refused as before.
-- A wake no longer ends a background shell without notice. For a session without the
-  chargehand mod, a wake stops and resumes the session, and the stop ended a background
-  shell of the ended turn, such as a dev server or a long test run, when an event such as
-  a comment arrived. Now the wake waits while the session list shows the session busy
-  after its turn ended: the worker is queued, its card says "wake held, a background shell
-  of session ... still runs", and the wake goes out once the session is idle. A held wake
-  runs no setup step of the role, except for a reply while the session list shows the
-  session working, and for a session without a recorded turn end (one launched without
-  the turn-start hook), which also gets no background-shell notice. For other workers the
-  notice after `background_shell_mins` still applies. A reply from the board still wakes
-  the worker at once, also for a question asked while a shell runs, because the operator
-  chose to act; only while the session list shows the session working, the reply waits
-  with the same reason. A session with the mod gets the wake through its outbox as
-  before, and its shell keeps running.
+- A wake no longer stops a session without the chargehand mod while a background shell of
+  its ended turn still runs. For such a session, a wake stops and resumes the session
+  when an event such as a comment arrives, and that stop can end a background shell, such
+  as a dev server or a long test run. With Claude Code 2.1.325 the shell kept running
+  after the stop and resume. Now the wake waits while the session list shows the session
+  busy after its turn ended: the worker is queued, its card says "wake held, a background
+  shell of session ... still runs", and the wake goes out once the session is idle. A
+  held wake runs no setup step of the role, except for a reply while the session list
+  shows the session working, and for a session without a recorded turn end (one launched
+  without the turn-start hook), which also gets no background-shell notice. For other
+  workers the notice after `background_shell_mins` still applies. A reply from the board
+  still wakes the worker at once, also for a question asked while a shell runs, because
+  the operator chose to act; only for an idle worker while the session list shows the
+  session working, the reply waits with the same reason. A session with the mod gets the
+  wake through its outbox as before, and its shell keeps running.
 - Discard no longer deletes a worktree under a session that is not the worker's own,
   such as a copy that `claude --resume` started in that worktree, which has no session
   row. Before, discard removed only the worker's sessions, deleted the worktree and left
@@ -283,6 +284,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree counted as the worker's, and the mod polled every 5 seconds, with a hello that
   was refused with 404 each time, until the session stopped. The tick still never adopts
   or stops such a session.
+- A worker at its daily wake cap now shows "wake held by the daily cap" on its card while
+  other workers fill `max_concurrent`. Before, admission checked the global cap first, so
+  the card named the global cap and the operator waited for the wrong limit, and the
+  daily-cap notification went out only once a working slot was free. The role's daily cap
+  now comes before the global cap, and the notification is sent once when the cap is
+  reached. The README and the `implementer` and `pr-reviewer` role templates now name all
+  three wakes that skip the debounce (a reply from the board, a due `request_wake` timer
+  and a summary clone's request for a current handoff note), and say the same about a
+  `/loop`: no cap stops its turns, and while such a turn runs the worker is `running` and
+  holds one slot of `max_concurrent`.
 
 ### Added
 

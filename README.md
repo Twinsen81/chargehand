@@ -244,10 +244,11 @@ long after the first waiting event; it is 0 by default, and the role templates s
 reply from the board, a due `request_wake` timer and a summary clone's request for a
 current handoff note do not wait. `max_wakes_per_day` (12 by default) caps the wakes of
 one worker over the last 24 hours: a worker at its cap stays in Queued with the reason on
-its card, and you are notified once. Each card shows the wakes in
-that window and an estimate of the tokens in the worker's session. A `/loop` that a role's
-prompt starts runs its own turns, which chargehand does not start: these limits do not
-count them, and no cap stops them.
+its card, and you are notified once. Each card shows the wakes in that window and an
+estimate of the tokens in the worker's session. A `/loop` that a role's prompt starts runs
+its own turns, which chargehand does not start: the debounce and the daily cap do not count
+them, and no cap stops them. While such a turn runs, the worker is `running` and holds one
+slot of `max_concurrent`.
 
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).
