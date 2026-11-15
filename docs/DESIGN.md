@@ -958,7 +958,8 @@ what described the old session (its context figures), keeps the old transcript p
 the old session's row, records a `refresh` row in `sessions`, which the daily wake cap
 counts, and records the wake. The old session is stopped and kept, with its row, for
 `claude --resume`; discard, retry and garbage collection remove every session of the
-worker, and an archive holds the transcript of each one. The launch writes a new token
+worker, and an archive holds the transcript of each one. Discard refuses without force
+while an earlier session runs again in the worktree, as for any other session there. The launch writes a new token
 for the new session, and its hooks and its mod's hello find the worker by that token, as
 during a launch; until the new ids are recorded, a post with that token from any session
 id counts as the worker's. After that, the old session's outbox poll is answered
@@ -1300,10 +1301,11 @@ refusal says which.
   whose action it refused, holds in its worktree: once the worker ended or the action was
   refused, then at most every ten minutes, because each look runs git twice in the
   worktree. The card's `work_at_risk` carries it, and the confirmation dialog of Discard,
-  Retry and Archive says it. A record is dropped once its worker leaves the window. The
-  card's `work_checked` says whether the tick has such a record; without one, the Discard
-  and Archive dialog of a live worker says that its worktree was not checked yet and can
-  hold work that the daemon refuses to lose without force.
+  Retry and Archive says it. A record is dropped once its worker leaves the window. A
+  live worker's session changes its worktree all the time, so when its card knows of no
+  work at risk, its Discard and Archive dialog says that the worktree is checked only when
+  the daemon applies the action and can hold work that the daemon refuses to lose without
+  force.
   The page asks for the token once, keeps it in the browser's `localStorage` for this
   origin, and sends it only in the `Authorization` header, never in a URL. It checks the
   token on Enter, when the field loses focus with a new value, on load and when the

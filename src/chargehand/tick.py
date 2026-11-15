@@ -1225,6 +1225,12 @@ class Runner:
 
     def _remove_session(self, worker: Worker) -> bool:
         """Remove the worker's session and each earlier one that a refresh kept."""
+        return not self._remove_sessions(worker)
+
+    def _remove_sessions(self, worker: Worker) -> list[str]:
+        """Remove the worker's session and each earlier one that a refresh kept. Returns the
+        ids that are still listed afterwards, all of them when the listing cannot be read.
+        """
         ids = self._session_ids(worker)
         if ids:
             runtime = self.runtime(worker.runtime)
@@ -1234,11 +1240,12 @@ class Runner:
             try:
                 sessions = self.sessions(worker.runtime, refresh=True)
             except AgentRuntimeError:
-                return False
-            if any(s.id in ids for s in sessions):
-                return False
+                return sorted(ids)
+            left = sorted(s.id for s in sessions if s.id in ids)
+            if left:
+                return left
         self._release_launch_files(worker)
-        return True
+        return []
 
     def _latest_session_id(self, worker: Worker) -> str | None:
         """The session that *worker*'s newest session row other than a wake started."""
@@ -2184,7 +2191,7 @@ class Runner:
                 )
         elif found is None:
             also = "; the session listing could not be read, so other sessions were not looked for"
-        removed = self._remove_session(worker)
+        left = self._remove_sessions(worker)
         try:
             branches_removed = self._remove_worktree(worker, force=True)
         except GitError as exc:
@@ -2194,17 +2201,20 @@ class Runner:
             self._sync_labels(worker, context, report)
         self.ledger.update(worker, gc_done=1, session_id=None, session_uuid=None)
         kept = ("" if branches_removed else f"; {KEPT_BRANCH}") + also
-        if not removed:
+        if left:
+            left_ids = _id_list([sanitize.scrub_identifier(session_id) for session_id in left])
+            noun = "session" if len(left) == 1 else "sessions"
             return True, (
-                f"discarded {worker.id_handle}: worktree and branch deleted, but the session "
-                f"could not be removed; remove session {worker.session_id} by hand{kept}"
+                f"discarded {worker.id_handle}: worktree and branch deleted, but the {noun} "
+                f"could not be removed; remove {noun} {left_ids} by hand{kept}"
             )
         return True, f"discarded {worker.id_handle}: session removed, worktree and branch deleted{kept}"
 
     def _other_sessions(self, worker: Worker) -> tuple[list[Session], list[Worker]] | None:
-        """The listed sessions other than *worker*'s own whose directory is in its worktree
-        or its item checkout, by real path, and the live workers whose current session is
-        one of them. None when the listing cannot be read.
+        """The listed sessions whose directory is in *worker*'s worktree or its item
+        checkout, by real path, other than its current session and its stopped earlier ones,
+        and the live workers whose current session is one of them. None when the listing
+        cannot be read.
         """
         self.invalidate_sessions(worker.runtime)
         try:
@@ -2213,15 +2223,22 @@ class Runner:
             return None
         roots = (worker.worktree_path, item_checkout_path(worker))
         own = {record.session_id for record in self.ledger.sessions_of(worker) if record.session_id}
+        earlier = own - {worker.session_id}
         if worker.session_id:
             own.add(worker.session_id)
         live = {
             other.session_id: other for other in self.ledger.live_workers()
             if other.id != worker.id and other.session_id
         }
+        runtime = self.runtime(worker.runtime)
         found = [
             session for session in sessions
-            if (session.id not in own or session.id in live)
+            # An earlier session that runs again, such as one resumed in place after a
+            # refresh, is not stopped by the worker's own stop.
+            if (
+                session.id not in own or session.id in live
+                or (session.id in earlier and not runtime.is_stopped(session))
+            )
             and any(self._under(root, session.cwd) for root in roots)
         ]
         holders = {live[session.id].id: live[session.id] for session in found if session.id in live}

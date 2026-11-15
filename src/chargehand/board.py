@@ -80,6 +80,7 @@ from chargehand.tick import (
     LAST_REFUSAL_SECS,
     MODEL_LIMIT_KEY,
     NEW_WORKER,
+    OTHER_SESSIONS_SHOWN,
     REFUSAL_KINDS,
     REPLY,
     REQUEST_MESSAGE_LIMIT,
@@ -296,8 +297,6 @@ def _segments(request: Request, prefix: str) -> list[str]:
 
 # The card button that a refused worker action names in its board wording.
 FORCED_BUTTONS = {"retry": "Retry", "discard": "Discard", ARCHIVE: "Archive"}
-# The most session ids a refusal's reason keeps: a discard names its first ones.
-OTHER_SESSIONS_KEPT = 5
 
 
 def outcome(row: dict[str, object]) -> dict[str, object]:
@@ -370,7 +369,7 @@ def refusal_reason(raw: object) -> dict[str, object] | None:
         reason["sessions_unknown"] = True
     others = raw.get("other_sessions")
     if (
-        isinstance(others, list) and 0 < len(others) <= OTHER_SESSIONS_KEPT
+        isinstance(others, list) and 0 < len(others) <= OTHER_SESSIONS_SHOWN
         and all(isinstance(i, str) and sanitize.is_safe_identifier(i) for i in others)
     ):
         reason["other_sessions"] = list(others)
@@ -1193,9 +1192,6 @@ def card(
         "last_hook": worker.last_hook,
         "job": job_entry(job, worker, ledger) if job else None,
         "work_at_risk": work_at_risk(work),
-        # The tick looks at a live worker's worktree only after it refused an action on it,
-        # so the first Discard or Archive dialog of a live worker says it was not checked.
-        "work_checked": work is not None,
         "last_refusal": last_refusal(worker, ledger, now),
         "archived_at": worker.archived_at,
         "created_at": worker.created_at,

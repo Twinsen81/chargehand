@@ -451,6 +451,71 @@ def test_a_stopped_session_in_the_worktree_refuses_discard_until_it_is_removed(h
     assert not worker.worktree_path.exists()
 
 
+def earlier_session(harness, worker, session_id, **listed):
+    """A session that a refresh replaced: it keeps its row, and the listing shows it."""
+    harness.ledger.record_session(
+        worker, kind=ledger_mod.SESSION_REFRESH, session_id=session_id,
+        session_uuid=f"uuid-{session_id}", now=1.0,
+    )
+    add_listed_session(harness, session_id, worker.worktree_path, **listed)
+
+
+def test_an_earlier_session_that_runs_again_in_the_worktree_refuses_discard(harness):
+    worker = hand_worker(harness)
+    # The operator resumed the replaced session in place: the worker's own stop misses it.
+    earlier_session(harness, worker, "e0a1e5d1")
+    target = harness.ledger.target_for(worker)
+
+    refused = apply_request(harness, "discard", target)
+
+    assert refused["ok"] == 0
+    assert refused["reason"] == {"needs_force": True, "other_sessions": ["e0a1e5d1"]}
+    assert ["rm", "e0a1e5d1"] not in harness.claude_state.commands
+    assert worker.worktree_path.is_dir()
+
+    forced = apply_request(harness, "discard", target, force=True)
+
+    assert forced["ok"] == 1
+    assert "other sessions in its worktree stopped and removed: e0a1e5d1" in forced["message"]
+    commands = harness.claude_state.commands
+    assert commands.index(["stop", "e0a1e5d1"]) < commands.index(["rm", "e0a1e5d1"])
+    assert not worker.worktree_path.exists()
+
+
+def test_a_stopped_earlier_session_is_removed_with_the_worker(harness):
+    worker = hand_worker(harness)
+    earlier_session(harness, worker, "e0a1e5d2", state="done")
+    sessions = harness.claude_state.sessions
+    for session in sessions:
+        if session["id"] == "e0a1e5d2":
+            session.pop("pid")
+            session.pop("status")
+    harness.claude_state.set(sessions=sessions)
+
+    result = apply_request(harness, "discard", harness.ledger.target_for(worker))
+
+    assert result["ok"] == 1
+    assert "other sessions" not in result["message"]
+    assert ["rm", "e0a1e5d2"] in harness.claude_state.commands
+    assert "e0a1e5d2" not in [s["id"] for s in harness.claude_state.sessions]
+
+
+def test_discard_names_each_session_that_could_not_be_removed(harness):
+    worker = hand_worker(harness)
+    earlier_session(harness, worker, "e0a1e5d3", state="done")
+    sessions = harness.claude_state.sessions
+    for session in sessions:
+        if session["id"] == "e0a1e5d3":
+            session.pop("pid")
+            session.pop("status")
+    harness.claude_state.set(sessions=sessions, rm_returncode=4)
+
+    result = apply_request(harness, "discard", harness.ledger.target_for(worker))
+
+    assert result["ok"] == 1
+    assert "could not be removed; remove sessions e0a1e5d3, s1 by hand" in result["message"]
+
+
 def test_a_refusal_counts_the_other_sessions_it_does_not_name(harness):
     worker = hand_worker(harness)
     ids = [f"copy{n}" for n in range(7)]

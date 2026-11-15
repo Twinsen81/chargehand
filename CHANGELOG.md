@@ -276,7 +276,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkout, by real path. Without force it refuses and names those sessions; with force
   it stops and removes them, then discards, and its outcome names them. It refuses also
   with force while the current session of another live worker works there, and without
-  force when the listing cannot be read.
+  force when the listing cannot be read. An earlier session of the worker that runs again
+  there, such as one that a refresh replaced and the operator resumed in place, counts as
+  another session too. When a session cannot be removed, the outcome names the sessions
+  that are still listed.
 - A session that a refresh replaced, resumed in place in the worktree of its live worker:
   the tick now reports once that "an earlier session of" the worker "is working again;
   attach to it or stop it", and the outbox poll of its mod is answered `ended`, so the mod
@@ -300,11 +303,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal of these actions from the board for each worker, for one hour, and the card
   carries it as `last_refusal`, in the board's words. Any action on the worker that
   succeeds, such as a Cancel, from the board or the command line, removes it, and so does the collection of
-  the worker. A dismiss hides it in that tab. The first Discard or Archive dialog of a
-  live worker now says that its worktree was not checked yet and can hold work that the
-  daemon refuses to lose without force. Before, that dialog gave no warning, because the
-  tick looks at a live worker's worktree only after a refusal; the card's new
-  `work_checked` tells the page whether it did.
+  the worker. A dismiss hides it in that tab, and the tab that sent the action drops its
+  own copy once the daemon no longer has it. When the card of a live worker knows of no
+  work at risk, its Discard or Archive dialog now says that the worktree is checked only
+  when the daemon applies the action and can hold work that the daemon refuses to lose
+  without force. Before, that dialog gave no warning, because the tick looks at a live
+  worker's worktree only after a refusal.
 
 ### Added
 

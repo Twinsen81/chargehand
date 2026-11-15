@@ -1166,19 +1166,19 @@ def test_a_refusal_without_board_words_shows_the_daemons_message(daemon, harness
     )
 
 
-def test_a_later_ok_action_clears_the_line_and_the_live_worktree_counts_as_checked(daemon, harness):
+def test_a_later_ok_action_clears_the_line_and_the_card_learns_the_work_at_risk(daemon, harness):
     unqueued(harness)
     worker = board_worker(harness)
     key = f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}"
     # The tick looks at a live worker's worktree only after a refusal.
-    assert card_of(daemon, worker)["work_checked"] is False
+    assert card_of(daemon, worker)["work_at_risk"] is None
     (worker.worktree_path / "progress.log").write_text("notes\n")
 
     post(daemon, f"/api/workers/{worker.id}/archive", {"force": False})
     harness.next_tick()
     refused = card_of(daemon, worker)
     assert refused["last_refusal"]["kind"] == "archive"
-    assert refused["work_checked"] is True
+    assert refused["work_at_risk"] is not None
     assert harness.ledger.get_state(key) is not None
 
     _, answer = post(daemon, f"/api/workers/{worker.id}/archive", {"force": True})
@@ -1348,6 +1348,21 @@ out.daemonNewer = statusLine();
 page.setCardStatus(7, 'pending', 'sending');
 page.render(model(closed({ last_refusal: refused(10, 'its worktree has 3 unpushed commits') })));
 out.ownSending = statusLine();
+// This tab's own refused Discard stays while the daemon keeps it. A read sent after the
+// refusal without it means that a later action succeeded in another tab or on the command
+// line, so the line goes. A read sent before the refusal changes nothing.
+page.setCardStatus(7, 'bad', 'refused: its worktree has 4 unpushed commits', 11, 'discard');
+page.render(model(closed({ last_refusal: null })), 0);
+out.ownRefusalOldRead = statusLine();
+page.render(model(closed({ last_refusal: refused(11, 'its worktree has 4 unpushed commits') })),
+  Date.now() + 1000);
+out.ownRefusalKept = statusLine();
+page.render(model(closed({ last_refusal: null })), Date.now() + 1000);
+out.ownRefusalCleared = statusLine();
+// The daemon does not keep a refused Cancel, so its line stays.
+page.setCardStatus(7, 'bad', 'refused: it is not running', 12, 'cancel');
+page.render(model(closed({ last_refusal: null })), Date.now() + 1000);
+out.ownCancelRefused = statusLine();
 console.log(JSON.stringify(out));
 """
 
@@ -1372,6 +1387,10 @@ def test_the_page_draws_and_dismisses_the_daemons_refusal(tmp_path):
         "ownNewer": "done: cancel requested",
         "daemonNewer": "refused: its worktree has 2 unpushed commits",
         "ownSending": "sending",
+        "ownRefusalOldRead": "refused: its worktree has 4 unpushed commits",
+        "ownRefusalKept": "refused: its worktree has 4 unpushed commits",
+        "ownRefusalCleared": None,
+        "ownCancelRefused": "refused: it is not running",
     }
 
 
@@ -1387,22 +1406,21 @@ const constant = (name) => {
   return src.slice(start, src.indexOf(';\n', start) + 2);
 };
 eval(constant('ACTION_LABELS') + grab('function riskWarning(') + ';globalThis.warn = riskWarning;');
-const live = { column: 'working', work_at_risk: null, work_checked: false };
+const live = { column: 'working', work_at_risk: null };
 const risk = { text: 'its worktree has uncommitted changes' };
 console.log(JSON.stringify({
   discard: warn(live, 'discard', false),
   discardForced: warn(live, 'discard', true),
   archiveForced: warn(live, 'archive', true),
   retry: warn(live, 'retry', false),
-  checked: warn(Object.assign({}, live, { work_checked: true }), 'discard', false),
   closed: warn(Object.assign({}, live, { column: 'closed' }), 'discard', false),
-  known: warn(Object.assign({}, live, { work_at_risk: risk, work_checked: true }), 'discard', false),
+  known: warn(Object.assign({}, live, { work_at_risk: risk }), 'discard', false),
 }));
 """
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
-def test_the_first_dialog_for_a_live_worker_says_that_its_worktree_was_not_checked(tmp_path):
+def test_the_dialog_of_a_live_worker_says_that_its_worktree_is_checked_only_when_applied(tmp_path):
     runner = tmp_path / "unchecked.js"
     runner.write_text(NODE_UNCHECKED)
     out = json.loads(subprocess.run(
@@ -1410,15 +1428,15 @@ def test_the_first_dialog_for_a_live_worker_says_that_its_worktree_was_not_check
         capture_output=True, text=True, check=True,
     ).stdout)
 
-    not_checked = " Its worktree was not checked yet"
+    not_checked = " Its worktree is checked only when the daemon applies this"
     assert out["discard"] == (
         not_checked + ": it can hold uncommitted changes or unpushed commits, and then the "
         "daemon refuses this without force."
     )
     assert out["discardForced"].startswith(not_checked) and out["discardForced"].endswith("are lost.")
     assert out["archiveForced"].endswith("are kept as files, not as commits.")
-    # A live worker's retry is refused anyway, and a checked or closed worktree is known.
-    assert (out["retry"], out["checked"], out["closed"]) == ("", "", "")
+    # A live worker's retry is refused anyway, and a closed worker's worktree is known.
+    assert (out["retry"], out["closed"]) == ("", "")
     assert out["known"].startswith(" Its worktree has uncommitted changes: without force")
 
 

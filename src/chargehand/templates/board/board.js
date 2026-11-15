@@ -33,8 +33,8 @@
 // card, so the line shows after a reload and in every tab; a dismiss hides it in this tab,
 // which keeps the dismissed request ids in sessionStorage. The daemon tells what Discard,
 // Retry and Archive would lose, from its last tick, so the confirmation dialog can say it
-// before the click. It looks at the worktree of a live worker only after a refusal, so the
-// dialog says when that worktree was not checked yet.
+// before the click. It looks at the worktree of a live worker only after a refusal, so for
+// a live worker the dialog says that the worktree is checked only when the action applies.
 'use strict';
 
 const POLL_MS = 1000;
@@ -69,6 +69,9 @@ const CLONE_ORIGIN_HINTS = {
   summary: 'Started from the handoff note and the branch of ',
 };
 const FORCED = new Set(['continue', 'retry', 'discard', 'archive']);
+// The actions whose refusal the daemon keeps for the card until a later action on the worker
+// succeeds, from any tab or the command line.
+const KEPT_REFUSALS = new Set(['retry', 'discard', 'archive']);
 const ANSWER_LABELS = { allow: 'Allow', deny: 'Deny', always: 'Always allow' };
 const ANSWER_HINTS = {
   allow: 'Allow this tool call once',
@@ -84,10 +87,12 @@ const ARCHIVE_NOTE = 'Its worktree, the transcript and its records are zipped un
 const $ = (id) => document.getElementById(id);
 let lastOk = 0;
 let latest = null;
+// When the read of `latest` was sent, by this tab's clock.
+let latestAskedAt = 0;
 // The last rendered signature of each card, by worker id.
 const signatures = new Map();
-// The outcome of the last action on each card, by worker id: { kind, text, request }, where
-// request is the request id once the daemon gave one.
+// The outcome of the last action on each card, by worker id: { kind, text, request, action,
+// at }, where request is the request id once the daemon gave one and at is this tab's clock.
 const cardStatus = new Map();
 // How many actions this page sent for each card, by worker id; it outlives a dismiss.
 const cardActionSequence = new Map();
@@ -436,6 +441,12 @@ function shownStatus(c) {
   if (newer && !dismissedRefusals().includes(refusal.request_id)) {
     return { kind: 'bad', text: 'refused: ' + refusal.text, request: refusal.request_id };
   }
+  // The daemon kept this tab's refusal, so a read sent after it that no longer has one means
+  // that a later action on the worker succeeded in another tab or on the command line.
+  if (own && own.kind === 'bad' && typeof own.request === 'number' && KEPT_REFUSALS.has(own.action) &&
+      !refusal && latestAskedAt > own.at) {
+    return null;
+  }
   return own || null;
 }
 
@@ -453,8 +464,8 @@ function statusNode(id, status) {
   return box;
 }
 
-function setCardStatus(id, kind, text, request) {
-  cardStatus.set(String(id), { kind, text, request });
+function setCardStatus(id, kind, text, request, action) {
+  cardStatus.set(String(id), { kind, text, request, action, at: Date.now() });
   rerender();
 }
 
@@ -697,8 +708,9 @@ function renderColumns(columns, now) {
 
 // ----- polling ---------------------------------------------------------------
 
-function render(model) {
+function render(model, askedAt = Date.now()) {
   latest = model;
+  latestAskedAt = askedAt;
   const now = model.generated_at;
   const usage = model.usage || {};
   renderGauge('seven_day', usage.known ? usage.seven_day : null);
@@ -902,17 +914,19 @@ async function send(path, body, what, onOutcome) {
 }
 
 // What the confirmation dialog of Discard, Retry or Archive says about the work they would
-// lose, when the card knows of it, or that the worktree of a live worker was not checked yet.
+// lose, when the card knows of it, or that the worktree of a live worker can hold some: its
+// session changes the worktree all the time, so the card knows only of work found earlier.
 function riskWarning(c, name, force) {
   const risk = c.work_at_risk;
   if (!['discard', 'retry', 'archive'].includes(name)) return '';
-  if (!risk && c.column !== 'closed' && !c.work_checked && name !== 'retry') {
+  if (!risk && c.column !== 'closed' && name !== 'retry') {
     if (!force) {
-      return ' Its worktree was not checked yet: it can hold uncommitted changes or unpushed ' +
-        'commits, and then the daemon refuses this without force.';
+      return ' Its worktree is checked only when the daemon applies this: it can hold uncommitted ' +
+        'changes or unpushed commits, and then the daemon refuses this without force.';
     }
-    return ' Its worktree was not checked yet; force is ticked, so uncommitted changes and ' +
-      'unpushed commits in it ' + (name === 'archive' ? 'are kept as files, not as commits.' : 'are lost.');
+    return ' Its worktree is checked only when the daemon applies this; force is ticked, so ' +
+      'uncommitted changes and unpushed commits in it ' +
+      (name === 'archive' ? 'are kept as files, not as commits.' : 'are lost.');
   }
   if (!risk) return '';
   const said = ' ' + risk.text.charAt(0).toUpperCase() + risk.text.slice(1);
@@ -962,7 +976,7 @@ function workerAction(c, name, force) {
     (outcome) => {
       if (!latestAction()) return;
       setCardStatus(c.id, outcome.pending ? 'pending' : outcome.ok ? 'ok' : 'bad', statusText(outcome),
-        outcome.id);
+        outcome.id, name);
     });
 }
 
@@ -1269,10 +1283,11 @@ function setupControls() {
 async function poll() {
   try {
     const filter = $('show-hidden').checked ? '?show_hidden=1' : '';
+    const askedAt = Date.now();
     const response = await fetch('/api/board' + filter, { cache: 'no-store', credentials: 'omit' });
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const model = await response.json();
-    render(model);
+    render(model, askedAt);
     lastOk = Date.now();
     const refresh = $('refresh');
     refresh.textContent = 'updated ' + new Date(model.generated_at * 1000).toLocaleTimeString();
