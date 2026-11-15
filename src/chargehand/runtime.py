@@ -213,12 +213,17 @@ class WakeResult:
 
     *busy* is set when a wake asked only for an idle session found it in a turn or at a
     prompt, and left it alone. That is no fault: the message waits.
+
+    *shell* is set together with *busy* when the turn has ended, but a background shell
+    of that turn still runs, and the wake would have to stop the session, which ends the
+    shell. The message waits until the shell ends.
     """
 
     ok: bool
     detail: str = ""
     copy_id: str | None = None
     busy: bool = False
+    shell: bool = False
 
 
 class Runtime(ABC):
@@ -344,6 +349,7 @@ class Runtime(ABC):
         session_uuid: str | None = None,
         if_idle: bool = False,
         if_ended: bool = False,
+        end_shell: bool = False,
     ) -> WakeResult:
         """Give the session *message* as its next turn, so that the same session continues.
 
@@ -355,6 +361,12 @@ class Runtime(ABC):
         worker that a usage limit parked asks this way. A reply from the board to a
         question asks with *if_idle* too. Both also count a session as ended that
         :meth:`ended_without_dialog` accepts.
+
+        With *if_idle* or *if_ended*, a runtime that must stop the session to wake it also
+        leaves alone a session whose turn ended while a background shell of that turn still
+        runs, because the stop ends the shell: the result has ``busy`` and ``shell`` set.
+        *end_shell* wakes such a session all the same; a reply from the board asks this
+        way, because the operator chose to act.
 
         A result with ``ok`` False is a fault the runtime detected, such as a session that
         did not stop or a copy that started. A failure to run the agent at all (missing

@@ -241,6 +241,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listing shows the turn ended, now says to answer the prompt on its card or in `claude
   attach`. Before, it said to send a reply, which then waited in the inbox behind the
   prompt.
+- A clone's settings file no longer denies `Write(//<original worktree>/**)`. Claude Code
+  warned at the start of every clone that this `Write` deny rule never matches. The
+  `Edit(//<original worktree>/**)` rule, as given and resolved, covers the Write tool
+  too, so the clone still cannot change the original's files with the file tools.
+- The last turn of a worker that reports `done` or `failed`: the Stop hook ends the
+  worker, and a few milliseconds later the mod posts the same turn end and the session's
+  usage reading. The daemon refused both posts, logged them at INFO as refused, and lost
+  the usage reading of that turn. Now, for 120 seconds after a worker ends done or failed,
+  these two posts from the worker's own session are accepted: the usage reading and the
+  context figures are recorded, the turn end changes nothing, and the log has at most a
+  DEBUG line. Every other post of an ended worker, a post of a cancelled worker, and a
+  post from another session are refused as before.
+- A wake no longer stops a session without the chargehand mod while a background shell of
+  its ended turn still runs. For such a session, a wake stops and resumes the session
+  when an event such as a comment arrives, and that stop can end a background shell, such
+  as a dev server or a long test run. With Claude Code 2.1.325 the shell kept running
+  after the stop and resume. Now the wake waits while the session list shows the session
+  busy after its turn ended: the worker is queued, its card says "wake held, a background
+  shell of session ... still runs", and the wake goes out once the session is idle. A
+  held wake runs no setup step of the role, except for a reply while the session list
+  shows the session working, and for a session without a recorded turn end (one launched
+  without the turn-start hook), which also gets no background-shell notice. For other
+  workers the notice after `background_shell_mins` still applies. A reply from the board
+  still wakes the worker at once, also for a question asked while a shell runs, because
+  the operator chose to act; only for an idle worker while the session list shows the
+  session working, the reply waits with the same reason. A session with the mod gets the
+  wake through its outbox as before, and its shell keeps running.
+- Discard no longer deletes a worktree under a session that is not the worker's own,
+  such as a copy that `claude --resume` started in that worktree, which has no session
+  row. Before, discard removed only the worker's sessions, deleted the worktree and left
+  the copy running in a deleted directory, with no message. Discard now reads the session
+  listing first and finds every session whose directory is in the worktree or the item
+  checkout, by real path. Without force it refuses and names those sessions; with force
+  it stops and removes them, then discards, and its outcome names them. It refuses also
+  with force while the current session of another live worker works there, and without
+  force when the listing cannot be read. An earlier session of the worker that runs again
+  there, such as one that a refresh replaced and the operator resumed in place, counts as
+  another session too. When a session cannot be removed, the outcome names the sessions
+  that are still listed.
+- A session that a refresh replaced, resumed in place in the worktree of its live worker:
+  the tick now reports once that "an earlier session of" the worker "is working again;
+  attach to it or stop it", and the outbox poll of its mod is answered `ended`, so the mod
+  stops polling. Before, the tick said nothing, because any session in a live worker's
+  worktree counted as the worker's, and the mod polled every 5 seconds, with a hello that
+  was refused with 404 each time, until the session stopped. The tick still never adopts
+  or stops such a session.
+- A worker at its daily wake cap now shows "wake held by the daily cap" on its card while
+  other workers fill `max_concurrent`. Before, admission checked the global cap first, so
+  the card named the global cap and the operator waited for the wrong limit, and the
+  daily-cap notification went out only once a working slot was free. The role's daily cap
+  now comes before the global cap, and the notification is sent once when the cap is
+  reached. The README and the `implementer` and `pr-reviewer` role templates now name all
+  three wakes that skip the debounce (a reply from the board, a due `request_wake` timer
+  and a summary clone's request for a current handoff note), and say the same about a
+  `/loop`: no cap stops its turns, and while such a turn runs the worker is `running` and
+  holds one slot of `max_concurrent`.
+- The line on a board card that says why a Discard, Retry or Archive was refused no
+  longer goes away when the page is reloaded, and a second tab shows it too. Before, only
+  the tab that sent the action had it, in its memory. The daemon now keeps the last
+  refusal of these actions from the board for each worker, for one hour, and the card
+  carries it as `last_refusal`, in the board's words. Any action on the worker that
+  succeeds, such as a Cancel, from the board or the command line, removes it, and so does the collection of
+  the worker. A dismiss hides it in that tab, and the tab that sent the action drops its
+  own copy once the daemon no longer has it. When the card of a live worker knows of no
+  work at risk, its Discard or Archive dialog now says that the worktree is checked only
+  when the daemon applies the action and can hold work that the daemon refuses to lose
+  without force. Before, that dialog gave no warning, because the tick looks at a live
+  worker's worktree only after a refusal.
 
 ### Added
 

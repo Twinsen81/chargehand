@@ -808,6 +808,50 @@ def test_the_board_words_each_reason(raw, words):
     assert answer["message"] == "the command line's text"
 
 
+@pytest.mark.parametrize("raw, words", [
+    ({"needs_force": True, "other_sessions": ["47076c61", "s9"]},
+     "sessions that are not this worker's own are in its worktree: 47076c61, s9; force stops "
+     "and removes them; tick force and press Discard again"),
+    ({"needs_force": True, "other_sessions": ["a1", "a2", "a3", "a4", "a5"],
+      "other_sessions_more": 2},
+     "sessions that are not this worker's own are in its worktree: a1, a2, a3, a4, a5 and 2 "
+     "more; force stops and removes them; tick force and press Discard again"),
+    ({"needs_force": True, "sessions_unknown": True},
+     "the session listing could not be read, so other sessions can work in its worktree; tick "
+     "force and press Discard again"),
+])
+def test_the_board_words_the_reasons_of_a_discard_that_other_sessions_refused(raw, words):
+    row = {"id": 1, "kind": "discard", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "the command line's text", "reason": raw}
+
+    answer = board.outcome(row)
+
+    assert answer["board_message"] == words
+    assert answer["reason"] == raw
+
+
+@pytest.mark.parametrize("others", [
+    [], ["ok", "bad id"], ["x" * 65], [7], "47076c61", ["a", "b", "c", "d", "e", "f"],
+])
+def test_a_reason_keeps_only_a_short_list_of_plain_session_ids(others):
+    row = {"id": 1, "kind": "discard", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "m", "reason": {"needs_force": True, "other_sessions": others}}
+
+    answer = board.outcome(row)
+
+    assert answer["reason"] == {"needs_force": True}
+    assert answer["board_message"] is None
+
+
+@pytest.mark.parametrize("more", [0, -1, True, "2", 10_000])
+def test_a_reason_drops_a_count_of_other_sessions_that_is_not_a_small_number(more):
+    raw = {"needs_force": True, "other_sessions": ["a1"], "other_sessions_more": more}
+    row = {"id": 1, "kind": "discard", "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "m", "reason": raw}
+
+    assert board.outcome(row)["reason"] == {"needs_force": True, "other_sessions": ["a1"]}
+
+
 def test_a_reason_is_left_out_unless_force_would_override_a_refusal():
     base = {"id": 1, "kind": "discard", "target": "#1", "message": "m"}
     work = {"needs_force": True, "work": {"uncommitted_changes": True}}
@@ -836,7 +880,9 @@ def test_the_card_shows_the_outcome_of_its_action_until_the_next_one_or_a_dismis
     follower = script[script.index("async function follow("):script.index("async function send(")]
     assert "if (onOutcome) onOutcome(current);" in follower
     # The line is part of the card's signature, so a re-render keeps it; a dismiss drops it.
-    assert "cardStatus.get(String(c.id)) || null" in script[script.index("function signature("):]
+    assert "shownStatus(c)" in script[script.index("function signature("):]
+    shown = script[script.index("function shownStatus("):script.index("function statusNode(")]
+    assert "cardStatus.get(String(c.id))" in shown
     status = script[script.index("function statusNode("):script.index("function setCardStatus(")]
     assert "cardStatus.delete(String(id));" in status
     # The top notice stays as it is.
@@ -1049,6 +1095,349 @@ def test_a_card_that_is_built_again_keeps_what_the_operator_put_into_it(tmp_path
         "rebuilt": True, "answer": "use the blue one", "focused": True, "caret": [7, 7],
         "force": True, "forceAfterAction": False, "answerToNextQuestion": "",
     }
+
+
+# ----- the last refusal stays on the card -------------------------------------------------
+
+
+def cancelled_board_worker(daemon, harness, item="ABC-1"):
+    worker = board_worker(harness, item)
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+    return harness.ledger.get(worker.id)
+
+
+@pytest.mark.parametrize("action, button", [
+    ("discard", "Discard"), ("retry", "Retry"), ("archive", "Archive"),
+])
+def test_a_refusal_from_the_board_shows_on_its_card_in_every_read(daemon, harness, action, button):
+    unqueued(harness)
+    unqueued(harness, "ABC-2")
+    worker = cancelled_board_worker(daemon, harness)
+    other = cancelled_board_worker(daemon, harness, "ABC-2")
+    assert card_of(daemon, worker)["last_refusal"] is None
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/{action}", {"force": False})
+    harness.next_tick()
+
+    expected = {
+        "request_id": answer["id"], "kind": action,
+        "text": f"its worktree has uncommitted changes; tick force and press {button} again"
+        + ("; the archive keeps the files, not the commits" if action == "archive" else ""),
+    }
+    # A reload, or a second tab, reads the board again and gets the same line.
+    for _ in range(2):
+        shown = card_of(daemon, worker)["last_refusal"]
+        assert {k: v for k, v in shown.items() if k != "at"} == expected
+        assert time.time() - shown["at"] < 60
+    assert card_of(daemon, other)["last_refusal"] is None
+
+
+def test_a_refused_discard_for_a_session_with_no_row_shows_in_board_words(daemon, harness):
+    unqueued(harness)
+    worker = cancelled_board_worker(daemon, harness)
+    sessions = harness.claude_state.sessions
+    sessions.append({
+        "id": "47076c61", "uuid": "uuid-47076c61", "cwd": str(worker.worktree_path),
+        "state": "working", "status": "busy", "pid": 4242,
+    })
+    harness.claude_state.set(sessions=sessions)
+
+    post(daemon, f"/api/workers/{worker.id}/discard", {"force": False})
+    harness.next_tick()
+
+    assert card_of(daemon, worker)["last_refusal"]["text"] == (
+        "sessions that are not this worker's own are in its worktree: 47076c61; force stops "
+        "and removes them; tick force and press Discard again"
+    )
+
+
+def test_a_refusal_without_board_words_shows_the_daemons_message(daemon, harness):
+    unqueued(harness)
+    worker = board_worker(harness)
+
+    post(daemon, f"/api/workers/{worker.id}/retry")
+    harness.next_tick()
+
+    worker = harness.ledger.get(worker.id)
+    assert card_of(daemon, worker)["last_refusal"]["text"] == (
+        f"{worker.name} is {worker.state}; cancel or stop it before retrying"
+    )
+
+
+def test_a_later_ok_action_clears_the_line_and_the_card_learns_the_work_at_risk(daemon, harness):
+    unqueued(harness)
+    worker = board_worker(harness)
+    key = f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}"
+    # The tick looks at a live worker's worktree only after a refusal.
+    assert card_of(daemon, worker)["work_at_risk"] is None
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+
+    post(daemon, f"/api/workers/{worker.id}/archive", {"force": False})
+    harness.next_tick()
+    refused = card_of(daemon, worker)
+    assert refused["last_refusal"]["kind"] == "archive"
+    assert refused["work_at_risk"] is not None
+    assert harness.ledger.get_state(key) is not None
+
+    _, answer = post(daemon, f"/api/workers/{worker.id}/archive", {"force": True})
+    harness.next_tick()
+    assert outcome_of(daemon, answer)["ok"] is True
+    assert card_of(daemon, worker)["last_refusal"] is None
+    assert harness.ledger.get_state(key) is None
+
+
+@pytest.mark.parametrize("origin", [ledger_mod.REQUEST_BOARD, ledger_mod.REQUEST_CLI])
+def test_any_later_ok_action_on_the_worker_clears_the_line(daemon, harness, origin):
+    unqueued(harness)
+    worker = board_worker(harness)
+    post(daemon, f"/api/workers/{worker.id}/retry")
+    harness.next_tick()
+    assert card_of(daemon, worker)["last_refusal"]["kind"] == "retry"
+
+    request_id = harness.ledger.record_request("cancel", worker.target, origin=origin)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 1
+    assert card_of(daemon, worker)["last_refusal"] is None
+    assert harness.ledger.get_state(f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}") is None
+
+
+def test_a_refused_action_of_another_kind_keeps_the_line(daemon, harness):
+    unqueued(harness)
+    worker = cancelled_board_worker(daemon, harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    post(daemon, f"/api/workers/{worker.id}/discard", {"force": False})
+    harness.next_tick()
+
+    post(daemon, f"/api/workers/{worker.id}/cancel")
+    harness.next_tick()
+
+    assert card_of(daemon, worker)["last_refusal"]["kind"] == "discard"
+
+
+def test_the_line_is_gone_after_its_lifetime(daemon, harness):
+    unqueued(harness)
+    worker = cancelled_board_worker(daemon, harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    post(daemon, f"/api/workers/{worker.id}/discard", {"force": False})
+    harness.next_tick()
+    key = f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}"
+    worker = harness.ledger.get(worker.id)
+    later = time.time() + tick_mod.LAST_REFUSAL_SECS + 1
+
+    # The model leaves it out as soon as it is too old, and the tick then drops it.
+    assert board.last_refusal(worker, harness.ledger, time.time()) is not None
+    assert board.last_refusal(worker, harness.ledger, later) is None
+    harness.runner._forget_refusals(now=time.time())
+    assert harness.ledger.get_state(key) is not None
+    harness.runner._forget_refusals(now=later)
+    assert harness.ledger.get_state(key) is None
+
+
+def test_a_refusal_from_the_command_line_does_not_show_on_the_card(daemon, harness):
+    unqueued(harness)
+    worker = cancelled_board_worker(daemon, harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+
+    request_id = harness.ledger.record_request("discard", worker.target, origin=ledger_mod.REQUEST_CLI)
+    harness.next_tick()
+
+    assert harness.ledger.get_request(request_id)["ok"] == 0
+    assert card_of(daemon, worker)["last_refusal"] is None
+
+
+def test_the_record_of_a_collected_worker_is_dropped(daemon, harness):
+    unqueued(harness)
+    worker = cancelled_board_worker(daemon, harness)
+    (worker.worktree_path / "progress.log").write_text("notes\n")
+    post(daemon, f"/api/workers/{worker.id}/discard", {"force": False})
+    harness.next_tick()
+    key = f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}"
+    assert harness.ledger.get_state(key) is not None
+
+    harness.ledger.update(harness.ledger.get(worker.id), gc_done=1)
+    assert board.last_refusal(harness.ledger.get(worker.id), harness.ledger, time.time()) is None
+    harness.runner._forget_refusals()
+    assert harness.ledger.get_state(key) is None
+
+
+@pytest.mark.parametrize("raw", [
+    "not json", "[]", json.dumps({"request_id": "1", "kind": "discard", "at": 1.0}),
+    json.dumps({"request_id": 1, "kind": "cancel", "at": 1.0}),
+    json.dumps({"request_id": 1, "kind": "discard", "at": "now"}),
+    json.dumps({"request_id": True, "kind": "discard", "at": 1.0}),
+])
+def test_a_refusal_record_that_is_not_well_formed_is_left_out(harness, tmp_path, raw):
+    worker = harness.ledger.create_worker(
+        role="implementer", item="ABC-9", item_id=None, url=None, repository="test",
+        repo=tmp_path, worktree=tmp_path / "w", branch="b",
+    )
+    harness.ledger.set_state(f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}", raw)
+
+    assert board.last_refusal(worker, harness.ledger, 2.0) is None
+
+
+def test_a_refusal_record_without_a_message_still_says_it_was_refused(harness, tmp_path):
+    worker = harness.ledger.create_worker(
+        role="implementer", item="ABC-9", item_id=None, url=None, repository="test",
+        repo=tmp_path, worktree=tmp_path / "w", branch="b",
+    )
+    harness.ledger.set_state(f"{tick_mod.LAST_REFUSAL_PREFIX}{worker.id}", json.dumps(
+        {"request_id": 3, "kind": "discard", "at": 1.0, "message": "", "reason": None}
+    ))
+
+    assert board.last_refusal(worker, harness.ledger, 2.0) == {
+        "request_id": 3, "kind": "discard", "text": "no reason given", "at": 1.0,
+    }
+
+
+def test_the_page_shows_the_daemons_refusal_unless_this_tab_dismissed_it():
+    script = (board.asset_dir() / "board.js").read_text()
+    shown = script[script.index("function shownStatus("):script.index("function statusNode(")]
+    assert "c.last_refusal" in shown
+    assert "'refused: ' + refusal.text" in shown
+    assert "dismissedRefusals().includes(refusal.request_id)" in shown
+    status = script[script.index("function statusNode("):script.index("function setCardStatus(")]
+    assert "dismissRefusal(status.request)" in status
+    stored = script[script.index("function dismissedRefusals("):script.index("function shownStatus(")]
+    assert "sessionStorage" in stored and "localStorage" not in stored
+    # The text is daemon text: it goes into the page as text only.
+    assert "el('span', null, status.text)" in status
+
+
+NODE_REFUSAL = r"""
+const sessionStore = new Map();
+const sessionStorage = {
+  getItem: (k) => (sessionStore.has(k) ? sessionStore.get(k) : null),
+  setItem: (k, v) => sessionStore.set(k, v), removeItem: (k) => sessionStore.delete(k),
+};
+const statusLine = () => {
+  const box = find((n) => n.has('status'));
+  return box ? box.children[0].textContent : null;
+};
+const dismiss = () => find((n) => n.has('dismiss')).fire('click');
+const refused = (id, text) => ({ request_id: id, kind: 'discard', text, at: 5 });
+const closed = (changes) => card(Object.assign({
+  column: 'needs_you', state: 'cancelled', permission_prompt: null,
+  actions: ['retry', 'discard', 'archive', 'clone'],
+}, changes));
+const find = (test) => [...root.walk()].find(test);
+const out = {};
+
+page.render(model(closed({ last_refusal: refused(4, 'its worktree has uncommitted changes') })));
+out.shown = statusLine();
+dismiss();
+out.afterDismiss = statusLine();
+page.render(model(closed({ last_refusal: refused(4, 'its worktree has uncommitted changes') })));
+out.afterPoll = statusLine();
+out.stored = JSON.parse(sessionStorage.getItem('chargehand.dismissedRefusals'));
+page.render(model(closed({ last_refusal: refused(6, 'its worktree has 1 unpushed commit') })));
+out.newer = statusLine();
+page.render(model(closed({ last_refusal: null })));
+out.cleared = statusLine();
+// The outcome of this tab's own action wins over an older refusal of the daemon, and a
+// newer refusal, such as one sent from another tab, wins over it.
+page.setCardStatus(7, 'ok', 'done: cancel requested', 8);
+page.render(model(closed({ last_refusal: refused(6, 'its worktree has 1 unpushed commit') })));
+out.ownNewer = statusLine();
+page.render(model(closed({ last_refusal: refused(9, 'its worktree has 2 unpushed commits') })));
+out.daemonNewer = statusLine();
+// An action that has no request id yet keeps its own line.
+page.setCardStatus(7, 'pending', 'sending');
+page.render(model(closed({ last_refusal: refused(10, 'its worktree has 3 unpushed commits') })));
+out.ownSending = statusLine();
+// This tab's own refused Discard stays while the daemon keeps it. A read sent after the
+// refusal without it means that a later action succeeded in another tab or on the command
+// line, so the line goes. A read sent before the refusal changes nothing.
+page.setCardStatus(7, 'bad', 'refused: its worktree has 4 unpushed commits', 11, 'discard');
+page.render(model(closed({ last_refusal: null })), 0);
+out.ownRefusalOldRead = statusLine();
+page.render(model(closed({ last_refusal: refused(11, 'its worktree has 4 unpushed commits') })),
+  Date.now() + 1000);
+out.ownRefusalKept = statusLine();
+page.render(model(closed({ last_refusal: null })), Date.now() + 1000);
+out.ownRefusalCleared = statusLine();
+// The daemon does not keep a refused Cancel, so its line stays.
+page.setCardStatus(7, 'bad', 'refused: it is not running', 12, 'cancel');
+page.render(model(closed({ last_refusal: null })), Date.now() + 1000);
+out.ownCancelRefused = statusLine();
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_page_draws_and_dismisses_the_daemons_refusal(tmp_path):
+    runner = tmp_path / "refusal.js"
+    page = NODE_RERENDER.split("const find = ")[0]
+    exposed = "globalThis.page = { render, workerAction };"
+    assert page.count(exposed) == 1
+    page = page.replace(exposed, "globalThis.page = { render, workerAction, setCardStatus };")
+    runner.write_text(page + NODE_REFUSAL)
+    out = subprocess.run(
+        ["node", str(runner), str(board.asset_dir() / "board.js")],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    assert json.loads(out.splitlines()[-1]) == {
+        "shown": "refused: its worktree has uncommitted changes",
+        "afterDismiss": None, "afterPoll": None, "stored": [4],
+        "newer": "refused: its worktree has 1 unpushed commit", "cleared": None,
+        "ownNewer": "done: cancel requested",
+        "daemonNewer": "refused: its worktree has 2 unpushed commits",
+        "ownSending": "sending",
+        "ownRefusalOldRead": "refused: its worktree has 4 unpushed commits",
+        "ownRefusalKept": "refused: its worktree has 4 unpushed commits",
+        "ownRefusalCleared": None,
+        "ownCancelRefused": "refused: it is not running",
+    }
+
+
+NODE_UNCHECKED = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const grab = (head) => {
+  const start = src.indexOf(head);
+  return src.slice(start, src.indexOf('\n}\n', start) + 3);
+};
+const constant = (name) => {
+  const start = src.indexOf('const ' + name + ' =');
+  return src.slice(start, src.indexOf(';\n', start) + 2);
+};
+eval(constant('ACTION_LABELS') + grab('function riskWarning(') + ';globalThis.warn = riskWarning;');
+const live = { column: 'working', work_at_risk: null };
+const risk = { text: 'its worktree has uncommitted changes' };
+console.log(JSON.stringify({
+  discard: warn(live, 'discard', false),
+  discardForced: warn(live, 'discard', true),
+  archiveForced: warn(live, 'archive', true),
+  retry: warn(live, 'retry', false),
+  closed: warn(Object.assign({}, live, { column: 'closed' }), 'discard', false),
+  known: warn(Object.assign({}, live, { work_at_risk: risk }), 'discard', false),
+}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_dialog_of_a_live_worker_says_that_its_worktree_is_checked_only_when_applied(tmp_path):
+    runner = tmp_path / "unchecked.js"
+    runner.write_text(NODE_UNCHECKED)
+    out = json.loads(subprocess.run(
+        ["node", str(runner), str(board.asset_dir() / "board.js")],
+        capture_output=True, text=True, check=True,
+    ).stdout)
+
+    not_checked = " Its worktree is checked only when the daemon applies this"
+    assert out["discard"] == (
+        not_checked + ": it can hold uncommitted changes or unpushed commits, and then the "
+        "daemon refuses this without force."
+    )
+    assert out["discardForced"].startswith(not_checked) and out["discardForced"].endswith("are lost.")
+    assert out["archiveForced"].endswith("are kept as files, not as commits.")
+    # A live worker's retry is refused anyway, and a closed worker's worktree is known.
+    assert (out["retry"], out["closed"]) == ("", "")
+    assert out["known"].startswith(" Its worktree has uncommitted changes: without force")
 
 
 # ----- the handle on the command line -------------------------------------------------------

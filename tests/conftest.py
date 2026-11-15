@@ -58,6 +58,10 @@ def run_git(*args: str, cwd: Path) -> str:
     return result.stdout
 
 
+# The status that a live session lists in a state, unless a test names another one.
+_LISTED_STATUS = {"working": "busy", "done": "idle"}
+
+
 class FakeClaudeState:
     """Reads and writes the fake binary's state file."""
 
@@ -93,7 +97,10 @@ class FakeClaudeState:
 
         A live session set `blocked` with no status shows a dialog, `status: waiting`, as
         Claude Code lists one. Keeping the earlier status would list a turn end instead:
-        `blocked` with `status: idle` or `busy` and no `waitingFor`.
+        `blocked` with `status: idle` or `busy` and no `waitingFor`. A live session set
+        `working` lists `status: busy`, and one set `done` lists `status: idle`, as Claude
+        Code lists a turn and a turn end; `done` with `status: busy` is a background shell
+        of the ended turn, so a test sets it by name.
         """
         state = self.read()
         for session in state.get("sessions", []):
@@ -102,6 +109,8 @@ class FakeClaudeState:
                 session["state"] = session_state
                 if session_state == "blocked" and "status" in session and "status" not in extra:
                     session["status"] = "waiting"
+                if session_state in _LISTED_STATUS and "status" in session and "status" not in extra:
+                    session["status"] = _LISTED_STATUS[session_state]
                 session.update(extra)
         self.write(state)
 

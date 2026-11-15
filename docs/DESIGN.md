@@ -582,7 +582,12 @@ identifier alone, for a session from before roles). Found → adopt it.
   on macOS) by the path that the link leads to. A session that a row of the `sessions`
   table names for a worker, but that is not that worker's current session, such as one
   that a refresh replaced, is never adopted: it belongs to its worker, and one that works
-  again is reported once. No unattended session runs outside the watchdog.
+  again is reported once, also when it works in the worktree of its live worker, as after
+  `claude --resume` in place. The tick does not stop it. A live worker with a session id
+  owns only that session in its worktree; a worker without one yet, in its launch, owns
+  every session there. A session in a live worker's worktree that no row names, such as
+  the fresh session of a refresh before its ids are recorded, is neither reported nor
+  adopted. No unattended session runs outside the watchdog.
 
 The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
 survives reboots. A partial unique index over live rows that a start rule created makes two
@@ -630,23 +635,28 @@ worktree). The session's hooks and its mod send it, and the daemon maps the toke
 worker: the token, not the session id or the working directory that a post names, says
 which worker posts. The board's token never goes to a session. A token ends with its
 worker: the daemon refuses the token of a worker that ended (its mod's outbox poll is
-answered `ended`), a new launch in the same worktree replaces it, and the file is
+answered `ended`), except for the turn end and the usage post of the last turn of a
+worker that ended `done` or `failed` less than 120 seconds ago, from the worker's own
+session (the Stop hook of that turn can end the worker before the mod posts; the usage
+reading is recorded, and the turn end changes nothing), a new launch in the same worktree replaces it, and the file is
 deleted with the settings file when the session is removed. A tool call acts as the
 token's worker, whatever session id it names. A hook, a hello, a lifecycle or usage post,
 or an outbox poll from a session that is not the worker's current one, such as a copy
 that a resume started in the same worktree with the same settings, is ignored: the post
-changes nothing, and the poll gets no message. Every launch's settings deny `Read` and
-`Edit` (which covers Write) on the board's token file and on the whole `worker-tokens/`
-directory, a launch without hooks too, so a session launched earlier is also denied the
-token files of sessions launched after it. A launch with hooks also denies them on every
-file in `session-settings/` (no tool of a session reads one: Claude Code loads its
-`--settings` itself). The session's own token file is under the denied directory as well:
-the mod reads it with `$.fs.read`, which a `Read` deny rule does not bind. No `Write` rule
-is written: Claude Code 2.1.322 warns at the start that a `Write` deny rule never matches
-and to use `Edit`. Like the deny rules, this is a guardrail: a shell command of the same
-user can still read another session's file. The token is not kept in the ledger: the launch
-runs in the runtime, which has no ledger, and the daemon finds the file that holds a
-token and then the newest worker in that file's worktree, a live one first.
+changes nothing, and the poll gets no message. The poll of a session that the worker had
+earlier, which a refresh replaced, is answered `ended`. Every launch's settings deny
+`Read` and `Edit` (which covers Write) on the board's token file and on the whole
+`worker-tokens/` directory, a launch without hooks too, so a session launched earlier is
+also denied the token files of sessions launched after it. A launch with hooks also
+denies them on every file in `session-settings/` (no tool of a session reads one: Claude
+Code loads its `--settings` itself). The session's own token file is under the denied
+directory as well: the mod reads it with `$.fs.read`, which a `Read` deny rule does not
+bind. No `Write` rule is written: Claude Code 2.1.322 warns at the start that a `Write`
+deny rule never matches and to use `Edit`. Like the deny rules, this is a guardrail: a
+shell command of the same user can still read another session's file. The token is not
+kept in the ledger: the launch runs in the runtime, which has no ledger, and the daemon
+finds the file that holds a token and then the newest worker in that file's worktree, a
+live one first.
 
 How a session gets the token, observed with Claude Code 2.1.322 in `--bg` sessions that
 loaded the mod with `--plugin-dir`: a variable in the settings `env` of the launch reaches
@@ -881,10 +891,11 @@ board, a due `request_wake` timer and a summary clone's request for a current ha
 note (section 5) do not wait, because the operator waits for the answer, the worker chose
 the time itself, and the clone's launch waits for the note; the waiting events go along
 with them. The
-wake must then pass admission: the number of working turns below `max_concurrent`, counted
-over the workers of all repositories, the role's
-`max_wakes_per_day` over the last 24 hours, and the usage reserve: the weekly window of the
-worker's provider at or below 100 minus `wake_reserve_percent` (80 % by default). No
+wake must then pass admission, in this order: the role's `max_wakes_per_day` over the last
+24 hours, the number of working turns below `max_concurrent`, counted over the workers of
+all repositories, and the usage reserve: the weekly window of the worker's provider at or
+below 100 minus `wake_reserve_percent` (80 % by default). The worker's own cap comes first,
+so a worker at its daily cap shows that reason while other workers fill `max_concurrent`. No
 reading means no reserve; a reading counts however old it is, until the window's reset
 time has passed (see "Admission" in section 5). A worker that waits becomes `queued` and
 keeps its events, and the reason it waits is kept for the board. A worker that reaches its
@@ -947,26 +958,28 @@ what described the old session (its context figures), keeps the old transcript p
 the old session's row, records a `refresh` row in `sessions`, which the daily wake cap
 counts, and records the wake. The old session is stopped and kept, with its row, for
 `claude --resume`; discard, retry and garbage collection remove every session of the
-worker, and an archive holds the transcript of each one. The launch writes a new token
+worker, and an archive holds the transcript of each one. Discard refuses without force
+while an earlier session runs again in the worktree, as for any other session there. The launch writes a new token
 for the new session, and its hooks and its mod's hello find the worker by that token, as
 during a launch; until the new ids are recorded, a post with that token from any session
-id counts as the worker's. A hook that came in during the launch, such as a permission prompt, is newer
-than the wake, and keeps the state it wrote; a post that the old session sent while it
-stopped is older, because the tick reads the worker again once the stop is confirmed. A
-crash in that window leaves the events in the inbox, and the next state diff takes the
-new session as the worker's, with the same switch as a refresh that ran to its end. The resume of
-a `parked` worker, the answer to a question that the session asked since its last wake
-(whether the listing shows that turn end as `blocked` or as `done`), and a summary
-clone's request for a current note stay in the session they belong to, because only that
-session holds the conversation they are about; the refresh then comes at the next wake.
-So does a reply from the board while the tick's listing shows the session `blocked` with
-`status: idle` or `busy` and no `waitingFor`, because it may answer a question that the session
-asked in plain text; another event to that worker refreshes as usual. Any other reply
-that answers no question refreshes as any event does. So a worker that follows no item
-and gets only replies refreshes only when the listing shows its turn end as `done`: if
+id counts as the worker's. After that, the old session's outbox poll is answered
+`ended`, so its mod stops polling when the operator resumes it. A hook that came in
+during the launch, such as a permission prompt, is newer than the wake, and keeps the
+state it wrote; a post that the old session sent while it stopped is older, because the
+tick reads the worker again once the stop is confirmed. A crash in that window leaves
+the events in the inbox, and the next state diff takes the new session as the worker's,
+with the same switch as a refresh that ran to its end. The resume of a `parked` worker,
+the answer to a question that the session asked since its last wake (whether the listing
+shows that turn end as `blocked` or as `done`), and a summary clone's request for a
+current note stay in the session they belong to, because only that session holds the
+conversation they are about; the refresh then comes at the next wake. So does a reply
+from the board while the tick's listing shows the session `blocked` with `status: idle`
+or `busy` and no `waitingFor`, because it may answer a question that the session asked
+in plain text; another event to that worker refreshes as usual. Any other reply that
+answers no question refreshes as any event does. So a worker that follows no item and
+gets only replies refreshes only when the listing shows its turn end as `done`: if
 Claude Code lists its session `blocked` with no dialog after every turn, every reply
-continues the session and the limit never applies. The card lists the worker's
-sessions.
+continues the session and the limit never applies. The card lists the worker's sessions.
 
 **The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
 in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
@@ -1009,11 +1022,16 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   submitted as the session's next turn once the session is idle (`$.prompt.submit`), and
   `POST /channel/outbox/confirm` says that the turn started. Once the worker is done,
   failed or cancelled, its session can live on; the poll then answers `ended`, which the
-  daemon logs once, and the mod stops polling. A paused worker's mod keeps polling. The
-  poll is never held open: a hook runs at most 10 seconds and one fetch at most 30.
+  daemon logs once, and the mod stops polling. The same is true for an earlier session
+  of a live worker, one that a refresh replaced, when it runs again. A paused worker's
+  mod keeps polling. The poll is never held open: a hook runs at most 10 seconds and one
+  fetch at most 30.
 - Each turn end of the main thread posts `/channel/lifecycle/turn_complete` and the
   session's rate-limit windows to `/channel/usage`; the session end posts
-  `/channel/lifecycle/session_end`.
+  `/channel/lifecycle/session_end`. When the Stop hook of the last turn already ended the
+  worker `done` or `failed`, the daemon still takes these two posts of that turn for 120
+  seconds, from the worker's own session: it records the usage reading, changes nothing
+  for the turn end, and logs at most a DEBUG line.
 
 Every post carries the session's own token, which says which worker posts. A tool call
 acts as that worker whatever session id it names; a hello, a lifecycle or usage post, or
@@ -1108,9 +1126,32 @@ the listing names no shell: a reply or another event that starts a turn while th
 runs ends in a new turn end, which is notified again `background_shell_mins` after it,
 while no newer turn started. The worker stays `idle`, so delivery may wake it: through the
 outbox the mod submits the wake as a new turn while the shell runs. A stop and resume, for
-a session without the mod, waits while the listing shows the session working, but stops
-one listed as done, or blocked with no dialog, and busy, which ends the shell. Neither the
-watchdog nor `max_concurrent` counts the time, because no turn runs and no usage is spent.
+a session without the mod, can end the shell, such as a dev server or a long test run.
+With Claude Code 2.1.325 it did not: a background `sleep` kept running after a stop and
+resume, and the listing still showed the resumed session busy. chargehand relies on
+neither result. So while the session is `background`, a wake for events waits: the worker
+is `queued`,
+its card says "wake held, a background shell of session ... still runs", and the events
+stay in its inbox. Delivery decides from the tick's listing before admission, so a held
+wake runs no setup step of the role in the item checkout. The runtime looks again right
+before its stop, and also leaves alone a session listed done (or blocked with no dialog)
+but busy. Two holds come only from that last look, after admission, so the setup step of
+a role with an item checkout runs at each held tick: a reply while the session lists
+working (see below), and a session listed done (or blocked with no dialog) but busy with
+no recorded turn end, such as one launched without the `UserPromptSubmit` hook. That
+second worker is not `background`, so it gets no background-shell notice; its card shows
+the reason. Once the listing shows the session idle, the next tick sends the wake. The
+background-shell notice above still tells the operator about a shell that does not end.
+Two wakes go out at once and do not wait for the shell: a reply from the board, also the
+answer to a question that ended its turn while a shell runs, because the operator chose to
+act; and the resume of a parked worker after its usage limit. For an `idle` worker, a reply
+waits too, with the same reason on the card, while the session lists working: at its last
+look the runtime cannot tell a background shell from a turn that the operator started. One
+more stop does not wait for the shell: past the role's `refresh_after_wakes` or
+`refresh_after_tokens`, a wake that goes out, such as a reply or a wake of a session with
+the mod, first stops the session to start a fresh one (see **Session refresh**). Neither
+the watchdog nor `max_concurrent` counts the time, because no turn runs and no usage is
+spent.
 Only sessions launched with the `UserPromptSubmit` hook get this reading, because a resume
 keeps the hooks of the launch: for a session launched before it, a turn that the operator
 starts in `claude attach` sends no hook, so a listing that shows it working still makes
@@ -1143,6 +1184,7 @@ chargehand stop <ITEM>              # pause one worker
 chargehand continue <ITEM>          # respawn it; the saved conversation resumes
 chargehand retry <ITEM>             # new worker for a failed or cancelled one
 chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
+                                    # or other sessions in the worktree; --force removes those too
 chargehand clone <ITEM> --mode fresh|full|summary [--prompt TEXT | --prompt-file PATH] [--model M]
                  [--effort E] [--subscribe KIND]...   # a new worker from an existing one
 chargehand tick                     # run a tick now, under the tick lock
@@ -1238,17 +1280,32 @@ refusal says which.
   and answers with the request's outcome, or with the request pending;
   `GET /api/requests/<id>` reads the outcome later, without the token, as every read.
   A refusal that force would override (`retry`, `discard`, `archive` over uncommitted
-  changes or unpushed commits, or a `discard` whose session did not stop) also carries a
+  changes or unpushed commits, a `discard` whose session did not stop, a `discard` of a
+  worktree where sessions that are not the worker's own are listed, running or stopped,
+  or a `discard` while the session listing cannot be read) also carries a
   machine-readable `reason`, kept in the ledger with the request (schema version 13), and
   a `board_message` in the board's words ("its worktree has uncommitted changes; tick
-  force and press Discard again"); its `message` stays the command line's text. The card
+  force and press Discard again"); its `message` stays the command line's text. Force
+  never overrides a `discard` while the current session of another live worker is in the
+  worktree: that refusal carries no `reason`. The card
   of the worker shows the outcome of its last action, "pending", then "done" or "refused"
-  with that text, until the next action or a dismiss. The board model makes no git call,
+  with that text, until the next action or a dismiss. The tick also keeps the last
+  refusal of a `discard`, `retry` or `archive` from the board for each worker in the
+  ledger's state, with its time, and the card carries it as `last_refusal` (the request
+  id, the kind, the board's words or else the request's message, and the time), so the
+  line shows after a reload and in every tab. Any action on the worker that succeeds,
+  from any origin, removes the record; the tick drops it after one hour and when the
+  worker is collected. A dismiss hides it in that tab only: the page keeps the dismissed
+  request ids in `sessionStorage`. The board model makes no git call,
   so the tick records what each worker that ended within the last day, and a live worker
   whose action it refused, holds in its worktree: once the worker ended or the action was
   refused, then at most every ten minutes, because each look runs git twice in the
   worktree. The card's `work_at_risk` carries it, and the confirmation dialog of Discard,
-  Retry and Archive says it. A record is dropped once its worker leaves the window.
+  Retry and Archive says it. A record is dropped once its worker leaves the window. A
+  live worker's session changes its worktree all the time, so when its card knows of no
+  work at risk, its Discard and Archive dialog says that the worktree is checked only when
+  the daemon applies the action and can hold work that the daemon refuses to lose without
+  force.
   The page asks for the token once, keeps it in the browser's `localStorage` for this
   origin, and sends it only in the `Authorization` header, never in a URL. It checks the
   token on Enter, when the field loses focus with a new value, on load and when the
@@ -1351,8 +1408,9 @@ refusal says which.
   launch resumed after a crash and a `retry` use them; a `retry` of a clone starts a new
   clone of the same original with them, or says why it cannot. A full-mode fork is
   recorded as a `fork` session; a summary clone's session is an `initial` one (section 5
-  describes its wait for a current note). A clone's session gets `Edit` and `Write` deny
-  rules for its original's worktree in its own settings file, in every mode, and for the
+  describes its wait for a current note). A clone's session gets an `Edit` deny rule
+  (which covers Write; no `Write` rule is written) for its original's worktree in its own
+  settings file, in every mode, and for the
   worktree of every earlier original of a clone of a clone, because a copy of a copy
   names them all; the line before a full-mode prompt names them all too. A deny rule
   holds in every permission mode, so its file tools cannot change the original's tree,

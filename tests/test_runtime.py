@@ -260,6 +260,42 @@ def test_a_wake_for_an_idle_session_wakes_an_idle_or_stopped_one(claude_runtime,
     assert claude_state.read()["resumes"][0]["target"] == UUID
 
 
+def with_shell(state):
+    """A live entry whose turn ended while a background shell of that turn still runs."""
+    return session(state, pid=86470, status="busy")
+
+
+@pytest.mark.parametrize("state, how", [
+    ("done", {"if_idle": True}), ("blocked", {"if_idle": True}),
+    ("done", {"if_ended": True}), ("failed", {"if_ended": True}),
+])
+def test_a_wake_leaves_a_session_alone_while_a_background_shell_of_its_turn_runs(
+    claude_runtime, claude_state, state, how
+):
+    # The stop would end the shell, such as a dev server or a long test run.
+    claude_state.set(sessions=[with_shell(state)])
+
+    result = claude_runtime.wake("s1", "new events: 2", **how)
+
+    assert not result.ok and result.busy and result.shell and result.copy_id is None
+    assert result.detail == "a background shell of session s1 still runs"
+    assert claude_state.commands == []
+    assert "resumes" not in claude_state.read()
+
+
+@pytest.mark.parametrize("state", ["done", "blocked"])
+def test_a_wake_that_may_end_the_shell_stops_and_resumes_the_session(
+    claude_runtime, claude_state, state
+):
+    claude_state.set(sessions=[with_shell(state)])
+
+    result = claude_runtime.wake("s1", "reply from the operator: blue", if_idle=True, end_shell=True)
+
+    assert result.ok and not result.busy and not result.shell
+    assert claude_state.commands == [["stop", "s1"]]
+    assert claude_state.read()["resumes"][0]["target"] == UUID
+
+
 def test_a_resume_wakes_a_session_listed_blocked_without_a_dialog(claude_runtime, claude_state):
     claude_state.set(sessions=[live("blocked")])
 

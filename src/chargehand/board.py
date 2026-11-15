@@ -76,8 +76,12 @@ from chargehand.tick import (
     ARCHIVE,
     ARCHIVE_REPOSITORY,
     CLONE,
+    LAST_REFUSAL_PREFIX,
+    LAST_REFUSAL_SECS,
     MODEL_LIMIT_KEY,
     NEW_WORKER,
+    OTHER_SESSIONS_SHOWN,
+    REFUSAL_KINDS,
     REPLY,
     REQUEST_MESSAGE_LIMIT,
     SUMMARY_STATE_PREFIX,
@@ -361,6 +365,17 @@ def refusal_reason(raw: object) -> dict[str, object] | None:
         reason["work"] = work
     if raw.get("session_running") is True:
         reason["session_running"] = True
+    if raw.get("sessions_unknown") is True:
+        reason["sessions_unknown"] = True
+    others = raw.get("other_sessions")
+    if (
+        isinstance(others, list) and 0 < len(others) <= OTHER_SESSIONS_SHOWN
+        and all(isinstance(i, str) and sanitize.is_safe_identifier(i) for i in others)
+    ):
+        reason["other_sessions"] = list(others)
+        more = raw.get("other_sessions_more")
+        if isinstance(more, int) and not isinstance(more, bool) and 0 < more < 10_000:
+            reason["other_sessions_more"] = more
     return reason
 
 
@@ -374,6 +389,15 @@ def board_refusal(kind: str, reason: dict[str, object]) -> str | None:
         why = str(work["text"])
     elif reason.get("session_running"):
         why = "the session did not stop, so its worktree is still in use"
+    elif isinstance(others := reason.get("other_sessions"), list):
+        more = reason.get("other_sessions_more")
+        named = ", ".join(others) + (f" and {more} more" if more else "")
+        why = (
+            f"sessions that are not this worker's own are in its worktree: {named}; force "
+            f"stops and removes them"
+        )
+    elif reason.get("sessions_unknown"):
+        why = "the session listing could not be read, so other sessions can work in its worktree"
     else:
         return None
     again = f"tick force and press {button} again"
@@ -1112,6 +1136,7 @@ def card(
     prompt = shown_prompt(own, held)
     cap = role.policy.max_wakes_per_day if role else None
     parent = ledger.get(worker.parent_id) if worker.parent_id else None
+    work = None if worker.gc_done else ledger.get_state(f"{WORK_AT_RISK_PREFIX}{worker.id}")
     return {
         "id": worker.id,
         "handle": worker.target,
@@ -1166,7 +1191,8 @@ def card(
         ),
         "last_hook": worker.last_hook,
         "job": job_entry(job, worker, ledger) if job else None,
-        "work_at_risk": work_at_risk(worker, ledger),
+        "work_at_risk": work_at_risk(work),
+        "last_refusal": last_refusal(worker, ledger, now),
         "archived_at": worker.archived_at,
         "created_at": worker.created_at,
         "updated_at": worker.updated_at,
@@ -1174,16 +1200,43 @@ def card(
     }
 
 
-def work_at_risk(worker: Worker, ledger: Ledger) -> dict[str, object] | None:
-    """What Discard, Retry or Archive would lose, as the tick last found it, or None when
-    it found nothing or does not look."""
-    if worker.gc_done:
-        return None
-    raw = ledger.get_state(f"{WORK_AT_RISK_PREFIX}{worker.id}")
+def work_at_risk(raw: str | None) -> dict[str, object] | None:
+    """What Discard, Retry or Archive would lose, from the tick's record *raw* under
+    `WORK_AT_RISK_PREFIX`, or None when it found nothing or does not look."""
     try:
         return work_facts(json.loads(raw)) if raw else None
     except ValueError:
         return None
+
+
+def last_refusal(worker: Worker, ledger: Ledger, now: float) -> dict[str, object] | None:
+    """The last refusal of a Discard, Retry or Archive that the board sent for *worker*,
+    as the tick recorded it, in board words, while it is younger than `LAST_REFUSAL_SECS`.
+    """
+    if worker.gc_done:
+        return None
+    raw = ledger.get_state(f"{LAST_REFUSAL_PREFIX}{worker.id}")
+    try:
+        record = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    request_id, kind, at = record.get("request_id"), record.get("kind"), record.get("at")
+    if (
+        not isinstance(request_id, int) or isinstance(request_id, bool)
+        or kind not in REFUSAL_KINDS
+        or not isinstance(at, (int, float)) or isinstance(at, bool)
+        or now - at >= LAST_REFUSAL_SECS
+    ):
+        return None
+    reason = refusal_reason(record.get("reason"))
+    message = record.get("message")
+    text = (board_refusal(str(kind), reason) if reason else None) or (
+        sanitize.one_line(message, limit=REQUEST_MESSAGE_LIMIT)
+        if isinstance(message, str) and message.strip() else "no reason given"
+    )
+    return {"request_id": request_id, "kind": kind, "text": text, "at": at}
 
 
 def shown_prompt(
@@ -1374,6 +1427,7 @@ __all__ = [
     "to_json",
     "tokens_estimate",
     "work_at_risk",
+    "last_refusal",
     "under_originals",
     "clone_form",
 ]

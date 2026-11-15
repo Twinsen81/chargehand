@@ -777,6 +777,81 @@ def test_an_earlier_session_of_an_ended_worker_that_works_again_is_reported_not_
     assert not any(reviewer.session_id in line for line in harness.next_tick().warnings)
 
 
+def test_an_earlier_session_resumed_in_the_worktree_of_its_live_worker_is_reported_once(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    for _ in range(3):
+        wake(harness, reviewer)
+    fresh = harness.ledger.get(reviewer.id)
+    assert fresh.session_id != reviewer.session_id and not fresh.is_terminal
+    # The operator resumes the kept session in place, next to the fresh one.
+    harness.claude_state.set_session_state(reviewer.session_id, "working", status="busy")
+    assert listed(harness, reviewer.session_id)["cwd"] == reviewer.worktree
+    commands = list(harness.claude_state.commands)
+
+    report = harness.next_tick()
+
+    assert [line for line in report.warnings if reviewer.session_id in line] == [
+        f"session {reviewer.session_id}, an earlier session of reviewer/PR-7, is working "
+        f"again; attach to it or stop it"
+    ]
+    assert report.adopted == []
+    assert [w.id for w in harness.ledger.live_workers()] == [reviewer.id]
+    after = harness.ledger.get(reviewer.id)
+    assert (after.session_id, after.session_uuid) == (fresh.session_id, fresh.session_uuid)
+    # Neither session is stopped by the tick, and the warning is said once.
+    report = harness.next_tick()
+    assert not any(reviewer.session_id in line for line in report.warnings)
+    assert listed(harness, reviewer.session_id)["state"] == "working"
+    assert harness.claude_state.commands == commands
+
+
+@pytest.mark.parametrize("name", ["reviewer/PR-7", "implementer/PR-8", None])
+def test_a_session_no_worker_had_in_the_worktree_of_a_live_worker_is_left_alone(after_two, name):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    for _ in range(3):
+        wake(harness, reviewer)
+    fresh = harness.ledger.get(reviewer.id)
+    # A copy that no session row names, such as the fresh session of a refresh before its
+    # ids are recorded, working in the worktree under the worker's name, another one or none.
+    copy = {**listed(harness, fresh.session_id), "id": "copy", "uuid": "copy-uuid",
+            "sessionId": "copy-uuid", "state": "working", "status": "busy"}
+    if name is None:
+        copy.pop("name", None)
+    else:
+        copy["name"] = name
+    harness.claude_state.set(sessions=[*harness.claude_state.sessions, copy])
+    commands = list(harness.claude_state.commands)
+
+    for _ in range(2):
+        report = harness.next_tick()
+        assert not any("copy" in line for line in report.warnings + report.errors)
+        assert report.adopted == []
+
+    assert [w.id for w in harness.ledger.live_workers()] == [reviewer.id]
+    assert harness.ledger.worker_by_session_id("copy") is None
+    assert harness.ledger.worker_by_session_row("copy") is None
+    assert harness.ledger.get(reviewer.id).session_id == fresh.session_id
+    assert harness.claude_state.commands == commands
+    assert ("?", "orphan-session") not in harness.notifications()
+
+
+def test_a_session_in_the_worktree_of_a_worker_in_its_launch_is_not_reported(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    for _ in range(3):
+        wake(harness, reviewer)
+    # A worker without a session id yet, as in a launch, owns every session in its worktree.
+    harness.ledger.update(harness.ledger.get(reviewer.id), session_id=None, session_uuid=None)
+    harness.claude_state.set_session_state(reviewer.session_id, "working", status="busy")
+
+    report = harness.next_tick()
+
+    assert not any(reviewer.session_id in line for line in report.warnings)
+    assert report.adopted == []
+
+
 def test_a_post_of_the_old_session_while_it_stops_does_not_hold_the_fresh_turn(
     after_two, monkeypatch
 ):
