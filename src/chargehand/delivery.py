@@ -480,7 +480,9 @@ class Refresh:
     its session instead, such as a fresh session that would not load the mod and its tool
     for the handoff note; then the wake continues the session as any wake does. *read* is
     the worker as read once the old session stopped: a post that the old session sent
-    while it stopped, such as its session end, is older than the fresh session.
+    while it stopped, such as its session end, is older than the fresh session. *shell*
+    is set together with *busy* when the turn ended, but a background shell of it still
+    runs, which the stop would end.
     """
 
     session: runtime_mod.Session | None = None
@@ -488,6 +490,7 @@ class Refresh:
     busy: str | None = None
     keep: str | None = None
     read: Worker | None = None
+    shell: bool = False
 
 
 @dataclass
@@ -527,7 +530,7 @@ class Delivery:
         resume_hold: Callable[[Worker], str | None] = lambda worker: None,
         awaits_answer: Callable[[Worker], bool] = lambda worker: False,
         ended_without_dialog: Callable[[Worker], bool] = lambda worker: False,
-        refresh: Callable[[Worker, str], Refresh] | None = None,
+        refresh: Callable[[Worker, str, bool], Refresh] | None = None,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -634,8 +637,8 @@ class Delivery:
         if self._shell_hold(worker, entries):
             # A first look at the tick's listing, before admission and the refresh of the
             # item checkout, which would run the role's setup under the shell on every
-            # tick. The runtime's wake looks again before its stop.
-            self._hold(worker, _shell_reason(worker), result)
+            # tick. The runtime's wake, or the refresh, looks again before its stop.
+            self._hold_for_shell(worker, result)
             return
         until = self._debounced_until(worker, entries)
         if until is not None:
@@ -649,8 +652,9 @@ class Delivery:
         """Whether the wake must wait because the stop would end a background shell.
 
         The tick's listing shows a background shell of the ended turn, the wake would stop
-        the session (no mod takes it from the outbox), and no reply from the board waits:
-        a reply goes out at once, because the operator chose to act.
+        the session (no mod takes it from the outbox, or the wake goes to a fresh session,
+        which stops this one), and no reply from the board waits: a reply goes out at once,
+        because the operator chose to act.
         """
         if worker.session_state != ledger_mod.SESSION_BACKGROUND:
             return False
@@ -660,7 +664,28 @@ class Delivery:
             in_place = self._runtime(worker.runtime).capabilities.in_place_wake
         except ConfigError:
             in_place = False
-        return not (in_place and has_mod(worker))
+        if not (in_place and has_mod(worker)):
+            return True
+        return (
+            self._refresh is not None and worker.state in WAKE_STATES
+            and not self._continues_session(worker, entries)
+            and self._refresh_reason(worker) is not None
+        )
+
+    def _hold_for_shell(self, worker: Worker, result: DeliveryResult) -> None:
+        """Hold *worker*'s wake for a background shell of its session.
+
+        The report line, which the log shows at INFO, comes once per hold: while the
+        worker waits for the same shell, the later ticks log it at DEBUG. A wake ends the
+        hold, because the worker no longer waits, and so does a new session.
+        """
+        reason = _shell_reason(worker)
+        if self.ledger.get_state(f"{QUEUE_REASON_PREFIX}{worker.id}") != reason:
+            self._hold(worker, reason, result)
+            return
+        if worker.state == ledger_mod.IDLE:
+            self.ledger.update(worker, state=ledger_mod.QUEUED)
+        log.debug("skipped: %s: %s", worker.handle, reason)
 
     def _debounced_until(self, worker: Worker, entries: Sequence[InboxEntry]) -> float | None:
         """When the role's debounce lets *entries* go, or None when they may go now.
@@ -799,7 +824,7 @@ class Delivery:
                 # the reason on its card, until the listing shows the session idle; the
                 # notice after background_shell_mins still tells the operator. Any other
                 # failed wake, such as a copy or a failed stop, is handled below.
-                self._hold(worker, _shell_reason(worker), result)
+                self._hold_for_shell(worker, result)
                 keep_notified()
                 return
             if outcome.busy:
@@ -906,7 +931,7 @@ class Delivery:
         assert self._refresh is not None
         reason_key = f"{QUEUE_REASON_PREFIX}{worker.id}"
         try:
-            refresh = self._refresh(worker, message)
+            refresh = self._refresh(worker, message, any(is_reply(entry) for entry in entries))
         except (AgentRuntimeError, ConfigError) as exc:
             problem = f"refresh failed: {sanitize.one_line(str(exc), limit=300)}"
             self.ledger.update(self.ledger.get(worker.id) or worker, last_error=problem[:500])
@@ -919,6 +944,9 @@ class Delivery:
                 f"the wake continues its session"
             )
             return False
+        if refresh.shell:
+            self._hold_for_shell(worker, result)
+            return True
         if refresh.busy is not None or refresh.session is None:
             detail = sanitize.one_line(refresh.busy or "no fresh session", limit=300)
             self.ledger.set_state(reason_key, f"wake held, {detail}")

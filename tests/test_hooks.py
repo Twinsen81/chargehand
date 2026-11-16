@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import board as board_mod, claude, delivery as delivery_mod, hooks
+from chargehand import board as board_mod, claude, cli, delivery as delivery_mod, hooks
 from chargehand import ledger as ledger_mod, worker_tokens
 from chargehand.config import ServeConfig
 from chargehand.runtime import Hook
@@ -886,6 +886,74 @@ def test_a_comment_waits_while_a_background_shell_runs_in_a_session_without_the_
     (resume,) = harness.claude_state.read()["resumes"]
     assert "comment: https://example.invalid/c1" in resume["prompt"].splitlines()
     assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") is None
+
+
+def _held_lines(caplog, line) -> list[int]:
+    return [r.levelno for r in caplog.records if r.getMessage() == line]
+
+
+def test_a_wake_held_for_a_background_shell_logs_at_info_once_per_hold(
+    daemon, harness, tmp_path, caplog
+):
+    # With a dev server, the hold lasts for hours: one INFO line, not one per tick.
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, "done")
+    harness.next_tick()
+    _comment(harness, worker)
+    reason = f"wake held, a background shell of session {worker.session_id} still runs"
+    line = f"skipped: implementer/ABC-1: {reason}"
+
+    reports = []
+    with caplog.at_level(logging.DEBUG, logger="chargehand"):
+        for _ in range(3):
+            reports.append(harness.next_tick())
+            cli._log_report(reports[-1])
+
+    assert _held_lines(caplog, line) == [logging.INFO, logging.DEBUG, logging.DEBUG]
+    assert [report.skipped for report in reports] == [[f"implementer/ABC-1: {reason}"], [], []]
+    # The card and the one transition are as before.
+    assert [report.transitions for report in reports] == [
+        ["implementer/ABC-1: wake held -> queued"], [], [],
+    ]
+    held = harness.worker("ABC-1")
+    assert held.state == ledger_mod.QUEUED
+    assert _card(harness, held)["queue_reason"] == reason
+
+    # The shell ends and the wake goes out. The next turn ends with a shell again, and an
+    # event waits for it: a new hold, logged at INFO again.
+    harness.claude_state.set_session_state(worker.session_id, "done", status="idle")
+    harness.next_tick()
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+    post(daemon, "Stop", {"session_id": worker.session_uuid})
+    harness.claude_state.set_session_state(worker.session_id, "done", status="busy")
+    harness.next_tick()
+    _comment(harness, worker, "c2")
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="chargehand"):
+        report = harness.next_tick()
+        cli._log_report(report)
+
+    assert _held_lines(caplog, line) == [logging.INFO]
+    assert report.skipped == [f"implementer/ABC-1: {reason}"]
+
+
+def test_a_hold_for_the_shell_of_another_session_logs_at_info_again(
+    daemon, harness, tmp_path, caplog
+):
+    worker = _turn_ended_with_a_background_shell(daemon, harness, tmp_path, "done")
+    harness.next_tick()
+    _comment(harness, worker)
+    harness.next_tick()
+    # The record of an earlier hold names another session.
+    harness.ledger.set_state(
+        f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}",
+        "wake held, a background shell of session 0ld5e55 still runs",
+    )
+
+    report = harness.next_tick()
+
+    reason = f"wake held, a background shell of session {worker.session_id} still runs"
+    assert report.skipped == [f"implementer/ABC-1: {reason}"]
+    assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") == reason
 
 
 @pytest.mark.parametrize("fault", ["copy", "stop"])

@@ -3690,7 +3690,9 @@ class Runner:
             resume_hold=self._resume_hold,
             awaits_answer=self._awaits_answer,
             ended_without_dialog=self._ended_without_dialog,
-            refresh=lambda worker, message: self._refresh_session(worker, message, report),
+            refresh=lambda worker, message, reply: self._refresh_session(
+                worker, message, report, reply=reply
+            ),
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -3717,14 +3719,16 @@ class Runner:
                 self.ledger.delete_state(f"{delivery_mod.CAP_NOTIFIED_PREFIX}{worker.id}")
 
     def _refresh_session(
-        self, worker: Worker, message: str, report: TickReport
+        self, worker: Worker, message: str, report: TickReport, *, reply: bool = False
     ) -> delivery_mod.Refresh:
         """Stop *worker*'s session and start a fresh one in its worktree, with *message*.
 
         The old session is stopped and kept, for `claude --resume`, so two sessions never
         run in one worktree. A session that an earlier, interrupted refresh started there
         is taken as it is. AgentRuntimeError or ConfigError when the refresh fails; the
-        worker then keeps its old session.
+        worker then keeps its old session. A session whose turn ended while a background
+        shell of that turn still runs is not stopped, because the stop ends the shell,
+        unless *reply* says that a reply from the board waits: the operator chose to act.
         """
         context = self.context_for_worker(worker)
         if context is None or not context.usable:
@@ -3752,6 +3756,16 @@ class Runner:
         ):
             # The operator may have started a turn in it since this tick's listing.
             return delivery_mod.Refresh(busy="the session has a turn or a prompt")
+        if (
+            found is None and current is not None and not reply and current.busy
+            and not runtime.is_stopped(current)
+            and (current.state == runtime_mod.DONE or runtime.ended_without_dialog(current))
+        ):
+            # A background shell may have started since this tick's listing.
+            return delivery_mod.Refresh(
+                busy=f"a background shell of session {worker.session_id} still runs",
+                shell=True,
+            )
         if not self._stop_session(worker):
             raise AgentRuntimeError(f"session {worker.session_id} did not stop")
         # What the old session posted while it stopped is older than the fresh session.
