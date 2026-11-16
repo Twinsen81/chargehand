@@ -958,8 +958,9 @@ what described the old session (its context figures), keeps the old transcript p
 the old session's row, records a `refresh` row in `sessions`, which the daily wake cap
 counts, and records the wake. The old session is stopped and kept, with its row, for
 `claude --resume`; discard, retry and garbage collection remove every session of the
-worker, and an archive holds the transcript of each one. Discard refuses without force
-while an earlier session runs again in the worktree, as for any other session there. The launch writes a new token
+worker, and an archive holds the transcript of each one. Discard, retry and archive refuse
+without force while an earlier session runs again in the worktree, as for any other session
+there, and garbage collection waits for it. The launch writes a new token
 for the new session, and its hooks and its mod's hello find the worker by that token, as
 during a launch; until the new ids are recorded, a post with that token from any session
 id counts as the worker's. After that, the old session's outbox poll is answered
@@ -1159,7 +1160,19 @@ the worker `running`.
 
 **Garbage collection.** When the issue is closed or its pull request is merged or closed, the
 session and its worktree are removed — never when commits are unpushed. Low disk space is
-reported.
+reported. Nor is a worktree removed while a session that is not the worker's own works in
+it or in the item checkout, such as a copy that `claude --resume` started there, or the
+current session of another live worker, or while the session listing cannot be read: such
+a session would lose its directory, and no operator chose that. Garbage collection uses
+the check of discard (the listing, by real path), skips the worker and looks again at the
+next collection. The first hold logs one WARNING line, adds one line to the tick report and
+sends one notification with the state `not-collected` and a count; the same sessions on
+later collections log at DEBUG only. The record of the hold is kept in the runner state
+under `not-collected:` and the worker id, and is dropped once the sessions are gone or the
+worker is collected. Retry applies the rules of discard before it removes the worktree:
+without force it refuses with the reasons `other_sessions` or `sessions_unknown`, with
+force it stops and removes those sessions and names them in its outcome, and it never stops
+the current session of another live worker.
 
 ## 7. Control: a CLI and a loopback daemon
 
@@ -1456,7 +1469,9 @@ refusal says which.
   by the tick like any other: it refuses a worker that is archived, that has an archive
   under way, or whose worktree was already removed; it applies the guard of discard
   (unpushed commits or uncommitted changes refuse it unless forced, and a forced archive
-  keeps the files, not the commits); for a live worker it records a `cancel` request with
+  keeps the files, not the commits), and the rules of discard for other sessions in the
+  worktree (refused with `other_sessions` or `sessions_unknown` unless forced, and refused
+  also with force while the current session of another live worker works there); for a live worker it records a `cancel` request with
   the same origin and lets the archive wait for it. The archive itself is a row of the
   `jobs` table (schema version 8, with `workers.archived_at`): a kind, a target, its
   arguments, a state, progress text, a result path, an error and its times. The states are
@@ -1468,7 +1483,13 @@ refusal says which.
   to its final name; a file is streamed in chunks, a symbolic link is stored as a link, and
   sockets and pipes are left out. Only then is the job `written`, and the next tick, the
   one writer of git and of sessions, applies the guard again and removes the session, the
-  worktree and the branch through garbage collection, and sets `archived_at`. Garbage
+  worktree and the branch through garbage collection, and sets `archived_at`. It also
+  looks for other sessions in the worktree again, because one can start there after the
+  request: without force such a session, or the current session of another live worker,
+  fails the job and keeps the worktree and the zip; a listing that cannot be read leaves the
+  job `written`, so the next tick tries again; with force the tick stops and removes the
+  other sessions first and the job's progress names them, but a live worker's session still
+  fails the job. The jobs of `archive_repository` get the same check. Garbage
   collection, discard and retry leave a worker alone while an archive of it is under way.
   A stop of the daemon during the zip, or a crash, leaves at most the `.part` file and the
   job `running`; the next start of the job thread deletes every `.part` file and puts
