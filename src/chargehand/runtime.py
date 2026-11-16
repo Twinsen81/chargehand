@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from chargehand.errors import AgentRuntimeError, ConfigError
+from chargehand.processes import Process
 
 if TYPE_CHECKING:
     from chargehand.config import MachineConfig
@@ -403,6 +404,15 @@ class Runtime(ABC):
         that cannot tell these apart never says True.
         """
         return False
+
+    def session_processes(self, session: Session) -> tuple[Process, ...]:
+        """The processes below the listed *session*'s own process, such as a background
+        shell of its turn and what that shell started.
+
+        Read before a stop: the stop does not end such a shell, and after it the shell has
+        another parent. Empty when the runtime cannot tell, or the session has no process.
+        """
+        return ()
 
     def release(self, worktree: Path) -> None:
         """Delete what the launch in *worktree* kept for its session, once that session is removed."""

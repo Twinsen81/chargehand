@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import signal
 import time
 
 import pytest
@@ -1237,3 +1239,109 @@ def test_a_live_worker_is_looked_at_only_after_a_refusal(harness):
     (worker.worktree_path / "scratch.txt").write_text("in progress\n")
     harness.next_tick()
     assert record(harness, worker) is None
+
+
+# ----- background shells that outlive a stop ------------------------------------------
+
+
+def shell_below(harness, process_table, session_id, pid=7001):
+    """A background shell below the pid the listing names for *session_id*, in a group of
+    its own, and the command it runs. The pids of both."""
+    listed = next(s for s in harness.claude_state.sessions if s["id"] == session_id)
+    process_table.add(pid, listed["pid"])
+    process_table.add(pid + 1, pid, group=pid)
+    return {pid, pid + 1}
+
+
+def test_cancel_ends_the_background_shells_that_outlive_the_stop(harness, process_table):
+    attempt = launch(harness)
+    shells = shell_below(harness, process_table, attempt.session_id)
+    process_table.add(9000, 1)
+
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
+
+    assert process_table.pids() == {9000}
+    assert (7001, signal.SIGTERM, True) in process_table.signals
+    assert {target for target, _, _ in process_table.signals} == shells
+
+
+def test_discard_ends_the_background_shells_of_the_worker_and_of_another_session(
+    harness, process_table
+):
+    attempt = launch(harness)
+    shell_below(harness, process_table, attempt.session_id)
+    add_listed_session(harness, "47076c61", attempt.worktree_path, pid=4242)
+    shell_below(harness, process_table, "47076c61", pid=7101)
+
+    result = apply_request(harness, "discard", "ABC-1", force=True)
+
+    assert result["ok"] == 1, result["message"]
+    assert ["rm", "47076c61"] in harness.claude_state.commands
+    assert process_table.pids() == set()
+
+
+def test_a_shell_whose_session_did_not_stop_is_left_alone(harness, process_table):
+    attempt = launch(harness)
+    shells = shell_below(harness, process_table, attempt.session_id)
+    harness.claude_state.set(stop_returncode=3)
+
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 0
+
+    assert process_table.pids() == shells and process_table.signals == []
+
+
+def test_stop_keeps_the_background_shells_and_tells_the_operator_once(
+    harness, process_table, caplog
+):
+    attempt = launch(harness)
+    shell_below(harness, process_table, attempt.session_id)
+
+    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+        result = apply_request(harness, "stop", "ABC-1")
+
+    assert result["ok"] == 1
+    assert result["message"] == (
+        "session stopped; `chargehand continue` respawns it. 2 process(es) that the session "
+        "started still run, such as a background shell; end them by hand if you do not "
+        "need them: 7001, 7002"
+    )
+    assert process_table.pids() == {7001, 7002} and process_table.signals == []
+    assert harness.notifications().count(("ABC-1", "orphan-shell")) == 1
+    [sent] = [n for n in harness.notifier.sent if n.state == "orphan-shell"]
+    assert sent.detail == "2 process(es) of the stopped session still run"
+    [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning == (
+        f"implementer/ABC-1: 2 process(es) below session {attempt.session_id[:8]} still run "
+        f"after the stop, such as a background shell; no session owns them now: 7001, 7002"
+    )
+
+    harness.next_tick()
+    assert harness.notifications().count(("ABC-1", "orphan-shell")) == 1
+
+    # They are no longer below the session, but a cancel still ends them.
+    process_table.reparent(7001)
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
+    assert process_table.pids() == set()
+    assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
+
+
+def test_stop_without_a_background_shell_says_nothing_more(harness, process_table):
+    launch(harness)
+
+    result = apply_request(harness, "stop", "ABC-1")
+
+    assert result["message"] == "session stopped; `chargehand continue` respawns it"
+    assert ("ABC-1", "orphan-shell") not in harness.notifications()
+
+
+def test_retry_ends_the_background_shells_of_the_previous_session(harness, process_table):
+    attempt = launch(harness)
+    # The run failed, and the process of its session lives on with a background shell.
+    harness.ledger.update(attempt, state=ledger_mod.FAILED)
+    harness.claude_state.set_session_state(attempt.session_id, "done", status="busy")
+    shells = shell_below(harness, process_table, attempt.session_id)
+
+    result = apply_request(harness, "retry", "ABC-1")
+
+    assert result["ok"] == 1, result["message"]
+    assert not process_table.pids() & shells

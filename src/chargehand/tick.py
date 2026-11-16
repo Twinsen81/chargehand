@@ -46,6 +46,7 @@ from chargehand import roles as roles_mod
 from chargehand import config as config_mod
 from chargehand import daemonlog, gitutil, ledger as ledger_mod, paths, sanitize, trackers
 from chargehand import delivery as delivery_mod
+from chargehand import processes as processes_mod
 from chargehand import router as router_mod
 from chargehand import runtime as runtime_mod
 from chargehand import sources as sources_mod
@@ -267,6 +268,12 @@ STOP_AND_REMOVE = "Remove them, or re-run with --force to stop and remove them w
 # and a notification go out when it is new or its ids change; the same hold on later
 # collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone.
 NOT_COLLECTED_PREFIX = "not-collected:"
+# The processes below a worker's session that a `chargehand stop` kept running, such as a
+# background shell, under this prefix and the worker id: a JSON list of their pid, group
+# and start time. The next stop that ends the worker's processes, such as a cancel, ends
+# them too: after the first stop they no longer are below the session. Dropped then, and
+# once the worker is collected.
+KEPT_PROCESSES_PREFIX = "kept-processes:"
 
 
 def _id_list(ids: Sequence[str]) -> str:
@@ -1216,19 +1223,72 @@ class Runner:
         The exit code alone is not enough: a stop can report success and leave the
         session running. Everything destructive downstream — removing a worktree, hard
         stopping a run — depends on the session really being gone.
+        The processes below the session that outlive the confirmed stop, such as a
+        background shell of its turn, are ended: no session owns them afterwards.
         """
+        return self._stop(worker, end_left=True)[0]
+
+    def _stop(
+        self, worker: Worker, *, end_left: bool
+    ) -> tuple[bool, tuple[processes_mod.Process, ...]]:
+        """Stop the session as :meth:`_stop_session` does. Returns whether it stopped, and
+        the processes below it that still run after the stop: with *end_left*, those that
+        did not end; without it, every one, because the caller keeps them. Kept processes
+        are recorded, and the next stop with *end_left* ends them too."""
         if not worker.session_id:
-            return True
-        self.runtime(worker.runtime).stop(worker.session_id)
+            return True, ()
+        runtime = self.runtime(worker.runtime)
+        below = self._processes_below(worker)
+        runtime.stop(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         try:
             sessions = self.sessions(worker.runtime, refresh=True)
         except AgentRuntimeError:
-            return False
+            return False, ()
         session = next((s for s in sessions if s.id == worker.session_id), None)
-        if session is None:
-            return True
-        return self.runtime(worker.runtime).is_stopped(session)
+        if session is not None and not runtime.is_stopped(session):
+            return False, ()
+        key = f"{KEPT_PROCESSES_PREFIX}{worker.id}"
+        kept = self._kept_processes(worker)
+        if not end_left:
+            left = processes_mod.running(below)
+            if left:
+                every = {(p.pid, p.started): p for p in (*kept, *left)}
+                self.ledger.set_state(key, json.dumps(
+                    [[p.pid, p.group, p.started] for p in every.values()]
+                ))
+            return True, left
+        if kept:
+            self.ledger.delete_state(key)
+        below = (*below, *(p for p in kept if p not in below))
+        if not below:
+            return True, ()
+        return True, processes_mod.end_after_stop(
+            below, who=worker.handle, session=sanitize.scrub_identifier(worker.session_id)[:8]
+        )
+
+    def _kept_processes(self, worker: Worker) -> tuple[processes_mod.Process, ...]:
+        """The processes of *worker*'s session that a `chargehand stop` kept running."""
+        raw = self.ledger.get_state(f"{KEPT_PROCESSES_PREFIX}{worker.id}")
+        try:
+            return tuple(
+                processes_mod.Process(int(pid), int(group), str(started))
+                for pid, group, started in json.loads(raw or "[]")
+            )
+        except (ValueError, TypeError):
+            return ()
+
+    def _processes_below(self, worker: Worker) -> tuple[processes_mod.Process, ...]:
+        """The processes below *worker*'s session, from a fresh listing, before a stop."""
+        try:
+            runtime = self.runtime(worker.runtime)
+            sessions = self.sessions(worker.runtime, refresh=True)
+        except (AgentRuntimeError, ConfigError):
+            return ()
+        session = next((s for s in sessions if s.id == worker.session_id), None)
+        if session is None or runtime.is_stopped(session):
+            return ()
+        return runtime.session_processes(session)
 
     def _remove_session(self, worker: Worker) -> bool:
         """Remove the worker's session and each earlier one that a refresh kept."""
@@ -1877,13 +1937,31 @@ class Runner:
             return False, f"{worker.name} is already {worker.state}{self._twins(worker)}"
         if not worker.session_id:
             return False, f"{worker.name} has no session to stop"
-        if not self._stop_session(worker):
+        # A stop that `continue` undoes keeps the background shells of the session: the
+        # operator decides about them.
+        stopped, left = self._stop(worker, end_left=False)
+        if not stopped:
             return False, f"{worker.name}: the session did not stop; it is still working"
         worker = self.ledger.update(worker, state=ledger_mod.PAUSED)
         # The stopped process took its wake with it; a continue gets a new one.
         delivery_mod.drop_open_outbox(self.ledger, worker, "the worker was stopped")
         self._sync_labels(worker, context, report)
-        return True, "session stopped; `chargehand continue` respawns it"
+        if not left:
+            return True, "session stopped; `chargehand continue` respawns it"
+        pids = processes_mod.pid_list(left)
+        log.warning(
+            "%s: %d process(es) below session %s still run after the stop, such as a "
+            "background shell; no session owns them now: %s",
+            worker.handle, len(left), sanitize.scrub_identifier(worker.session_id)[:8], pids,
+        )
+        self._notify(report, worker.name, "orphan-shell", worker.url, worker.repository,
+                     role=worker.role,
+                     detail=f"{len(left)} process(es) of the stopped session still run")
+        return True, (
+            f"session stopped; `chargehand continue` respawns it. {len(left)} process(es) "
+            f"that the session started still run, such as a background shell; end them "
+            f"by hand if you do not need them: {pids}"
+        )
 
     def _do_continue(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
@@ -2298,6 +2376,10 @@ class Runner:
         """
         runtime = self.runtime(runtime_name)
         ids = [session.id for session in sessions]
+        below = {
+            session.id: runtime.session_processes(session)
+            for session in sessions if not runtime.is_stopped(session)
+        }
         for session_id in ids:
             runtime.stop(session_id)
         self.invalidate_sessions(runtime_name)
@@ -2307,7 +2389,14 @@ class Runner:
             return ids
         for session_id in ids:
             session = listed.get(session_id)
-            if session is not None and runtime.is_stopped(session):
+            if session is not None and not runtime.is_stopped(session):
+                continue
+            if below.get(session_id):
+                processes_mod.end_after_stop(
+                    below[session_id], who="other session",
+                    session=sanitize.scrub_identifier(session_id)[:8],
+                )
+            if session is not None:
                 runtime.remove(session_id)
         self.invalidate_sessions(runtime_name)
         try:
@@ -4946,7 +5035,10 @@ class Runner:
             live_only = next((p for p in LIVE_WORKER_STATE_PREFIXES if key.startswith(p)), None)
             prefix = live_only or next(
                 (
-                    p for p in (*WORKER_STATE_PREFIXES, WORK_AT_RISK_PREFIX, NOT_COLLECTED_PREFIX)
+                    p for p in (
+                        *WORKER_STATE_PREFIXES, WORK_AT_RISK_PREFIX, NOT_COLLECTED_PREFIX,
+                        KEPT_PROCESSES_PREFIX,
+                    )
                     if key.startswith(p)
                 ),
                 None,

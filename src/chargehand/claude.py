@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 from chargehand import paths
 from chargehand import runtime as runtime_mod
-from chargehand import sanitize, worker_tokens
+from chargehand import processes, sanitize, worker_tokens
 from chargehand.config import PERMISSION_MODES, validate_permission_rule
 from chargehand.errors import ClaudeError, ConfigError, WorkspaceNotTrusted
 from chargehand.runtime import (
@@ -2083,6 +2083,16 @@ class ClaudeRuntime(Runtime):
             return False
         return session.raw.get("status") in ("idle", "busy") or self.is_stopped(session)
 
+    def session_processes(self, session: Session) -> tuple[processes.Process, ...]:
+        """The processes below the ``pid`` that the listing names for *session*.
+
+        Observed in Claude Code 2.1.325: a background Bash command runs as a ``zsh`` child
+        of that process, in a process group of its own, and after ``claude stop`` it runs on
+        with PID 1 as its parent.
+        """
+        pid = _listed_pid(session)
+        return processes.below(pid) if pid is not None else ()
+
     def wake(
         self,
         session_id: str,
@@ -2110,7 +2120,9 @@ class ClaudeRuntime(Runtime):
         A stop that exits non-zero refuses the wake. Otherwise the wake waits, up to
         ``stop_wait_secs``, until the listing shows the job stopped (see
         :meth:`is_stopped`) and the process the listing named before the stop has exited:
-        the listing drops ``pid`` about a second before that process ends.
+        the listing drops ``pid`` about a second before that process ends. The processes
+        below it that outlive the confirmed stop, such as a background shell, are ended
+        then (see :meth:`session_processes`): the resumed session does not own them.
         """
         session = self._find(session_id)
         if session is None:
@@ -2134,7 +2146,9 @@ class ClaudeRuntime(Runtime):
                 False, f"a background shell of session {session_id} still runs",
                 busy=True, shell=True,
             )
+        below: tuple[processes.Process, ...] = ()
         if not self.is_stopped(session):
+            below = self.session_processes(session)
             stopped = self.cli.stop(session_id)
             if stopped.returncode != 0:
                 return WakeResult(
@@ -2162,6 +2176,10 @@ class ClaudeRuntime(Runtime):
                     False, f"session {session_id} stopped, but its process {old_pid} is still running"
                 )
             time.sleep(self.stop_poll_secs)
+        if below:
+            processes.end_after_stop(
+                below, who="wake", session=sanitize.scrub_identifier(session_id)[:8]
+            )
         uuid = session_uuid or session.uuid
         if not uuid:
             return WakeResult(False, f"session {session_id} has no full session id to resume by")
