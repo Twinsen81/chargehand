@@ -611,6 +611,131 @@ def test_discard_refuses_without_force_when_the_listing_cannot_be_read(harness, 
     assert not worker.worktree_path.exists()
 
 
+def new_workers(harness, worker):
+    return [w for w in harness.ledger.live_workers() if w.id != worker.id]
+
+
+def test_retry_refuses_a_session_with_no_row_in_the_worktree_and_force_removes_it(harness):
+    worker = hand_worker(harness)
+    add_listed_session(harness, "47076c61", worker.worktree_path / "src")
+    (worker.worktree_path / "src").mkdir()
+    target = harness.ledger.target_for(worker)
+
+    refused = apply_request(harness, "retry", target)
+
+    assert refused["ok"] == 0
+    assert "other sessions are in its worktree: 47076c61. Remove them" in refused["message"]
+    assert refused["reason"] == {"needs_force": True, "other_sessions": ["47076c61"]}
+    assert worker.worktree_path.is_dir()
+    assert ["stop", "47076c61"] not in harness.claude_state.commands
+    assert harness.claude_state.commands.count(["stop", worker.session_id]) == 1  # the cancel
+    assert ["rm", worker.session_id] not in harness.claude_state.commands
+    assert harness.ledger.get(worker.id).gc_done == 0
+    assert new_workers(harness, worker) == []
+
+    forced = apply_request(harness, "retry", target, force=True)
+
+    assert forced["ok"] == 1, forced["message"]
+    assert forced["message"].startswith("cleared; ")
+    assert forced["message"].endswith(
+        "; other sessions in its worktree stopped and removed: 47076c61"
+    )
+    commands = harness.claude_state.commands
+    assert commands.index(["stop", "47076c61"]) < commands.index(["rm", "47076c61"])
+    assert "47076c61" not in [s["id"] for s in harness.claude_state.sessions]
+    assert not worker.worktree_path.exists()
+    assert harness.ledger.get(worker.id).gc_done == 1
+    (again,) = new_workers(harness, worker)
+    assert again.role == worker.role
+
+
+def test_an_earlier_session_that_runs_again_in_the_worktree_refuses_retry(harness):
+    worker = hand_worker(harness)
+    earlier_session(harness, worker, "e0a1e5d4")
+
+    refused = apply_request(harness, "retry", harness.ledger.target_for(worker))
+
+    assert refused["ok"] == 0
+    assert refused["reason"] == {"needs_force": True, "other_sessions": ["e0a1e5d4"]}
+    assert worker.worktree_path.is_dir()
+
+
+def test_a_forced_retry_names_another_session_that_did_not_stop(harness):
+    worker = hand_worker(harness)
+    add_listed_session(harness, "47076c62", worker.worktree_path)
+    harness.claude_state.set(stop_state="working")
+
+    result = apply_request(harness, "retry", harness.ledger.target_for(worker), force=True)
+
+    assert "; other sessions in its worktree could not be stopped and removed: 47076c62; " \
+        "remove them by hand" in result["message"]
+    assert ["rm", "47076c62"] not in harness.claude_state.commands
+
+
+def test_retry_never_stops_the_session_of_another_live_worker_in_the_worktree(harness):
+    live = launch(harness)
+    worker = hand_worker(harness)
+    sessions = harness.claude_state.sessions
+    for session in sessions:
+        if session["id"] == live.session_id:
+            session["cwd"] = str(worker.worktree_path)
+    harness.claude_state.set(sessions=sessions)
+
+    for force in (False, True):
+        result = apply_request(harness, "retry", harness.ledger.target_for(worker), force=force)
+
+        assert result["ok"] == 0 and result["reason"] is None
+        assert f"the session of live worker {live.id_handle} works in its worktree" in result["message"]
+    assert ["stop", live.session_id] not in harness.claude_state.commands
+    assert worker.worktree_path.is_dir()
+    assert harness.ledger.get(worker.id).gc_done == 0
+    assert harness.worker("ABC-1").state == ledger_mod.RUNNING
+
+
+def test_retry_leaves_a_session_outside_the_worktree_alone(harness, tmp_path):
+    worker = hand_worker(harness)
+    sibling = worker.worktree_path.with_name(worker.worktree_path.name + "-2")
+    sibling.mkdir()
+    add_listed_session(harness, "bbbb2223", sibling)
+
+    result = apply_request(harness, "retry", harness.ledger.target_for(worker))
+
+    assert result["ok"] == 1 and "other sessions" not in result["message"]
+    assert "bbbb2223" in [s["id"] for s in harness.claude_state.sessions]
+    assert not any(c[1] == "bbbb2223" for c in harness.claude_state.commands)
+    assert not worker.worktree_path.exists()
+
+
+def test_retry_refuses_without_force_when_the_listing_cannot_be_read(harness, monkeypatch):
+    worker = hand_worker(harness)
+    target = harness.ledger.target_for(worker)
+    other_sessions = tick_mod.Runner._other_sessions
+
+    def listing_fails(self, *args):
+        # Only this look fails: the retry's own stop and removal read the listing too.
+        harness.claude_state.set(agents_fail=True)
+        try:
+            return other_sessions(self, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_other_sessions", listing_fails)
+
+    refused = apply_request(harness, "retry", target)
+
+    assert refused["ok"] == 0 and "listing could not be read" in refused["message"]
+    assert "Re-run with --force to retry anyway." in refused["message"]
+    assert refused["reason"] == {"needs_force": True, "sessions_unknown": True}
+    assert worker.worktree_path.is_dir()
+    assert new_workers(harness, worker) == []
+
+    forced = apply_request(harness, "retry", target, force=True)
+
+    assert forced["ok"] == 1
+    assert "other sessions were not looked for" in forced["message"]
+    assert not worker.worktree_path.exists()
+
+
 def test_retry_starts_a_new_session_instead_of_adopting_the_old_one(harness):
     """`stop` keeps the session, and it still carries this issue's name and worktree."""
     launch(harness)
