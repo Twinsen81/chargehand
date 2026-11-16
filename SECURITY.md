@@ -356,6 +356,12 @@ public location.
   list; see the first known limit below.
 - **One writer of side effects.** Mutating commands record a request; only the daemon's
   tick acts on it, under the tick lock. Control actions cannot race a launch in progress.
+- **Only a session's own processes are ended.** A stop of a session does not end a
+  background shell that its turn started, so after a confirmed stop chargehand ends the
+  processes that were below the session's process just before the stop. It signals no
+  other process: a process counts only with the pid and the start time it had then, so a
+  pid that a new process got meanwhile is never signalled, and PID 1 and chargehand itself
+  never are. `chargehand stop`, which `continue` undoes, ends none of them.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
   issue URL, and a short reason chargehand itself writes — never question text, agent
   output, issue titles, a status file's `stop_reason`, or a setup script's output —

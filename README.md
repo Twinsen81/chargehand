@@ -388,7 +388,12 @@ working or done, and the board and `status` show the worker as idle with the ses
 `background`, or as queued when an event waits for the shell to end. When no new turn has started 30 minutes after that turn end (`background_shell_mins` in the machine
 configuration; 0 turns it off), you are notified once, because a shell that never ends,
 such as a dev server, can hide a session that waits for you. This applies to workers
-launched by this release or a later one. As shipped it
+launched by this release or a later one. Claude Code does not end such a shell when it
+stops the session, so chargehand ends the processes that outlive a stop of a session:
+cancel, discard, retry, archive, garbage collection, the watchdog, a session refresh, and
+a reply that resumes the session. `chargehand stop`, which `continue` undoes, keeps them,
+and you are notified once (`orphan-shell`) with a count; the log names their PIDs. As
+shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an
 email, and a push service, and you can enable more than one. The hook receives only the
