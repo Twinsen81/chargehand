@@ -309,6 +309,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the daemon applies the action and can hold work that the daemon refuses to lose
   without force. Before, that dialog gave no warning, because the tick looks at a live
   worker's worktree only after a refusal.
+- Retry, archive and garbage collection no longer delete a worktree under a session that
+  is not the worker's own, such as a copy that `claude --resume` started there. Before,
+  only discard looked for such sessions; the other three paths deleted the worktree and
+  left the copy running in a deleted directory, with no message. Retry and archive now
+  apply the rules of discard: without force they refuse and name those sessions (on the
+  board with the same words as discard), or refuse because the session listing cannot be
+  read; with force they stop and remove those sessions first, and the outcome names them;
+  they never stop the current session of another live worker. The archive job looks again
+  before it removes the worktree: a session that started there after the request fails a
+  job without force and keeps the worktree, and a listing that cannot be read makes the
+  next tick try again. Garbage collection skips a worker whose worktree other sessions
+  work in, or while the listing cannot be read, logs one WARNING line, sends one
+  notification with the new state `not-collected`, and collects the worker at the first
+  collection after those sessions are gone. `retry --force` says so in its help.
 
 ### Added
 

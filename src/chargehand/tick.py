@@ -260,6 +260,13 @@ KEPT_BRANCH = (
 
 # How many ids of other sessions in a worktree a discard names; it counts the rest.
 OTHER_SESSIONS_SHOWN = 5
+# The end of a refusal of discard or retry for other sessions in the worktree.
+STOP_AND_REMOVE = "Remove them, or re-run with --force to stop and remove them with the worker."
+# The other sessions that keep garbage collection from removing a worker's worktree, under
+# this prefix and the worker id: a JSON list of their sorted, scrubbed ids. A WARNING line
+# and a notification go out when it is new or its ids change; the same hold on later
+# collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone.
+NOT_COLLECTED_PREFIX = "not-collected:"
 
 
 def _id_list(ids: Sequence[str]) -> str:
@@ -2050,6 +2057,7 @@ class Runner:
         if context is None or not context.usable:
             return False, f"repository '{worker.repository}' is unavailable"
         branches_removed = True
+        also = ""
         if worker.worktree_path.exists():
             risk = self._work_at_risk(worker)
             if risk and not force:
@@ -2057,10 +2065,21 @@ class Runner:
                     f"{worker.name}: {risk.text}. Push or discard it first "
                     f"(`chargehand discard {self.ledger.target_for(worker)} --yes`)."
                 ))
+        if worker.worktree_path.exists() or item_checkout_path(worker).exists():
+            # The same rules as discard: another session in the worktree, such as a copy
+            # that `claude --resume` started there, would lose its directory.
+            refusal, others = self._other_sessions_refusal(
+                worker, force, unknown="Re-run with --force to retry anyway.",
+                remove=STOP_AND_REMOVE,
+            )
+            if refusal is not None:
+                return False, refusal
+            also = self._stop_other_sessions(worker, others, "retry")
+        if worker.worktree_path.exists():
             try:
                 branches_removed = self._remove_worktree(worker, force=True)
             except GitError as exc:
-                return False, f"could not remove the previous worktree: {exc}"
+                return False, f"could not remove the previous worktree: {exc}{also}"
         # The previous session is kept by `stop`, and it still carries this issue's name
         # and working directory. Left in place it would be adopted as the retry's own
         # session, so the retry would report success without starting anything.
@@ -2070,7 +2089,7 @@ class Runner:
                 return False, (
                     f"{worker.name}: the previous session {worker.session_id} could not be "
                     f"removed; a new worker would adopt it instead of starting. Remove it, "
-                    f"then retry."
+                    f"then retry.{also}"
                 )
             worker = self.ledger.update(worker, session_id=None, session_uuid=None)
         if worker.origin == ledger_mod.ORIGIN_BOARD:
@@ -2084,7 +2103,7 @@ class Runner:
                 again["subscribe"] = list(primary.kinds) if primary else []
             ok, outcome = self._do_new_worker(worker.repository, again, report)
             outcome = f"cleared; {outcome}" if ok else f"cleared, but no new worker started: {outcome}"
-            return ok, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
+            return ok, (outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}") + also
         if worker.origin == ledger_mod.ORIGIN_CLONE:
             # A clone is started again as a new clone of the same original, with the
             # values the operator chose for it.
@@ -2103,19 +2122,19 @@ class Runner:
                 }
                 ok, outcome = self._do_clone(parent, self.context_for_worker(parent), again, report)
             outcome = f"cleared; {outcome}" if ok else f"cleared, but no new clone started: {outcome}"
-            return ok, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
+            return ok, (outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}") + also
         if not self._drives_label(worker):
             # The queue label would start the queue's role, not this one. A new start
             # event for the item starts a new worker of this role.
             self.ledger.update(worker, gc_done=1)
             outcome = "cleared; the next start event for the item starts a new worker"
-            return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
+            return True, (outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}") + also
         try:
             context.source.mark(context.item_of(worker), Status.QUEUED)  # type: ignore[union-attr]
         except ItemGone:
-            return False, f"{worker.name} no longer exists on the tracker"
+            return False, f"{worker.name} no longer exists on the tracker{also}"
         except TRACKER_FAILURES as exc:
-            return False, f"could not re-queue {worker.name}: {exc}"
+            return False, f"could not re-queue {worker.name}: {exc}{also}"
         _log_mark(worker.handle, context.item_of(worker), context.source, worker.label_state or "none",
                   Status.QUEUED.value)
         self.ledger.update(worker, gc_done=1)
@@ -2127,7 +2146,7 @@ class Runner:
             )
         else:
             outcome = "re-queued; the next admission pass starts a new worker"
-        return True, outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}"
+        return True, (outcome if branches_removed else f"{outcome}; {KEPT_BRANCH}") + also
 
     def _do_discard(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
@@ -2140,31 +2159,11 @@ class Runner:
         # A session that is not the worker's own can work in its worktree, such as a copy
         # that `claude --resume` started there. It has no session row, so only the listing
         # shows it. Looked at before the worker's own stop, so a refusal changes nothing.
-        found = self._other_sessions(worker)
-        if found is None and not force:
-            return False, NeedsForce((
-                f"{worker.name}: the session listing could not be read, so other sessions "
-                f"can work in its worktree. Re-run with --force to discard anyway."
-            ), {"sessions_unknown": True})
-        others, holders = found if found is not None else ([], [])
-        if holders:
-            # Force never stops the current session of another live worker.
-            return False, (
-                f"{worker.name}: the session of live worker "
-                f"{', '.join(holder.id_handle for holder in holders)} works in its worktree. "
-                f"Cancel that worker first."
-            )
-        ids = [sanitize.scrub_identifier(session.id) for session in others]
-        if others and not force:
-            # A stopped session still counts: it stays listed, and a respawn would run it
-            # in the worktree again, until it is removed.
-            reason: dict[str, object] = {"other_sessions": ids[:OTHER_SESSIONS_SHOWN]}
-            if len(ids) > OTHER_SESSIONS_SHOWN:
-                reason["other_sessions_more"] = len(ids) - OTHER_SESSIONS_SHOWN
-            return False, NeedsForce((
-                f"{worker.name}: other sessions are in its worktree: {_id_list(ids)}. Remove "
-                f"them, or re-run with --force to stop and remove them with the worker."
-            ), reason)
+        refusal, others = self._other_sessions_refusal(
+            worker, force, unknown="Re-run with --force to discard anyway.", remove=STOP_AND_REMOVE,
+        )
+        if refusal is not None:
+            return False, refusal
         # Pulling the worktree out from under a session that is still running destroys
         # whatever it is doing, so the stop has to be confirmed first.
         if not self._stop_session(worker) and not force:
@@ -2173,24 +2172,7 @@ class Runner:
                 f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
             ), {"session_running": True})
-        also = ""
-        if others:
-            log.info(
-                "%s: discard stops and removes %s other session(s) in its worktree: %s",
-                worker.handle, len(others), ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]),
-            )
-            left = self._remove_other_sessions(worker.runtime, others)
-            gone = [i for session, i in zip(others, ids) if session.id not in left]
-            if gone:
-                also += f"; other sessions in its worktree stopped and removed: {_id_list(gone)}"
-            if left:
-                kept_ids = [sanitize.scrub_identifier(session_id) for session_id in left]
-                also += (
-                    f"; other sessions in its worktree could not be stopped and removed: "
-                    f"{_id_list(kept_ids)}; remove them by hand"
-                )
-        elif found is None:
-            also = "; the session listing could not be read, so other sessions were not looked for"
+        also = self._stop_other_sessions(worker, others, "discard")
         left = self._remove_sessions(worker)
         try:
             branches_removed = self._remove_worktree(worker, force=True)
@@ -2209,6 +2191,72 @@ class Runner:
                 f"could not be removed; remove {noun} {left_ids} by hand{kept}"
             )
         return True, f"discarded {worker.id_handle}: session removed, worktree and branch deleted{kept}"
+
+    def _other_sessions_refusal(
+        self, worker: Worker, force: bool, *, unknown: str, remove: str
+    ) -> tuple[str | None, list[Session] | None]:
+        """Why the sessions in *worker*'s worktree that are not its own forbid removing it,
+        by the rules of discard, else None and those sessions (None when the listing could
+        not be read). *unknown* ends the refusal for a listing that could not be read, and
+        *remove* the one for other sessions. Force overrides both, but never allows the
+        removal under the current session of another live worker.
+        """
+        found = self._other_sessions(worker)
+        if found is None and not force:
+            return NeedsForce((
+                f"{worker.name}: the session listing could not be read, so other sessions "
+                f"can work in its worktree. {unknown}"
+            ), {"sessions_unknown": True}), None
+        if found is None:
+            return None, None
+        others, holders = found
+        if holders:
+            # Force never stops the current session of another live worker.
+            return (
+                f"{worker.name}: the session of live worker "
+                f"{', '.join(holder.id_handle for holder in holders)} works in its worktree. "
+                f"Cancel that worker first."
+            ), others
+        if others and not force:
+            # A stopped session still counts: it stays listed, and a respawn would run it
+            # in the worktree again, until it is removed.
+            ids = [sanitize.scrub_identifier(session.id) for session in others]
+            reason: dict[str, object] = {"other_sessions": ids[:OTHER_SESSIONS_SHOWN]}
+            if len(ids) > OTHER_SESSIONS_SHOWN:
+                reason["other_sessions_more"] = len(ids) - OTHER_SESSIONS_SHOWN
+            return NeedsForce(
+                f"{worker.name}: other sessions are in its worktree: {_id_list(ids)}. {remove}",
+                reason,
+            ), others
+        return None, others
+
+    def _stop_other_sessions(
+        self, worker: Worker, others: list[Session] | None, action: str
+    ) -> str:
+        """Stop and remove *others*, which None gives when the listing could not be read,
+        and return the end of the outcome that names them."""
+        if others is None:
+            return "; the session listing could not be read, so other sessions were not looked for"
+        if not others:
+            return ""
+        ids = [sanitize.scrub_identifier(session.id) for session in others]
+        log.info(
+            "%s: %s stops and removes %s other session(s) in its worktree: %s",
+            worker.handle, action, len(others),
+            ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]),
+        )
+        left = self._remove_other_sessions(worker.runtime, others)
+        also = ""
+        gone = [i for session, i in zip(others, ids) if session.id not in left]
+        if gone:
+            also += f"; other sessions in its worktree stopped and removed: {_id_list(gone)}"
+        if left:
+            kept_ids = [sanitize.scrub_identifier(session_id) for session_id in left]
+            also += (
+                f"; other sessions in its worktree could not be stopped and removed: "
+                f"{_id_list(kept_ids)}; remove them by hand"
+            )
+        return also
 
     def _other_sessions(self, worker: Worker) -> tuple[list[Session], list[Worker]] | None:
         """The listed sessions whose directory is in *worker*'s worktree or its item
@@ -2297,6 +2345,14 @@ class Runner:
                 f"{worker.name}: {risk.text}. Commit and push that work first, or archive with "
                 f"force: the archive keeps the files, not the commits."
             ))
+        # The same rules as discard. The job looks again before it removes the worktree,
+        # and with force it stops and removes the other sessions only then.
+        refusal, _ = self._other_sessions_refusal(
+            worker, force, unknown="Archive with force to archive anyway.",
+            remove="Remove them, or archive with force to stop and remove them with the worker.",
+        )
+        if refusal is not None:
+            return False, refusal
         job = self._queue_archive(worker, force, origin)
         if job.state == ledger_mod.JOB_WAITING:
             return True, (
@@ -4674,6 +4730,8 @@ class Runner:
             if blocker:
                 report.warnings.append(f"{worker.handle}: not collected, {blocker}")
                 continue
+            if self._other_sessions_hold(worker, report):
+                continue
             problem = self._collect(worker, report)
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
@@ -4681,6 +4739,47 @@ class Runner:
         self._forget_refusals()
         self._forget_checkout_heads()
         self._forget_summary_waits()
+
+    def _other_sessions_hold(self, worker: Worker, report: TickReport) -> bool:
+        """Whether a session that is not *worker*'s own keeps garbage collection from
+        removing its worktree, by the rules of discard without force: such a session would
+        lose its directory, and no operator chose that. So does a listing that cannot be
+        read. The next collection looks again.
+
+        The operator learns of a hold once, through a WARNING line, the tick report and a
+        notification, and again only when other sessions hold it; see `NOT_COLLECTED_PREFIX`.
+        """
+        key = f"{NOT_COLLECTED_PREFIX}{worker.id}"
+        found = self._other_sessions(worker)
+        if found is None:
+            log.debug("%s: not collected, the session listing could not be read", worker.handle)
+            return True
+        others, holders = found
+        ids = sorted(
+            {sanitize.scrub_identifier(session.id) for session in others}
+            | {sanitize.scrub_identifier(holder.session_id or "") for holder in holders}
+        )
+        if not ids:
+            self.ledger.delete_state(key)
+            return False
+        what = (
+            f"{len(ids)} other session{'s' if len(ids) > 1 else ''} "
+            f"{'work' if len(ids) > 1 else 'works'} in its worktree"
+        )
+        record = json.dumps(ids)
+        if self.ledger.get_state(key) == record:
+            log.debug("%s: not collected, %s: %s", worker.handle, what,
+                      ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
+            return True
+        self.ledger.set_state(key, record)
+        log.warning("%s: not collected, %s: %s", worker.handle, what,
+                    ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
+        report.warnings.append(f"{worker.handle}: not collected, {what}")
+        self._notify(
+            report, worker.name, "not-collected", worker.url, worker.repository, role=worker.role,
+            detail=f"{what}; it is removed once they are gone",
+        )
+        return True
 
     def _forget_summary_waits(self) -> None:
         """Drop what an ended summary clone left: its card line, and its request for a
@@ -4780,6 +4879,43 @@ class Runner:
             )
             report.warnings.append(f"{worker.handle}: archived, but not removed: {blocker}")
             return
+        # A session that is not the worker's own can have started in the worktree after
+        # the request was checked, such as a copy that `claude --resume` started there.
+        # The rules of discard, as the request applied them.
+        found = self._other_sessions(worker)
+        if found is None and not job.force:
+            # Like a session that did not stop yet: the next tick looks again.
+            report.warnings.append(
+                f"{worker.handle}: archive written, but not removed: the session listing "
+                f"could not be read"
+            )
+            return
+        others, holders = found if found is not None else ([], [])
+        if holders:
+            # Force never stops the current session of another live worker.
+            blocker = (
+                f"the session of live worker "
+                f"{', '.join(holder.id_handle for holder in holders)} works in its worktree"
+            )
+        elif others and not job.force:
+            ids = [sanitize.scrub_identifier(session.id) for session in others]
+            blocker = f"other sessions are in its worktree: {_id_list(ids)}"
+        else:
+            blocker = None
+        if blocker:
+            self.ledger.update_job(
+                job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_FAILED, progress=None,
+                error=sanitize.one_line(f"not removed: {blocker}; {kept}", limit=300),
+            )
+            count = len(holders) if holders else len(others)
+            report.warnings.append(
+                f"{worker.handle}: archived, but not removed: {count} other session(s) work "
+                f"in its worktree"
+            )
+            log.warning("%s: archive job %s does not remove the worktree: %s other session(s) "
+                        "work in it", worker.handle, job.id, count)
+            return
+        also = self._stop_other_sessions(worker, others, "archive") if others else ""
         problem = self._collect(worker, report, force=job.force, archived_at=time.time())
         if problem == SESSION_STILL_WORKING:
             # The stop did not take yet; the next tick tries again.
@@ -4793,8 +4929,14 @@ class Runner:
             report.warnings.append(f"{worker.handle}: archive written, but {problem}")
             return
         self.ledger.update_job(
-            job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_DONE, progress="archived"
+            job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_DONE,
+            progress=sanitize.one_line(f"archived{also}", limit=300),
         )
+        if "could not be stopped" in also:
+            report.warnings.append(
+                f"{worker.handle}: archived, but other sessions in its worktree could not be "
+                f"stopped and removed; archive job {job.id} names them"
+            )
         log.info("%s: archived to %s; worktree and session removed", worker.handle, dest)
 
     def _forget_checkout_heads(self) -> None:
@@ -4803,7 +4945,10 @@ class Runner:
         for key in self.ledger.all_state():
             live_only = next((p for p in LIVE_WORKER_STATE_PREFIXES if key.startswith(p)), None)
             prefix = live_only or next(
-                (p for p in (*WORKER_STATE_PREFIXES, WORK_AT_RISK_PREFIX) if key.startswith(p)),
+                (
+                    p for p in (*WORKER_STATE_PREFIXES, WORK_AT_RISK_PREFIX, NOT_COLLECTED_PREFIX)
+                    if key.startswith(p)
+                ),
                 None,
             )
             if prefix is None:

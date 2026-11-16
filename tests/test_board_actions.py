@@ -830,6 +830,31 @@ def test_the_board_words_the_reasons_of_a_discard_that_other_sessions_refused(ra
     assert answer["reason"] == raw
 
 
+@pytest.mark.parametrize("kind, raw, words", [
+    ("retry", {"needs_force": True, "other_sessions": ["47076c61"]},
+     "sessions that are not this worker's own are in its worktree: 47076c61; force stops and "
+     "removes them; tick force and press Retry again"),
+    ("retry", {"needs_force": True, "sessions_unknown": True},
+     "the session listing could not be read, so other sessions can work in its worktree; tick "
+     "force and press Retry again"),
+    ("archive", {"needs_force": True, "other_sessions": ["47076c61"], "other_sessions_more": 1},
+     "sessions that are not this worker's own are in its worktree: 47076c61 and 1 more; force "
+     "stops and removes them; tick force and press Archive again; the archive keeps the files, "
+     "not the commits"),
+    ("archive", {"needs_force": True, "sessions_unknown": True},
+     "the session listing could not be read, so other sessions can work in its worktree; tick "
+     "force and press Archive again; the archive keeps the files, not the commits"),
+])
+def test_the_board_words_the_other_sessions_that_refused_a_retry_or_an_archive(kind, raw, words):
+    row = {"id": 1, "kind": kind, "target": "#1", "applied_at": 2.0, "ok": 0,
+           "message": "the command line's text", "reason": raw}
+
+    answer = board.outcome(row)
+
+    assert answer["board_message"] == words
+    assert answer["reason"] == raw
+
+
 @pytest.mark.parametrize("others", [
     [], ["ok", "bad id"], ["x" * 65], [7], "47076c61", ["a", "b", "c", "d", "e", "f"],
 ])

@@ -382,7 +382,10 @@ public location.
   Code's `projects` directory is read. The settings file of a session, which holds the
   session's own token, is not in the worktree and so not in the archive. The worktree is
   removed only after the zip is complete and has passed its check, and only by the tick,
-  with the guard of discard applied again.
+  with the guard of discard applied again, which includes the check for other sessions in
+  the worktree. Retry and garbage collection apply that check too, so no path of
+  chargehand deletes a worktree under a session that is not the worker's own unless the
+  operator forces it; garbage collection never forces it and waits instead.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 - **The chargehand mod does only what it says.** Every worker session loads it, so what it

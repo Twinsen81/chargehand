@@ -149,7 +149,9 @@ worker's ledger row and sessions as JSON, in
 `<state directory>/archive/<repository>/<role>-<item>-<date>-<time>-<id>.zip` with mode 0600. A
 live worker is cancelled first. As with discard, unpushed commits or uncommitted changes
 refuse the archive unless you tick force; a forced archive keeps the files, not the
-commits. The zip is written by the daemon in the background, so the board stays
+commits. Other sessions in the worktree, such as a copy that `claude --resume` started
+there, also refuse it, as for discard and retry; with force they are stopped and removed
+before the worktree is. The zip is written by the daemon in the background, so the board stays
 responsive; the card and the top bar show the job and its progress. Only once the zip is
 complete and has passed its check does the next tick remove the worktree, the branch and
 the session. A stop or a crash of the daemon during the zip leaves no archive and no
@@ -375,7 +377,10 @@ prompt before anything runs.
 
 The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or ends:
 blocked, parked, failed, done through a report or the status file, stopped by the
-watchdog, or held by its daily wake cap (`daily-cap`). A
+watchdog, or held by its daily wake cap (`daily-cap`). A worker whose item closed but
+whose worktree other sessions still work in, such as a copy that `claude --resume`
+started there, is not collected; you are notified once (`not-collected`), and the
+worktree is removed at the first collection after those sessions are gone. A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
 are not notified; `chargehand status` shows them. A turn can end while a background shell
 that it started still runs; Claude Code then lists the session as busy, with the state
