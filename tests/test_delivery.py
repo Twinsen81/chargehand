@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import time
 import tomllib
 from datetime import datetime, timezone
@@ -1352,3 +1353,51 @@ def test_delivery_takes_a_timer_by_its_own_clock(wired):
     assert run(due - 1).woken == []
     assert [w.id for w in run(due).woken] == [reviewer.id]
     assert "timer: request_wake" in resumes(wired)[-1]["prompt"].splitlines()
+
+
+# ----- a wake fault pauses the worker -------------------------------------------------
+
+
+def test_a_wake_fault_keeps_the_background_shells_and_tells_the_operator_once(
+    wired, process_table, monkeypatch, caplog
+):
+    from chargehand import tick as tick_mod
+
+    reviewer = start_reviewer(wired)
+    end_turn(wired)
+    listed = next(s for s in wired.claude_state.sessions if s["id"] == reviewer.session_id)
+    process_table.add(7001, listed["pid"])
+    process_table.add(7002, 7001, group=7001)
+    monkeypatch.setattr(
+        tick_mod.Runner, "_workspace_check",
+        lambda self, worker, **kwargs: tick_mod.WorkspaceCheck("the worktree changed"),
+    )
+    emit_three()
+
+    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+        wired.next_tick()
+
+    paused = wired.ledger.get(reviewer.id)
+    assert paused.state == ledger_mod.PAUSED
+    assert ["stop", reviewer.session_id] in wired.claude_state.commands
+    assert process_table.pids() == {7001, 7002} and process_table.signals == []
+    assert ("PR-7", "wake-fault") in wired.notifications()
+    assert wired.notifications().count(("PR-7", "orphan-shell")) == 1
+    [warning] = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "still run after the stop" in r.getMessage()
+    ]
+    assert warning == (
+        f"reviewer/PR-7: 2 process(es) below session {reviewer.session_id[:8]} still run "
+        f"after the stop, such as a background shell; no session owns them now: 7001, 7002"
+    )
+    assert wired.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{reviewer.id}") is not None
+
+    wired.next_tick()
+    assert wired.notifications().count(("PR-7", "orphan-shell")) == 1
+
+    # A final stop ends them, although they are no longer below the session.
+    process_table.reparent(7001)
+    wired.ledger.record_request("cancel", "PR-7")
+    wired.next_tick()
+    assert process_table.pids() == set()

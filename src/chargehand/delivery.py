@@ -77,6 +77,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from chargehand import ledger as ledger_mod
+from chargehand import processes as processes_mod
 from chargehand import runtime as runtime_mod
 from chargehand import sanitize
 from chargehand.errors import AgentRuntimeError, ConfigError, DeliveryAborted
@@ -501,6 +502,9 @@ class DeliveryResult:
     held: list[str] = field(default_factory=list)
     # Workers that a wake fault paused, each with the phrase for its notification.
     faults: list[tuple[Worker, str]] = field(default_factory=list)
+    # Workers that a wake fault paused, each with the processes below its session that
+    # still run after the stop, such as a background shell.
+    kept: list[tuple[Worker, tuple[processes_mod.Process, ...]]] = field(default_factory=list)
     # Workers that reached their daily cap since their last wake, each with the phrase
     # for its notification.
     capped: list[tuple[Worker, str]] = field(default_factory=list)
@@ -531,6 +535,7 @@ class Delivery:
         awaits_answer: Callable[[Worker], bool] = lambda worker: False,
         ended_without_dialog: Callable[[Worker], bool] = lambda worker: False,
         refresh: Callable[[Worker, str, bool], Refresh] | None = None,
+        pause: Callable[[Worker], tuple[processes_mod.Process, ...]] | None = None,
     ) -> None:
         self.ledger = ledger
         self.max_concurrent = max_concurrent
@@ -563,6 +568,10 @@ class Delivery:
         # prompt carries the message; raises AgentRuntimeError or ConfigError when it
         # fails. Without it, every wake continues the same session.
         self._refresh = refresh
+        # Stops the worker's session for a pause that `continue` undoes, and returns the
+        # processes below it that still run, which it keeps; raises AgentRuntimeError or
+        # ConfigError when it fails. Without it, the session is stopped and nothing more.
+        self._pause = pause
         # One fresh listing per runtime and run, for the wakes through the outbox.
         self._listings: dict[str, list[runtime_mod.Session]] = {}
 
@@ -1074,8 +1083,12 @@ class Delivery:
         fault = self._guard(worker)
         if fault is None:
             return False
+        kept: tuple[processes_mod.Process, ...] = ()
         try:
-            self._runtime(worker.runtime).stop(worker.session_id)
+            if self._pause is not None:
+                kept = self._pause(worker)
+            else:
+                self._runtime(worker.runtime).stop(worker.session_id)
         except (AgentRuntimeError, ConfigError):
             pass
         paused = self.ledger.update(
@@ -1084,6 +1097,8 @@ class Delivery:
         # The stopped process took no wake; a continue gets a new one.
         drop_open_outbox(self.ledger, paused, "the wake was refused", now=self._clock())
         result.faults.append((paused, fault))
+        if kept:
+            result.kept.append((paused, kept))
         result.errors.append(f"{worker.handle}: wake refused: {fault}")
         return True
 

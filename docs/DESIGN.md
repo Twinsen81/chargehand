@@ -1188,9 +1188,10 @@ stop, the close of a worker whose item closed, the stop of a session refresh, th
 another session in the worker's worktree, and the stop before a resume (a reply from the
 board, the resume after a usage limit). The log names the pids it ended, and a WARNING
 names those that did not end. A stop that is not confirmed ends nothing. `chargehand stop`,
-which `continue` undoes, keeps them, because the operator may want the shell, but says
-so: its outcome and one WARNING line name the pids, and one notification goes out with the
-state `orphan-shell` and a count. The runner state keeps them for the worker, and the next
+which `continue` undoes, keeps them, because the operator may want the shell, and so does
+the pause of a worker whose wake the workspace guard refuses (`wake-fault`), but each says
+so: one WARNING line names the pids, as does the outcome of `chargehand stop`, and one
+notification goes out with the state `orphan-shell` and a count. The runner state keeps them for the worker, and the next
 cancel, discard, retry or other stop that ends the worker's work ends those that still run
 too. The stop before a resume does not.
 

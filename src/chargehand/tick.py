@@ -1962,20 +1962,30 @@ class Runner:
         self._sync_labels(worker, context, report)
         if not left:
             return True, "session stopped; `chargehand continue` respawns it"
-        pids = processes_mod.pid_list(left)
-        log.warning(
-            "%s: %d process(es) below session %s still run after the stop, such as a "
-            "background shell; no session owns them now: %s",
-            worker.handle, len(left), sanitize.scrub_identifier(worker.session_id)[:8], pids,
-        )
-        self._notify(report, worker.name, "orphan-shell", worker.url, worker.repository,
-                     role=worker.role,
-                     detail=f"{len(left)} process(es) of the stopped session still run")
+        pids = self._report_kept(worker, left, report)
         return True, (
             f"session stopped; `chargehand continue` respawns it. {len(left)} process(es) "
             f"that the session started still run, such as a background shell; end them "
             f"by hand if you do not need them: {pids}"
         )
+
+    def _report_kept(
+        self, worker: Worker, left: tuple[processes_mod.Process, ...], report: TickReport
+    ) -> str:
+        """Tell the operator of the processes that a stop which `continue` undoes kept
+        running: one WARNING line with their pids and one notification with a count.
+        Returns the pids as a list for the outcome."""
+        pids = processes_mod.pid_list(left)
+        log.warning(
+            "%s: %d process(es) below session %s still run after the stop, such as a "
+            "background shell; no session owns them now: %s",
+            worker.handle, len(left), sanitize.scrub_identifier(worker.session_id or "")[:8],
+            pids,
+        )
+        self._notify(report, worker.name, "orphan-shell", worker.url, worker.repository,
+                     role=worker.role,
+                     detail=f"{len(left)} process(es) of the stopped session still run")
+        return pids
 
     def _do_continue(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
@@ -3711,6 +3721,7 @@ class Runner:
             refresh=lambda worker, message, reply: self._refresh_session(
                 worker, message, report, reply=reply
             ),
+            pause=lambda worker: self._stop(worker, end_left=False)[1],
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -3730,6 +3741,8 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+        for worker, kept in result.kept:
+            self._report_kept(worker, kept, report)
         for worker, detail in result.capped:
             if not self._notify(report, worker.name, "daily-cap", worker.url,
                                 worker.repository, role=worker.role, detail=detail):

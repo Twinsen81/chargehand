@@ -368,6 +368,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so. Before, the processes below it, which then may be only its normal children such as
   an MCP server, counted as outliving the stop: a final stop signalled them, and
   `chargehand stop` sent a false `orphan-shell` notification.
+- The pause of a worker whose wake the workspace guard refuses (`wake-fault`) now treats
+  the processes below its session as `chargehand stop` does: it keeps them, logs one
+  WARNING line with their pids, sends one `orphan-shell` notification, and records them,
+  so a later cancel or other final stop ends them. Before, a background shell of the
+  session ran on with no owner and no word to the operator.
 
 ### Added
 

@@ -7,8 +7,9 @@
 # waits for events and a worker whose item closed are not notified; `status` shows them.
 # Two exceptions: a worker whose turn ended while a background shell of that turn still
 # runs is notified once, with the state idle, after background_shell_mins; and a
-# `chargehand stop` that leaves processes of the session running, such as a background
-# shell, is notified once, with the state orphan-shell. These variables are set:
+# `chargehand stop`, or the pause after a wake fault, that leaves processes of the session
+# running, such as a background shell, is notified once, with the state orphan-shell.
+# These variables are set:
 #
 #   CHARGEHAND_ITEM    the work item (an issue identifier); for a worker started on the
 #                      board, its handle with its id instead, such as implementer/ABC-1#7
