@@ -4926,8 +4926,11 @@ class Runner:
         Only a worker with a record counts, so that a failed notification is sent again.
         """
         told: set[str] = set()
+        # An adopted worker keeps the path the listing named, which can be another path
+        # to the same directory.
+        worktree = os.path.realpath(worker.worktree_path)
         for other in self.ledger.workers_needing_gc():
-            if other.id == worker.id or other.worktree_path != worker.worktree_path:
+            if other.id == worker.id or os.path.realpath(other.worktree_path) != worktree:
                 continue
             raw = self.ledger.get_state(f"{NOT_COLLECTED_PREFIX}{other.id}")
             if raw is None:

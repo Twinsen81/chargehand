@@ -792,17 +792,27 @@ def test_collection_notifies_again_when_other_sessions_hold_the_worktree(harness
     assert worker.worktree_path.is_dir()
 
 
-def test_two_workers_that_share_a_held_worktree_notify_once(harness, repo, tmp_path, caplog):
+@pytest.mark.parametrize("named", ["as stored", "through a link"])
+def test_two_workers_that_share_a_held_worktree_notify_once(
+    harness, repo, tmp_path, caplog, named
+):
     status_dir = _with_status_file(harness, repo, tmp_path)
     first = launch(harness)
     (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
+    cwd = first.worktree_path
+    if named == "through a link":
+        # The listing can name the worktree by another path, such as /private/tmp for
+        # /tmp on macOS, and the adopted worker keeps that path.
+        link = tmp_path / "linked-root"
+        link.symlink_to(harness.worktree_root)
+        cwd = link / first.worktree_path.relative_to(harness.worktree_root)
     # A copy that `claude --resume` started in the worktree works, so the tick adopts it
     # as a second worker of the item, which then ends as well.
     sessions = harness.claude_state.sessions
     sessions.append({
-        "id": "c0b1e5d1", "uuid": "uuid-c0b1e5d1", "cwd": str(first.worktree_path),
+        "id": "c0b1e5d1", "uuid": "uuid-c0b1e5d1", "cwd": str(cwd),
         "state": "working", "status": "busy", "pid": 4242,
     })
     harness.claude_state.set(sessions=sessions)
