@@ -354,6 +354,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   progress: "archived; the session listing could not be read, so other sessions were not
   looked for", as a forced discard and a forced retry do. Before, it said only
   "archived".
+- A `not-collected` notification that the hook fails to send goes out again at the next
+  collection, as a `daily-cap` notification does. Before, the hold was recorded before
+  the hook ran, so a failed hook meant that the operator never got the notification.
 
 ### Added
 

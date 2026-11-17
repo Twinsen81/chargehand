@@ -379,8 +379,9 @@ The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or end
 blocked, parked, failed, done through a report or the status file, stopped by the
 watchdog, or held by its daily wake cap (`daily-cap`). A worker whose item closed but
 whose worktree other sessions still work in, such as a copy that `claude --resume`
-started there, is not collected; you are notified once (`not-collected`), and the
-worktree is removed at the first collection after those sessions are gone. A
+started there, is not collected; you are notified once (`not-collected`; a hook that
+fails gets it again at the next collection), and the worktree is removed at the first
+collection after those sessions are gone. A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
 are not notified; `chargehand status` shows them. A turn can end while a background shell
 that it started still runs; Claude Code then lists the session as busy, with the state

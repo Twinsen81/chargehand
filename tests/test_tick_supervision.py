@@ -792,6 +792,30 @@ def test_collection_notifies_again_when_other_sessions_hold_the_worktree(harness
     assert worker.worktree_path.is_dir()
 
 
+def test_a_failed_not_collected_notification_goes_again_on_the_next_tick(
+    harness, repo, tmp_path
+):
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+    failing = [True]
+    dispatch = harness.notifier.dispatch
+
+    def flaky(notification):
+        outcome = dispatch(notification)
+        return dataclasses.replace(outcome, failed=failing[0], sent=not failing[0])
+
+    harness.notifier.dispatch = flaky
+    harness.next_tick()
+    assert harness.ledger.get_state(f"not-collected:{worker.id}") is None
+
+    failing[0] = False
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications().count(("ABC-1", "not-collected")) == 2
+    assert harness.ledger.get_state(f"not-collected:{worker.id}") == '["c0b1e5d1"]'
+    assert worker.worktree_path.is_dir()
+
+
 def test_collection_waits_while_the_session_listing_cannot_be_read(
     harness, repo, tmp_path, monkeypatch
 ):

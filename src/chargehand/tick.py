@@ -266,7 +266,8 @@ STOP_AND_REMOVE = "Remove them, or re-run with --force to stop and remove them w
 # The other sessions that keep garbage collection from removing a worker's worktree, under
 # this prefix and the worker id: a JSON list of their sorted, scrubbed ids. A WARNING line
 # and a notification go out when it is new or its ids change; the same hold on later
-# collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone.
+# collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone,
+# and when the hook fails, so that the next collection sends the notification again.
 NOT_COLLECTED_PREFIX = "not-collected:"
 # The processes below a worker's session that a `chargehand stop` kept running, such as a
 # background shell, under this prefix and the worker id: a JSON list of their pid, group
@@ -4890,10 +4891,12 @@ class Runner:
         log.warning("%s: not collected, %s: %s", worker.handle, what,
                     ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
         report.warnings.append(f"{worker.handle}: not collected, {what}")
-        self._notify(
+        if not self._notify(
             report, worker.name, "not-collected", worker.url, worker.repository, role=worker.role,
             detail=f"{what}; it is removed once they are gone",
-        )
+        ):
+            # The next collection tells the operator again, as for the daily cap.
+            self.ledger.delete_state(key)
         return True
 
     def _forget_summary_waits(self) -> None:

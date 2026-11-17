@@ -1203,10 +1203,11 @@ next collection. The first hold logs one WARNING line, adds one line to the tick
 sends one notification with the state `not-collected` and a count; the same sessions on
 later collections log at DEBUG only. The record of the hold is kept in the runner state
 under `not-collected:` and the worker id, and is dropped once the sessions are gone or the
-worker is collected. Retry applies the rules of discard before it removes the worktree:
-without force it refuses with the reasons `other_sessions` or `sessions_unknown`, with
-force it stops and removes those sessions and names them in its outcome, and it never stops
-the current session of another live worker.
+worker is collected. It is dropped too when the hook fails, so the next collection sends
+the notification again, as for the daily cap. Retry applies the rules of discard before it
+removes the worktree: without force it refuses with the reasons `other_sessions` or
+`sessions_unknown`, with force it stops and removes those sessions and names them in its
+outcome, and it never stops the current session of another live worker.
 
 ## 7. Control: a CLI and a loopback daemon
 
