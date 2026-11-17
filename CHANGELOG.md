@@ -148,15 +148,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The project is renamed from chargehand to elfcrew, because other projects already use
   the old name. The package, the command, the module, the `ELFCREW_*` environment
   variables, the configuration and state paths (`~/.config/elfcrew`,
-  `~/Library/Application Support/elfcrew`, `~/Library/Logs/elfcrew.log`,
-  `~/elfcrew-worktrees`), the repository files (`.elfcrew.toml`, `.elfcrew/roles/`), the
-  launchd label `dev.elfcrew.tick`, the default labels (`elfcrew`, `elfcrew-running`,
-  `elfcrew-blocked`), the branch prefix `elfcrew/`, the Keychain services
-  (`elfcrew-linear`, `elfcrew-smtp`), the skill and the mod all take the new name. Nothing
-  reads the old names, except that comments marked by a chargehand worker are still
-  recognised. To upgrade, stop all workers, run `chargehand uninstall --remove-plist`,
-  install elfcrew, move or rename the paths and Keychain items above, rename the labels in
-  the tracker, and run `elfcrew install`.
+  `~/Library/Application Support/elfcrew`, `~/Library/Logs/elfcrew.log`), the default
+  worktree root `~/elfcrew-worktrees`, the repository files (`.elfcrew.toml`,
+  `.elfcrew/roles/`), the launchd label `dev.elfcrew.tick`, the default labels (`elfcrew`,
+  `elfcrew-running`, `elfcrew-blocked`), the branch prefix `elfcrew/`, the Keychain
+  services (`elfcrew-linear`, `elfcrew-smtp`), the skill and the mod all take the new name.
+  Nothing reads the old names, except that comments marked by a chargehand worker are
+  still recognised. To upgrade:
+  1. Let every worker finish, or discard it with `chargehand discard`. A stopped worker is
+     not enough: it resumes with the launch settings it started with, which name the old
+     paths and deny only the old command to the session.
+  2. Run `chargehand uninstall --remove-plist` and install elfcrew.
+  3. Move `~/.config/chargehand` and `~/Library/Application Support/chargehand` to their
+     new names, rename `.chargehand.toml` and `.chargehand/` in each repository, and rename
+     the `CHARGEHAND_*` variables in a notify command.
+  4. Keep the worktree root where it is with `worktree_root = "~/chargehand-worktrees"` in
+     the machine configuration. The ledger and git record each worktree by its absolute
+     path, so rename the directory only while no worker exists.
+  5. Rename the labels in the tracker and the Keychain items, or set their old names in the
+     configuration, and run `elfcrew install`.
 
 - Attach opens Terminal.app by default; iTerm2 stays a choice on the page, listed second.
   Attach in Terminal.app no longer needs the Automation permission. The daemon writes a
@@ -598,8 +608,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_requested: https://github.com/o/r/pull/1`, so a woken worker knows what each link
   asks for. The shipped role prompts and the `pr-reviewer` agent file describe the kinds.
 - The authorship marker that workers add to their comments is now
-  `<!-- elfcrew-worker -->`. The first spelling, `<!-- elfcrew -->`, has a space after
-  the name, so the launch deny rule `Bash(*elfcrew *)` refused every `gh` command that
+  `<!-- elfcrew-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
+  the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that
   carried it on its command line, and a worker could not post a review or a comment at all.
   The shipped role and agent templates use the new spelling; the sources still read the old
   one as marked, and a `command` source may report either.

@@ -149,8 +149,8 @@ pointer (a URL or identifier the worker fetches itself). It never carries a body
 reads a comment only to find elfcrew's authorship marker, `<!-- elfcrew-worker -->`,
 and the text stays in the source. No space follows the name, because the launch deny rule
 `Bash(*elfcrew *)` refuses the name followed by a space in a command, and a body can
-still end up on a command line; the first spelling, `<!-- elfcrew -->`, is still read
-as marked. Kinds are bare (`comment`, any source) or qualified by the source name
+still end up on a command line. The spellings from before the rename,
+`<!-- chargehand-worker -->` and `<!-- chargehand -->`, are still read as marked. Kinds are bare (`comment`, any source) or qualified by the source name
 (`github.comment`).
 
 Delivery is publish and subscribe. A worker subscribes to work items, each with a set of

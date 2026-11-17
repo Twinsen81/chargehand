@@ -75,7 +75,6 @@ def test_an_event_has_no_body():
     "body,marked",
     (
         (f"Fixed.\n\n{AUTHORSHIP_MARKER}", True),
-        ("Fixed.\n\n<!-- elfcrew -->", True),
         ("Fixed.\n\n<!-- chargehand-worker -->", True),
         ("Fixed.\n\n<!-- chargehand -->", True),
         ("elfcrew fixed it", False),

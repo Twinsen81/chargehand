@@ -22,14 +22,11 @@ from elfcrew.trackers.base import Status
 #
 # No space follows the name: a worker usually posts with the body on the command line,
 # and the launch deny rule `Bash(*elfcrew *)` refuses any command that holds the name
-# and a space. The first spelling had that space, so it is still read as marked, and
-# so are the spellings from before the rename to elfcrew, which old comments carry.
+# and a space. Workers posted under the project's first name, chargehand, before the
+# rename, and their comments still carry those markers, so both spellings of that name
+# are still read as marked.
 AUTHORSHIP_MARKER = "<!-- elfcrew-worker -->"
-LEGACY_AUTHORSHIP_MARKERS = (
-    "<!-- elfcrew -->",
-    "<!-- chargehand-worker -->",
-    "<!-- chargehand -->",
-)
+LEGACY_AUTHORSHIP_MARKERS = ("<!-- chargehand-worker -->", "<!-- chargehand -->")
 
 
 def is_marked(body: object) -> bool:

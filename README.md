@@ -14,9 +14,10 @@ session picks it up in a fresh git worktree on a machine you own.
 > [docs/DESIGN.md](docs/DESIGN.md).
 
 An *elfcrew* is a small crew of elves that fixes things and does not trouble you with the
-details. This tool is that for coding agents: it watches your issue tracker, starts one background session per issue, keeps
-track of what each one is doing, tells you when one needs you, and cleans up afterwards.
-It runs on your own Mac, the one you already work on, not in a cloud.
+details. This tool is that for coding agents: it watches your issue tracker, starts one
+background session per issue, keeps track of what each one is doing, tells you when one
+needs you, and cleans up afterwards. It runs on your own Mac, the one you already work
+on, not in a cloud.
 
 ## How it works
 
@@ -65,7 +66,7 @@ python3 -m venv ~/.venvs/elfcrew             # a packaged python refuses a direc
 export PATH="$HOME/.venvs/elfcrew/bin:$PATH"
 
 elfcrew init --machine               # ~/.config/elfcrew/config.toml and notify.sh
-elfcrew init --repo ~/code/my-app # .elfcrew.toml and .elfcrew/roles/implementer.toml
+elfcrew init --repo ~/code/my-app    # .elfcrew.toml and .elfcrew/roles/implementer.toml
 elfcrew init --repo ~/code/my-app --role pr-reviewer     # a reviewer role and its agent file
 elfcrew doctor                       # check this machine
 elfcrew tick                         # one pass, in the foreground
