@@ -3773,8 +3773,10 @@ class Runner:
         run in one worktree. A session that an earlier, interrupted refresh started there
         is taken as it is. AgentRuntimeError or ConfigError when the refresh fails; the
         worker then keeps its old session. A session whose turn ended while a background
-        shell of that turn still runs is not stopped, because the stop ends the shell,
-        unless *reply* says that a reply from the board waits: the operator chose to act.
+        shell of that turn still runs is not stopped, because the stop ends the shell. With
+        the mod, the wake then goes to it in place and the refresh waits; without it, the
+        wake waits, unless *reply* says that a reply from the board waits: the operator
+        chose to act.
         """
         context = self.context_for_worker(worker)
         if context is None or not context.usable:
@@ -3803,15 +3805,16 @@ class Runner:
             # The operator may have started a turn in it since this tick's listing.
             return delivery_mod.Refresh(busy="the session has a turn or a prompt")
         if (
-            found is None and current is not None and not reply and current.busy
+            found is None and current is not None and current.busy
             and not runtime.is_stopped(current)
             and (current.state == runtime_mod.DONE or runtime.ended_without_dialog(current))
         ):
             # A background shell may have started since this tick's listing.
-            return delivery_mod.Refresh(
-                busy=f"a background shell of session {worker.session_id} still runs",
-                shell=True,
-            )
+            shell = f"a background shell of session {worker.session_id} still runs"
+            if delivery_mod.has_mod(worker):
+                return delivery_mod.Refresh(keep=shell, shell=True)
+            if not reply:
+                return delivery_mod.Refresh(busy=shell, shell=True)
         # A refresh does not end the worker's work: what `chargehand stop` kept runs on.
         if not self._stop_session(worker, listed=listed, end_kept=False):
             raise AgentRuntimeError(f"session {worker.session_id} did not stop")

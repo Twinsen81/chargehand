@@ -340,15 +340,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pids, and one notification goes out with the new state `orphan-shell` and a count; a
   later cancel, discard or other stop that ends the worker's work ends them. The stop of a
   session refresh does not: it ends only the processes below the session that it stops.
-- Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake for events no
-  longer stops a session with the mod while a background shell of its ended turn runs.
-  Before, the refresh stopped the session to start a fresh one, which a wake without the
-  refresh never does. Now the wake waits as the wake of a session without the mod does:
-  the worker is `queued`, its card says "wake held, a background shell of session ...
-  still runs", the events stay in the inbox, and no setup step of the role runs. Once the
-  listing shows the session idle, the next tick refreshes it. A reply from the board still
-  refreshes at once. The refresh also looks again right before its stop, so a shell that
-  started after the tick's listing holds the wake too.
+- Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake no longer stops
+  a session with the mod while a background shell of its ended turn runs. Before, the
+  refresh stopped the session to start a fresh one, which a wake without the refresh
+  never does, and so ended the shell, such as a dev server. Now the refresh waits and the
+  wake does not: the session takes the wake from its outbox while the shell runs, for
+  events and for a reply from the board alike, and one INFO line says that the refresh
+  was postponed. The refresh comes at the first wake after the shell has ended. The
+  refresh also looks again right before its stop, so a shell that started after the
+  tick's listing postpones it too. A session without the mod, whose wake is a stop and a
+  resume, still waits for the shell, and a reply to it still refreshes at once.
 - A wake held for a background shell logs its `skipped:` line at INFO once per hold, and
   at DEBUG on later ticks. Before, the line came at INFO on every tick, for hours with a
   dev server. A new hold, after a wake or for another session, logs at INFO again. The
