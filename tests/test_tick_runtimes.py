@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from chargehand import ledger as ledger_mod
-from chargehand.cli import build_status
-from chargehand.config import SourceConfig
-from chargehand.errors import LaunchAborted
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.runtime import LaunchSpec
-from chargehand.tick import Runner
+from elfcrew import ledger as ledger_mod
+from elfcrew.cli import build_status
+from elfcrew.config import SourceConfig
+from elfcrew.errors import LaunchAborted
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.runtime import LaunchSpec
+from elfcrew.tick import Runner
 from conftest import Harness, make_config
 from support import fake_runtime, fake_source
 
@@ -29,7 +29,7 @@ START = '\n[[start]]\non = "labeled"\n'
 
 
 def write_role(repo, name, text):
-    target = repo / ".chargehand" / "roles" / f"{name}.toml"
+    target = repo / ".elfcrew" / "roles" / f"{name}.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
 
@@ -66,7 +66,7 @@ def test_a_queued_item_starts_a_worker_on_the_roles_runtime(harness, runtime_nam
     assert worker.runtime == runtime_name
     assert worker.session_id
     assert len(driver.launches) == 1
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
 
 def test_a_blocked_session_blocks_the_worker_and_notifies(harness, runtime_name, driver):
@@ -78,7 +78,7 @@ def test_a_blocked_session_blocks_the_worker_and_notifies(harness, runtime_name,
     worker = harness.worker("ABC-1")
     assert worker.state == ledger_mod.BLOCKED
     assert worker.waiting_for == "a question"
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
     assert ("ABC-1", "blocked") in harness.notifications()
 
 

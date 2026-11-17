@@ -67,8 +67,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from chargehand.claude import ClaudeCLI  # noqa: E402
-from chargehand.sanitize import one_line as sanitize_line  # noqa: E402
+from elfcrew.claude import ClaudeCLI     # noqa: E402
+from elfcrew.sanitize import one_line as sanitize_line     # noqa: E402
 from smoke_support import (  # noqa: E402
     SMOKE_LABELS,
     is_sandbox,
@@ -205,7 +205,7 @@ class Probe:
             assignee_id=self.assignee_id,
             label_ids=[self.label_ids["queued"]] if queued else [],
             description=(
-                "Created by the chargehand smoke probe to exercise the runner against a "
+                "Created by the elfcrew smoke probe to exercise the runner against a "
                 "real tracker. Safe to delete."
             ),
         )
@@ -775,7 +775,7 @@ class Probe:
         worktree = self.sandbox.worktree_root / name
         created = subprocess.run(
             ["git", "-C", str(self.sandbox.repo), "worktree", "add", "-b",
-             f"chargehand/{name}", str(worktree), "origin/main"],
+             f"elfcrew/{name}", str(worktree), "origin/main"],
             capture_output=True, text=True, check=False,
         )
         if not worktree.is_dir():
@@ -939,7 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "worktrees and the sandbox")
     parser.add_argument("--reuse", action="store_true",
                         help="reuse an existing sandbox directory instead of rebuilding it")
-    parser.add_argument("--keychain-service", default="chargehand-linear")
+    parser.add_argument("--keychain-service", default="elfcrew-linear")
     parser.add_argument("--keychain-account")
     parser.add_argument("--json", action="store_true", help="emit the transcript as JSON")
     return parser

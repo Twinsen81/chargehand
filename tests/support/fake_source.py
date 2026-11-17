@@ -20,9 +20,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from chargehand.errors import TrackerError
-from chargehand.sources import register
-from chargehand.sources.base import Event, Source, WorkItem
+from elfcrew.errors import TrackerError
+from elfcrew.sources import register
+from elfcrew.sources.base import Event, Source, WorkItem
 from support import fake_tracker
 
 OTHER_ACTOR = "someone-else@example.invalid"

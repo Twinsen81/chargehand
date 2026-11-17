@@ -12,11 +12,11 @@ from pathlib import Path
 import pytest
 
 from conftest import REPO_CONFIG, Harness, make_config, run_git
-from chargehand import delivery as delivery_mod
-from chargehand import ledger as ledger_mod
-from chargehand import paths, sanitize
-from chargehand.config import SourceConfig, TrackerConfig
-from chargehand.delivery import (
+from elfcrew import delivery as delivery_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew import paths, sanitize
+from elfcrew.config import SourceConfig, TrackerConfig
+from elfcrew.delivery import (
     MESSAGE_HEADER,
     UNKNOWN_KIND,
     UsageReading,
@@ -24,13 +24,13 @@ from chargehand.delivery import (
     usage_admits,
     wake_message,
 )
-from chargehand.errors import DeliveryAborted
-from chargehand.gitutil import Git
-from chargehand.ledger import InboxEntry, Ledger
-from chargehand.notify import Notifier
-from chargehand.roles import Role
-from chargehand.sources import Event, WorkItem
-from chargehand.tick import Runner
+from elfcrew.errors import DeliveryAborted
+from elfcrew.gitutil import Git
+from elfcrew.ledger import InboxEntry, Ledger
+from elfcrew.notify import Notifier
+from elfcrew.roles import Role
+from elfcrew.sources import Event, WorkItem
+from elfcrew.tick import Runner
 from support import fake_source, fake_tracker
 from support.fake_gh import GhState
 
@@ -47,7 +47,7 @@ subscribe = ["comment", "ci_status"]
 
 
 def write_role(repo: Path, name: str, text: str) -> None:
-    target = repo / ".chargehand" / "roles" / f"{name}.toml"
+    target = repo / ".elfcrew" / "roles" / f"{name}.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
 
@@ -700,7 +700,7 @@ NO_DEBOUNCE = (
     "current handoff note do not wait."
 )
 LOOP = (
-    "A /loop that a role's prompt starts runs its own turns, which chargehand does not "
+    "A /loop that a role's prompt starts runs its own turns, which elfcrew does not "
     "start: the debounce and the daily cap do not count them, and no cap stops them. While "
     "such a turn runs, the worker is running and holds one slot of max_concurrent."
 )
@@ -710,8 +710,8 @@ LOOP = (
     "path",
     [
         ROOT / "README.md",
-        ROOT / "src" / "chargehand" / "templates" / "roles" / "implementer.toml",
-        ROOT / "src" / "chargehand" / "templates" / "roles" / "pr-reviewer.toml",
+        ROOT / "src" / "elfcrew" / "templates" / "roles" / "implementer.toml",
+        ROOT / "src" / "elfcrew" / "templates" / "roles" / "pr-reviewer.toml",
     ],
     ids=lambda path: path.name,
 )
@@ -988,7 +988,7 @@ def test_no_branch_is_read_when_no_source_has_pull_requests(wired, monkeypatch):
 
 def test_a_permission_prompt_of_the_woken_turn_stays_open(wired, monkeypatch):
     """The new turn can ask for permission before the wake writes `running`."""
-    from chargehand import claude
+    from elfcrew import claude
 
     reviewer = start_reviewer(wired)
     end_turn(wired)
@@ -1017,7 +1017,7 @@ def test_a_permission_prompt_of_the_woken_turn_stays_open(wired, monkeypatch):
 
 
 def with_mod(harness, worker):
-    """The worker's session says hello from its chargehand mod, as the mod's session start does."""
+    """The worker's session says hello from its elfcrew mod, as the mod's session start does."""
     return delivery_mod.record_mod_hello(harness.ledger, harness.ledger.get(worker.id), worker.session_uuid)
 
 
@@ -1361,7 +1361,7 @@ def test_delivery_takes_a_timer_by_its_own_clock(wired):
 def test_a_wake_fault_keeps_the_background_shells_and_tells_the_operator_once(
     wired, process_table, monkeypatch, caplog
 ):
-    from chargehand import tick as tick_mod
+    from elfcrew import tick as tick_mod
 
     reviewer = start_reviewer(wired)
     end_turn(wired)
@@ -1374,7 +1374,7 @@ def test_a_wake_fault_keeps_the_background_shells_and_tells_the_operator_once(
     )
     emit_three()
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.tick"):
         wired.next_tick()
 
     paused = wired.ledger.get(reviewer.id)

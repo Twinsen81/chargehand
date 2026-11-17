@@ -11,18 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude as claude_mod
-from chargehand import runtime as runtime_mod
-from chargehand.claude import ClaudeCLI, ClaudeRuntime
-from chargehand.config import DEFAULT_DENY_RULES
-from chargehand.errors import ClaudeError, ConfigError
-from chargehand.roles import Role, load_role
-from chargehand.runtime import LaunchSpec
+from elfcrew import claude as claude_mod
+from elfcrew import runtime as runtime_mod
+from elfcrew.claude import ClaudeCLI, ClaudeRuntime
+from elfcrew.config import DEFAULT_DENY_RULES
+from elfcrew.errors import ClaudeError, ConfigError
+from elfcrew.roles import Role, load_role
+from elfcrew.runtime import LaunchSpec
 from conftest import FAKE_CLAUDE, make_config
 from support import fake_runtime
 from support.fake_runtime import FakeRuntime
 
-SRC = Path(__file__).resolve().parent.parent / "src" / "chargehand"
+SRC = Path(__file__).resolve().parent.parent / "src" / "elfcrew"
 
 
 # ----- the registry ---------------------------------------------------------
@@ -134,7 +134,7 @@ def test_a_role_on_an_unknown_runtime_is_rejected():
 
 
 def test_only_the_claude_runtime_looks_for_an_agent_file(tmp_path):
-    role_dir = tmp_path / ".chargehand" / "roles"
+    role_dir = tmp_path / ".elfcrew" / "roles"
     role_dir.mkdir(parents=True)
     (role_dir / "claude-role.toml").write_text('prompt = "{item}"\nagent = "nobody"\n')
     (role_dir / "fake-role.toml").write_text('runtime = "fake"\nprompt = "{item}"\n')
@@ -181,7 +181,7 @@ def test_a_claude_launch_passes_the_roles_keys_and_the_settings(claude_runtime, 
     assert argv[argv.index("--agent") + 1] == "reviewer"
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "high"
-    assert '"allow": ["Bash(gh pr *)", "mcp__chargehand__*"]' in argv[argv.index("--settings") + 1]
+    assert '"allow": ["Bash(gh pr *)", "mcp__elfcrew__*"]' in argv[argv.index("--settings") + 1]
     assert claude_runtime.list_sessions()[0].name == "pr-reviewer/ABC-1"
 
 
@@ -214,7 +214,7 @@ def test_the_claude_stop_rule_reads_the_live_fields():
         assert not runtime.is_stopped(parse(live(state))), state
         assert not runtime.is_stopped(parse(session(state, status="idle"))), state
         assert not runtime.is_stopped(parse(session(state, pid=86470))), state
-    # A state chargehand does not recognise fails closed, even without the live fields.
+    # A state elfcrew does not recognise fails closed, even without the live fields.
     assert not runtime.is_stopped(parse(session("reticulating-splines")))
 
 
@@ -665,7 +665,7 @@ def test_the_fake_runtime_wakes_only_a_session_at_rest():
 def test_the_tick_the_cli_and_the_roles_reach_claude_code_only_through_the_interface(module):
     text = (SRC / module).read_text()
 
-    assert not re.search(r"ClaudeCLI|ClaudeRuntime|claude_mod|chargehand\.claude|from chargehand import claude", text)
+    assert not re.search(r"ClaudeCLI|ClaudeRuntime|claude_mod|elfcrew\.claude|from elfcrew import claude", text)
     assert '== "claude"' not in text
 
 

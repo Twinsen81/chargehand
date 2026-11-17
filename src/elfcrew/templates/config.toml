@@ -1,0 +1,85 @@
+# elfcrew — machine configuration
+#
+# Everything specific to this machine lives here. Nothing in this file belongs in a
+# repository: a repository contributes only its own .elfcrew.toml and role files.
+#
+# Copy to ~/.config/elfcrew/config.toml and edit.
+
+poll_interval_secs = 180
+
+# Launch throttle: how many workers may be actively working at once. Blocked workers
+# do not hold a slot, because one waiting overnight for an answer would otherwise stall
+# the queue.
+max_concurrent = 2
+
+# Working + blocked. Bounds how many sessions can wake at once when you answer a batch
+# of questions.
+max_open_workers = 4
+
+# Watchdog. Background sessions have no spend cap, so the limits are wall-clock.
+max_run_hours = 6
+hard_stop_hours = 10
+
+# A turn that ended while a background shell runs: the worker stays idle, and after this
+# many minutes without a new turn you are notified. 0 never notifies.
+background_shell_mins = 30
+
+worktree_root = "~/elfcrew-worktrees"
+
+# Warn when the worktree root's filesystem drops below this.
+min_free_disk_gb = 30
+
+# The daemon, `elfcrew serve`, which `elfcrew install` sets up as a launchd job. It
+# listens on 127.0.0.1 only; nothing here binds another address. Mutating requests need
+# the token in token_file, which the daemon writes with mode 0600 when it is missing.
+# poll_interval_secs above is now only the refresh interval of `elfcrew watch`.
+[serve]
+port = 7878
+# token_file = "~/.config/elfcrew/board.token"      # the default: next to this file
+tick_interval_secs = 60
+# The daemon's log: debug, info or warning. Info records polls, events, hooks, wakes,
+# label writes and notifications; it never records what a worker said or did.
+# log_level = "info"
+
+# The part of the subscription's weekly usage window that workers leave for your own
+# sessions. The daemon asks Claude Code for the window every poll_secs (0 turns that off;
+# the request is experimental in Claude Code), and the status line wrapper
+# (`elfcrew statusline`) and the worker sessions write it too; the newest reading in
+# usage_file counts. No wake starts while the weekly window is above 100 minus
+# wake_reserve_percent, and no new worker while it is above 100 minus
+# new_worker_reserve_percent. Without a usage file there is no reserve. The newest reading
+# counts however old it is, until the window's reset time passes.
+[usage]
+wake_reserve_percent = 20
+new_worker_reserve_percent = 30
+poll_secs = 300
+
+[notify]
+# Receives ELFCREW_ITEM, ELFCREW_ROLE, ELFCREW_STATE, ELFCREW_URL,
+# ELFCREW_REPOSITORY and ELFCREW_DETAIL as environment variables (ELFCREW_ISSUE and
+# ELFCREW_ROUTE stay set with the same values). For a worker started on the board,
+# ELFCREW_ITEM is its handle with its id, such as implementer/ABC-1#7, which already
+# holds the role. The payload carries no issue text and no
+# agent output, because it usually crosses a third-party relay.
+command = "~/.config/elfcrew/notify.sh"
+
+# Queue labels. These are the default names; change them to match your tracker.
+[labels]
+queued = "elfcrew"
+running = "elfcrew-running"
+blocked = "elfcrew-blocked"
+
+[[repository]]
+name = "my-app"
+path = "~/code/my-app"
+tracker = { type = "linear", team = "ABC", state = "Todo" }
+# The roles enabled in this repository. Each one is a file under
+# <repo>/.elfcrew/roles/ or ~/.config/elfcrew/roles/.
+roles = ["implementer"]
+# Optional per-repository cap, applied on top of the global max_concurrent.
+# max_concurrent = 1
+
+# The Linear API key is read from $ELFCREW_LINEAR_API_KEY, then from an optional
+# api_key_command, then from the login keychain:
+#
+#   security add-generic-password -s elfcrew-linear -a "$USER" -w 'lin_api_...'

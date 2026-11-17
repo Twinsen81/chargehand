@@ -124,7 +124,7 @@ def next_serial(state: dict) -> int:
 
 
 # What Claude Code 2.1.317 answered to get_usage, trimmed: the weekly window as a
-# percentage and an ISO reset time, beside windows that chargehand ignores.
+# percentage and an ISO reset time, beside windows that elfcrew ignores.
 USAGE_RESPONSE = {
     "subscription_type": "max",
     "rate_limits_available": True,

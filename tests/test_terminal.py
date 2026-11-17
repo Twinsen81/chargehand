@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import terminal
+from elfcrew import terminal
 
 UNSAFE = (
     'claude attach x"; do shell script "rm',

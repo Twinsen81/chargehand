@@ -1,4 +1,4 @@
-# chargehand
+# elfcrew
 
 Label an issue, and a supervised [Claude Code](https://claude.com/product/claude-code)
 session picks it up in a fresh git worktree on a machine you own.
@@ -13,8 +13,8 @@ session picks it up in a fresh git worktree on a machine you own.
 > scratch repository, not something to leave running. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
-A *chargehand* is the worker in charge of a small crew. This tool is that for coding
-agents: it watches your issue tracker, starts one background session per issue, keeps
+An *elfcrew* is a small crew of elves that fixes things and does not trouble you with the
+details. This tool is that for coding agents: it watches your issue tracker, starts one background session per issue, keeps
 track of what each one is doing, tells you when one needs you, and cleans up afterwards.
 It runs on your own Mac, the one you already work on, not in a cloud.
 
@@ -25,7 +25,7 @@ It runs on your own Mac, the one you already work on, not in a cloud.
    "running", creates a worktree, runs your repo's setup script, and starts a Claude Code
    background session with the prompt, agent, model and effort the role configured.
 3. The session works the issue. What "work" means is up to your repo: a slash command, a
-   skill, or a plain prompt. A *role* file under `.chargehand/roles/` holds that, and a
+   skill, or a plain prompt. A *role* file under `.elfcrew/roles/` holds that, and a
    repository may enable several roles.
 4. When a session needs you, the runner notices, notifies you, and marks the issue
    "blocked". You answer on the board, or in Claude Code's own agent view; the session
@@ -33,7 +33,7 @@ It runs on your own Mac, the one you already work on, not in a cloud.
 5. When the session finishes, the runner clears the label and later removes the worktree.
 
 You steer it with a CLI: `status`, `watch`, `pause`, `cancel`, `retry`. A daemon,
-`chargehand serve`, runs the tick and applies what you ask for; it listens on 127.0.0.1
+`elfcrew serve`, runs the tick and applies what you ask for; it listens on 127.0.0.1
 only and needs a token for anything that changes state.
 
 ## Design principles
@@ -60,31 +60,31 @@ only and needs a token for anything that changes state.
 ## Trying it
 
 ```bash
-python3 -m venv ~/.venvs/chargehand          # a packaged python refuses a direct install
-~/.venvs/chargehand/bin/pip install -e .
-export PATH="$HOME/.venvs/chargehand/bin:$PATH"
+python3 -m venv ~/.venvs/elfcrew             # a packaged python refuses a direct install
+~/.venvs/elfcrew/bin/pip install -e .
+export PATH="$HOME/.venvs/elfcrew/bin:$PATH"
 
-chargehand init --machine            # ~/.config/chargehand/config.toml and notify.sh
-chargehand init --repo ~/code/my-app # .chargehand.toml and .chargehand/roles/implementer.toml
-chargehand init --repo ~/code/my-app --role pr-reviewer  # a reviewer role and its agent file
-chargehand doctor                    # check this machine
-chargehand tick                      # one pass, in the foreground
-chargehand status                    # what is running
+elfcrew init --machine               # ~/.config/elfcrew/config.toml and notify.sh
+elfcrew init --repo ~/code/my-app # .elfcrew.toml and .elfcrew/roles/implementer.toml
+elfcrew init --repo ~/code/my-app --role pr-reviewer     # a reviewer role and its agent file
+elfcrew doctor                       # check this machine
+elfcrew tick                         # one pass, in the foreground
+elfcrew status                       # what is running
 ```
 
-`chargehand install` writes the launchd job that keeps the daemon, `chargehand serve`,
+`elfcrew install` writes the launchd job that keeps the daemon, `elfcrew serve`,
 running; it does not load it until you pass `--load`, or run the `launchctl bootstrap`
 line it prints. `install --load` also replaces the timer job of an older release, which
 had the same label. The daemon runs a tick every minute (`tick_interval_secs` in
 `[serve]`), and at once when a control command records a request. It serves
 `/api/health` and `/api/state` on `127.0.0.1:7878` (`port` in `[serve]`) and writes its
-token to `~/.config/chargehand/board.token` with mode 0600. The job records an absolute
+token to `~/.config/elfcrew/board.token` with mode 0600. The job records an absolute
 path to the interpreter it was installed with, so it works whether or not the environment
 is on your shell's PATH. It also records the PATH of the shell you run `install` from,
 because launchd gives a job only a minimal one; `doctor` checks that `claude` and `git`
 resolve through the job's PATH, not only through yours, that the daemon answers, and that
-the token file has mode 0600. The daemon writes its log to `~/Library/Logs/chargehand.log`
-(see [The log](#the-log)). To try the daemon without the job, run `chargehand serve`
+the token file has mode 0600. The daemon writes its log to `~/Library/Logs/elfcrew.log`
+(see [The log](#the-log)). To try the daemon without the job, run `elfcrew serve`
 in a terminal; ctrl-c stops it after the tick phase in progress.
 
 Open <http://127.0.0.1:7878/> for the board: the weekly usage window, the launch throttle, a
@@ -115,7 +115,7 @@ a function of your shell is found, as when you type the command. iTerm2 asks for
 it runs any file it is asked to open, so attach in iTerm2 still goes through Apple events:
 macOS asks once whether the daemon's Python may control iTerm2 (System Settings, Privacy &
 Security, Automation). macOS gives that permission to the Python interpreter binary, not
-to chargehand, so every background job that runs on that Python can then read and type
+to elfcrew, so every background job that runs on that Python can then read and type
 into every iTerm2 session, and macOS asks again after a Python upgrade. Terminal needs no
 permission; if you do not want to give it, keep Terminal on the page.
 
@@ -126,11 +126,11 @@ template, model and effort, which you can change. Fresh mode starts a new sessio
 mode starts with a copy of the worker's conversation (only while the worker is not in the
 middle of a turn or a prompt); summary mode starts a new session that first reads the
 worker's handoff note through the `read_handoff` tool. When that note is older than the
-worker's last turn, chargehand first wakes the worker once to write a current note, and the
+worker's last turn, elfcrew first wakes the worker once to write a current note, and the
 clone waits for it for up to 10 minutes; then it starts from the stored note, and its card
 says so. The clone follows no events on the item unless you name the
 kinds, so only your replies reach it. Its card follows the original's card and says "clone
-of" the original. From a terminal: `chargehand clone implementer/ABC-1#7 --mode full
+of" the original. From a terminal: `elfcrew clone implementer/ABC-1#7 --mode full
 --model sonnet --prompt-file next.txt`, with `--effort`, `--prompt` and `--subscribe KIND`
 as further options.
 
@@ -163,7 +163,7 @@ forced, which cancels them first. Unarchive only shows the repository again.
 To restore a worktree from an archive, by hand: unzip it somewhere, add a worktree on the
 pushed branch (`git worktree add <path> <branch>` in the repository), and copy the files
 under `worktree/` into it. `transcript.txt`, `worker.json` and `sessions.json` are for
-reading; chargehand does not take an archived worker back.
+reading; elfcrew does not take an archived worker back.
 
 When a worker's session asks for permission to run a tool, its card in Needs you shows the
 tool and its input with Allow, Deny and Always allow, and the session waits for your
@@ -174,7 +174,7 @@ waits up to `permission_timeout_secs` (a role key, 600 seconds by default) and t
 its own dialog, which only `claude attach` can answer; so does a prompt that was open
 when the daemon stopped.
 
-A worker asks you a question with the `ask` tool of the chargehand mod; `AskUserQuestion`
+A worker asks you a question with the `ask` tool of the elfcrew mod; `AskUserQuestion`
 is denied for every worker. The question shows on its card in Needs you with its options
 as buttons and a one-line answer field. The worker ends its turn after it asks, and your
 answer reaches it as a reply, as its next turn. A worker reports its progress with the
@@ -184,20 +184,20 @@ worker when its turn ends, which clears or keeps the label as a finished worker 
 worker that never reports is supervised by its hooks and its session state as before.
 The `status_file` key of a role is deprecated: it still works in this release and goes
 away in a later one. A worker reports and asks with the `report` and `ask` tools, which
-its session gets from chargehand with their own descriptions, so a prompt that told the
+its session gets from elfcrew with their own descriptions, so a prompt that told the
 worker to write the file can drop that instruction. `doctor` names each role that still
 sets the key.
 
 The daemon reads your subscription's weekly usage window by itself. Every 5 minutes it
 starts a short `claude -p` process in an empty directory and sends it Claude Code's
 `get_usage` control request; Claude Code answers with the usage that it fetches with its
-own sign-in. chargehand reads no token and no Keychain item, the request runs no turn
+own sign-in. elfcrew reads no token and no Keychain item, the request runs no turn
 and no hooks, and it writes no transcript. The reading goes to
-`~/.cache/chargehand/usage.json` (`usage_file` in `[serve]`), and `/api/state` and the
+`~/.cache/elfcrew/usage.json` (`usage_file` in `[serve]`), and `/api/state` and the
 board show the window's percentage and reset time. The request is experimental in Claude
 Code and can change with any release: when it fails, times out or gets an answer without
 the window, the daemon logs one line and keeps the last reading, and the bar stays grey
-until there is one. `chargehand doctor` shows which source wrote the last reading and how
+until there is one. `elfcrew doctor` shows which source wrote the last reading and how
 old it is. Set the interval, or turn the request off with 0, in `[usage]`:
 
 ```toml
@@ -207,16 +207,16 @@ poll_secs = 300   # at least 60; 0 turns the request off
 
 Two more sources write the same file, and the newest reading counts however old it is,
 until its reset time has passed; `source` in `/api/state` says which wrote it. Each worker
-session posts its reading after its turns, through the chargehand mod that every worker
-loads. And a status line command wrapped with `chargehand statusline` writes the window
+session posts its reading after its turns, through the elfcrew mod that every worker
+loads. And a status line command wrapped with `elfcrew statusline` writes the window
 from its input and then runs your command with the same input, so your status line does not
-change; other windows in the input are ignored. chargehand does not edit the settings file
+change; other windows in the input are ignored. elfcrew does not edit the settings file
 for you:
 
 ```json
 "statusLine": {
   "type": "command",
-  "command": "chargehand statusline -- '~/.claude/statusline.sh'"
+  "command": "elfcrew statusline -- '~/.claude/statusline.sh'"
 }
 ```
 
@@ -248,23 +248,23 @@ current handoff note do not wait. `max_wakes_per_day` (12 by default) caps the w
 one worker over the last 24 hours: a worker at its cap stays in Queued with the reason on
 its card, and you are notified once. Each card shows the wakes in that window and an
 estimate of the tokens in the worker's session. A `/loop` that a role's prompt starts runs
-its own turns, which chargehand does not start: the debounce and the daily cap do not count
+its own turns, which elfcrew does not start: the debounce and the daily cap do not count
 them, and no cap stops them. While such a turn runs, the worker is `running` and holds one
 slot of `max_concurrent`.
 
 To share devices and emulators between parallel workers, let the repository's scripts
 lease them through a lease tool such as [banksman](https://github.com/Twinsen81/banksman).
-chargehand does not call it and needs no setting for it.
+elfcrew does not call it and needs no setting for it.
 
 Steer it with `status`, `watch`, `logs`, `pause`, `cancel`, `stop`, `continue`, `retry`
 and `discard`. Answers to a session's questions go through the board, or through Claude
 Code's own agent view (`claude agents`), not through this CLI. It is a plain CLI, so it works over SSH too if
 you want to reach the machine from elsewhere, but nothing depends on that.
 
-To move your setup to another machine or user account, run `chargehand export setup.zip`
-there and `chargehand import setup.zip` on the new one. The archive holds the machine
+To move your setup to another machine or user account, run `elfcrew export setup.zip`
+there and `elfcrew import setup.zip` on the new one. The archive holds the machine
 configuration with `~` for your home directory, the role files in
-`~/.config/chargehand/roles/` and the agent files in `~/.claude/agents/` that the roles
+`~/.config/elfcrew/roles/` and the agent files in `~/.claude/agents/` that the roles
 name, the notification hook, your status line entry, and the board's names, icons, pins
 and hidden repositories (not those of workers, which belong to this machine's ledger). It
 holds no token, no Keychain value and no configuration key that can carry a credential,
@@ -276,26 +276,26 @@ it as a program to install, as it does for any `*_bin` key given as a path.
 Import asks for the path of each repository and for the worktree root
 (or takes `--repository NAME=PATH` and `--worktree-root PATH`, or one line per answer on
 stdin), refuses to overwrite a file without `--force`, and writes a new token. It does
-not edit `~/.claude/settings.json` and does not install the launchd job: `chargehand
+not edit `~/.claude/settings.json` and does not install the launchd job: `elfcrew
 doctor` lists those steps, and the tracker key, until they are done.
 
-`chargehand templates` lists the bundled starter files: the two configuration
+`elfcrew templates` lists the bundled starter files: the two configuration
 templates, a notification hook, the deny rules passed to launched sessions, and a
 skill for driving this CLI from a Claude Code session.
 
 ## The log
 
-The daemon writes `~/Library/Logs/chargehand.log` itself and rotates it at 10 MB, keeping
-five old files (`chargehand.log.1` to `.5`). The launchd job's own output goes to
-`~/Library/Logs/chargehand.launchd.log`, which only holds what the interpreter prints
+The daemon writes `~/Library/Logs/elfcrew.log` itself and rotates it at 10 MB, keeping
+five old files (`elfcrew.log.1` to `.5`). The launchd job's own output goes to
+`~/Library/Logs/elfcrew.launchd.log`, which only holds what the interpreter prints
 before the log is set up, such as a crash at start. A job installed by an older release
 writes the log through launchd and nothing rotates it; `doctor` warns, and
-`chargehand install --load` fixes it.
+`elfcrew install --load` fixes it.
 
 The level is `log_level` in `[serve]`: `debug`, `info` (the default) or `warning`. The
 daemon reads it again on every tick, so a change needs no restart; `-v` and `-vv` override
-it for a `chargehand serve` in a terminal. Every line has the same format, a timestamp, the
-level and the part of chargehand that wrote it, and every line about a worker starts with
+it for an `elfcrew serve` in a terminal. Every line has the same format, a timestamp, the
+level and the part of elfcrew that wrote it, and every line about a worker starts with
 its handle, `role/item`, so `grep implementer/ABC-1` finds all of them. A worker started on
 the board has `role/item#id` there. A start-rule worker keeps `role/item` in the log also
 after it ends, while `status --json` then shows it as `role/item#id`, which a command takes.
@@ -324,17 +324,17 @@ The log never holds what a worker said or did in its session: no last answer, wa
 text, permission tool input, question, report summary, handoff note, status file text,
 comment body or transcript path. It never
 holds a comment author either, which on Linear is an email address. Those stay in the
-ledger and on the board. Text from outside chargehand that may appear, such as a setup
+ledger and on the board. Text from outside elfcrew that may appear, such as a setup
 script's error or a command's stderr, is capped and cut to one line.
 
 When the log is not enough, the ledger keeps every routed event for 30 days. Look up an
 event by the dedupe id in brackets on its log line, then the inbox rows it made:
 
 ```bash
-sqlite3 ~/Library/Application\ Support/chargehand/ledger.sqlite \
+sqlite3 ~/Library/Application\ Support/elfcrew/ledger.sqlite \
   "SELECT source, kind, item, datetime(occurred_at,'unixepoch'), datetime(seen_at,'unixepoch'),
           start_pending FROM events WHERE dedupe_id = 'tracker:comment:1234';"
-sqlite3 ~/Library/Application\ Support/chargehand/ledger.sqlite \
+sqlite3 ~/Library/Application\ Support/elfcrew/ledger.sqlite \
   "SELECT w.role || '/' || w.item, datetime(i.queued_at,'unixepoch'),
           datetime(i.delivered_at,'unixepoch')
    FROM inbox i JOIN workers w ON w.id = i.worker_id WHERE i.dedupe_id = 'tracker:comment:1234';"
@@ -351,9 +351,9 @@ blocked, and why?", and steer it when you ask. Install the bundled skill and its
 permission rules for the sessions you start:
 
 ```bash
-mkdir -p ~/.claude/skills/chargehand
-chargehand templates skill/SKILL.md > ~/.claude/skills/chargehand/SKILL.md
-chargehand templates assistant-settings.json
+mkdir -p ~/.claude/skills/elfcrew
+elfcrew templates skill/SKILL.md > ~/.claude/skills/elfcrew/SKILL.md
+elfcrew templates assistant-settings.json
 ```
 
 Add the `allow` and `ask` lists that the last command prints to the `permissions` object
@@ -375,7 +375,7 @@ prompt before anything runs.
 
 ## Notifications
 
-The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or ends:
+The runner calls `~/.config/elfcrew/notify.sh` when a worker needs you or ends:
 blocked, parked, failed, done through a report or the status file, stopped by the
 watchdog, or held by its daily wake cap (`daily-cap`). A worker whose item closed but
 whose worktree other sessions still work in, such as a copy that `claude --resume`
@@ -383,20 +383,20 @@ started there, is not collected; you are notified once (`not-collected`; a hook 
 fails gets it again at the next collection), and the worktree is removed at the first
 collection after those sessions are gone. A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
-are not notified; `chargehand status` shows them. A turn can end while a background shell
+are not notified; `elfcrew status` shows them. A turn can end while a background shell
 that it started still runs; Claude Code then lists the session as busy, with the state
 working or done, and the board and `status` show the worker as idle with the session state
 `background`, or as queued when an event waits for the shell to end. Only a session
-without the chargehand mod makes an event wait: a session with the mod takes the event
+without the elfcrew mod makes an event wait: a session with the mod takes the event
 while the shell runs, and a session refresh that the role's limit makes due waits until
 the shell has ended. When no new turn has started 30 minutes after that turn end
 (`background_shell_mins` in the machine
 configuration; 0 turns it off), you are notified once, because a shell that never ends,
 such as a dev server, can hide a session that waits for you. This applies to workers
 launched by this release or a later one. Claude Code does not end such a shell when it
-stops the session, so chargehand ends the processes that outlive a stop of a session:
+stops the session, so elfcrew ends the processes that outlive a stop of a session:
 cancel, discard, retry, archive, garbage collection, the watchdog, a session refresh, and
-a reply that resumes the session. `chargehand stop`, which `continue` undoes, keeps them,
+a reply that resumes the session. `elfcrew stop`, which `continue` undoes, keeps them,
 and so does the pause after a `wake-fault`; you are notified once (`orphan-shell`) with a
 count, and the log names their PIDs. A later cancel, discard or other stop that ends the
 worker's work ends them; a session refresh does not. As
@@ -425,7 +425,7 @@ server with `curl`. Set it up once:
    your shell history:
 
    ```bash
-   security add-generic-password -s chargehand-smtp -a alerts@example.com -w
+   security add-generic-password -s elfcrew-smtp -a alerts@example.com -w
    ```
 
 4. In `notify.sh`, uncomment the email example, and set `sender` to that mailbox and
@@ -435,8 +435,8 @@ server with `curl`. Set it up once:
 **Test it** by running the hook by hand with a sample payload:
 
 ```bash
-CHARGEHAND_ISSUE=TEST CHARGEHAND_STATE=blocked CHARGEHAND_DETAIL="test" \
-  ~/.config/chargehand/notify.sh; echo "exit $?"
+ELFCREW_ISSUE=TEST ELFCREW_STATE=blocked ELFCREW_DETAIL="test" \
+  ~/.config/elfcrew/notify.sh; echo "exit $?"
 ```
 
 Exit code 0 means that every method you enabled succeeded. When the hook fails, the

@@ -21,12 +21,12 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import board as board_mod, claude, cli, delivery as delivery_mod, hooks
-from chargehand import ledger as ledger_mod, worker_tokens
-from chargehand.config import ServeConfig
-from chargehand.runtime import Hook
-from chargehand.sources import Event, WorkItem
-from chargehand.tick import Runner, TickReport
+from elfcrew import board as board_mod, claude, cli, delivery as delivery_mod, hooks
+from elfcrew import ledger as ledger_mod, worker_tokens
+from elfcrew.config import ServeConfig
+from elfcrew.runtime import Hook
+from elfcrew.sources import Event, WorkItem
+from elfcrew.tick import Runner, TickReport
 from support import daemon as support
 
 AUTH = {"Authorization": f"Bearer {support.TOKEN}", "Content-Type": "application/json"}
@@ -135,7 +135,7 @@ def test_the_hook_settings_are_in_a_private_file_and_not_on_the_command_line(har
     assert path == claude.settings_file_for(Path(harness.worker("ABC-1").worktree))
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-    # The deny rules travel in the same file, with the ones for chargehand's own secrets.
+    # The deny rules travel in the same file, with the ones for elfcrew's own secrets.
     deny = json.loads(path.read_text())["permissions"]["deny"]
     assert deny[:len(harness.config.deny_rules) + 1] == [
         *harness.config.deny_rules, "AskUserQuestion",
@@ -317,7 +317,7 @@ def test_a_session_from_before_its_own_token_still_posts_with_the_boards(
     monkeypatch.setattr(hooks, "_BOARD_TOKEN_SESSIONS", {})
     worker = launch(harness)
 
-    with caplog.at_level(logging.INFO, logger="chargehand.hooks"):
+    with caplog.at_level(logging.INFO, logger="elfcrew.hooks"):
         for _ in range(2):
             status, _ = post(daemon, "Notification", {"session_id": worker.session_uuid})
             assert status == 200
@@ -381,7 +381,7 @@ def test_the_session_start_command_exits_at_once_when_no_daemon_answers(harness,
 def test_the_poster_exits_zero_on_any_input(argv, monkeypatch):
     import io
 
-    from chargehand import hook_post
+    from elfcrew import hook_post
 
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"{}")))
     assert hook_post.main(argv) == 0
@@ -521,7 +521,7 @@ def test_a_usage_limit_failure_parks_the_worker_with_its_reset_time(daemon, harn
     entry = state_of(daemon, "ABC-1")
     assert (entry["state"], entry["reset_at"]) == ("parked", after.reset_at)
     # A parked worker shows as blocked on its tracker.
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
 
 
 def test_a_usage_limit_without_a_named_category_is_read_from_the_message(daemon, harness):
@@ -681,7 +681,7 @@ def test_the_diff_catches_up_on_a_turn_end_no_hook_reported(harness):
 
 def test_the_daemon_logs_each_change_a_hook_makes_as_a_tick_line(harness, tmp_path, caplog):
     """The daemon writes a hook's changes into its log in the tick report's own form."""
-    from chargehand import cli
+    from elfcrew import cli
 
     config = support.daemon_config(harness.config, tmp_path / "board.token")
     built = support.build(
@@ -690,7 +690,7 @@ def test_the_daemon_logs_each_change_a_hook_makes_as_a_tick_line(harness, tmp_pa
     with support.running(built, loop=False):
         worker = launch(harness)
         caplog.clear()
-        caplog.set_level(logging.INFO, logger="chargehand.tick")
+        caplog.set_level(logging.INFO, logger="elfcrew.tick")
 
         post(built, "Stop", {"session_id": worker.session_uuid})
         # Hooks that change nothing log no report line.
@@ -698,7 +698,7 @@ def test_the_daemon_logs_each_change_a_hook_makes_as_a_tick_line(harness, tmp_pa
         post(built, "Notification", {"session_id": worker.session_uuid, "notification_type": "idle_prompt"})
 
     lines = [r.getMessage() for r in caplog.records
-             if r.name == "chargehand.tick" and not r.getMessage().startswith(("implementer/ABC-1: marked"))]
+             if r.name == "elfcrew.tick" and not r.getMessage().startswith(("implementer/ABC-1: marked"))]
     assert lines == ["transition: implementer/ABC-1: running -> idle"], lines
 
 
@@ -858,7 +858,7 @@ def test_a_comment_waits_while_a_background_shell_runs_in_a_session_without_the_
     _comment(harness, worker)
     refreshes = _count_checkout_refreshes(monkeypatch)
 
-    with caplog.at_level(logging.INFO, logger="chargehand"):
+    with caplog.at_level(logging.INFO, logger="elfcrew"):
         for _ in range(3):
             harness.next_tick()
 
@@ -903,7 +903,7 @@ def test_a_wake_held_for_a_background_shell_logs_at_info_once_per_hold(
     line = f"skipped: implementer/ABC-1: {reason}"
 
     reports = []
-    with caplog.at_level(logging.DEBUG, logger="chargehand"):
+    with caplog.at_level(logging.DEBUG, logger="elfcrew"):
         for _ in range(3):
             reports.append(harness.next_tick())
             cli._log_report(reports[-1])
@@ -928,7 +928,7 @@ def test_a_wake_held_for_a_background_shell_logs_at_info_once_per_hold(
     harness.next_tick()
     _comment(harness, worker, "c2")
     caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="chargehand"):
+    with caplog.at_level(logging.DEBUG, logger="elfcrew"):
         report = harness.next_tick()
         cli._log_report(report)
 
@@ -1447,7 +1447,7 @@ def test_a_cancelled_worker_keeps_the_settings_file_of_its_kept_session(harness,
 
 
 def test_the_status_payload_names_the_last_hook_but_not_its_text(daemon, harness):
-    from chargehand import cli
+    from elfcrew import cli
 
     worker = launch(harness)
     post(daemon, "StopFailure", {

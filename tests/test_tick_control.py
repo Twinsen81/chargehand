@@ -9,10 +9,10 @@ import time
 
 import pytest
 
-from chargehand import claude as claude_mod
-from chargehand import ledger as ledger_mod
-from chargehand import tick as tick_mod
-from chargehand.errors import LaunchAborted
+from elfcrew import claude as claude_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew import tick as tick_mod
+from elfcrew.errors import LaunchAborted
 from conftest import run_git
 
 
@@ -64,7 +64,7 @@ def test_cancel_stops_the_session_marks_blocked_and_keeps_the_worktree(harness):
     assert result["ok"] == 1
     assert ["stop", attempt.session_id] in harness.claude_state.commands
     assert harness.worker("ABC-1").state == ledger_mod.CANCELLED
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
     assert (harness.worktree("ABC-1")).is_dir()
     assert ("ABC-1", "cancelled") in harness.notifications()
 
@@ -83,7 +83,7 @@ def test_a_cancel_recorded_during_a_launch_is_applied_cleanly(harness):
     assert attempt.state == ledger_mod.CANCELLED
     assert attempt.session_id
     assert ["stop", attempt.session_id] in harness.claude_state.commands
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
 
 
 def test_stop_then_continue_round_trips_a_run(harness):
@@ -121,7 +121,7 @@ def test_continue_refuses_a_run_that_is_not_paused_or_blocked(harness):
 def test_retry_starts_a_new_attempt_for_a_failed_run(harness, repo):
     (repo / "setup.sh").write_text("#!/bin/sh\nexit 3\n")
     (repo / "setup.sh").chmod(0o755)
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         'base = "origin/main"\nprompt = "{issue}"\nsetup = "setup.sh {worktree}"\n'
     )
     harness.board.add("ABC-1")
@@ -136,7 +136,7 @@ def test_retry_starts_a_new_attempt_for_a_failed_run(harness, repo):
     attempt = harness.worker("ABC-1")
     assert attempt.id != first_id
     assert attempt.state == ledger_mod.RUNNING
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
 
 def test_retry_refuses_a_live_run(harness):
@@ -172,14 +172,14 @@ def test_discard_removes_the_session_worktree_and_branch(harness):
     assert result["ok"] == 1
     assert not (harness.worktree("ABC-1")).exists()
     assert ["rm", attempt.session_id] in harness.claude_state.commands
-    assert not harness.runner.git.branch_exists(harness.repo, "chargehand/implementer/ABC-1")
+    assert not harness.runner.git.branch_exists(harness.repo, "elfcrew/implementer/ABC-1")
 
 
 def test_discard_deletes_a_branch_the_session_renamed(harness):
     """A session may rename its placeholder after the tracker's convention."""
     launch(harness)
     worktree = harness.worktree("ABC-1")
-    run_git("branch", "-m", "chargehand/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    run_git("branch", "-m", "elfcrew/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
     apply_request(harness, "cancel", "ABC-1")
 
     result = apply_request(harness, "discard", "ABC-1")
@@ -192,7 +192,7 @@ def test_discard_deletes_a_branch_the_session_renamed(harness):
 def test_discard_follows_a_branch_renamed_more_than_once(harness):
     launch(harness)
     worktree = harness.worktree("ABC-1")
-    run_git("branch", "-m", "chargehand/implementer/ABC-1", "abc-1-first", cwd=worktree)
+    run_git("branch", "-m", "elfcrew/implementer/ABC-1", "abc-1-first", cwd=worktree)
     run_git("branch", "-m", "abc-1-first", "abc-1-second", cwd=worktree)
     apply_request(harness, "cancel", "ABC-1")
 
@@ -214,7 +214,7 @@ def test_discard_keeps_a_branch_the_runner_did_not_create(harness):
     assert result["ok"] == 1
     assert not worktree.exists()
     assert harness.runner.git.branch_exists(harness.repo, "made-by-the-session")
-    assert not harness.runner.git.branch_exists(harness.repo, "chargehand/implementer/ABC-1")
+    assert not harness.runner.git.branch_exists(harness.repo, "elfcrew/implementer/ABC-1")
     assert "branch was kept" in result["message"]
     # The session chose that name, and this message can reach an assistant's session.
     assert "made-by-the-session" not in result["message"]
@@ -225,7 +225,7 @@ def test_discard_keeps_a_renamed_branch_when_the_repository_keeps_no_reflog(harn
     run_git("config", "core.logAllRefUpdates", "false", cwd=harness.repo)
     launch(harness)
     worktree = harness.worktree("ABC-1")
-    run_git("branch", "-m", "chargehand/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    run_git("branch", "-m", "elfcrew/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
     apply_request(harness, "cancel", "ABC-1")
 
     result = apply_request(harness, "discard", "ABC-1")
@@ -238,7 +238,7 @@ def test_discard_keeps_a_renamed_branch_when_the_repository_keeps_no_reflog(harn
 def test_retry_deletes_a_branch_the_session_renamed(harness):
     launch(harness)
     worktree = harness.worktree("ABC-1")
-    run_git("branch", "-m", "chargehand/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
+    run_git("branch", "-m", "elfcrew/implementer/ABC-1", "abc-1-a-title-slug", cwd=worktree)
     apply_request(harness, "cancel", "ABC-1")
 
     result = apply_request(harness, "retry", "ABC-1")
@@ -779,7 +779,7 @@ def test_a_launch_never_adopts_a_session_another_attempt_owns(harness):
 
 def test_a_control_request_survives_an_unusable_tracker_credential(harness, monkeypatch):
     """A locked keychain must not brick the tick."""
-    from chargehand.errors import TrackerAuthError
+    from elfcrew.errors import TrackerAuthError
     from support import fake_tracker
 
     launch(harness)
@@ -834,7 +834,7 @@ def test_an_unrecognised_session_state_never_counts_as_stopped(harness, process_
         # unrecognised.
         harness.claude_state.set(stop_state="reticulating-splines")
     else:
-        # The stop drops pid and status, and the state is one chargehand does not know.
+        # The stop drops pid and status, and the state is one elfcrew does not know.
         harness.claude_state.set_session_state("ABC-1", "reticulating-splines")
 
     result = apply_request(harness, "discard", "ABC-1")
@@ -949,7 +949,7 @@ def test_continue_points_an_open_permission_prompt_at_its_answer_when_no_dialog_
 def with_status_file(repo, tmp_path):
     status_dir = tmp_path / "status"
     status_dir.mkdir(exist_ok=True)
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         f'base = "origin/main"\nprompt = "{{issue}}"\nstatus_file = "{status_dir}/{{issue}}.json"\n'
     )
     return status_dir
@@ -992,7 +992,7 @@ def test_continue_points_a_status_file_question_at_a_reply(harness, repo, tmp_pa
 
 def test_a_prompt_during_the_answer_to_a_question_is_notified(harness, monkeypatch):
     """No SessionStart hook comes first, so the record of the notified question must go."""
-    from chargehand import claude
+    from elfcrew import claude
 
     attempt = launch(harness)
     harness.ledger.record_question(harness.worker("ABC-1"), "Which file next?", [])
@@ -1021,8 +1021,8 @@ def test_a_prompt_during_the_answer_to_a_question_is_notified(harness, monkeypat
 
 
 def test_a_held_answer_does_not_notify_the_question_again(harness, repo, tmp_path, monkeypatch):
-    from chargehand import claude
-    from chargehand.runtime import WakeResult
+    from elfcrew import claude
+    from elfcrew.runtime import WakeResult
 
     asked_in_the_status_file(harness, repo, tmp_path)
     monkeypatch.setattr(
@@ -1074,7 +1074,7 @@ def test_a_stopped_idle_session_keeps_its_worker_paused(harness):
 
 def test_a_permission_prompt_of_the_respawned_session_stays_open(harness, monkeypatch):
     """The respawned session can ask for permission before the continue writes `running`."""
-    from chargehand import claude
+    from elfcrew import claude
 
     attempt = launch(harness)
     assert apply_request(harness, "stop", "ABC-1")["ok"] == 1
@@ -1140,7 +1140,7 @@ def test_a_refused_discard_retry_and_archive_carry_the_reason_and_keep_the_cli_t
         "discard": f"{worker.name}: its worktree has uncommitted changes. Re-run with --force to "
                    f"discard anyway.",
         "retry": f"{worker.name}: its worktree has uncommitted changes. Push or discard it first "
-                 f"(`chargehand discard {harness.ledger.target_for(worker)} --yes`).",
+                 f"(`elfcrew discard {harness.ledger.target_for(worker)} --yes`).",
         "archive": f"{worker.name}: its worktree has uncommitted changes. Commit and push that work "
                    f"first, or archive with force: the archive keeps the files, not the commits.",
     }
@@ -1297,12 +1297,12 @@ def test_stop_keeps_the_background_shells_and_tells_the_operator_once(
     attempt = launch(harness)
     shell_below(harness, process_table, attempt.session_id)
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.tick"):
         result = apply_request(harness, "stop", "ABC-1")
 
     assert result["ok"] == 1
     assert result["message"] == (
-        "session stopped; `chargehand continue` respawns it. 2 process(es) that the session "
+        "session stopped; `elfcrew continue` respawns it. 2 process(es) that the session "
         "started still run, such as a background shell; end them by hand if you do not "
         "need them: 7001, 7002"
     )
@@ -1378,7 +1378,7 @@ def test_stop_does_not_count_a_child_that_ends_with_the_session_process(
 
     result = apply_request(harness, "stop", "ABC-1")
 
-    assert result["message"] == "session stopped; `chargehand continue` respawns it"
+    assert result["message"] == "session stopped; `elfcrew continue` respawns it"
     assert checks == [listed["pid"]] * 3
     assert ("ABC-1", "orphan-shell") not in harness.notifications()
     assert process_table.signals == []
@@ -1407,10 +1407,10 @@ def test_stop_reports_nothing_while_the_session_process_lives_on(
     attempt = launch(harness)
     shell_below(harness, process_table, attempt.session_id)
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.tick"):
         result = apply_request(harness, "stop", "ABC-1")
 
-    assert result["message"] == "session stopped; `chargehand continue` respawns it"
+    assert result["message"] == "session stopped; `elfcrew continue` respawns it"
     assert ("ABC-1", "orphan-shell") not in harness.notifications()
     assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
     [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -1438,7 +1438,7 @@ def test_discard_ends_nothing_of_another_session_whose_process_lives_on(
     add_listed_session(harness, "47076c61", attempt.worktree_path, pid=4242)
     shells = shell_below(harness, process_table, "47076c61", pid=7101)
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.tick"):
         result = apply_request(harness, "discard", "ABC-1", force=True)
 
     assert result["ok"] == 1, result["message"]
@@ -1455,7 +1455,7 @@ def test_stop_without_a_background_shell_says_nothing_more(harness, process_tabl
 
     result = apply_request(harness, "stop", "ABC-1")
 
-    assert result["message"] == "session stopped; `chargehand continue` respawns it"
+    assert result["message"] == "session stopped; `elfcrew continue` respawns it"
     assert ("ABC-1", "orphan-shell") not in harness.notifications()
 
 

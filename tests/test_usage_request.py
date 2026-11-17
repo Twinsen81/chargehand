@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude
-from chargehand import install
-from chargehand import ledger as ledger_mod
-from chargehand import usage as usage_mod
-from chargehand.config import MachineConfig, UsageConfig
-from chargehand.errors import ClaudeError, ConfigError
+from elfcrew import claude
+from elfcrew import install
+from elfcrew import ledger as ledger_mod
+from elfcrew import usage as usage_mod
+from elfcrew.config import MachineConfig, UsageConfig
+from elfcrew.errors import ClaudeError, ConfigError
 from conftest import FAKE_CLAUDE
 from support import daemon as support
 
@@ -241,7 +241,7 @@ def test_a_failed_poll_writes_nothing_and_logs_one_line(harness, tmp_path, caplo
     usage_file = harness.config.serve.usage_file
     usage_mod.write_usage(usage_file, {"seven_day": {"used_percent": 10, "resets_at": RESET_EPOCH}}, now=5)
     before = usage_file.read_bytes()
-    caplog.set_level(logging.DEBUG, logger="chargehand.usage")
+    caplog.set_level(logging.DEBUG, logger="elfcrew.usage")
 
     assert not poller(harness, Fetch(result), tmp_path).poll_once()
 
@@ -253,7 +253,7 @@ def test_a_failed_poll_writes_nothing_and_logs_one_line(harness, tmp_path, caplo
 def test_a_failure_warns_once_until_it_changes_and_a_recovery_says_so(harness, tmp_path, caplog):
     fetch = Fetch(ClaudeError("the usage request timed out"))
     poll = poller(harness, fetch, tmp_path)
-    caplog.set_level(logging.DEBUG, logger="chargehand.usage")
+    caplog.set_level(logging.DEBUG, logger="elfcrew.usage")
 
     poll.poll_once()
     poll.poll_once()
@@ -450,7 +450,7 @@ def test_doctor_says_when_there_is_no_reading_or_no_current_window(harness):
 
 
 def test_doctor_lists_the_usage_check(capsys, config_file, harness):
-    from chargehand.cli import main
+    from elfcrew.cli import main
 
     main(["--config", str(config_file), "doctor", "--json", "--no-tracker"])
 
@@ -482,6 +482,6 @@ def test_a_bad_poll_interval_is_an_error(value, message):
 
 
 def test_the_bundled_configuration_names_the_poll_interval():
-    from chargehand import paths
+    from elfcrew import paths
 
     assert "poll_secs = 300" in (paths.templates_dir() / "config.toml").read_text()

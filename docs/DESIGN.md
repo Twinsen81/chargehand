@@ -1,4 +1,4 @@
-# chargehand — design
+# elfcrew — design
 
 **Status:** the runner and the control surface are implemented and tested against a fake
 Claude Code and a fake tracker, and the whole sequence has been run against a real tracker
@@ -24,7 +24,7 @@ Goals:
 Non-goals:
 
 - A shared team queue. Routing is per assignee.
-- Cloud execution, merging pull requests, or deciding *how* an issue is worked. chargehand is
+- Cloud execution, merging pull requests, or deciding *how* an issue is worked. elfcrew is
   deliberately dumb: it launches a prompt and supervises the session. The intelligence lives
   in the repository's own skills and instructions.
 
@@ -34,7 +34,7 @@ Non-goals:
 Issue: queue label + assigned to me (+ optional state filter)
         │  poll every few minutes
         ▼
-launchd KeepAlive job ──► chargehand serve: a tick every tick_interval_secs,
+launchd KeepAlive job ──► elfcrew serve: a tick every tick_interval_secs,
                           and at once when a control request waits
    1. reconcile incomplete launches
    2. apply recorded control requests
@@ -57,7 +57,7 @@ Claude Code supervisor (background sessions, one per worker)
         ▼
 whatever the prompt produces — typically a draft pull request
 
-Operator: chargehand status|watch|cancel…  ·  Claude Code agent view for replies
+Operator: elfcrew status|watch|cancel…  ·  Claude Code agent view for replies
           GET 127.0.0.1:7878/api/state, /api/health (the daemon's loopback API)
 ```
 
@@ -68,11 +68,11 @@ Components:
 | Runner (tick, ledger, reconciler, notifier, watchdog, garbage collection) | Turns queued issues into supervised workers |
 | Roles | Per-repository templates for workers: prompt, agent, model, effort, permissions, start rules |
 | Runtimes | The coding agent behind one interface; `claude` is the only one that ships |
-| Daemon (`chargehand serve`) | Runs the tick on a timer and applies control requests; serves a loopback API with a token |
+| Daemon (`elfcrew serve`) | Runs the tick on a timer and applies control requests; serves a loopback API with a token |
 | Control CLI | See and steer the runner; records requests for the daemon |
 | Tracker adapters | `linear` and `github` |
 | Event sources | `github`, the repository's tracker, and a `command` source for anything else |
-| A lease tool such as banksman (external, optional, never called by chargehand) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
+| A lease tool such as banksman (external, optional, never called by elfcrew) | Leases for devices, emulators, and build slots, taken by the repository's own scripts |
 
 ## 3. Trigger and routing
 
@@ -95,9 +95,9 @@ Label lifecycle (names are configurable):
 
 | Label | Meaning | Set by |
 |---|---|---|
-| `chargehand` | Queued | you |
-| `chargehand-running` | A session is working on it | runner, at pickup |
-| `chargehand-blocked` | Waiting for you, cancelled, failed, or needs a look | runner |
+| `elfcrew` | Queued | you |
+| `elfcrew-running` | A session is working on it | runner, at pickup |
+| `elfcrew-blocked` | Waiting for you, cancelled, failed, or needs a look | runner |
 | *(none)* | Finished | runner |
 
 Re-arm an issue by adding the queue label again; a new worker starts only when the previous
@@ -146,10 +146,10 @@ events and the next cursor, an optional `mark` for label writes, and `item_open`
 collection. It is configured as a `[[source]]` table with a `name`, a `type`, and the type's
 own options. An event names its source, kind, work item, actor, time, a dedupe id and a
 pointer (a URL or identifier the worker fetches itself). It never carries a body: a source
-reads a comment only to find chargehand's authorship marker, `<!-- chargehand-worker -->`,
+reads a comment only to find elfcrew's authorship marker, `<!-- elfcrew-worker -->`,
 and the text stays in the source. No space follows the name, because the launch deny rule
-`Bash(*chargehand *)` refuses the name followed by a space in a command, and a body can
-still end up on a command line; the first spelling, `<!-- chargehand -->`, is still read
+`Bash(*elfcrew *)` refuses the name followed by a space in a command, and a body can
+still end up on a command line; the first spelling, `<!-- elfcrew -->`, is still read
 as marked. Kinds are bare (`comment`, any source) or qualified by the source name
 (`github.comment`).
 
@@ -189,7 +189,7 @@ The router runs once per tick after the polls, in this order:
    repository that no `[[repository]]` names is ignored, and reported once per source and
    repository when a role would start on its kind.
 
-The `github` source works through the `gh` CLI, so chargehand handles no token, and it is
+The `github` source works through the `gh` CLI, so elfcrew handles no token, and it is
 the only module that knows `gh`. It polls in two parts. The notifications endpoint of the
 signed-in account gives `review_requested`, `comment`, `mention` and `ci_status` (GitHub's
 `ci_activity`); it is asked with `If-Modified-Since` and `If-None-Match`, so an unchanged
@@ -224,9 +224,9 @@ name, and a name that GitHub itself would refuse is skipped. A start event belon
 `[[repository]]` whose `github` key names its `owner/repo`; on any other repository it
 starts nothing. `gh_bin` and `timeout_secs` are its options.
 
-The `command` source connects any other system without a plugin framework: chargehand runs
+The `command` source connects any other system without a plugin framework: elfcrew runs
 a configured executable that reads the cursor on stdin, and the refs of the followed items
-in `CHARGEHAND_REFS`, and prints one JSON object per event and a last line with the new
+in `ELFCREW_REFS`, and prints one JSON object per event and a last line with the new
 cursor. Optional commands answer `item_open` and `mark` (exit 3 means the write may or may
 not have landed). The commands run as subprocesses with a
 timeout and without a shell, each output line is checked against a closed event shape, and a
@@ -261,7 +261,7 @@ than a week is given up with a warning.
 
 Two layers, so a repository can be shared without sharing machine details.
 
-Machine layer — `~/.config/chargehand/config.toml`:
+Machine layer — `~/.config/elfcrew/config.toml`:
 
 ```toml
 poll_interval_secs = 180
@@ -270,10 +270,10 @@ max_open_workers = 4                # working + blocked; bounds the resume burst
 max_run_hours = 6                   # watchdog: notify
 hard_stop_hours = 10                # watchdog: stop the session
 background_shell_mins = 30          # notify when a background shell outlives its turn this long
-worktree_root = "~/chargehand-worktrees"
+worktree_root = "~/elfcrew-worktrees"
 
 [notify]
-command = "~/.config/chargehand/notify.sh"   # receives ITEM, ROLE, STATE, URL, REPOSITORY as env vars
+command = "~/.config/elfcrew/notify.sh"      # receives ITEM, ROLE, STATE, URL, REPOSITORY as env vars
 
 [[repository]]
 name = "my-app"
@@ -298,9 +298,9 @@ The daemon reads two more tables. Every key is optional; these are the defaults:
 ```toml
 [serve]
 port = 7878                         # on 127.0.0.1; no key binds another address
-token_file = "~/.config/chargehand/board.token"   # next to config.toml; mode 0600
+token_file = "~/.config/elfcrew/board.token"      # next to config.toml; mode 0600
 tick_interval_secs = 60             # how often the daemon ticks
-usage_file = "~/.cache/chargehand/usage.json"     # the usage readings go here
+usage_file = "~/.cache/elfcrew/usage.json"        # the usage readings go here
 
 [usage]
 wake_reserve_percent = 20           # no wake while the week is above 80 %
@@ -314,19 +314,19 @@ The reserves keep a part of the subscription's weekly usage window for your own 
 `poll_interval_secs` no longer sets how often the tick runs. It is still the refresh
 interval of `watch`, capped at 30 seconds.
 
-Repository layer — `.chargehand.toml`, checked in:
+Repository layer — `.elfcrew.toml`, checked in:
 
 ```toml
 base = "origin/main"
 setup = "scripts/setup_worktree.sh {worktree}"
-branch_prefix = "chargehand/"       # the placeholder branch each worker starts on
+branch_prefix = "elfcrew/"          # the placeholder branch each worker starts on
 ```
 
-Role files — `.chargehand/roles/<name>.toml` in the repository, or
-`~/.config/chargehand/roles/<name>.toml` for every repository that has none of its own:
+Role files — `.elfcrew/roles/<name>.toml` in the repository, or
+`~/.config/elfcrew/roles/<name>.toml` for every repository that has none of its own:
 
 ```toml
-# .chargehand/roles/implementer.toml
+# .elfcrew/roles/implementer.toml
 runtime = "claude"                  # the coding agent, see "Runtimes"; claude is the default
 agent = "implementer"               # optional: .claude/agents/implementer.md, passed as --agent
 model = "opus"                      # optional, passed as --model
@@ -336,7 +336,7 @@ permission_mode = "auto"            # auto | manual | acceptEdits | dontAsk | pl
 allow = ["Bash(gh pr *)"]           # optional allow rules for this role's sessions
 permission_timeout_secs = 600       # optional: how long a permission prompt waits for the board
 setup = "scripts/prepare.sh {worktree}"   # optional, runs after the repository's setup
-status_file = "/tmp/chargehand/{item}/status.json"   # optional, see "Supervision"
+status_file = "/tmp/elfcrew/{item}/status.json"      # optional, see "Supervision"
 
 [[start]]                           # create a worker when an issue gets the queue label
 on = "labeled"                      # any tracker; "linear.labeled" names one
@@ -350,7 +350,7 @@ refresh_after_wakes = 20            # optional: a fresh session after this many 
 refresh_after_tokens = 120000       # optional: a fresh session past about this many tokens; 0 for never
 ```
 
-A repository whose `.chargehand.toml` still carries `prompt`, `permission_mode` and
+A repository whose `.elfcrew.toml` still carries `prompt`, `permission_mode` and
 `status_file`, and has no role file, gets an `implementer` role built from them, so a
 configuration from before roles keeps working.
 
@@ -375,7 +375,7 @@ ledger allows at most one live worker per role and item among the workers that s
 created, enforced by the database. The ledger already records each worker's origin, so a
 later way to create workers by hand is not held to that limit.
 
-chargehand ships two starter roles, which `chargehand init --role <name>` writes into a
+elfcrew ships two starter roles, which `elfcrew init --role <name>` writes into a
 repository. `implementer` takes issues from the queue. `pr-reviewer` starts on
 `github.review_requested`, follows `comment`, `review` and `ci_status` on its pull request
 and ends on `pr_closed`; it comes with a Claude Code agent file,
@@ -391,7 +391,7 @@ the main checkout or an absolute `PATH` entry; for the reviewer that is `gh pr c
 {item_url} --detach`. The step runs again before each wake, so the checkout follows the
 item's head, and then its program comes from the main checkout or `PATH` only, because the
 session has worked in the base checkout since; a wake whose step fails waits like one a
-cap holds. Every git call chargehand makes, and the setup subprocess, run with
+cap holds. Every git call elfcrew makes, and the setup subprocess, run with
 `core.hooksPath` and `core.fsmonitor` off, so no repository config runs a program. The
 prompt names the checkout as `{item_checkout}`, and the session may read it without a
 prompt. After the setup step, the tick records the files its runtime loads from a working
@@ -447,7 +447,7 @@ reads.
 
 Each runtime declares its capabilities: live attach, in-place wake, permission prompts that
 can be answered from outside the session, usage readings, fork, and whether a supervisor
-outside chargehand hosts its processes. The tick and the CLI check a capability, never the
+outside elfcrew hosts its processes. The tick and the CLI check a capability, never the
 runtime's name, and the board will show what a worker's runtime cannot do.
 
 Role files stay flat. The common keys (`runtime`, `prompt`, `model`, `effort`, `checkout`,
@@ -459,10 +459,10 @@ one runtime does not start silently on another.
 
 `claude` is the only runtime that ships and the default. It wakes a session by stopping its
 process, confirming that it stopped, and resuming it by the full session id with stdin
-closed; a resume that starts a copy instead is reported as a fault. With the chargehand mod
+closed; a resume that starts a copy instead is reported as a fault. With the elfcrew mod
 in the session, the wake goes into the session's outbox instead, and the process goes on
-(see "The chargehand mod" in section 6). The test suite has a
-second runtime with fewer capabilities, whose processes chargehand hosts, and the tick tests
+(see "The elfcrew mod" in section 6). The test suite has a
+second runtime with fewer capabilities, whose processes elfcrew hosts, and the tick tests
 that must behave the same run on both.
 
 Fork copies a session into a new one that keeps the conversation; a clone in full mode
@@ -589,7 +589,7 @@ identifier alone, for a session from before roles). Found → adopt it.
   the fresh session of a refresh before its ids are recorded, is neither reported nor
   adopted. No unattended session runs outside the watchdog.
 
-The ledger is a SQLite database under `~/Library/Application Support/chargehand/`, which
+The ledger is a SQLite database under `~/Library/Application Support/elfcrew/`, which
 survives reboots. A partial unique index over live rows that a start rule created makes two
 such workers of one role for one issue impossible at the database level rather than by a
 check the caller might skip. Every session a worker owns is recorded in a `sessions` table.
@@ -599,7 +599,7 @@ The queue status last *verified* on the tracker is stored separately from the wo
 state, so a write that could not be confirmed is retried on the next tick instead of being
 assumed to have landed.
 
-The daemon runs one tick at a time, but `chargehand tick` is also a command, so every tick
+The daemon runs one tick at a time, but `elfcrew tick` is also a command, so every tick
 takes an exclusive file lock rather than assuming it is alone. The daemon holds the lock
 only while one of its ticks runs, so a tick by hand waits for it or reports that a tick is
 running. The kernel releases the lock when its holder dies, so a killed tick needs no
@@ -622,7 +622,7 @@ session exists, because a resume, a respawn and an attach apply the saved `--set
 again; it is deleted when the session is removed (`discard`, `retry`, garbage collection).
 In most launches whose stdin is /dev/null or a pipe already at its end, a new session runs
 no `SessionStart` hook; it runs one in every launch whose stdin is a pipe that stays open.
-So a launch gets an empty pipe that chargehand closes when the launcher exits, and does not
+So a launch gets an empty pipe that elfcrew closes when the launcher exits, and does not
 depend on the daemon's own stdin, which is /dev/null under launchd. The daemon applies each
 post to the ledger at once, through the same transition and notification code as the tick.
 `claude agents --json --all`, diffed against the ledger on every tick, stays the fallback
@@ -850,7 +850,7 @@ state `background` (see **Background shells**). A bare `done` still says nothing
 *how* a run finished.
 
 A worker disambiguates that with its **report**: the mod's `report(state, summary, links)`
-tool (see "The chargehand mod" below). A report of `done` or `failed` in a turn ends the
+tool (see "The elfcrew mod" below). A report of `done` or `failed` in a turn ends the
 worker at the end of that turn, as the status file's `complete` and `aborted` do: `done`
 clears the label, and `failed` keeps the summary as the worker's problem, out of the
 notification. A report counts for the turn it was made in, from the last wake on (with a
@@ -900,10 +900,10 @@ reading means no reserve; a reading counts however old it is, until the window's
 time has passed (see "Admission" in section 5). A worker that waits becomes `queued` and
 keeps its events, and the reason it waits is kept for the board. A worker that reaches its
 daily cap is notified once, with the state `daily-cap`, and again only after its next wake.
-A `/loop` that a role's prompt starts runs its own turns, which chargehand does not start:
+A `/loop` that a role's prompt starts runs its own turns, which elfcrew does not start:
 the debounce and the daily cap do not count them, and no cap stops them. While such a turn
 runs, the worker is `running` and holds one slot of `max_concurrent`. A session whose
-chargehand mod said hello gets the message in its outbox (see "The chargehand mod" below).
+elfcrew mod said hello gets the message in its outbox (see "The elfcrew mod" below).
 Any other session is woken by the runtime: `claude` stops a live idle process, confirms
 that it stopped, and resumes it by the full session id. It reads the listing again first:
 a session that started a turn or opened a prompt since the tick's listing is left alone,
@@ -942,7 +942,7 @@ report, it is the transcript's size on disk at about four bytes per token. The m
 the count, which decides. The ledger keeps no window size, so a percentage alone reads a
 session of a model with a larger window as smaller than it is: the refresh comes later,
 never earlier. A runtime
-whose fresh session would not load the chargehand mod, and so has no tool for the note,
+whose fresh session would not load the elfcrew mod, and so has no tool for the note,
 keeps the session, with a warning. While a background shell of the ended turn runs, the
 refresh waits, not the wake: a session with the mod takes the wake from its outbox, also a
 reply from the board, and the shell runs on; the refresh comes at the first wake after the
@@ -957,7 +957,7 @@ mod, and otherwise waits unless a reply from the board waits. Else the tick stop
 session and confirms the stop, which ends the processes that outlive it (see **Shells
 after a stop**), so two sessions never run in one worktree, drops the
 old session's open outbox message, and launches a new one in the same worktree under the
-worker's name, with the mod. Its first prompt is chargehand's own text, which names the
+worker's name, with the mod. Its first prompt is elfcrew's own text, which names the
 item and the `read_handoff` tool, then the role's prompt, then the waiting events as the
 usual lines. When no note is stored, the text says so and sends the session to the
 worktree, its branch and the item instead of the tool. The handoff note never reaches
@@ -992,8 +992,8 @@ gets only replies refreshes only when the listing shows its turn end as `done`: 
 Claude Code lists its session `blocked` with no dialog after every turn, every reply
 continues the session and the limit never applies. The card lists the worker's sessions.
 
-**The chargehand mod.** Every worker session loads a small Claude Code plugin that ships
-in the package (`templates/mod/`, plugin name `chargehand`) with `--plugin-dir`, at its
+**The elfcrew mod.** Every worker session loads a small Claude Code plugin that ships
+in the package (`templates/mod/`, plugin name `elfcrew`) with `--plugin-dir`, at its
 launch and at a full-mode clone; Claude Code stores the flag with the job, so the mod
 comes back after a stop and a resume or a respawn. The session loads a copy of the mod
 in the state directory (`mod/`), which each launch brings up to date: Claude Code writes
@@ -1007,7 +1007,7 @@ posts nothing; it has no default port. It is the transport of the agent channel:
   daemon's registry (name, description and input schema, defined once in the daemon, so a
   new tool needs no change in the mod), and posts the session start. The hello is the
   record that this session takes its wakes from the outbox. The model sees the tools as
-  `mcp__chargehand__<tool>`, and the launch settings allow them, so no permission mode
+  `mcp__elfcrew__<tool>`, and the launch settings allow them, so no permission mode
   asks for them. In this release: `report`, `ask`, `handoff`, `read_handoff`, `request_wake` and
   `subscribe(item, kinds)`, which subscribes the worker to an item that a source names by
   its URL or identifier.
@@ -1094,7 +1094,7 @@ item closed is not notified. A turn end that waits for events (`idle` or `queued
 because a worker that answers ten comments ends ten turns; `status` and the board show it.
 The one exception is a turn end whose background shell still runs after
 `background_shell_mins`, which is notified once per turn end, as `idle` (see
-"Background shells" below), and a `chargehand stop` that leaves processes of the session
+"Background shells" below), and an `elfcrew stop` that leaves processes of the session
 running, such as a background shell, which is notified once, as `orphan-shell` (see
 "Shells after a stop" below). The turn end clears the record
 of the last notified session state, so the next question is notified even when it is the
@@ -1140,7 +1140,7 @@ runs ends in a new turn end, which is notified again `background_shell_mins` aft
 while no newer turn started. The worker stays `idle`, so delivery may wake it: through the
 outbox the mod submits the wake as a new turn while the shell runs. A stop and resume, for
 a session without the mod, ends the shell, such as a dev server or a long test run:
-chargehand ends what outlives the stop (see **Shells after a stop**). So while the session
+elfcrew ends what outlives the stop (see **Shells after a stop**). So while the session
 is `background`, a wake for events waits: the worker is `queued`, its card says "wake
 held, a background shell of session ... still runs", and the events stay in its inbox.
 The hold's line in the tick report, which the daemon logs at INFO, comes once per hold:
@@ -1180,7 +1180,7 @@ PID 1 as its parent, and no session owns it, such as a dev server that keeps its
 This was checked with Claude Code 2.1.322, 2.1.323 and 2.1.325 as the binary that
 launched the session; the shared background service ran every session with the newest
 installed version, 2.1.325, so the check does not tell older versions apart. So before
-each stop, chargehand reads the processes below the session's listed `pid` (`ps`, with
+each stop, elfcrew reads the processes below the session's listed `pid` (`ps`, with
 the start time of each). Once the stop is confirmed, it waits up to 10 seconds, as a
 resume does, until that `pid` has exited: the listing shows the stop about a second
 before the process ends, and the processes that end with it, such as a stdio MCP server,
@@ -1190,15 +1190,15 @@ children. Otherwise it ends the ones that still run: SIGTERM to each, and to the
 group of each one that leads its own group, then SIGKILL to what still runs after 3
 seconds. A process counts only with the same pid and
 the same start time, so a pid that a new process got meanwhile is never signalled, and
-chargehand never signals PID 1 or itself. This applies to every stop that ends the
+elfcrew never signals PID 1 or itself. This applies to every stop that ends the
 session's work: cancel, discard, retry, archive, garbage collection, the watchdog's hard
 stop, the close of a worker whose item closed, the stop of a session refresh, the stop of
 another session in the worker's worktree, and the stop before a resume (a reply from the
 board, the resume after a usage limit). The log names the pids it ended, and a WARNING
-names those that did not end. A stop that is not confirmed ends nothing. `chargehand
+names those that did not end. A stop that is not confirmed ends nothing. `elfcrew
 stop`, which `continue` undoes, keeps them, because the operator may want the shell, and
 so does the pause of a worker whose wake the workspace guard refuses (`wake-fault`), but
-each says so: one WARNING line names the pids, as does the outcome of `chargehand stop`,
+each says so: one WARNING line names the pids, as does the outcome of `elfcrew stop`,
 and one notification goes out with the state `orphan-shell` and a count. The runner state
 keeps them for the worker, and the next cancel, discard, retry or other stop that ends the
 worker's work ends those that still run too. The stop before a resume and the stop of a
@@ -1233,8 +1233,8 @@ live worker.
 
 ## 7. Control: a CLI and a loopback daemon
 
-chargehand runs on the machine you work on and is steered from a terminal on it. A
-resident daemon, `chargehand serve`, does the work: it runs the tick every
+elfcrew runs on the machine you work on and is steered from a terminal on it. A
+resident daemon, `elfcrew serve`, does the work: it runs the tick every
 `tick_interval_secs`, applies control requests, and serves a small HTTP API on 127.0.0.1.
 The CLI is how you steer it.
 
@@ -1244,24 +1244,24 @@ machine remotely is the operating system's job, not this tool's. The daemon's AP
 reachable from the machine itself and from nowhere else.
 
 ```
-chargehand status [--json]          # queue, workers, repositories, sessions — no free text
-chargehand watch                    # self-refreshing status table
-chargehand logs <ITEM>              # tail of the session's output — explicitly untrusted
-chargehand pause [--repository <name>]   # stop admitting new launches; running sessions continue
-chargehand resume [--repository <name>]
-chargehand cancel <ITEM>            # stop the session, mark blocked; keep the worktree
-chargehand stop <ITEM>              # pause one worker
-chargehand continue <ITEM>          # respawn it; the saved conversation resumes
-chargehand retry <ITEM>             # new worker for a failed or cancelled one
-chargehand discard <ITEM> --yes     # remove session, worktree, branch; refuses with unpushed commits
+elfcrew status [--json]             # queue, workers, repositories, sessions — no free text
+elfcrew watch                       # self-refreshing status table
+elfcrew logs <ITEM>                 # tail of the session's output — explicitly untrusted
+elfcrew pause [--repository <name>]      # stop admitting new launches; running sessions continue
+elfcrew resume [--repository <name>]
+elfcrew cancel <ITEM>               # stop the session, mark blocked; keep the worktree
+elfcrew stop <ITEM>                 # pause one worker
+elfcrew continue <ITEM>             # respawn it; the saved conversation resumes
+elfcrew retry <ITEM>                # new worker for a failed or cancelled one
+elfcrew discard <ITEM> --yes        # remove session, worktree, branch; refuses with unpushed commits
                                     # or other sessions in the worktree; --force removes those too
-chargehand clone <ITEM> --mode fresh|full|summary [--prompt TEXT | --prompt-file PATH] [--model M]
+elfcrew clone <ITEM> --mode fresh|full|summary [--prompt TEXT | --prompt-file PATH] [--model M]
                  [--effort E] [--subscribe KIND]...   # a new worker from an existing one
-chargehand tick                     # run a tick now, under the tick lock
-chargehand serve                    # the daemon; `install` writes the job that runs it
-chargehand statusline -- '<command>'   # status line wrapper: records the weekly usage window
-chargehand export <FILE>            # this machine's setup in one archive, without secrets
-chargehand import <FILE>            # unpack it on another machine; asks for the paths
+elfcrew tick                        # run a tick now, under the tick lock
+elfcrew serve                       # the daemon; `install` writes the job that runs it
+elfcrew statusline -- '<command>'      # status line wrapper: records the weekly usage window
+elfcrew export <FILE>               # this machine's setup in one archive, without secrets
+elfcrew import <FILE>               # unpack it on another machine; asks for the paths
 ```
 
 Commands that take an item also take `--role`, which is needed when workers of several
@@ -1284,7 +1284,7 @@ refusal says which.
   at once when one waits, so a command usually returns within a second or two, and after
   the tick in progress when there is one. While the daemon answers on its port the command
   never runs a tick itself. The daemon reports which ledger it serves, so a second
-  instance (`CHARGEHAND_STATE_DIR`, `--config`) does not wait on another instance's
+  instance (`ELFCREW_STATE_DIR`, `--config`) does not wait on another instance's
   daemon. With no daemon, the command runs a tick itself under the tick lock; a timer job
   from before the daemon is still kick-started first. A `cancel` therefore cannot race a
   launch in progress. Reconciliation runs *before* recorded requests, so a cancel issued
@@ -1305,7 +1305,7 @@ refusal says which.
   a page on another origin cannot read one either. A body is capped at 1 MiB and must come
   with a `Content-Length`. Each request opens its own ledger connection.
   `POST /hooks/<event>` receives the posts of the worker sessions (section 6), and
-  `POST /channel/...` the posts of their chargehand mod (section 6); each
+  `POST /channel/...` the posts of their elfcrew mod (section 6); each
   worker in `/api/state` also carries its last hook, its last answer, the reset time of a
   usage limit and its open permission prompts.
 - **The board.** `GET /` is one static page with its script and style sheet
@@ -1399,7 +1399,7 @@ refusal says which.
   by a handle with the worker's id, `role/item#id` (`role/#id` without an item); a
   worker that a start rule created keeps `role/item`. Every command that takes an item
   also takes a handle, and `#id` alone; a shell reads a word that starts with `#` as a
-  comment, so quote it: `chargehand stop '#7'`. One rule resolves a target, in order:
+  comment, so quote it: `elfcrew stop '#7'`. One rule resolves a target, in order:
   (1) an id handle names the worker with that id; (2) `role/item`, or an item with
   `--role`, is a handle, and when a worker has exactly that handle it wins, the live one
   first, then the newest; (3) otherwise the item decides: its one live worker (in the
@@ -1408,7 +1408,7 @@ refusal says which.
   started by hand, while a start-rule worker on the item has ended, is refused, because a
   notification about that worker carried the bare item. Anything else is refused with
   each candidate as `role/item#id`, and a refusal about a finished worker lists the live
-  workers on its item. `cancel` and `discard` name the worker they acted on. Every handle chargehand prints resolves back to its
+  workers on its item. `cancel` and `discard` name the worker they acted on. Every handle elfcrew prints resolves back to its
   worker under this rule: `status --json` and the board show `role/item` for a live
   start-rule worker and the id handle for every other worker, finished ones included,
   and a hint in a refusal uses the bare item only when the rule resolves it to that
@@ -1443,7 +1443,7 @@ refusal says which.
   sequences, with the same placeholders as a role's prompt), `model` (a model name or
   alias that does not start with `-`), `effort` (a level of the role file) and
   `subscribe` (event kinds on the original's item, only when it has one); a bad value is
-  refused with 400 before a request is recorded. `chargehand clone <ITEM> --mode ...`
+  refused with 400 before a request is recorded. `elfcrew clone <ITEM> --mode ...`
   records the same request row, with origin `cli`. `GET /api/workers/<id>/clone`, a read
   without the token, answers what the card's clone form starts with: the worker's prompt
   template, model and effort (its role's, or for a clone the ones chosen for it), the
@@ -1458,7 +1458,7 @@ refusal says which.
   exists, when the repository is paused or unavailable, when the original's branch is
   gone, for full mode when the runtime cannot fork, the original has no session, or it
   is launching, running or blocked (a copy would take a turn in progress or an open
-  prompt), for summary mode when the runtime's sessions do not load the chargehand mod
+  prompt), for summary mode when the runtime's sessions do not load the elfcrew mod
   (no tool gives the note), when the original's note is not current and it is
   launching, running or blocked ("clone it in summary mode once it is idle"), when it
   has no note and no wake can reach it, or when the note is not current and the global
@@ -1571,7 +1571,7 @@ refusal says which.
   servers of yours, no session file) in an empty private directory under the state directory,
   writes one `control_request` line with the subtype `get_usage`, reads lines until the
   `control_response` with that request id, and closes stdin. Claude Code fetches the usage
-  with its own sign-in, so chargehand reads no token and no Keychain item and makes
+  with its own sign-in, so elfcrew reads no token and no Keychain item and makes
   no network call; the request runs no turn and writes no transcript. The answer's
   `rate_limits.seven_day` has `utilization` (a percentage) and `resets_at` (an ISO time),
   and the daemon writes that window with the source `get_usage`; `five_hour`, the
@@ -1582,24 +1582,24 @@ refusal says which.
   reason stays the same), and leaves the file with the reading it has. `--bare` is no
   option, because it skips the Keychain, where the sign-in is. `doctor` shows the source
   and the age of the last reading, and warns when it is older than three poll intervals.
-  The status line wrapper and the mod stay as sources beside it. The chargehand mod posts
+  The status line wrapper and the mod stay as sources beside it. The elfcrew mod posts
   each worker session's rate-limit windows after every turn, and the daemon writes the
   `seven_day` one with the source `session`. Claude Code gives a status line command the subscription's
   `rate_limits`: a `seven_day` window with `used_percentage` and `resets_at`. It sends them
   on subscription plans only, and only after the session's first API response.
-  `chargehand statusline -- '<command>'` reads that payload, writes the `seven_day` window
+  `elfcrew statusline -- '<command>'` reads that payload, writes the `seven_day` window
   with the time it wrote it to `usage_file` (atomically, mode 0600), and then runs
   `<command>` through a shell with the same stdin, passing its output and exit code
   through. Other windows in `rate_limits` or in the file are ignored without a message. A
   payload without the `seven_day` window, or with one whose `resets_at` cannot be read,
   leaves the file as it is, and a file that cannot be written changes nothing in the status
-  line. chargehand does not edit your settings;
+  line. elfcrew does not edit your settings;
   you wrap your own command in `~/.claude/settings.json`:
 
   ```json
   "statusLine": {
     "type": "command",
-    "command": "chargehand statusline -- '~/.claude/statusline.sh'"
+    "command": "elfcrew statusline -- '~/.claude/statusline.sh'"
   }
   ```
 
@@ -1633,8 +1633,8 @@ refusal says which.
   makes "only when asked" a rule rather than the model's judgement. The rules lead with a
   wildcard rather than anchoring on the program name, for the same reason the launch-time
   deny rules do: a rule matches the command text, so an anchored one gates
-  `chargehand cancel X` and misses both `/usr/local/bin/chargehand cancel X` and
-  `sh -c 'chargehand cancel X'`. The skill tells the session to stop when a prompt is
+  `elfcrew cancel X` and misses both `/usr/local/bin/elfcrew cancel X` and
+  `sh -c 'elfcrew cancel X'`. The skill tells the session to stop when a prompt is
   declined, not to reach the same result another way. An ask rule makes Claude Code ask
   whatever runs the session, so it protects nothing where a hook or an app answers
   prompts automatically. `probes/assistant_rules.py` checks the rules, and the skill in
@@ -1659,10 +1659,10 @@ refusal says which.
 
 Parallel workers on one machine compete for scarce things: a phone on USB, a limited number
 of emulators, memory for heavy builds. Sharing them safely is the job of a lease tool, such
-as banksman, which the repository's own scripts call. chargehand does not call it, read its
+as banksman, which the repository's own scripts call. elfcrew does not call it, read its
 output, or know its version. A machine without a lease tool runs exactly the same.
 
-banksman needs nothing from the caller, so chargehand only has to keep a few properties that
+banksman needs nothing from the caller, so elfcrew only has to keep a few properties that
 any such tool can rely on:
 
 - **A worker's commands run below its own agent process.** A worker's session is a Claude
@@ -1678,13 +1678,13 @@ any such tool can rely on:
 - **Stopping a worker ends its process.** banksman ends a lease when its agent process has
   ended, after a grace period, and takes the resource back at the start of its next command
   or in its own reap job. So a cancel, the watchdog, a discard, or garbage collection frees a
-  worker's leases without chargehand releasing anything. The cost: after a stop, a resource
+  worker's leases without elfcrew releasing anything. The cost: after a stop, a resource
   can stay held for the grace period.
 - **Agents cannot reach the tool's operator commands.** The launch deny rules include
   `Bash(*banksman admin*)` (see "Control").
 
-chargehand once ran banksman's `reap` and `status` itself. That made every change of
-banksman's output schema a reason to change chargehand, for no gain in safety, because
+elfcrew once ran banksman's `reap` and `status` itself. That made every change of
+banksman's output schema a reason to change elfcrew, for no gain in safety, because
 banksman reaps on its own. Use `banksman watch` to see who holds what.
 
 ## 9. Leaving it running
@@ -1693,8 +1693,8 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
   login keychain, and launchd agents run in that session. A locked screen is fine; a logged
   out one is not.
 - `install` writes a LaunchAgent with `KeepAlive` and `RunAtLoad` that runs
-  `chargehand serve`. launchd starts the daemon when you log in and starts it again when it
-  exits, at most once every ten seconds. The label is still `dev.chargehand.tick`, so
+  `elfcrew serve`. launchd starts the daemon when you log in and starts it again when it
+  exits, at most once every ten seconds. The label is still `dev.elfcrew.tick`, so
   `install --load` unloads a timer job from an older release before it loads the new one,
   and `doctor` warns when the installed job is still that timer. `doctor` also checks that
   the daemon answers on its port and that the token file has mode 0600.
@@ -1721,8 +1721,8 @@ banksman reaps on its own. Use `banksman watch` to see who holds what.
 
 ### Moving a setup to another machine
 
-`chargehand export <file>` writes one zip archive with a `manifest.json` (format version,
-chargehand version, time, member list). It holds:
+`elfcrew export <file>` writes one zip archive with a `manifest.json` (format version,
+elfcrew version, time, member list). It holds:
 
 - The machine configuration. Repository paths, `worktree_root`, `usage_file`, and every
   `*_bin` key are written with `~` for the home directory; `token_file` and `usage_file` are
@@ -1733,7 +1733,7 @@ chargehand version, time, member list). It holds:
   `password` or `api_key`) are left out and listed in the manifest. Comments and the keys
   export does not rewrite stay as they are: the standard library has no TOML writer, so the
   file is rewritten as text and parsed again.
-- The role files in `~/.config/chargehand/roles/`, and the agent files in
+- The role files in `~/.config/elfcrew/roles/`, and the agent files in
   `~/.claude/agents/` that the machine-level roles or the repositories' enabled roles name.
   Repository-level role files travel with their repository.
 - The notification hook, when its command runs a file in the home or the configuration
@@ -1743,7 +1743,7 @@ chargehand version, time, member list). It holds:
   generated shim that contains the home directory's path. Export says why, and import
   lists installing it as a manual step. The archive holds no file larger than 4 MB and at
   most 512 files, the limits import applies.
-- The `statusLine` entry of `~/.claude/settings.json` when it runs `chargehand statusline`.
+- The `statusLine` entry of `~/.claude/settings.json` when it runs `elfcrew statusline`.
 - The board settings of the configured repositories. Worker settings are not exported: they
   are kept by worker id, and a worker id means nothing on another machine.
 
@@ -1751,7 +1751,7 @@ The archive never holds the daemon's token, a Keychain value, or the rest of the
 Export refuses to write an archive in which any file still contains the home directory or
 the token, and names the file.
 
-`chargehand import <file>` checks the archive first: it refuses a format version newer
+`elfcrew import <file>` checks the archive first: it refuses a format version newer
 than it knows, a file name outside the layout above, a symlink, and a member that the
 manifest does not list. It then asks for each repository's path and for the worktree root
 (the archive's values are the defaults), or takes them from `--repository NAME=PATH` and
@@ -1775,11 +1775,11 @@ The log is for investigating a missed event, a missed hook, a wrong notification
 stale worker or a daemon that stopped ticking, without reading the ledger by hand. It is
 not a record of what workers did: nothing a session wrote reaches it.
 
-- **One writer, one format.** The daemon writes `~/Library/Logs/chargehand.log` through
+- **One writer, one format.** The daemon writes `~/Library/Logs/elfcrew.log` through
   a rotating handler (10 MB, five old files); `install` passes the path as
-  `serve --log-file`. The launchd job's stdout and stderr go to `chargehand.launchd.log`,
+  `serve --log-file`. The launchd job's stdout and stderr go to `elfcrew.launchd.log`,
   because a rotation renames the log file and launchd would go on writing into the renamed
-  one. The tick report goes through the same handler, under `chargehand.tick`; a tick run
+  one. The tick report goes through the same handler, under `elfcrew.tick`; a tick run
   by hand still prints its report to stdout, and `tick --json` is unchanged. A formatter
   cuts every message to one line and strips control sequences, so a message that quotes a
   script or a tracker cannot break a line or reach a terminal that tails the file. A
@@ -1844,13 +1844,13 @@ Done:
 - Notifications, watchdog, garbage collection, the status-file protocol.
 - `init`, `doctor`, `install`, and the bundled templates.
 - `export` and `import`: a machine's setup carried to another machine without its secrets.
-- Devices shared through a lease tool that chargehand never calls, with the deny rule for
+- Devices shared through a lease tool that elfcrew never calls, with the deny rule for
   its operator commands.
 - Roles and workers: role files with an agent, model, effort and allow rules, start rules,
   several roles per repository, and a ledger of workers and their sessions.
 - The runtime interface, with Claude Code as the `claude` runtime behind it and declared
   capabilities.
-- The chargehand mod in every worker session: the worker tools from one registry, the wake
+- The elfcrew mod in every worker session: the worker tools from one registry, the wake
   of a live process from its outbox, the lifecycle posts and the usage readings.
 - The daemon's own usage reading, from Claude Code's experimental `get_usage` request, so
   the week bar and the reserves need neither the status line wrapper nor a running worker.
@@ -1898,8 +1898,8 @@ deny-rule probe against 2.1.278:
   payload is built rather than templated and the probe is what confirms it arrived.
 - A `Bash` deny rule matches the command text after Claude Code splits compound commands
   and strips a fixed wrapper list. It does not follow the program: an anchored
-  `Bash(chargehand:*)` misses `/usr/local/bin/chargehand cancel X` and
-  `sh -c 'chargehand cancel X'`. A leading `*` matches anywhere in the text and covers
+  `Bash(elfcrew:*)` misses `/usr/local/bin/elfcrew cancel X` and
+  `sh -c 'elfcrew cancel X'`. A leading `*` matches anywhere in the text and covers
   both. `claude kill` is `claude stop` under an alias and needs its own pattern. Every
   form in `probes/deny_rules.py` was refused with the shipped rules and ran without
   them, so the rules do reach a background launch and do bite. What they bite is a list

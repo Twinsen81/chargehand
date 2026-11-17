@@ -19,12 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idle or queued worker is notified once per turn end, so a shell that never ends does
   not hide a session that waits. The watchdog and `max_concurrent` do not count that time. Only
   sessions launched with the new hook get this; older ones keep the old behaviour.
-- Clone in summary mode, from the card's Clone form or with `chargehand clone <ITEM>
+- Clone in summary mode, from the card's Clone form or with `elfcrew clone <ITEM>
   --mode summary`. The clone gets its own worktree from the original's branch and a new
   session that loads the mod; its first prompt names the item and the `read_handoff`
   tool, never the note, and the tool gives the clone the original's handoff note, copied
   into the clone's own row right before the launch. When the note is older than the
-  start of the original's last turn, chargehand first puts one `handoff` event into the
+  start of the original's last turn, elfcrew first puts one `handoff` event into the
   original's inbox, which wakes it under the usual caps, and the clone's launch waits
   for a current note without using up launch attempts; after 10 minutes, or at once
   when no wake can reach the original, it starts from the stored note and its card says
@@ -65,13 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker's session look like an orphan, and it never adopts a session that a session row
   names for a worker but that is not its current one, such as one a refresh replaced or a
   removal left behind; one that works again is reported once.
-- The chargehand mod, a Claude Code plugin that ships in the package and that every worker
+- The elfcrew mod, a Claude Code plugin that ships in the package and that every worker
   session loads with `--plugin-dir` at launch and at a full-mode clone. Claude Code stores
   the flag with the job, so the mod comes back after a stop and a resume or a respawn. The
   sessions load a copy of it in the state directory, so the files that Claude Code writes
   beside a mod it loads stay out of the package. It registers the worker tools that the
   daemon lists in one registry (`report`, `ask`, `handoff`, `request_wake` and
-  `subscribe`, as `mcp__chargehand__<tool>`) and forwards each call to the daemon; the
+  `subscribe`, as `mcp__elfcrew__<tool>`) and forwards each call to the daemon; the
   launch settings allow those tools in every permission mode. It polls the worker's outbox
   and submits the wake message as the session's next turn once the session is idle, so a
   wake no longer stops and resumes a live process; once its worker has ended, it stops
@@ -93,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at least 60, 0 turns it off) a thread of the daemon sends Claude Code's `get_usage`
   control request to a short `claude -p` process in an empty directory under the state
   directory, with all hooks and your MCP servers turned off and no session file, and writes
-  the weekly window of the answer with the source `get_usage`. Claude Code fetches the usage with its own sign-in: chargehand reads
+  the weekly window of the answer with the source `get_usage`. Claude Code fetches the usage with its own sign-in: elfcrew reads
   no token and makes no network call, and the request runs no turn. So the week bar and
   the reserves work without the status line wrapper and without a running worker. The
   request is experimental in Claude Code: an error, a timeout, an answer without the
@@ -145,6 +145,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The project is renamed from chargehand to elfcrew, because other projects already use
+  the old name. The package, the command, the module, the `ELFCREW_*` environment
+  variables, the configuration and state paths (`~/.config/elfcrew`,
+  `~/Library/Application Support/elfcrew`, `~/Library/Logs/elfcrew.log`,
+  `~/elfcrew-worktrees`), the repository files (`.elfcrew.toml`, `.elfcrew/roles/`), the
+  launchd label `dev.elfcrew.tick`, the default labels (`elfcrew`, `elfcrew-running`,
+  `elfcrew-blocked`), the branch prefix `elfcrew/`, the Keychain services
+  (`elfcrew-linear`, `elfcrew-smtp`), the skill and the mod all take the new name. Nothing
+  reads the old names, except that comments marked by a chargehand worker are still
+  recognised. To upgrade, stop all workers, run `chargehand uninstall --remove-plist`,
+  install elfcrew, move or rename the paths and Keychain items above, rename the labels in
+  the tracker, and run `elfcrew install`.
+
 - Attach opens Terminal.app by default; iTerm2 stays a choice on the page, listed second.
   Attach in Terminal.app no longer needs the Automation permission. The daemon writes a
   three-line shell script (`#!/bin/sh`, `rm -f -- "$0"`, and a line that runs `claude
@@ -171,10 +184,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- chargehand no longer runs banksman. The pool module, the reap at the start of every tick,
+- elfcrew no longer runs banksman. The pool module, the reap at the start of every tick,
   the leases in `status`, and the banksman check in `doctor` are gone. banksman finds a
   worker's leases by itself, ends them when the worker's process ends, and reaps on its own,
-  so the call only tied chargehand to banksman's output schema. `pool_bin` is still
+  so the call only tied elfcrew to banksman's output schema. `pool_bin` is still
   accepted for one release, and `doctor` says that it is ignored. The deny rule for
   `banksman admin` stays in the launch deny rules.
 - The five-hour usage window. The subscription has only the weekly window now, so the status
@@ -253,7 +266,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context figures are recorded, the turn end changes nothing, and the log has at most a
   DEBUG line. Every other post of an ended worker, a post of a cancelled worker, and a
   post from another session are refused as before.
-- A wake no longer stops a session without the chargehand mod while a background shell of
+- A wake no longer stops a session without the elfcrew mod while a background shell of
   its ended turn still runs. For such a session, a wake stops and resumes the session
   when an event such as a comment arrives, and that stop can end a background shell, such
   as a dev server or a long test run. With Claude Code 2.1.325 the shell kept running
@@ -335,7 +348,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once the stop is confirmed and the session's process has exited (a process that ends
   with it, such as an MCP server, does not count): SIGTERM to each and to the process
   group of each shell, then SIGKILL after 3 seconds. A process is known by its pid and its start time, so a pid that
-  a new process got meanwhile is never signalled. The log names the pids. `chargehand
+  a new process got meanwhile is never signalled. The log names the pids. `elfcrew
   stop`, which `continue` undoes, keeps them: the outcome and one WARNING line name the
   pids, and one notification goes out with the new state `orphan-shell` and a count; a
   later cancel, discard or other stop that ends the worker's work ends them. The stop of a
@@ -364,7 +377,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the hook ran, so a failed hook meant that the operator never got the notification.
 - A worktree that garbage collection does not remove gives one `not-collected`
   notification and one WARNING line, also when two finished workers share it. Before,
-  a copy that `claude --resume` started in a worktree, and that chargehand adopted as a
+  a copy that `claude --resume` started in a worktree, and that elfcrew adopted as a
   second worker of the item, made the two workers hold each other, and each one sent the
   same notification and its own WARNING line. Both workers are still collected once the
   copy is gone.
@@ -372,9 +385,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stop now ends and reports nothing of what runs below it, and one WARNING line says
   so. Before, the processes below it, which then may be only its normal children such as
   an MCP server, counted as outliving the stop: a final stop signalled them, and
-  `chargehand stop` sent a false `orphan-shell` notification.
+  `elfcrew stop` sent a false `orphan-shell` notification.
 - The pause of a worker whose wake the workspace guard refuses (`wake-fault`) now treats
-  the processes below its session as `chargehand stop` does: it keeps them, logs one
+  the processes below its session as `elfcrew stop` does: it keeps them, logs one
   WARNING line with their pids, sends one `orphan-shell` notification, and records them,
   so a later cancel or other final stop ends them. Before, a background shell of the
   session ran on with no owner and no word to the operator.
@@ -387,7 +400,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the field as "no token", "checking", "token accepted" or "token not valid". The page
   checks it again on load and when the daemon was restarted or unreachable, so a restart
   with a new token file shows "token not valid" before the next action.
-- Clone a worker, from a card's Clone form or with `chargehand clone <ITEM> --mode
+- Clone a worker, from a card's Clone form or with `elfcrew clone <ITEM> --mode
   fresh|full`. A clone is a new worker with origin `clone`, on its original's role and
   item, in a worktree of its own branched from the original's current branch, so its
   commits carry over and the two never write the same tree. Fresh mode starts a new
@@ -436,7 +449,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notified once. The board has a Parked column with the reset time, shows on a queued or
   parked card why it waits, and shows a model-limit badge in the top bar when a turn fails
   on one model family's own limit.
-- `chargehand export <file>` and `chargehand import <file>`. Export writes one zip archive
+- `elfcrew export <file>` and `elfcrew import <file>`. Export writes one zip archive
   with a versioned manifest: the machine configuration with home paths written as `~` and
   credential-bearing keys (such as `api_key_command`) left out, the machine-level role
   files, the user-level agent files the roles name, the notification hook, the status line
@@ -488,12 +501,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workers that share a role and an item are named by a handle with the worker's id,
   `role/item#id`, and every command that takes an item accepts it, `role/item`, and `#id`
   (quoted in a shell, as `'#7'`). A notification about such a worker carries the handle in
-  `CHARGEHAND_ITEM` and `CHARGEHAND_ISSUE`, which already holds the role. `status --json`
+  `ELFCREW_ITEM` and `ELFCREW_ISSUE`, which already holds the role. `status --json`
   and the board show a finished start-rule worker as `role/item#id`; its log lines keep
   `role/item`. `cancel` and `discard` name the worker they acted on.
 - An investigation log for the daemon. `serve --log-file` writes
-  `~/Library/Logs/chargehand.log` through a rotating handler (10 MB, five old files), and
-  `install` sets it up; the launchd job's own output moves to `chargehand.launchd.log`.
+  `~/Library/Logs/elfcrew.log` through a rotating handler (10 MB, five old files), and
+  `install` sets it up; the launchd job's own output moves to `elfcrew.launchd.log`.
   `log_level` in `[serve]` (`debug`, `info`, `warning`; default `info`) sets the level, read
   on every tick. At `info` the log records each poll that found new events with its cursor
   and duration, the other polls of a source as one line at most every 15 minutes, each
@@ -501,7 +514,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matched, each accepted label write, each wake with its kinds and pointers, what the
   session listing says when it changes, each notification with the notify command's
   outcome, and a warning for a slow or late tick. The tick report goes through the same
-  handler under `chargehand.tick`, so every line has one format. No line carries what a
+  handler under `elfcrew.tick`, so every line has one format. No line carries what a
   worker said or did, or an event's actor. `doctor` warns about a job that does not
   rotate its log.
 - A read-only board at `http://127.0.0.1:<port>/`, served by the daemon: the usage
@@ -565,7 +578,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explains the change), a closed pull request is reported as "item closed", the warning
   for a start event of an unconfigured repository is printed once, and `follow:` lines
   show the pull requests that workers start to follow.
-- The tick runs in a resident daemon, `chargehand serve`, in place of the launchd timer:
+- The tick runs in a resident daemon, `elfcrew serve`, in place of the launchd timer:
   `install` writes a KeepAlive job that runs it, control commands are applied within a
   second or two, and a loopback API (`/api/health`, `/api/state`) with a token in a mode
   0600 file serves the status; `doctor` checks both, and sessions get deny rules for the
@@ -585,8 +598,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review_requested: https://github.com/o/r/pull/1`, so a woken worker knows what each link
   asks for. The shipped role prompts and the `pr-reviewer` agent file describe the kinds.
 - The authorship marker that workers add to their comments is now
-  `<!-- chargehand-worker -->`. The first spelling, `<!-- chargehand -->`, has a space after
-  the name, so the launch deny rule `Bash(*chargehand *)` refused every `gh` command that
+  `<!-- elfcrew-worker -->`. The first spelling, `<!-- elfcrew -->`, has a space after
+  the name, so the launch deny rule `Bash(*elfcrew *)` refused every `gh` command that
   carried it on its command line, and a worker could not post a review or a comment at all.
   The shipped role and agent templates use the new spelling; the sources still read the old
   one as marked, and a `command` source may report either.
@@ -599,8 +612,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker per role and item among the workers a start rule created, because a start event
   arrives again on every poll; workers created by hand are not limited, and the item may
   be empty.
-- Roles. How a worker thinks and when it runs moves out of `.chargehand.toml` into a role
-  file, `<repo>/.chargehand/roles/<name>.toml` or `~/.config/chargehand/roles/<name>.toml`:
+- Roles. How a worker thinks and when it runs moves out of `.elfcrew.toml` into a role
+  file, `<repo>/.elfcrew/roles/<name>.toml` or `~/.config/elfcrew/roles/<name>.toml`:
   an optional Claude Code agent definition (`agent`), `model`, `effort`, the first
   `prompt`, `permission_mode`, `allow` rules, an optional role `setup` that runs after the
   repository's, a `status_file`, `[[start]]` rules that create a worker when an event
@@ -608,7 +621,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `subscribe` and `close_on` event kinds for the worker's item), and `[policy]` caps such
   as `max_workers`. `runtime` names the coding agent; `claude` is the only one so far. The
   queue label is one per issue, so a queued issue that any live worker holds is skipped,
-  whichever role holds it. A repository whose `.chargehand.toml` still carries `prompt` and
+  whichever role holds it. A repository whose `.elfcrew.toml` still carries `prompt` and
   has no role file gets its `implementer` role from it, so an older configuration keeps
   working. `init` writes both files; `doctor` checks every enabled
   role and the agent file it names.
@@ -621,8 +634,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktrees from before this change are still recognised.
 - Control commands take an item and, when several roles hold it, `--role`; `pause` and
   `resume` take `--repository`. `status --json` reports `workers` and `repositories`, each
-  repository with its roles. Notifications carry `CHARGEHAND_ITEM`, `CHARGEHAND_ROLE` and
-  `CHARGEHAND_REPOSITORY`; `CHARGEHAND_ISSUE` and `CHARGEHAND_ROUTE` stay set.
+  repository with its roles. Notifications carry `ELFCREW_ITEM`, `ELFCREW_ROLE` and
+  `ELFCREW_REPOSITORY`; `ELFCREW_ISSUE` and `ELFCREW_ROUTE` stay set.
 - The Claude Code adapter passes `--agent`, `--model`, `--effort` and `--plugin-dir` at
   launch, and can wake a stopped background session with a new prompt by its full
   session id, recognising when Claude Code started a copy instead.
@@ -637,11 +650,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `chargehand statusline -- '<command>'`, a status line wrapper that writes the
+- `elfcrew statusline -- '<command>'`, a status line wrapper that writes the
   subscription's weekly usage window to `usage_file` in `[serve]` and then
   runs your own status line command unchanged; `/api/state` and `status --json` show the
   reading, unknown once the window's reset time has passed.
-- A `pr-reviewer` starter role and its agent file, written by `chargehand init --role
+- A `pr-reviewer` starter role and its agent file, written by `elfcrew init --role
   pr-reviewer`: a review request starts a reviewer in a checkout of `base` that reads the
   pull request head from a separate checkout, `{item_checkout}`, so the author's Claude
   Code settings and hooks are never loaded. Its setup runs with git hooks turned off and
@@ -652,7 +665,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the session wrote, read as data rather than followed. A wake refuses a reviewer whose item
   checkout is gone, a symlink or a redirected worktree, whose worktree left its branch, or
   whose Claude Code files changed since the setup step, and checks again after the refresh;
-  `chargehand continue --force` accepts a file change after a look. A reply wakes it, its own marked comments do not, and a second
+  `elfcrew continue --force` accepts a file change after a look. A reply wakes it, its own marked comments do not, and a second
   review request wakes it again.
   A start rule's `close_on` event on a worker's primary item ends the worker, and a start
   event for a repository that is not configured is reported once. `tick` prints wakes and
@@ -674,7 +687,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every worker that follows it; a comment a worker posted with the authorship marker does
   not. The `linear` adapter still lists the whole queue on each poll, and reads the
   followed issues and their comments since each one's previous poll in one more query.
-  The implementer role, from a pre-roles `.chargehand.toml` or from the starter role file,
+  The implementer role, from a pre-roles `.elfcrew.toml` or from the starter role file,
   subscribes to `comment` and declares `close_on = ["done"]`. A queue start waits in the
   router while the caps, a pause, a live worker on the issue or a broken role file hold it
   back, is tried after the state diff so the tick that frees a slot uses it, and is
@@ -687,7 +700,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Event sources and a publish-and-subscribe router. A `[[source]]` table in the machine
   configuration names a poller (`name`, `type`, and the type's own options); each tick
   polls every source after the watchdog, drops events seen before and comments that a
-  chargehand worker posted as the signed-in account (by an authorship marker), puts one
+  elfcrew worker posted as the signed-in account (by an authorship marker), puts one
   inbox row per matching live subscriber, and then runs the enabled roles' start rules,
   which start a worker subscribed to its item unless a suitable worker already has it. A
   start that the caps defer is kept for up to a week and tried again. Only a worker the
@@ -802,7 +815,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build those sessions run. CPU-bound work in such a session took about three times as
   long as from a terminal. The daemon also hosts background sessions started by hand, so
   while it was up, those were slowed too. The job is now an `Interactive` job. Run
-  `chargehand install --load` again to rewrite and reload it.
+  `elfcrew install --load` again to rewrite and reload it.
 - `discard`, `retry` and the collection of closed issues delete a run's branch that the
   session renamed. They deleted only the placeholder name, which no longer exists after a
   rename, so the renamed branch stayed in the repository. A branch counts as the run's
@@ -848,8 +861,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also appears as a warning in the tick's output.
 - A control command no longer kick-starts the scheduled job unless this process is the
   instance that job runs. The LaunchAgent carries no path overrides, so it always ticks
-  the default configuration and ledger: a second instance, which `CHARGEHAND_CONFIG`,
-  `CHARGEHAND_STATE_DIR` and `--config` all exist to allow, was asking launchd to run a
+  the default configuration and ledger: a second instance, which `ELFCREW_CONFIG`,
+  `ELFCREW_STATE_DIR` and `--config` all exist to allow, was asking launchd to run a
   tick against somebody else's ledger and then waiting for a request that tick would
   never see.
 - Label lookup narrows on the server when the route names a team, and refuses a full page
@@ -862,10 +875,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A plain tracker failure already handed the retry back; this makes the unverifiable case
   behave the same way. Both were observed live.
 - The bundled assistant settings gate every mutating command in every spelling. They were
-  anchored on the program name, so `chargehand cancel X` prompted while
-  `/usr/local/bin/chargehand cancel X` and `sh -c 'chargehand cancel X'` ran without one.
+  anchored on the program name, so `elfcrew cancel X` prompted while
+  `/usr/local/bin/elfcrew cancel X` and `sh -c 'elfcrew cancel X'` ran without one.
   Neither is an evasion: the first is what an assistant produces after running
-  `which chargehand`. This is the same hole the launch-time deny rules were fixed for, in
+  `which elfcrew`. This is the same hole the launch-time deny rules were fixed for, in
   the list that guards the other direction. `uninstall` and `init` had no rule at all.
 - The launchd job's argument list is now complete in every case. Built without a console
   script on `PATH`, which is what an unactivated virtual environment looks like, it named
@@ -877,12 +890,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The lease pool is now planned as an external tool instead of a part of chargehand. How
+- The lease pool is now planned as an external tool instead of a part of elfcrew. How
   the runner connects to it is not decided yet; until then the runner keeps its no-op pool.
 - The runner does not release leases when it stops a session. The pool ends the leases of
   a session whose agent process has ended, after its grace period, so the release on
   cancel, on the watchdog's hard stop, on discard, and in collection is gone.
-- Every line `chargehand tick` prints starts with the date and time. The scheduled job
+- Every line `elfcrew tick` prints starts with the date and time. The scheduled job
   appends this output to its log, and without a time the log could not show whether ticks
   ran on schedule or when an error began. `--json` output is unchanged.
 - `install` suggests `launchctl kickstart` without `-k` to run a tick by hand. `-k` kills a
@@ -908,14 +921,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The deny rules passed to launched sessions now lead with a wildcard instead of
   anchoring on the program name. A Claude Code `Bash` rule matches command text rather
-  than the program behind it, so the previous `Bash(chargehand:*)` stopped
-  `chargehand cancel X` while leaving `/usr/local/bin/chargehand cancel X` and
-  `sh -c 'chargehand cancel X'` untouched. Also covers `claude kill`, which is
+  than the program behind it, so the previous `Bash(elfcrew:*)` stopped
+  `elfcrew cancel X` while leaving `/usr/local/bin/elfcrew cancel X` and
+  `sh -c 'elfcrew cancel X'` untouched. Also covers `claude kill`, which is
   `claude stop` under its documented alias, and the flags that would start a session
   without any of these rules.
 
-- Project scaffold: `chargehand` Python package (standard library only, Python 3.11+)
-  with a `chargehand` console script, a pytest suite, and CI.
+- Project scaffold: `elfcrew` Python package (standard library only, Python 3.11+)
+  with an `elfcrew` console script, a pytest suite, and CI.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

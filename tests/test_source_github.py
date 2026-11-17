@@ -11,25 +11,25 @@ from pathlib import Path
 import pytest
 
 from conftest import Harness, make_config
-from chargehand import sanitize
-from chargehand import sources as sources_mod
-from chargehand import trackers as trackers_mod
-from chargehand.config import Labels, MachineConfig, Repository, SourceConfig, TrackerConfig
-from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.sources import AUTHORSHIP_MARKER, WorkItem
-from chargehand.sources.github import GithubSource, GithubTracker, item_key, make_ref, parse_ref
-from chargehand.tick import Runner
-from chargehand.trackers import Status
+from elfcrew import sanitize
+from elfcrew import sources as sources_mod
+from elfcrew import trackers as trackers_mod
+from elfcrew.config import Labels, MachineConfig, Repository, SourceConfig, TrackerConfig
+from elfcrew.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.sources import AUTHORSHIP_MARKER, WorkItem
+from elfcrew.sources.github import GithubSource, GithubTracker, item_key, make_ref, parse_ref
+from elfcrew.tick import Runner
+from elfcrew.trackers import Status
 from support.fake_gh import GhState
 
 FAKE_GH = Path(__file__).parent / "support" / "fake_gh.py"
 NOW = datetime(2026, 10, 26, 10, 0, tzinfo=timezone.utc).timestamp()
 PR = "octo/app#7"
 PR_KEY = "octo_app_7"
-LABELS = {"queued": "chargehand", "running": "chargehand-running", "blocked": "chargehand-blocked"}
+LABELS = {"queued": "elfcrew", "running": "elfcrew-running", "blocked": "elfcrew-blocked"}
 
 
 def iso(epoch: float) -> str:
@@ -344,8 +344,8 @@ def test_a_review_request_without_a_thread_warns_once_a_day(source, gh, clock):
 
 
 def test_the_printed_warning_keeps_the_hint_with_long_keys(source, gh, capsys):
-    from chargehand import cli
-    from chargehand.tick import TickReport
+    from elfcrew import cli
+    from elfcrew.tick import TickReport
 
     for number in (101, 102, 103):
         gh.add_pull(f"octo/{'long-repository-name-' * 4}{number}#{number}", updated_at=OLD_REQUEST)
@@ -381,7 +381,7 @@ def test_a_young_review_request_does_not_warn(source, gh, clock):
 def test_a_long_thread_list_is_read_in_a_few_pages_and_old_requests_are_not_guessed(
     source, gh, monkeypatch
 ):
-    from chargehand.sources import github as github_mod
+    from elfcrew.sources import github as github_mod
 
     monkeypatch.setattr(github_mod, "REVIEW_CHECK_PAGE_SIZE", 2)
     monkeypatch.setattr(github_mod, "REVIEW_CHECK_MAX_PAGES", 1)
@@ -401,7 +401,7 @@ def test_a_long_thread_list_is_read_in_a_few_pages_and_old_requests_are_not_gues
 
 
 def test_a_thread_on_a_later_page_counts(source, gh, monkeypatch):
-    from chargehand.sources import github as github_mod
+    from elfcrew.sources import github as github_mod
 
     monkeypatch.setattr(github_mod, "REVIEW_CHECK_PAGE_SIZE", 2)
     monkeypatch.setattr(github_mod, "REVIEW_CHECK_MAX_PAGES", 3)
@@ -755,48 +755,48 @@ def test_the_github_tracker_is_registered():
 
 
 def test_the_queue_is_open_labeled_issues_assigned_to_me(tracker, gh):
-    gh.add_issue("octo/app#1", labels=["chargehand"])
-    gh.add_issue("octo/app#2", labels=["chargehand"], assignees=["someone"])
-    gh.add_issue("octo/app#3", labels=["chargehand"], state="closed")
+    gh.add_issue("octo/app#1", labels=["elfcrew"])
+    gh.add_issue("octo/app#2", labels=["elfcrew"], assignees=["someone"])
+    gh.add_issue("octo/app#3", labels=["elfcrew"], state="closed")
     gh.add_issue("octo/app#4", labels=["other"])
     gh.set(extra_issue_list_entries=[{"number": 5, "pull_request": {}, "labels": []}])
 
     queued = tracker.list(Status.QUEUED)
 
     assert [(i.id, i.identifier, i.url, i.labels) for i in queued] == [
-        ("octo/app#1", "octo_app_1", "https://github.com/octo/app/issues/1", ("chargehand",))
+        ("octo/app#1", "octo_app_1", "https://github.com/octo/app/issues/1", ("elfcrew",))
     ]
     assert tracker.whoami() == "operator"
 
 
 def test_the_label_lifecycle(tracker, gh):
-    gh.add_issue("octo/app#1", labels=["chargehand", "bug"])
+    gh.add_issue("octo/app#1", labels=["elfcrew", "bug"])
     issue = tracker.list(Status.QUEUED)[0]
 
     running = tracker.mark(issue, Status.RUNNING)
-    assert gh.labels_of("octo/app#1") == ["bug", "chargehand-running"]
+    assert gh.labels_of("octo/app#1") == ["bug", "elfcrew-running"]
     blocked = tracker.mark(running, Status.BLOCKED)
-    assert gh.labels_of("octo/app#1") == ["bug", "chargehand-blocked"]
+    assert gh.labels_of("octo/app#1") == ["bug", "elfcrew-blocked"]
     done = tracker.mark(blocked, Status.DONE)
     assert gh.labels_of("octo/app#1") == ["bug"] and done.labels == ("bug",)
     assert tracker.mark(done, Status.DONE) is done
     edits = [call for call in gh.calls if call[:2] == ["issue", "edit"]]
     assert edits[0] == ["issue", "edit", "1", "--repo", "octo/app", "--add-label",
-                        "chargehand-running", "--remove-label", "chargehand"]
+                        "elfcrew-running", "--remove-label", "elfcrew"]
 
 
 def test_a_failed_write_that_landed_is_accepted(tracker, gh):
-    gh.add_issue("octo/app#1", labels=["chargehand"])
+    gh.add_issue("octo/app#1", labels=["elfcrew"])
     gh.set(edit_fails=True)
 
     fresh = tracker.mark(tracker.get("octo/app#1"), Status.RUNNING)
 
-    assert fresh.labels == ("chargehand-running",)
+    assert fresh.labels == ("elfcrew-running",)
 
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_a_write_the_re_read_does_not_show_is_ambiguous(tracker, gh, fails):
-    gh.add_issue("octo/app#1", labels=["chargehand"])
+    gh.add_issue("octo/app#1", labels=["elfcrew"])
     gh.set(edit_lands=False, edit_fails=fails)
 
     with pytest.raises(AmbiguousWrite):
@@ -804,7 +804,7 @@ def test_a_write_the_re_read_does_not_show_is_ambiguous(tracker, gh, fails):
 
 
 def test_a_write_that_cannot_be_verified_is_ambiguous(tracker, gh):
-    gh.add_issue("octo/app#1", labels=["chargehand"])
+    gh.add_issue("octo/app#1", labels=["elfcrew"])
     issue = tracker.get("octo/app#1")
     gh.set(fail=[{"match": "repos/octo/app/issues/1", "stderr": "HTTP 502: Bad Gateway"}])
 
@@ -819,7 +819,7 @@ def test_get_of_an_issue_that_is_gone_is_none(tracker, gh):
 
 def test_get_by_item_key_for_an_adopted_session(tracker, gh):
     """A session adopted with no ledger row behind it knows only its item key."""
-    gh.add_issue("octo/app#1", labels=["chargehand-running"])
+    gh.add_issue("octo/app#1", labels=["elfcrew-running"])
 
     issue = tracker.get("octo_app_1")
 
@@ -849,7 +849,7 @@ subscribe = ["comment", "review", "ci_status", "pr_closed"]
 
 @pytest.fixture
 def ticking(tmp_path, repo, claude_state, board, gh):
-    target = repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    target = repo / ".elfcrew" / "roles" / "pr-reviewer.toml"
     target.parent.mkdir(parents=True)
     target.write_text(REVIEWER)
     worktree_root = tmp_path / "worktrees"

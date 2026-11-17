@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths, sanitize
+from elfcrew import archive, board, claude as claude_mod, ledger as ledger_mod, paths, sanitize
 from conftest import run_git
 from support import daemon as support
 
@@ -216,7 +216,7 @@ def test_an_unreadable_transcript_is_logged_without_control_characters(
 
     monkeypatch.setattr(claude_mod, "transcript_text", unreadable)
     runtime = harness.runner.runtime("claude")
-    with caplog.at_level("WARNING", logger="chargehand.claude"):
+    with caplog.at_level("WARNING", logger="elfcrew.claude"):
         runtime.transcript(str(path), None)
 
     (record,) = [r for r in caplog.records if "transcript" in r.getMessage()]
@@ -436,7 +436,7 @@ def test_an_archive_refuses_other_sessions_in_the_worktree_unless_forced(harness
 
 
 def test_an_archive_refuses_without_force_when_the_listing_cannot_be_read(harness, monkeypatch):
-    from chargehand import tick as tick_mod
+    from elfcrew import tick as tick_mod
 
     worker = cancelled(harness)
     other_sessions = tick_mod.Runner._other_sessions
@@ -562,7 +562,7 @@ def test_an_archive_job_never_stops_the_session_of_another_live_worker(harness):
 
 
 def test_an_archive_job_waits_while_the_listing_cannot_be_read(harness, monkeypatch):
-    from chargehand import tick as tick_mod
+    from elfcrew import tick as tick_mod
 
     worker = cancelled(harness)
     apply_request(harness, "archive", worker.target)
@@ -595,7 +595,7 @@ def test_an_archive_job_waits_while_the_listing_cannot_be_read(harness, monkeypa
 
 
 def test_a_forced_archive_job_says_when_the_listing_could_not_be_read(harness, monkeypatch):
-    from chargehand import tick as tick_mod
+    from elfcrew import tick as tick_mod
 
     worker = cancelled(harness)
     apply_request(harness, "archive", worker.target, force=True)

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with chargehand
+about: Report a problem with elfcrew
 title: "[bug] "
 labels: bug
 assignees: ""
@@ -12,7 +12,7 @@ A clear description of the bug.
 
 ## Environment
 
-- chargehand version (`chargehand --version`):
+- elfcrew version (`elfcrew --version`):
 - macOS version:
 - Python version:
 - Claude Code version (`claude --version`):
@@ -30,6 +30,6 @@ A clear description of the bug.
 
 ## Logs
 
-<!-- Paste the relevant part of `chargehand status --json` and the runner log.
+<!-- Paste the relevant part of `elfcrew status --json` and the runner log.
      IMPORTANT: redact tracker keys, private repository names, and issue content
      before sharing. -->

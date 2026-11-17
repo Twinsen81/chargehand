@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-from chargehand import ledger as ledger_mod
-from chargehand.errors import LaunchAborted
-from chargehand.ledger import LAST_STEP
+from elfcrew import ledger as ledger_mod
+from elfcrew.errors import LaunchAborted
+from elfcrew.ledger import LAST_STEP
 
 
 @pytest.mark.parametrize("step", [0, 1, 2, 3])
@@ -29,7 +29,7 @@ def test_a_launch_interrupted_after_any_step_completes_on_the_next_tick(harness,
     assert attempt.state == ledger_mod.RUNNING, report.errors
     assert attempt.step == LAST_STEP
     assert attempt.session_id
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
     assert len(harness.claude_state.launches) == 1
 
 
@@ -39,9 +39,9 @@ def test_an_interrupted_launch_never_leaves_the_issue_stranded_as_queued(harness
         harness.tick(crash_after_step=1)
 
     # The label moved on at step 1; reconciliation must never put it back.
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
     harness.next_tick()
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
 
 def test_a_session_started_before_the_crash_is_adopted_not_duplicated(harness):
@@ -77,7 +77,7 @@ def test_a_launch_that_never_completes_fails_loudly_after_the_attempt_limit(harn
     attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
     assert "did not complete after" in attempt.last_error
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
     assert ("ABC-1", "failed") in harness.notifications()
 
 
@@ -90,14 +90,14 @@ def test_a_tracker_write_that_landed_but_reported_failure_is_reconciled(harness)
     # The write landed; the tick was told it failed, so the row stayed at step 0.
     assert any("502" in error for error in first.errors)
     assert harness.worker("ABC-1").step == 0
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
     harness.next_tick()
 
     attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.RUNNING
     assert attempt.step == LAST_STEP
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
     assert issue.identifier == "ABC-1"
 
 
@@ -109,28 +109,28 @@ def test_a_write_that_reported_success_without_landing_is_caught_by_the_re_read(
 
     assert any("did not land" in error for error in report.errors)
     assert harness.worker("ABC-1").step == 0
-    assert harness.labels("ABC-1") == ("chargehand",)
+    assert harness.labels("ABC-1") == ("elfcrew",)
 
     harness.next_tick()
 
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
 
 def test_a_running_label_with_no_live_attempt_is_marked_blocked(harness):
-    harness.board.add("ABC-9", labels=("chargehand-running",))
+    harness.board.add("ABC-9", labels=("elfcrew-running",))
 
     report = harness.next_tick()
 
-    assert harness.labels("ABC-9") == ("chargehand-blocked",)
+    assert harness.labels("ABC-9") == ("elfcrew-blocked",)
     assert ("ABC-9", "blocked") in harness.notifications()
     assert any("no live worker" in warning for warning in report.warnings)
 
 
 def test_a_session_under_the_worktree_root_with_no_ledger_row_is_adopted(harness):
-    issue = harness.board.add("ABC-5", labels=("chargehand-running",))
+    issue = harness.board.add("ABC-5", labels=("elfcrew-running",))
     worktree = harness.worktree("ABC-5")
-    harness.runner.git.add_worktree(harness.repo, worktree, "chargehand/implementer/ABC-5", "origin/main")
+    harness.runner.git.add_worktree(harness.repo, worktree, "elfcrew/implementer/ABC-5", "origin/main")
     harness.claude_state.set(
         sessions=[{"id": "orphan", "uuid": "u9", "name": "ABC-5", "cwd": str(worktree),
                    "state": "working"}]
@@ -193,7 +193,7 @@ def test_a_tracker_outage_during_admission_does_not_touch_other_phases(harness):
 
 def test_a_tracker_outage_during_a_resume_does_not_burn_a_launch_retry(harness, monkeypatch):
     """Three unlucky ticks must not fail a launch that never actually went wrong."""
-    from chargehand.errors import TrackerError
+    from elfcrew.errors import TrackerError
     from support import fake_tracker
 
     harness.board.add("ABC-1")
@@ -226,7 +226,7 @@ def test_a_tracker_outage_during_a_resume_does_not_burn_a_launch_retry(harness, 
 
 
 def test_an_unusable_credential_still_lets_the_labels_phase_report(harness, monkeypatch):
-    from chargehand.errors import TrackerAuthError
+    from elfcrew.errors import TrackerAuthError
     from support import fake_tracker
 
     launch_report = harness.tick()
@@ -260,7 +260,7 @@ def test_reconciliation_never_adopts_a_previous_attempts_session(harness):
 
     issue = harness.board.by_identifier("ABC-1")
     harness.board.issues[issue.id] = issue.__class__(
-        **{**issue.__dict__, "labels": ("chargehand",)}
+        **{**issue.__dict__, "labels": ("elfcrew",)}
     )
     harness.fresh_runner()
     with pytest.raises(LaunchAborted):
@@ -281,8 +281,8 @@ def test_reconciliation_never_adopts_a_previous_attempts_session(harness):
 
 
 def test_a_step_that_keeps_failing_on_resume_fails_the_attempt_loudly(harness, monkeypatch):
-    from chargehand.errors import GitError
-    from chargehand.gitutil import Git
+    from elfcrew.errors import GitError
+    from elfcrew.gitutil import Git
 
     harness.board.add("ABC-1")
     with pytest.raises(LaunchAborted):
@@ -297,13 +297,13 @@ def test_a_step_that_keeps_failing_on_resume_fails_the_attempt_loudly(harness, m
 
     attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
     assert ("ABC-1", "failed") in harness.notifications()
 
 
 def test_a_step_that_recovers_on_resume_completes_the_launch(harness, monkeypatch):
-    from chargehand.errors import GitError
-    from chargehand.gitutil import Git
+    from elfcrew.errors import GitError
+    from elfcrew.gitutil import Git
 
     harness.board.add("ABC-1")
     with pytest.raises(LaunchAborted):
@@ -332,7 +332,7 @@ def test_a_setup_failure_on_the_resume_path_is_terminal_not_retried(harness, rep
         harness.tick(crash_after_step=2)
     (repo / "setup.sh").write_text("#!/bin/sh\nexit 9\n")
     (repo / "setup.sh").chmod(0o755)
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         'base = "origin/main"\nprompt = "{issue}"\nsetup = "setup.sh {worktree}"\n'
     )
 
@@ -378,7 +378,7 @@ def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monke
     retried, but if each hold also spent one of its three launch retries, three of
     these in a row would fail a launch in which nothing had gone wrong.
     """
-    from chargehand.errors import AmbiguousWrite
+    from elfcrew.errors import AmbiguousWrite
     from support import fake_tracker
 
     harness.board.add("ABC-1")
@@ -407,7 +407,7 @@ def test_an_unverifiable_label_write_does_not_burn_a_launch_retry(harness, monke
     harness.next_tick()
 
     assert harness.worker("ABC-1").state == ledger_mod.RUNNING
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
 
 def test_an_unverifiable_label_write_on_a_fresh_launch_is_recorded(harness):

@@ -11,23 +11,23 @@ from pathlib import Path
 import pytest
 
 from conftest import Harness, make_config
-from chargehand import ledger as ledger_mod
-from chargehand import sources
-from chargehand.config import SourceConfig
-from chargehand.delivery import MESSAGE_HEADER
-from chargehand.errors import AmbiguousWrite, ConfigError, TrackerError
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.sources.base import WorkItem
-from chargehand.sources.command import (
+from elfcrew import ledger as ledger_mod
+from elfcrew import sources
+from elfcrew.config import SourceConfig
+from elfcrew.delivery import MESSAGE_HEADER
+from elfcrew.errors import AmbiguousWrite, ConfigError, TrackerError
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.sources.base import WorkItem
+from elfcrew.sources.command import (
     MAX_LINE_BYTES,
     MAX_OUTPUT_BYTES,
     REFS_ENV,
     CommandSource,
 )
-from chargehand.tick import Runner
-from chargehand.trackers.base import Status
+from elfcrew.tick import Runner
+from elfcrew.trackers.base import Status
 from support.fake_command_source import SCRIPT as FAKE_SCRIPT
 from support.fake_command_source import CommandBoard
 
@@ -129,7 +129,7 @@ def test_lines_that_do_not_fit_are_logged_and_skipped(tmp_path, caplog):
     good = {**EVENT, "dedupe_id": "comment:2"}
     poll = printing(tmp_path, *bad, good, {"cursor": "c9"})
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.sources.command"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.sources.command"):
         events, cursor = source(poll, repositories=["app"]).poll("c1", [])
 
     assert [event.dedupe_id for event in events] == ["comment:2"]
@@ -206,7 +206,7 @@ def test_an_unforeseen_error_on_one_line_skips_only_that_line(tmp_path, monkeypa
         return real(entry)
 
     monkeypatch.setattr(cmd, "_event", flaky)
-    with caplog.at_level(logging.WARNING, logger="chargehand.sources.command"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.sources.command"):
         events, cursor = cmd.poll("c1", [])
 
     assert [event.dedupe_id for event in events] == ["comment:2"]
@@ -235,7 +235,7 @@ def test_the_poll_gets_the_followed_refs_in_the_environment(tmp_path):
 def test_without_a_cursor_line_the_old_cursor_is_kept(tmp_path, caplog):
     poll = printing(tmp_path, EVENT)
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.sources.command"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.sources.command"):
         events, cursor = source(poll).poll("c1", [])
 
     assert len(events) == 1 and cursor == "c1"
@@ -257,7 +257,7 @@ def test_the_command_runs_without_a_shell(tmp_path):
 def test_a_relative_program_resolves_against_the_configuration_directory(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     (config_dir / "bin").mkdir(parents=True)
-    monkeypatch.setenv("CHARGEHAND_CONFIG", str(config_dir / "config.toml"))
+    monkeypatch.setenv("ELFCREW_CONFIG", str(config_dir / "config.toml"))
     script(config_dir / "bin", 'echo \'{"cursor": "here"}\'\n', "events")
 
     assert CommandSource("cmd", {"poll": "bin/events"}).poll(None, []) == ([], "here")
@@ -381,12 +381,12 @@ def test_the_fake_tracker_contract_marks_and_answers_item_open(fake_board):
     (queued,), _ = cmd.poll(None, [])
 
     cmd.mark(queued.item, Status.RUNNING)
-    assert fake_board.labels_of("DEMO-1") == ["chargehand-running"]
+    assert fake_board.labels_of("DEMO-1") == ["elfcrew-running"]
     fake_board.update(fail_next_mark="ambiguous")
     with pytest.raises(AmbiguousWrite):
         cmd.mark(queued.item, Status.BLOCKED)
     # Ambiguous means the write may have landed: here it did.
-    assert fake_board.labels_of("DEMO-1") == ["chargehand-blocked"]
+    assert fake_board.labels_of("DEMO-1") == ["elfcrew-blocked"]
 
     assert cmd.item_open(queued.item) is True
     fake_board.close("DEMO-1")
@@ -409,7 +409,7 @@ def with_mark() -> bool:
 @pytest.fixture
 def wired(tmp_path, repo, claude_state, board, fake_board, watchers, with_mark):
     for name in watchers:
-        target = repo / ".chargehand" / "roles" / f"{name}.toml"
+        target = repo / ".elfcrew" / "roles" / f"{name}.toml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(WATCHER)
     worktree_root = tmp_path / "worktrees"
@@ -474,7 +474,7 @@ def test_a_garbage_line_does_not_stop_the_tick(wired, fake_board, caplog):
     fake_board.add("DEMO-1")
     fake_board.update(garbage=["<html>502 Bad Gateway</html>"])
 
-    with caplog.at_level(logging.WARNING, logger="chargehand.sources.command"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew.sources.command"):
         report = wired.tick()
 
     assert report.errors == []
@@ -495,13 +495,13 @@ def test_the_worker_a_command_source_started_marks_its_item(wired, fake_board):
     watcher = wired.worker("DEMO-1", "watcher")
     assert watcher.owns_label == ledger_mod.LABEL_SOURCE
     assert watcher.label_state == "running"
-    assert fake_board.labels_of("DEMO-1") == ["chargehand-running"]
+    assert fake_board.labels_of("DEMO-1") == ["elfcrew-running"]
 
     # The turn ends: the worker waits for events, and its item shows it as blocked.
     wired.claude_state.set_session_state("DEMO-1", "done", status="idle")
     wired.next_tick()
     assert wired.worker("DEMO-1", "watcher").state == ledger_mod.IDLE
-    assert fake_board.labels_of("DEMO-1") == ["chargehand-blocked"]
+    assert fake_board.labels_of("DEMO-1") == ["elfcrew-blocked"]
 
     fake_board.close("DEMO-1")
     wired.next_tick()
@@ -641,7 +641,7 @@ def test_a_failing_poll_is_one_line_per_tick_without_a_traceback(
     runner = Runner(config, ledger, git=Git(), notifier=notifier)
     harness = Harness(config, ledger, runner, claude_state, board, repo, repo, worktree_root, notifier)
 
-    with caplog.at_level(logging.DEBUG, logger="chargehand"):
+    with caplog.at_level(logging.DEBUG, logger="elfcrew"):
         reports = [harness.next_tick(), harness.next_tick()]
 
     expected = "source demo: poll exited 2: upstream is down"

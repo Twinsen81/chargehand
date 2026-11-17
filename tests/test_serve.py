@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import cli, serve
-from chargehand.config import ServeConfig, load_machine_config
-from chargehand.errors import ChargehandError
-from chargehand.ledger import Ledger
+from elfcrew import cli, serve
+from elfcrew.config import ServeConfig, load_machine_config
+from elfcrew.errors import ElfcrewError
+from elfcrew.ledger import Ledger
 from conftest import write_machine_config
 from support import daemon as support
 
@@ -51,7 +51,7 @@ def test_it_binds_the_loopback_address_only(config):
 
 
 def test_the_configuration_has_no_address_to_bind():
-    with pytest.raises(ChargehandError, match="unknown"):
+    with pytest.raises(ElfcrewError, match="unknown"):
         ServeConfig.parse({"host": "0.0.0.0"})
     parsed = ServeConfig.parse({"port": 9000, "tick_interval_secs": 30})
     assert (parsed.port, parsed.tick_interval_secs) == (9000, 30)
@@ -254,7 +254,7 @@ def test_a_configuration_that_stops_parsing_keeps_the_daemon_running(config):
 
     def load():
         loads.append(1)
-        raise ChargehandError("config: broken")
+        raise ElfcrewError("config: broken")
 
     daemon = support.build(config, load_config=load, interval_secs=0.05, poll_secs=0.02)
     with support.running(daemon):
@@ -274,7 +274,7 @@ class _BlockingRunner:
         return self
 
     def tick(self, *, stop=None):
-        from chargehand.tick import TickReport
+        from elfcrew.tick import TickReport
 
         self.entered.set()
         assert self.release.wait(30)
@@ -294,11 +294,11 @@ def test_a_hand_tick_reports_the_lock_while_the_daemon_ticks(capsys, config, con
         finally:
             blocking.release.set()
 
-    assert "another chargehand tick is running" in capsys.readouterr().err
+    assert "another elfcrew tick is running" in capsys.readouterr().err
 
 
 def test_the_daemon_waits_for_a_hand_tick_and_then_runs_its_own(config):
-    from chargehand.tick import tick_lock
+    from elfcrew.tick import tick_lock
 
     daemon = support.build(config, interval_secs=3600, poll_secs=0.02)
     # The hand tick holds the lock before the daemon starts, so the daemon's first tick
@@ -383,7 +383,7 @@ def test_sigterm_ends_the_process_with_exit_code_zero(tmp_path, repo, harness):
         "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1",
     }
     process = subprocess.Popen(
-        [sys.executable, "-m", "chargehand", "--config", str(config_file), "serve"],
+        [sys.executable, "-m", "elfcrew", "--config", str(config_file), "serve"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
     )
 
@@ -437,7 +437,7 @@ def test_a_readable_token_file_is_refused(tmp_path):
 
     assert "chmod 600" in serve.token_problem(path)
     assert serve.read_token(path) is None
-    with pytest.raises(ChargehandError, match="mode 644"):
+    with pytest.raises(ElfcrewError, match="mode 644"):
         serve.ensure_token(path)
 
 
@@ -479,7 +479,7 @@ def test_a_port_in_use_fails_the_start(config):
         holder.listen()
         port = holder.getsockname()[1]
         daemon = support.build(config, port=port)
-        with pytest.raises(ChargehandError, match="cannot listen"):
+        with pytest.raises(ElfcrewError, match="cannot listen"):
             daemon.start()
 
 
@@ -507,7 +507,7 @@ def test_an_idle_connection_is_dropped(config, monkeypatch):
         assert serve.probe(daemon.port)["ok"] is True
 
 
-def test_the_server_header_names_chargehand_only(config):
+def test_the_server_header_names_elfcrew_only(config):
     import http.client
 
     daemon = support.build(config)
@@ -518,7 +518,7 @@ def test_the_server_header_names_chargehand_only(config):
         response.read()
         connection.close()
 
-    assert response.getheader("Server") == "chargehand"
+    assert response.getheader("Server") == "elfcrew"
 
 
 def test_the_state_asks_launchd_at_most_once_a_minute(monkeypatch):
@@ -536,7 +536,7 @@ def test_the_state_asks_launchd_at_most_once_a_minute(monkeypatch):
 
 def test_the_status_takes_the_launchd_state_it_is_given(config, harness, monkeypatch):
     monkeypatch.setattr(
-        "chargehand.cli.install.is_loaded", lambda: pytest.fail("the state ran launchctl")
+        "elfcrew.cli.install.is_loaded", lambda: pytest.fail("the state ran launchctl")
     )
     payload = cli.build_status(
         config, harness.ledger, include_queue=False, sessions=([], None),
@@ -547,7 +547,7 @@ def test_the_status_takes_the_launchd_state_it_is_given(config, harness, monkeyp
 
 
 def test_the_default_token_file_sits_next_to_the_configuration(tmp_path, monkeypatch):
-    from chargehand import paths
+    from elfcrew import paths
 
     monkeypatch.setenv(paths.CONFIG_ENV, str(tmp_path / "elsewhere" / "config.toml"))
 

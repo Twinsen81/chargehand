@@ -13,10 +13,10 @@ import time
 
 import pytest
 
-from chargehand import install, paths
-from chargehand.cli import EXIT_OK, EXIT_REFUSED, main
-from chargehand.config import load_machine_config
-from chargehand.errors import ChargehandError
+from elfcrew import install, paths
+from elfcrew.cli import EXIT_OK, EXIT_REFUSED, main
+from elfcrew.config import load_machine_config
+from elfcrew.errors import ElfcrewError
 from conftest import make_config
 
 
@@ -45,16 +45,16 @@ def test_the_plist_can_always_be_run_by_launchd(monkeypatch):
     """launchd has no shell and no PATH of its own, so the argv has to be complete.
 
     The module form is what a virtual environment that was never activated falls back
-    to: neither `chargehand` nor its `python` is on PATH there, so naming the program
+    to: neither `elfcrew` nor its `python` is on PATH there, so naming the program
     alone would produce `python serve`, which launchd would try to run as a file.
     """
     monkeypatch.setattr(install.shutil, "which", lambda name: None)
     argv = install.build_plist()["ProgramArguments"]
     log_file = ["--log-file", str(paths.log_file())]
-    assert argv == [sys.executable, "-m", "chargehand", "serve", *log_file]
+    assert argv == [sys.executable, "-m", "elfcrew", "serve", *log_file]
 
-    monkeypatch.setattr(install.shutil, "which", lambda name: "/opt/bin/chargehand")
-    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/chargehand", "serve", *log_file]
+    monkeypatch.setattr(install.shutil, "which", lambda name: "/opt/bin/elfcrew")
+    assert install.build_plist()["ProgramArguments"] == ["/opt/bin/elfcrew", "serve", *log_file]
 
 
 def test_the_plist_round_trips_through_plistlib(tmp_path):
@@ -69,9 +69,9 @@ def test_the_plist_round_trips_through_plistlib(tmp_path):
 
 
 def test_a_job_from_before_the_daemon_is_a_timer_job():
-    assert install.is_timer_job({"ProgramArguments": ["/bin/chargehand", "tick"], "StartInterval": 180})
-    assert install.is_timer_job({"ProgramArguments": ["/bin/chargehand", "tick"]})
-    assert not install.is_timer_job({"ProgramArguments": ["/bin/chargehand", "serve"]})
+    assert install.is_timer_job({"ProgramArguments": ["/bin/elfcrew", "tick"], "StartInterval": 180})
+    assert install.is_timer_job({"ProgramArguments": ["/bin/elfcrew", "tick"]})
+    assert not install.is_timer_job({"ProgramArguments": ["/bin/elfcrew", "serve"]})
 
 
 def test_install_writes_the_daemon_job_and_does_not_load_it(monkeypatch, capsys, config_file, tmp_path):
@@ -126,13 +126,13 @@ def test_uninstall_unloads_the_job_and_removes_its_plist(monkeypatch, capsys, tm
 def test_init_writes_a_repo_config_that_parses(tmp_path, capsys):
     assert main(["init", "--repo", str(tmp_path)]) == EXIT_OK
 
-    from chargehand.config import load_repo_config
+    from elfcrew.config import load_repo_config
 
     config = load_repo_config(tmp_path)
     assert config.base
     assert config.prompt is None
-    from chargehand.roles import load_role
-    from chargehand.sources import AUTHORSHIP_MARKER
+    from elfcrew.roles import load_role
+    from elfcrew.sources import AUTHORSHIP_MARKER
 
     role = load_role(tmp_path, "implementer", repo_config=config, tracker_type="linear")
     # The worker posts as the operator, so it must mark its comments or they wake it.
@@ -144,24 +144,24 @@ def test_init_writes_a_repo_config_that_parses(tmp_path, capsys):
 def test_init_refuses_to_overwrite_without_force(tmp_path):
     install.init_repo(tmp_path)
 
-    with pytest.raises(ChargehandError, match="--force"):
+    with pytest.raises(ElfcrewError, match="--force"):
         install.init_repo(tmp_path)
 
     assert install.init_repo(tmp_path, force=True)
 
 
 def test_init_writes_a_starter_role_and_its_agent_file_on_request(tmp_path, capsys):
-    from chargehand.config import load_repo_config
-    from chargehand.roles import load_role
+    from elfcrew.config import load_repo_config
+    from elfcrew.roles import load_role
 
-    config = tmp_path / ".chargehand.toml"
+    config = tmp_path / ".elfcrew.toml"
     config.write_text('base = "origin/main"\n')
 
     assert main(["init", "--repo", str(tmp_path), "--role", "pr-reviewer"]) == EXIT_OK
 
     # The repository configuration that exists is left alone.
     assert config.read_text() == 'base = "origin/main"\n'
-    assert not (tmp_path / ".chargehand" / "roles" / "implementer.toml").exists()
+    assert not (tmp_path / ".elfcrew" / "roles" / "implementer.toml").exists()
     agent = tmp_path / ".claude" / "agents" / "pr-reviewer.md"
     assert agent.read_text() == (paths.templates_dir() / "agents" / "pr-reviewer.md").read_text()
     # The role finds its agent file.
@@ -169,10 +169,10 @@ def test_init_writes_a_starter_role_and_its_agent_file_on_request(tmp_path, caps
     assert role.agent == "pr-reviewer"
     assert role.start_rule_for("review_requested", "github") is not None
 
-    with pytest.raises(ChargehandError, match="--force"):
+    with pytest.raises(ElfcrewError, match="--force"):
         install.init_repo(tmp_path, roles=["pr-reviewer"])
     assert install.init_repo(tmp_path, roles=["pr-reviewer"], force=True) == [
-        tmp_path / ".chargehand" / "roles" / "pr-reviewer.toml", agent,
+        tmp_path / ".elfcrew" / "roles" / "pr-reviewer.toml", agent,
     ]
 
 
@@ -180,10 +180,10 @@ def test_init_writes_the_repository_configuration_with_a_role_when_it_is_missing
     written = install.init_repo(tmp_path, roles=["pr-reviewer", "implementer"])
 
     assert written == [
-        tmp_path / ".chargehand.toml",
-        tmp_path / ".chargehand" / "roles" / "pr-reviewer.toml",
+        tmp_path / ".elfcrew.toml",
+        tmp_path / ".elfcrew" / "roles" / "pr-reviewer.toml",
         tmp_path / ".claude" / "agents" / "pr-reviewer.md",
-        tmp_path / ".chargehand" / "roles" / "implementer.toml",
+        tmp_path / ".elfcrew" / "roles" / "implementer.toml",
     ]
 
 
@@ -245,7 +245,7 @@ def test_doctor_checks_every_route(capsys, config_file, harness):
 
 
 def test_doctor_flags_a_bypass_permissions_route(capsys, config_file, harness, repo):
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         'base = "origin/main"\nprompt = "{issue}"\npermission_mode = "bypassPermissions"\n'
     )
 
@@ -257,7 +257,7 @@ def test_doctor_flags_a_bypass_permissions_route(capsys, config_file, harness, r
 
 
 def test_doctor_checks_every_runtime_a_role_uses(capsys, config_file, harness, repo):
-    role = repo / ".chargehand" / "roles" / "implementer.toml"
+    role = repo / ".elfcrew" / "roles" / "implementer.toml"
     role.parent.mkdir(parents=True)
     role.write_text('runtime = "fake"\nprompt = "{item}"\n\n[[start]]\non = "labeled"\n')
 
@@ -279,7 +279,7 @@ def test_doctor_warns_when_the_launch_deny_rules_cannot_be_passed(capsys, config
 
 
 def test_doctor_names_a_role_that_still_sets_the_status_file(capsys, config_file, harness, repo):
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         'base = "origin/main"\nprompt = "{issue}"\nstatus_file = "/tmp/status/{issue}.json"\n'
     )
 
@@ -310,7 +310,7 @@ def test_worst_picks_the_most_serious_status():
 
 
 def test_install_is_refused_off_macos(capsys, config_file, monkeypatch):
-    monkeypatch.setattr("chargehand.cli.sys", __import__("sys"))
+    monkeypatch.setattr("elfcrew.cli.sys", __import__("sys"))
     import sys as real_sys
 
     monkeypatch.setattr(real_sys, "platform", "linux")
@@ -335,11 +335,11 @@ def test_a_control_command_never_forces_a_kickstart(monkeypatch, config_file, ha
     forced = []
     # The suite always runs as a second instance, which is now a reason not to kick the
     # job at all. This test is about the `force` flag, so it takes that question away.
-    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("elfcrew.cli._runs_the_scheduled_job", lambda args: True)
     monkeypatch.setattr(install, "is_loaded", lambda: True)
-    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("elfcrew.cli.install.is_loaded", lambda: True)
     monkeypatch.setattr(
-        "chargehand.cli.install.kickstart",
+        "elfcrew.cli.install.kickstart",
         lambda **kwargs: forced.append(kwargs) or None,
     )
     harness.board.add("ABC-1")
@@ -360,11 +360,11 @@ def test_a_control_command_keeps_asking_while_the_scheduled_job_is_busy(
     the full thirty seconds, and then apply the request in an inline tick: outside the job's
     environment and missing from its log.
     """
-    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
-    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
-    monkeypatch.setattr("chargehand.cli.KICKSTART_RETRY_SECS", 0.05)
+    monkeypatch.setattr("elfcrew.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("elfcrew.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("elfcrew.cli.KICKSTART_RETRY_SECS", 0.05)
     monkeypatch.setattr(
-        "chargehand.cli.tick_lock",
+        "elfcrew.cli.tick_lock",
         lambda **kwargs: pytest.fail("the command fell back to an inline tick"),
     )
     kicks = []
@@ -375,7 +375,7 @@ def test_a_control_command_keeps_asking_while_the_scheduled_job_is_busy(
         if len(kicks) == 3:
             harness.next_tick()
 
-    monkeypatch.setattr("chargehand.cli.install.kickstart", kickstart)
+    monkeypatch.setattr("elfcrew.cli.install.kickstart", kickstart)
 
     assert main(["--config", str(config_file), "pause"]) == EXIT_OK
 
@@ -387,12 +387,12 @@ def test_a_control_command_keeps_asking_while_the_scheduled_job_is_busy(
 def test_a_control_command_falls_back_when_the_scheduled_job_never_applies_it(
     monkeypatch, capsys, config_file, harness
 ):
-    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
-    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
-    monkeypatch.setattr("chargehand.cli.KICKSTART_RETRY_SECS", 0.05)
-    monkeypatch.setattr("chargehand.cli.SCHEDULED_JOB_WAIT_SECS", 0.3)
+    monkeypatch.setattr("elfcrew.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("elfcrew.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("elfcrew.cli.KICKSTART_RETRY_SECS", 0.05)
+    monkeypatch.setattr("elfcrew.cli.SCHEDULED_JOB_WAIT_SECS", 0.3)
     kicks = []
-    monkeypatch.setattr("chargehand.cli.install.kickstart", lambda **kwargs: kicks.append(kwargs))
+    monkeypatch.setattr("elfcrew.cli.install.kickstart", lambda **kwargs: kicks.append(kwargs))
 
     assert main(["--config", str(config_file), "pause"]) == EXIT_OK
 
@@ -410,11 +410,11 @@ def _executable(path):
 def test_doctor_checks_the_path_the_job_has_rather_than_its_own(tmp_path, harness):
     """A tool that resolves in a shell but not under launchd fails inside a tick instead."""
     bin_dir = tmp_path / "job-bin"
-    program = _executable(bin_dir / "chargehand")
-    claude = _executable(bin_dir / "chargehand-test-claude")
-    git = _executable(bin_dir / "chargehand-test-git")
+    program = _executable(bin_dir / "elfcrew")
+    claude = _executable(bin_dir / "elfcrew-test-claude")
+    git = _executable(bin_dir / "elfcrew-test-git")
     config = dataclasses.replace(
-        harness.config, claude_bin="chargehand-test-claude", git_bin="chargehand-test-git"
+        harness.config, claude_bin="elfcrew-test-claude", git_bin="elfcrew-test-git"
     )
     job = {
         "ProgramArguments": [str(program), "tick"],
@@ -430,7 +430,7 @@ def test_doctor_checks_the_path_the_job_has_rather_than_its_own(tmp_path, harnes
     job["EnvironmentVariables"] = {"PATH": "/usr/bin:/bin"}
     checks = {check.name: check for check in install.job_checks(config, job)}
     assert checks["launchd PATH"].status == install.FAIL
-    assert "chargehand-test-claude, chargehand-test-git" in checks["launchd PATH"].detail
+    assert "elfcrew-test-claude, elfcrew-test-git" in checks["launchd PATH"].detail
 
     # A job that sets no PATH gets launchd's own, which has no room for either.
     del job["EnvironmentVariables"]
@@ -441,7 +441,7 @@ def test_doctor_checks_the_path_the_job_has_rather_than_its_own(tmp_path, harnes
 def test_doctor_fails_a_job_whose_program_is_gone(tmp_path, harness):
     """launchd cannot start it at all, so the job's log never says anything."""
     job = {
-        "ProgramArguments": [str(tmp_path / "removed-venv" / "chargehand"), "tick"],
+        "ProgramArguments": [str(tmp_path / "removed-venv" / "elfcrew"), "tick"],
         "EnvironmentVariables": {"PATH": "/usr/bin:/bin"},
     }
 
@@ -498,9 +498,9 @@ def test_a_second_instance_never_kickstarts_the_scheduled_job(monkeypatch, confi
     never sees.
     """
     monkeypatch.setattr(install, "is_loaded", lambda: True)
-    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("elfcrew.cli.install.is_loaded", lambda: True)
     monkeypatch.setattr(
-        "chargehand.cli.install.kickstart",
+        "elfcrew.cli.install.kickstart",
         lambda **kwargs: pytest.fail("a second instance kick-started the scheduled job"),
     )
     harness.board.add("ABC-1")
@@ -511,7 +511,7 @@ def test_a_second_instance_never_kickstarts_the_scheduled_job(monkeypatch, confi
 
 @pytest.mark.parametrize("override", [paths.CONFIG_ENV, paths.STATE_DIR_ENV])
 def test_a_path_override_makes_this_a_second_instance(monkeypatch, tmp_path, override):
-    from chargehand.cli import _runs_the_scheduled_job
+    from elfcrew.cli import _runs_the_scheduled_job
 
     args = argparse.Namespace(config=None)
     monkeypatch.delenv(paths.CONFIG_ENV, raising=False)
@@ -524,7 +524,7 @@ def test_a_path_override_makes_this_a_second_instance(monkeypatch, tmp_path, ove
 
 def test_pointing_at_another_config_makes_this_a_second_instance(monkeypatch, tmp_path):
     """`--config` reaches the same place the environment variable does."""
-    from chargehand.cli import _runs_the_scheduled_job
+    from elfcrew.cli import _runs_the_scheduled_job
 
     monkeypatch.delenv(paths.CONFIG_ENV, raising=False)
     monkeypatch.delenv(paths.STATE_DIR_ENV, raising=False)
@@ -534,7 +534,7 @@ def test_pointing_at_another_config_makes_this_a_second_instance(monkeypatch, tm
 
 
 def test_the_suite_is_insulated_from_a_real_launch_agent():
-    """With chargehand installed, an unstubbed control command would start the real job."""
+    """With elfcrew installed, an unstubbed control command would start the real job."""
     assert install.is_loaded() is False
     # pytest.fail raises from BaseException, which is what makes the guard unmissable.
     with pytest.raises(BaseException, match="tried to run launchctl"):

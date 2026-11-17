@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from chargehand import roles as roles_mod
-from chargehand.claude import launch_settings
-from chargehand.config import DEFAULT_DENY_RULES, RepoConfig
-from chargehand.errors import ConfigError
-from chargehand.roles import Role, StartRule, load_role
+from elfcrew import roles as roles_mod
+from elfcrew.claude import launch_settings
+from elfcrew.config import DEFAULT_DENY_RULES, RepoConfig
+from elfcrew.errors import ConfigError
+from elfcrew.roles import Role, StartRule, load_role
 
 FULL = """\
 agent = "reviewer"
@@ -41,7 +41,7 @@ refresh_after_tokens = 120000
 
 
 def write_role(repo, name, text):
-    target = repo / ".chargehand" / "roles" / f"{name}.toml"
+    target = repo / ".elfcrew" / "roles" / f"{name}.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
     return target
@@ -92,7 +92,7 @@ def test_an_unqualified_start_kind_matches_every_source():
 
 def test_the_repository_file_wins_over_the_machine_file(tmp_path, monkeypatch):
     machine = tmp_path / "config"
-    monkeypatch.setenv("CHARGEHAND_CONFIG", str(machine / "config.toml"))
+    monkeypatch.setenv("ELFCREW_CONFIG", str(machine / "config.toml"))
     repo = tmp_path / "repo"
     repo.mkdir()
     (machine / "roles").mkdir(parents=True)
@@ -118,11 +118,11 @@ def test_a_repository_without_a_role_file_gets_implementer_from_its_old_config(t
 
 
 def test_the_shipped_implementer_starts_follows_and_closes_like_the_old_config():
-    """`chargehand init` writes the template; a pre-roles repository gets legacy_role. A
+    """`elfcrew init` writes the template; a pre-roles repository gets legacy_role. A
     queue worker must hear the same events and end the same way under either."""
     import tomllib
 
-    from chargehand import paths
+    from elfcrew import paths
 
     path = paths.templates_dir() / "roles" / "implementer.toml"
     shipped = Role.parse("implementer", tomllib.loads(path.read_text(encoding="utf-8")))
@@ -141,7 +141,7 @@ def test_the_shipped_implementer_posts_bodies_from_a_file():
     by the rules."""
     import tomllib
 
-    from chargehand import paths
+    from elfcrew import paths
 
     path = paths.templates_dir() / "roles" / "implementer.toml"
     shipped = Role.parse("implementer", tomllib.loads(path.read_text(encoding="utf-8")))
@@ -169,8 +169,8 @@ def test_a_missing_role_names_where_it_looked(tmp_path):
         load_role(tmp_path, "ghost", repo_config=RepoConfig(base="origin/main"))
 
     message = str(caught.value)
-    assert ".chargehand/roles/ghost.toml" in message
-    assert "chargehand init" in message
+    assert ".elfcrew/roles/ghost.toml" in message
+    assert "elfcrew init" in message
 
 
 def test_an_agent_the_role_names_must_exist(tmp_path):

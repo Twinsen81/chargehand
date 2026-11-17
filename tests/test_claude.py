@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude as claude_mod
-from chargehand.claude import (
+from elfcrew import claude as claude_mod
+from elfcrew.claude import (
     ClaudeCLI,
     CommandResult,
     Session,
@@ -17,7 +17,7 @@ from chargehand.claude import (
     parse_sessions,
     worker_from_session,
 )
-from chargehand.errors import ClaudeError, WorkspaceNotTrusted
+from elfcrew.errors import ClaudeError, WorkspaceNotTrusted
 from conftest import FAKE_CLAUDE
 
 
@@ -241,7 +241,7 @@ def test_the_shape_claude_code_actually_returns_is_parsed():
 
 
 def test_the_permission_modes_match_the_ones_claude_code_accepts():
-    from chargehand.config import PERMISSION_MODES
+    from elfcrew.config import PERMISSION_MODES
 
     assert set(PERMISSION_MODES) == {
         "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"
@@ -276,7 +276,7 @@ RESUMED_TURN_ENDED = {
     "pid": 52227, "id": "4a4a227e", "kind": "background", "startedAt": 1793092895050,
     "sessionId": "4a4a227e-1732-46ef-b775-0faeb5f4ec61", "name": "pr-reviewer/octo_app_1",
     "status": "idle", "state": "working",
-    "cwd": "/private/tmp/chargehand-pr21-probe/worktrees/pr-reviewer/octo_app_1",
+    "cwd": "/private/tmp/elfcrew-pr21-probe/worktrees/pr-reviewer/octo_app_1",
 }
 
 
@@ -519,18 +519,18 @@ def test_agent_files_are_looked_up_in_the_project_then_the_user_directory(tmp_pa
 @pytest.mark.parametrize(
     "entry, runs",
     [
-        ({"type": "command", "command": "~/.local/bin/chargehand statusline -- ~/line.sh"}, True),
-        ({"type": "command", "command": "chargehand statusline"}, True),
+        ({"type": "command", "command": "~/.local/bin/elfcrew statusline -- ~/line.sh"}, True),
+        ({"type": "command", "command": "elfcrew statusline"}, True),
         ({"type": "command", "command": "~/line.sh"}, False),
-        ({"type": "command", "command": "chargehand status"}, False),
-        ({"type": "command", "command": "chargehand statuslines"}, False),
+        ({"type": "command", "command": "elfcrew status"}, False),
+        ({"type": "command", "command": "elfcrew statuslines"}, False),
         ({"type": "command"}, False),
-        ({"command": ["chargehand", "statusline"]}, False),
-        ("chargehand statusline", False),
+        ({"command": ["elfcrew", "statusline"]}, False),
+        ("elfcrew statusline", False),
         (None, False),
     ],
 )
-def test_the_status_line_runs_the_wrapper_only_when_its_command_runs_chargehand_statusline(entry, runs):
+def test_the_status_line_runs_the_wrapper_only_when_its_command_runs_elfcrew_statusline(entry, runs):
     assert claude_mod.runs_statusline_wrapper(entry) is runs
 
 
@@ -539,12 +539,12 @@ def test_an_import_step_about_the_status_line_is_done_when_the_settings_run_the_
 ):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     settings = claude_mod.user_settings_file()
-    wrapper = {"type": "command", "command": "~/bin/chargehand statusline -- ~/line.sh"}
+    wrapper = {"type": "command", "command": "~/bin/elfcrew statusline -- ~/line.sh"}
     step = claude_mod.ClaudeRuntime.status_line_step(wrapper)
 
     assert settings == tmp_path / "settings.json"
     assert step["runtime"] == "claude" and step["settings"] == str(settings)
-    assert '{"statusLine": {"command": "~/bin/chargehand statusline -- ~/line.sh"' in step["detail"]
+    assert '{"statusLine": {"command": "~/bin/elfcrew statusline -- ~/line.sh"' in step["detail"]
     assert claude_mod.ClaudeRuntime.import_step_done(step) is False
     settings.write_text("{not json")
     assert claude_mod.ClaudeRuntime.import_step_done(step) is False
@@ -572,7 +572,7 @@ def test_every_launch_settings_payload_denies_ask_user_question(deny_rules):
 
 
 def test_a_launch_and_a_fork_both_deny_ask_user_question(claude_state, tmp_path):
-    from chargehand.runtime import LaunchSpec
+    from elfcrew.runtime import LaunchSpec
 
     # No deny rules from the configuration, as with `pass_deny_rules_at_launch = false`.
     runtime = claude_mod.ClaudeRuntime(ClaudeCLI(str(FAKE_CLAUDE)), deny_rules=())

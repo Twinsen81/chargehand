@@ -13,12 +13,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from chargehand import paths, processes  # noqa: E402
-from chargehand.config import Labels, MachineConfig, NotifyConfig, Repository, TrackerConfig  # noqa: E402
-from chargehand.gitutil import Git  # noqa: E402
-from chargehand.ledger import Ledger  # noqa: E402
-from chargehand.notify import Notifier  # noqa: E402
-from chargehand.tick import Runner  # noqa: E402
+from elfcrew import paths, processes     # noqa: E402
+from elfcrew.config import Labels, MachineConfig, NotifyConfig, Repository, TrackerConfig     # noqa: E402
+from elfcrew.gitutil import Git     # noqa: E402
+from elfcrew.ledger import Ledger     # noqa: E402
+from elfcrew.notify import Notifier     # noqa: E402
+from elfcrew.tick import Runner     # noqa: E402
 from support import fake_runtime, fake_source, fake_tracker  # noqa: E402
 from support.fake_processes import FakeProcesses  # noqa: E402
 
@@ -31,7 +31,7 @@ REPO_CONFIG = """\
 base = "origin/main"
 prompt = "work on {issue} ({url})"
 permission_mode = "auto"
-branch_prefix = "chargehand/"
+branch_prefix = "elfcrew/"
 """
 
 ROLE_CONFIG = """\
@@ -167,13 +167,13 @@ def never_touch_launchd(monkeypatch):
     """Keep the suite away from a real LaunchAgent.
 
     A control command kick-starts the scheduled job when one is loaded. On a machine
-    where chargehand is actually installed that would make `pytest` start the real
+    where elfcrew is actually installed that would make `pytest` start the real
     runner, against the real configuration, and then wait 30 seconds on a ledger it
     never touches. Tests that exercise this path stub it themselves.
     """
-    monkeypatch.setattr("chargehand.install.is_loaded", lambda: False)
+    monkeypatch.setattr("elfcrew.install.is_loaded", lambda: False)
     monkeypatch.setattr(
-        "chargehand.install.launchctl",
+        "elfcrew.install.launchctl",
         lambda *args: pytest.fail(f"a test tried to run launchctl {' '.join(args)}"),
     )
 
@@ -194,7 +194,7 @@ def isolated_state(tmp_path, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
     monkeypatch.setenv(paths.STATE_DIR_ENV, str(state))
-    monkeypatch.setenv(paths.LOG_FILE_ENV, str(tmp_path / "chargehand.log"))
+    monkeypatch.setenv(paths.LOG_FILE_ENV, str(tmp_path / "elfcrew.log"))
     monkeypatch.setenv(paths.CONFIG_ENV, str(tmp_path / "config.toml"))
     # A launch marks its worktree as a trusted workspace, which means writing Claude
     # Code's own configuration file. Without this the suite would fill the operator's
@@ -248,7 +248,7 @@ def board() -> "fake_tracker.Board":
 
 
 def make_config(repo: Path, worktree_root: Path, **overrides) -> MachineConfig:
-    labels = Labels(queued="chargehand", running="chargehand-running", blocked="chargehand-blocked")
+    labels = Labels(queued="elfcrew", running="elfcrew-running", blocked="elfcrew-blocked")
     repository = Repository(
         name="test",
         path=repo,

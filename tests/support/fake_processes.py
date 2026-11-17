@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import signal
 
-from chargehand.processes import Process, Row
+from elfcrew.processes import Process, Row
 
 
 class FakeProcesses:

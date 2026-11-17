@@ -16,15 +16,15 @@ from pathlib import Path
 import pytest
 
 from conftest import make_config
-from chargehand import claude, cli, daemonlog, hooks, install, ledger as ledger_mod, paths
-from chargehand.config import NotifyConfig, ServeConfig, SourceConfig
-from chargehand.errors import ConfigError
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.router import Router, StartResult, event_name
-from chargehand.sources import Event, WorkItem
-from chargehand.tick import Runner, TickReport
+from elfcrew import claude, cli, daemonlog, hooks, install, ledger as ledger_mod, paths
+from elfcrew.config import NotifyConfig, ServeConfig, SourceConfig
+from elfcrew.errors import ConfigError
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.router import Router, StartResult, event_name
+from elfcrew.sources import Event, WorkItem
+from elfcrew.tick import Runner, TickReport
 from support import daemon as support
 from support import fake_source
 
@@ -54,7 +54,7 @@ def wired(tmp_path, repo, claude_state, board):
     """A harness with the fake `[[source]]` and a reviewer role that it starts."""
     from conftest import Harness
 
-    target = repo / ".chargehand" / "roles" / "reviewer.toml"
+    target = repo / ".elfcrew" / "roles" / "reviewer.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(REVIEWER)
     worktree_root = tmp_path / "worktrees"
@@ -82,14 +82,14 @@ def start_reviewer(harness, item="PR-7"):
 
 def test_the_formatter_keeps_each_message_on_one_line_without_control_sequences():
     formatter = daemonlog.OneLineFormatter()
-    record = logging.LogRecord("chargehand.x", logging.ERROR, __file__, 1,
+    record = logging.LogRecord("elfcrew.x", logging.ERROR, __file__, 1,
                                "setup said: %s", ("line one\nline two \x1b]0;title\x07 end",), None)
 
     line = formatter.format(record)
 
     assert "\n" not in line
     assert "\x1b" not in line and "\x07" not in line
-    assert line.endswith("chargehand.x: setup said: line one line two end")
+    assert line.endswith("elfcrew.x: setup said: line one line two end")
 
 
 def test_the_formatter_keeps_the_lines_of_a_traceback():
@@ -97,7 +97,7 @@ def test_the_formatter_keeps_the_lines_of_a_traceback():
     try:
         raise RuntimeError("boom \x1b[31mred")
     except RuntimeError:
-        record = logging.LogRecord("chargehand.x", logging.ERROR, __file__, 1, "failed", (),
+        record = logging.LogRecord("elfcrew.x", logging.ERROR, __file__, 1, "failed", (),
                                    sys.exc_info())
 
     text = formatter.format(record)
@@ -125,19 +125,19 @@ def test_log_level_is_read_from_serve_and_checked():
 def test_the_daemon_writes_its_log_file_through_a_rotating_handler(tmp_path):
     root = logging.getLogger()
     level = root.level
-    target = tmp_path / "logs" / "chargehand.log"
+    target = tmp_path / "logs" / "elfcrew.log"
     try:
         daemonlog.setup(logging.INFO, log_file=target)
         daemonlog.setup(logging.INFO, log_file=target)
         ours = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
         assert len(ours) == 1
         assert ours[0].maxBytes == daemonlog.MAX_BYTES and ours[0].backupCount == daemonlog.BACKUP_COUNT
-        logging.getLogger("chargehand.test").info("hello\nworld")
+        logging.getLogger("elfcrew.test").info("hello\nworld")
         ours[0].flush()
         [line] = target.read_text().splitlines()
-        assert line.endswith("INFO    chargehand.test: hello world")
+        assert line.endswith("INFO    elfcrew.test: hello world")
     finally:
-        for handler in [h for h in root.handlers if getattr(h, "_chargehand_handler", False)]:
+        for handler in [h for h in root.handlers if getattr(h, "_elfcrew_handler", False)]:
             root.removeHandler(handler)
             handler.close()
         root.setLevel(level)
@@ -160,7 +160,7 @@ def test_a_poll_that_found_events_is_one_line_at_once(caplog):
 
     polls.polled("github", "c1", "c2", 3, 0.25)
 
-    assert messages(caplog, "chargehand.poll") == ["poll github: 3 event(s), 3 new, cursor c1 -> c2, 0.2s"]
+    assert messages(caplog, "elfcrew.poll") == ["poll github: 3 event(s), 3 new, cursor c1 -> c2, 0.2s"]
 
 
 def test_polls_that_found_nothing_become_one_line(caplog):
@@ -171,11 +171,11 @@ def test_polls_that_found_nothing_become_one_line(caplog):
     for cursor in range(3):
         polls.polled("github", f"c{cursor}", f"c{cursor + 1}", 0, 0.1 * (cursor + 1))
         clock.now += 60
-    assert messages(caplog, "chargehand.poll") == []
+    assert messages(caplog, "elfcrew.poll") == []
 
     polls.polled("github", "c3", "c4", 1, 0.1)
 
-    summary, found = messages(caplog, "chargehand.poll")
+    summary, found = messages(caplog, "elfcrew.poll")
     assert summary.startswith("poll github: 3 poll(s) found nothing new from ")
     assert summary.endswith("cursor c0 -> c3, longest 0.3s")
     assert found == "poll github: 1 event(s), 1 new, cursor c3 -> c4, 0.1s"
@@ -190,7 +190,7 @@ def test_quiet_polls_are_written_once_the_window_has_passed(caplog):
         polls.polled("linear", "c", "c", 0, 0.1)
         clock.now += 60
 
-    [line] = messages(caplog, "chargehand.poll")
+    [line] = messages(caplog, "elfcrew.poll")
     assert "16 poll(s) found nothing new" in line
 
 
@@ -202,10 +202,10 @@ def test_a_failed_poll_writes_the_quiet_polls_before_its_error(caplog):
 
     polls.failed("github")
 
-    [line] = messages(caplog, "chargehand.poll")
+    [line] = messages(caplog, "elfcrew.poll")
     assert line.startswith("poll github: 1 poll(s) found nothing new")
     polls.flush()
-    assert messages(caplog, "chargehand.poll")[-1].startswith("poll tracker:test: 1 poll(s)")
+    assert messages(caplog, "elfcrew.poll")[-1].startswith("poll tracker:test: 1 poll(s)")
 
 
 def test_a_poll_that_returned_only_events_seen_before_is_quiet(caplog):
@@ -214,9 +214,9 @@ def test_a_poll_that_returned_only_events_seen_before_is_quiet(caplog):
 
     polls.polled("github", "a", "b", 5, 0.1, new=0)
 
-    assert messages(caplog, "chargehand.poll") == []
+    assert messages(caplog, "elfcrew.poll") == []
     polls.flush()
-    assert messages(caplog, "chargehand.poll")[0].startswith("poll github: 1 poll(s) found nothing new")
+    assert messages(caplog, "elfcrew.poll")[0].startswith("poll github: 1 poll(s) found nothing new")
 
 
 def test_events_seen_before_add_no_routed_line_and_no_event_line(wired, caplog):
@@ -229,8 +229,8 @@ def test_events_seen_before_add_no_routed_line_and_no_event_line(wired, caplog):
     report = wired.next_tick()
 
     assert report.routed == []
-    assert [m for m in messages(caplog, "chargehand.router") if "seen-once" in m] == []
-    assert "poll fake: 1 event(s), 0 new, cursor 1 -> 2" in messages(caplog, "chargehand.poll")[0]
+    assert [m for m in messages(caplog, "elfcrew.router") if "seen-once" in m] == []
+    assert "poll fake: 1 event(s), 0 new, cursor 1 -> 2" in messages(caplog, "elfcrew.poll")[0]
 
 
 def test_a_tick_by_hand_logs_every_poll_with_its_cursor(wired, caplog):
@@ -238,7 +238,7 @@ def test_a_tick_by_hand_logs_every_poll_with_its_cursor(wired, caplog):
 
     wired.tick()
 
-    polls = messages(caplog, "chargehand.poll")
+    polls = messages(caplog, "elfcrew.poll")
     assert "poll fake: 0 event(s), 0 new, cursor none -> 0" in polls[0]
     assert any(line.startswith("poll tracker:test: ") for line in polls)
 
@@ -251,7 +251,7 @@ def test_an_event_that_starts_a_worker_names_the_decision_and_the_worker(wired, 
 
     start_reviewer(wired)
 
-    [line] = [m for m in messages(caplog, "chargehand.router") if "review_requested" in m]
+    [line] = [m for m in messages(caplog, "elfcrew.router") if "review_requested" in m]
     assert line.startswith("event fake review_requested PR-7 [evt-")
     assert "launched reviewer/PR-7" in line
     assert "https://tracker.invalid/PR-7#evt-" in line
@@ -266,7 +266,7 @@ def test_an_event_delivered_to_a_subscriber_names_the_worker(wired, caplog):
     fake_source.feed().emit("comment", "PR-7", pointer="not a url, the agent wrote this")
     wired.tick()
 
-    [line] = [m for m in messages(caplog, "chargehand.router") if " comment " in m]
+    [line] = [m for m in messages(caplog, "elfcrew.router") if " comment " in m]
     assert line.endswith(": delivered to reviewer/PR-7")
     assert "agent wrote" not in line
 
@@ -278,13 +278,13 @@ def test_an_event_nobody_follows_says_so():
                   "comment:123456789012345", "https://github.invalid/o/r/pull/1")
     records: list[str] = []
     handler = _Collect(records)
-    logging.getLogger("chargehand.router").addHandler(handler)
-    logging.getLogger("chargehand.router").setLevel(logging.INFO)
+    logging.getLogger("elfcrew.router").addHandler(handler)
+    logging.getLogger("elfcrew.router").setLevel(logging.INFO)
     try:
         router.route([event], signed_in="me")
     finally:
-        logging.getLogger("chargehand.router").removeHandler(handler)
-        logging.getLogger("chargehand.router").setLevel(logging.NOTSET)
+        logging.getLogger("elfcrew.router").removeHandler(handler)
+        logging.getLogger("elfcrew.router").setLevel(logging.NOTSET)
 
     assert records == [
         "event github comment o-r-1 [comment:123456789012345]: no subscriber and no start; "
@@ -303,7 +303,7 @@ def test_a_deferred_start_says_why():
 
 
 def cli_free_decision(started, event):
-    from chargehand.router import decision
+    from elfcrew.router import decision
 
     return decision([], [], 0, started, event)
 
@@ -342,7 +342,7 @@ def test_a_wake_names_the_kinds_and_pointers_it_carried(wired, caplog):
     fake_source.feed().emit("comment", "PR-7", pointer="https://tracker.invalid/PR-7#c1")
     wired.tick()
 
-    [line] = [m for m in messages(caplog, "chargehand.delivery") if "woke" in m]
+    [line] = [m for m in messages(caplog, "elfcrew.delivery") if "woke" in m]
     assert line.startswith("reviewer/PR-7: woke session ")
     assert line.endswith("with comment: https://tracker.invalid/PR-7#c1")
 
@@ -353,7 +353,7 @@ def test_a_label_write_is_logged_with_the_status_before_and_after(harness, caplo
 
     harness.tick()
 
-    marks = [m for m in messages(caplog, "chargehand.tick") if " marked " in m]
+    marks = [m for m in messages(caplog, "elfcrew.tick") if " marked " in m]
     assert marks == ["implementer/ABC-1: marked ABC-1 on fake: none -> running"]
 
 
@@ -431,7 +431,7 @@ def test_a_hook_is_logged_with_its_worker_and_session(harness, daemon, caplog):
     post(daemon, "Stop", {"session_id": worker.session_uuid})
 
     assert f"implementer/ABC-1: hook Stop from session {worker.session_uuid[:8]}" in messages(
-        caplog, "chargehand.hooks"
+        caplog, "elfcrew.hooks"
     )
 
 
@@ -440,7 +440,7 @@ def test_a_hook_for_no_live_worker_says_why_with_its_cwd(harness, daemon, caplog
 
     post(daemon, "Stop", {"session_id": "0123456789abcdef", "cwd": "/nowhere/\x1b[2Jhere"})
 
-    assert messages(caplog, "chargehand.hooks") == [
+    assert messages(caplog, "elfcrew.hooks") == [
         "hook Stop from session 01234567: no live worker has this session (cwd /nowhere/here)"
     ]
 
@@ -450,7 +450,7 @@ def test_a_refused_hook_is_logged(harness, daemon, caplog):
 
     assert post(daemon, "Stop", {"session_id": "x"}, headers={"Authorization": "Bearer stale"}) == 401
 
-    assert messages(caplog, "chargehand.serve") == [
+    assert messages(caplog, "elfcrew.serve") == [
         "POST /hooks/Stop refused: 401 a valid bearer token is required"
     ]
 
@@ -466,10 +466,10 @@ def test_the_daemon_logs_its_report_through_the_tick_logger_with_levels(caplog):
     cli._log_report(report)
 
     assert [(r.name, r.levelno, r.getMessage()) for r in caplog.records] == [
-        ("chargehand.tick", logging.INFO, "launched: implementer/ABC-1"),
-        ("chargehand.tick", logging.INFO, "routed: fake: 1 event(s)"),
-        ("chargehand.tick", logging.WARNING, "warning: w"),
-        ("chargehand.tick", logging.ERROR, "error: e"),
+        ("elfcrew.tick", logging.INFO, "launched: implementer/ABC-1"),
+        ("elfcrew.tick", logging.INFO, "routed: fake: 1 event(s)"),
+        ("elfcrew.tick", logging.WARNING, "warning: w"),
+        ("elfcrew.tick", logging.ERROR, "error: e"),
     ]
 
 
@@ -486,11 +486,11 @@ def test_an_idle_daemon_at_info_writes_no_line(harness, daemon, caplog):
 
     assert messages(caplog, level=logging.INFO) == []
     daemon.polls.flush()
-    assert any("poll(s) found nothing new" in m for m in messages(caplog, "chargehand.poll"))
+    assert any("poll(s) found nothing new" in m for m in messages(caplog, "elfcrew.poll"))
 
 
 def test_the_heartbeat_is_debug_and_warns_for_a_slow_or_late_tick(harness, daemon, caplog):
-    caplog.set_level(logging.DEBUG, logger="chargehand.serve")
+    caplog.set_level(logging.DEBUG, logger="elfcrew.serve")
     data = daemon.health_data
     data.ticks = 7
     data.last_tick_started_at, data.last_tick_finished_at = 10_000.0, 10_002.0
@@ -499,7 +499,7 @@ def test_the_heartbeat_is_debug_and_warns_for_a_slow_or_late_tick(harness, daemo
     data.last_tick_started_at, data.last_tick_finished_at = 20_000.0, 24_000.0
     daemon._heartbeat(TickReport(), previous_end=10_002.0)
 
-    quiet, loud = [r for r in caplog.records if r.name == "chargehand.serve"]
+    quiet, loud = [r for r in caplog.records if r.name == "elfcrew.serve"]
     assert (quiet.levelno, quiet.getMessage()) == (logging.DEBUG, "tick 7 took 2.0s: 1 launched")
     assert loud.levelno == logging.WARNING
     assert loud.getMessage() == (
@@ -523,7 +523,7 @@ def test_the_job_runs_the_daemon_with_its_own_log_and_launchd_output_elsewhere()
 
 
 def test_a_job_from_before_the_log_file_is_not_a_timer_but_writes_no_log_of_its_own():
-    job = {"ProgramArguments": ["/bin/chargehand", "serve"]}
+    job = {"ProgramArguments": ["/bin/elfcrew", "serve"]}
 
     assert not install.is_timer_job(job)
     assert not install.writes_own_log(job)

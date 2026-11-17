@@ -17,15 +17,15 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import board, claude as claude_mod, ledger as ledger_mod
-from chargehand import clone as clone_mod
-from chargehand import delivery as delivery_mod
-from chargehand import usage as usage_mod, worker_tokens
-from chargehand.cli import EXIT_ERROR, EXIT_OK, build_parser, build_status, main
-from chargehand.config import ServeConfig
-from chargehand.errors import LaunchAborted
-from chargehand.runtime import Capabilities
-from chargehand.tick import Runner
+from elfcrew import board, claude as claude_mod, ledger as ledger_mod
+from elfcrew import clone as clone_mod
+from elfcrew import delivery as delivery_mod
+from elfcrew import usage as usage_mod, worker_tokens
+from elfcrew.cli import EXIT_ERROR, EXIT_OK, build_parser, build_status, main
+from elfcrew.config import ServeConfig
+from elfcrew.errors import LaunchAborted
+from elfcrew.runtime import Capabilities
+from elfcrew.tick import Runner
 from conftest import run_git
 from support import daemon as support
 from support import fake_runtime
@@ -48,7 +48,7 @@ def daemon(harness, tmp_path, monkeypatch):
 
 
 def write_role(harness, text=ROLE):
-    path = harness.repo / ".chargehand" / "roles" / "implementer.toml"
+    path = harness.repo / ".elfcrew" / "roles" / "implementer.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
 
@@ -162,7 +162,7 @@ def test_a_fresh_clone_launches_a_new_session_in_its_own_worktree(harness, origi
     assert (clone.role, clone.item, clone.state) == ("implementer", "ABC-1", ledger_mod.RUNNING)
     assert clone.handle == f"implementer/ABC-1#{clone.id}"
     assert clone.worktree.endswith(f"implementer/ABC-1-{clone.id}")
-    assert clone.branch == f"chargehand/implementer/ABC-1-{clone.id}"
+    assert clone.branch == f"elfcrew/implementer/ABC-1-{clone.id}"
     assert fork_calls(harness, runtime) == []
     if runtime == "claude":
         launch = harness.claude_state.launches[-1]
@@ -791,7 +791,7 @@ def test_a_clone_of_a_queue_label_worker_follows_its_item_on_the_tracker_and_own
     original = idle(harness, harness.worker("ABC-1"))
     assert original.owns_label == ledger_mod.LABEL_QUEUE
     labels = harness.labels("ABC-1")
-    assert "chargehand-blocked" in labels
+    assert "elfcrew-blocked" in labels
 
     clone = clone_of(harness, original, mode=mode)
     primary = harness.ledger.primary_subscription(clone)
@@ -890,7 +890,7 @@ def test_a_runtime_without_the_mod_offers_no_summary_clone(daemon, harness):
     _, form = get(daemon, f"/api/workers/{original.id}/clone")
 
     assert form["modes"] == ["fresh", "full"]
-    assert "does not load the chargehand mod" in form["summary_refused"]
+    assert "does not load the elfcrew mod" in form["summary_refused"]
     outcome = request_clone(harness, original, mode="summary")
     assert outcome["ok"] == 0 and "summary mode is not available" in outcome["message"]
     assert clones_of(harness, original) == []
@@ -1129,7 +1129,7 @@ def test_the_wait_uses_up_no_launch_attempt_with_a_limit_of_one(harness):
 
 
 def test_the_handoff_tool_says_what_a_handoff_wake_line_asks_for():
-    from chargehand import channel
+    from elfcrew import channel
 
     description = channel.TOOLS["handoff"].description
     assert "A wake line 'handoff: ...' asks for a current note now" in description
@@ -1141,7 +1141,7 @@ def test_after_the_time_limit_the_clone_starts_from_the_stored_note_and_says_so(
     clone = started(harness, request_clone(harness, original, mode="summary"))
     assert clone.state == ledger_mod.LAUNCHING
 
-    monkeypatch.setattr("chargehand.tick.SUMMARY_WAIT_SECS", 0)
+    monkeypatch.setattr("elfcrew.tick.SUMMARY_WAIT_SECS", 0)
     harness.next_tick()
 
     clone = harness.ledger.get(clone.id)
@@ -1158,7 +1158,7 @@ def test_after_the_time_limit_a_clone_of_an_original_without_a_note_fails(harnes
     assert clone.state == ledger_mod.LAUNCHING
     assert len(handoff_entries(harness, original)) == 1
 
-    monkeypatch.setattr("chargehand.tick.SUMMARY_WAIT_SECS", 0)
+    monkeypatch.setattr("elfcrew.tick.SUMMARY_WAIT_SECS", 0)
     harness.next_tick()
 
     clone = harness.ledger.get(clone.id)

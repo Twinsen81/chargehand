@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install chargehand (with test extras)
+      - name: Install elfcrew (with test extras)
         run: python -m pip install '.[test]'
 
       - name: Run pytest

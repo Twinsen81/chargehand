@@ -10,7 +10,7 @@ import logging
 import os
 import signal
 
-from chargehand import processes
+from elfcrew import processes
 
 
 def test_the_table_is_read_from_ps_output_with_the_start_time_as_one_field():
@@ -88,7 +88,7 @@ def test_an_end_after_a_stop_logs_the_pids_and_warns_about_the_ones_left(
     process_table.add(300, 100)
     process_table.unkillable.add(300)
 
-    with caplog.at_level(logging.INFO, logger="chargehand.processes"):
+    with caplog.at_level(logging.INFO, logger="elfcrew.processes"):
         left = processes.end_after_stop(processes.below(100), who="impl/ABC-1", session="abcd1234")
 
     assert [p.pid for p in left] == [300]
@@ -101,7 +101,7 @@ def test_an_end_after_a_stop_logs_the_pids_and_warns_about_the_ones_left(
     ]
 
 
-def test_an_end_never_signals_chargehand_itself_or_pid_one(process_table):
+def test_an_end_never_signals_elfcrew_itself_or_pid_one(process_table):
     own = os.getpid()
     process_table.add(100, 1)
     process_table.add(own, 100, group=os.getpgrp())

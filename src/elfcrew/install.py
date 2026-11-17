@@ -1,0 +1,661 @@
+"""Installation helpers: the launchd job, `doctor`, and `init`.
+
+Nothing here runs as part of a tick. `install` writes the definition of the job that
+keeps the daemon running and, only when asked, loads it; `doctor` reports and never
+repairs.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import plistlib
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from xml.parsers.expat import ExpatError
+
+from elfcrew import __version__, paths
+from elfcrew import roles as roles_mod
+from elfcrew import runtime as runtime_mod
+from elfcrew import serve
+from elfcrew import usage as usage_mod
+from elfcrew.config import MachineConfig, load_repo_config
+from elfcrew.errors import ElfcrewError, ConfigError
+from elfcrew.gitutil import Git
+from elfcrew.sources import build as build_source
+from elfcrew.trackers import build as build_tracker
+
+OK = "ok"
+# Not a fault: something worth knowing that needs no change for the machine to work.
+INFO = "info"
+WARN = "warn"
+FAIL = "fail"
+
+# launchd starts jobs with a minimal PATH, so everything the tick shells out to has
+# to be reachable through the job's own PATH rather than through a login shell's.
+DEFAULT_JOB_PATH = (
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+)
+# What launchd gives a job whose definition sets no PATH.
+LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# Everything the tick starts inherits the job's process type, including the Claude Code
+# daemon that a launch starts, and that daemon then hosts every background session on
+# the machine, the operator's own as well. Background would hold all of them in the
+# throttled band, where CPU-bound work measured about three times slower than from a
+# terminal. Interactive gives them the priority a terminal gives.
+JOB_PROCESS_TYPE = "Interactive"
+# How long launchd waits after SIGTERM before it sends SIGKILL. The daemon finishes the
+# tick phase in progress first; a phase that runs longer, such as a slow setup script, is
+# killed, and the next start reconciles it as an interrupted launch.
+JOB_EXIT_TIMEOUT_SECS = 300
+# Next to the machine configuration: what an import could not do, for `doctor` to list.
+IMPORT_STEPS_FILE = "imported-steps.json"
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    status: str
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+def build_plist(
+    *,
+    program: Iterable[str] | None = None,
+    job_path: str | None = None,
+    log_path: Path | None = None,
+) -> dict[str, object]:
+    """A job that keeps `elfcrew serve` running: started at load, restarted on exit.
+
+    The daemon writes its own log, rotated; *log_path* only gets what it prints before
+    that, such as a crash on import.
+    """
+    argv = list(program) if program else elfcrew_argv()
+    extra_path = os.environ.get("PATH", "")
+    return {
+        "Label": paths.LAUNCHD_LABEL,
+        "ProgramArguments": argv,
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ExitTimeOut": JOB_EXIT_TIMEOUT_SECS,
+        "ProcessType": JOB_PROCESS_TYPE,
+        "EnvironmentVariables": {"PATH": job_path or _merge_path(DEFAULT_JOB_PATH, extra_path)},
+        "StandardOutPath": str(log_path or paths.launchd_output_file()),
+        "StandardErrorPath": str(log_path or paths.launchd_output_file()),
+    }
+
+
+def _merge_path(base: str, extra: str) -> str:
+    seen: list[str] = []
+    for entry in base.split(":") + extra.split(":"):
+        if entry and entry not in seen:
+            seen.append(entry)
+    return ":".join(seen)
+
+
+def elfcrew_argv() -> list[str]:
+    """How launchd should start the daemon, as a full argument list.
+
+    The console script when one is on PATH, and the module form otherwise. Both halves
+    matter: a virtual environment that was not activated puts neither `elfcrew` nor
+    its `python` on PATH, so the interpreter running this call is the only reliable way
+    back to the package. Returning the whole argv rather than a program keeps the two
+    forms from being recombined wrongly by a caller.
+    """
+    serve_args = ["serve", "--log-file", str(paths.log_file())]
+    script = shutil.which("elfcrew")
+    if script:
+        return [script, *serve_args]
+    return [sys.executable, "-m", "elfcrew", *serve_args]
+
+
+def write_plist(destination: Path | None = None, *, job_path: str | None = None) -> Path:
+    target = destination or paths.launch_agent_plist()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = build_plist(job_path=job_path)
+    with target.open("wb") as handle:
+        plistlib.dump(data, handle)
+    return target
+
+
+def installed_job(plist: Path | None = None) -> dict[str, object] | None:
+    try:
+        with (plist or paths.launch_agent_plist()).open("rb") as handle:
+            data = plistlib.load(handle)
+    except (OSError, ValueError, ExpatError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def is_timer_job(job: Mapping[str, object]) -> bool:
+    """Whether *job* is the timer that ran one tick at a time, from before the daemon."""
+    argv = job.get("ProgramArguments")
+    return "StartInterval" in job or not (isinstance(argv, list) and "serve" in argv[1:])
+
+
+def writes_own_log(job: Mapping[str, object]) -> bool:
+    """Whether the daemon of *job* writes its own, rotated log, as `install` sets it up now."""
+    argv = job.get("ProgramArguments")
+    return isinstance(argv, list) and "--log-file" in argv
+
+
+def daemon_checks(config: MachineConfig) -> list[Check]:
+    """Whether this instance's daemon answers on its port, and whether its token is private."""
+    port = config.serve.port
+    checks: list[Check] = []
+    health = serve.probe(port)
+    if health is None:
+        checks.append(
+            Check("daemon", FAIL,
+                  f"nothing answers on {serve.HOST}:{port}; run `elfcrew install --load`, "
+                  "or `elfcrew serve` in a terminal")
+        )
+    elif not serve.serves_this_ledger(health):
+        checks.append(
+            Check("daemon", FAIL,
+                  f"the daemon on {serve.HOST}:{port} serves another ledger, {health.get('ledger')}; "
+                  "give this instance a port of its own in [serve]")
+        )
+    else:
+        checks.append(
+            Check("daemon", OK,
+                  f"answers on {serve.HOST}:{port} · pid {health.get('pid')} · "
+                  f"{health.get('ticks')} ticks, {health.get('failed_ticks')} failed")
+        )
+    token = config.serve.token_file
+    problem = serve.token_problem(token)
+    if problem is None:
+        checks.append(Check("daemon token", OK, f"{token} · mode 600"))
+    elif not token.exists() and not token.is_symlink():
+        checks.append(Check("daemon token", WARN, problem))
+    else:
+        checks.append(Check("daemon token", FAIL, problem))
+    return checks
+
+
+def job_checks(config: MachineConfig, job: Mapping[str, object]) -> list[Check]:
+    """What the scheduled job can reach, rather than what the shell running doctor can.
+
+    The job has only the PATH its definition sets. A tool that resolves in a shell but not
+    there shows up as a "not found" inside a tick, long after setup looked fine.
+    """
+    checks: list[Check] = []
+    argv = job.get("ProgramArguments")
+    program = argv[0] if isinstance(argv, list) and argv else job.get("Program")
+    if not isinstance(program, str) or not os.access(program, os.X_OK):
+        checks.append(
+            Check("launchd program", FAIL,
+                  f"the job runs {program}, which is not an executable file; "
+                  "re-run `elfcrew install --load`")
+        )
+    environment = job.get("EnvironmentVariables")
+    job_path = environment.get("PATH") if isinstance(environment, Mapping) else None
+    found: list[str] = []
+    missing: list[str] = []
+    for tool in (config.claude_bin, config.git_bin):
+        where = shutil.which(os.path.expanduser(tool), path=job_path or LAUNCHD_PATH)
+        if where:
+            found.append(f"{tool} at {where}")
+        else:
+            missing.append(tool)
+    if missing:
+        checks.append(
+            Check("launchd PATH", FAIL,
+                  f"the job's PATH does not reach {', '.join(missing)}; re-run "
+                  "`elfcrew install --load` from a shell where it resolves, or set an "
+                  "absolute claude_bin or git_bin")
+        )
+    else:
+        checks.append(Check("launchd PATH", OK, ", ".join(found)))
+    return checks
+
+
+def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["launchctl", *args], capture_output=True, text=True, check=False, timeout=60
+    )
+
+
+def domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def service_target() -> str:
+    return f"{domain()}/{paths.LAUNCHD_LABEL}"
+
+
+def is_loaded() -> bool:
+    if sys.platform != "darwin":
+        return False
+    return launchctl("print", service_target()).returncode == 0
+
+
+def bootstrap(plist: Path) -> subprocess.CompletedProcess[str]:
+    return launchctl("bootstrap", domain(), str(plist))
+
+
+def bootout() -> subprocess.CompletedProcess[str]:
+    return launchctl("bootout", service_target())
+
+
+def kickstart(*, force: bool = False) -> subprocess.CompletedProcess[str]:
+    """Ask launchd to run the job now.
+
+    `-k` kills the running instance first, which would abort a tick in the middle of a
+    git fetch or a setup script and burn one of that attempt's launch retries. Control
+    commands therefore never force: if a tick is already running they wait for it, and
+    the caller falls back to running a tick itself under the tick lock.
+    """
+    args = ["kickstart", "-k", service_target()] if force else ["kickstart", service_target()]
+    return launchctl(*args)
+
+
+def starter_roles() -> list[str]:
+    """The roles elfcrew ships a template for."""
+    return sorted(path.stem for path in (paths.templates_dir() / "roles").glob("*.toml"))
+
+
+def _starter_agent_file(repo: Path, name: str) -> Path | None:
+    """Where the agent file of the starter role *name* goes in *repo*, or None when it has none."""
+    if not (paths.templates_dir() / "agents" / f"{name}.md").is_file():
+        return None
+    with (paths.templates_dir() / "roles" / f"{name}.toml").open("rb") as handle:
+        runtime = tomllib.load(handle).get("runtime", roles_mod.DEFAULT_RUNTIME)
+    return runtime_mod.get(runtime).repo_agent_file(repo, name)
+
+
+def init_repo(repo: Path, *, force: bool = False, roles: Sequence[str] = ()) -> list[Path]:
+    """Write the repository configuration and a starter `implementer` role.
+
+    With *roles*, write those starter roles instead, each with the agent file it names
+    when elfcrew ships one, and the repository configuration only when it is missing.
+    """
+    unknown = sorted(set(roles) - set(starter_roles()))
+    if unknown:
+        raise ElfcrewError(
+            f"no starter role named {', '.join(unknown)}; available: {', '.join(starter_roles())}"
+        )
+    targets: list[tuple[Path, str]] = []
+    config = repo / paths.REPO_CONFIG_NAME
+    if not roles or not config.exists():
+        targets.append((config, "elfcrew.toml"))
+    for name in roles or (roles_mod.DEFAULT_ROLE,):
+        targets.append((repo / ".elfcrew" / "roles" / f"{name}.toml", f"roles/{name}.toml"))
+        agent = _starter_agent_file(repo, name)
+        if agent is not None:
+            targets.append((agent, f"agents/{name}.md"))
+    for target, _ in targets:
+        if target.exists() and not force:
+            raise ElfcrewError(f"{target} already exists; pass --force to overwrite")
+    written = []
+    for target, template in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((paths.templates_dir() / template).read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(target)
+    return written
+
+
+def _runtimes_in_use(config: MachineConfig) -> list[str]:
+    """The default runtime and every runtime an enabled role names. A role that fails to load is reported later."""
+    names = {roles_mod.DEFAULT_RUNTIME}
+    for repository in config.repositories:
+        try:
+            repo_config = load_repo_config(repository.path)
+        except ConfigError:
+            continue
+        for name in repository.roles:
+            try:
+                role = roles_mod.load_role(
+                    repository.path, name, repo_config=repo_config,
+                    tracker_type=repository.tracker.type, check_agent=False,
+                )
+            except ConfigError:
+                continue
+            names.add(role.runtime)
+    return sorted(names)
+
+
+def doctor(config: MachineConfig | None, *, check_trackers: bool = True) -> list[Check]:
+    checks: list[Check] = [
+        Check("elfcrew", OK, f"version {__version__}"),
+        Check(
+            "python",
+            OK if sys.version_info >= (3, 11) else FAIL,
+            f"{sys.version.split()[0]} at {sys.executable}",
+        ),
+    ]
+
+    if config is None:
+        checks.append(
+            Check("config", FAIL, f"no configuration at {paths.config_file()}; run `elfcrew init --machine`")
+        )
+        return checks
+    checks.append(Check("config", OK, str(config.source or "(in memory)")))
+    for key in config.ignored_keys:
+        checks.append(Check("config", INFO, f"{key} is ignored and can be removed"))
+    checks.extend(import_checks(config))
+
+    for name in _runtimes_in_use(config):
+        try:
+            runtime = runtime_mod.create(name, config)
+            results = runtime.health_checks()
+        except ElfcrewError as exc:
+            checks.append(Check(f"runtime {name}", FAIL, str(exc)))
+            continue
+        checks.extend(Check(result.name, result.status, result.detail) for result in results)
+
+    git = Git(config.git_bin)
+    checks.append(
+        Check("git", OK if shutil.which(config.git_bin) else FAIL, config.git_bin)
+    )
+
+    root = config.worktree_root
+    if root.exists():
+        checks.append(
+            Check("worktree root", OK if os.access(root, os.W_OK) else FAIL, str(root))
+        )
+    else:
+        parent = root.parent
+        checks.append(
+            Check(
+                "worktree root",
+                OK if parent.exists() and os.access(parent, os.W_OK) else FAIL,
+                f"{root} (will be created)",
+            )
+        )
+    try:
+        free_gb = shutil.disk_usage(root if root.exists() else root.parent).free / 1024**3
+        checks.append(
+            Check(
+                "disk",
+                OK if free_gb >= config.min_free_disk_gb else WARN,
+                f"{free_gb:.1f} GB free",
+            )
+        )
+    except OSError as exc:
+        checks.append(Check("disk", WARN, str(exc)))
+
+    if config.notify.command:
+        # Split and resolved as the notifier runs it: a bare name through PATH.
+        try:
+            words = shlex.split(os.path.expanduser(config.notify.command))
+        except ValueError:
+            words = []
+        program = os.path.expanduser(words[0]) if words else config.notify.command
+        found = shutil.which(program) if words else None
+        checks.append(
+            Check("notify", OK if found else FAIL, found or f"{program} is not executable")
+        )
+    else:
+        checks.append(Check("notify", WARN, "no notify.command configured; nothing will reach you"))
+
+    checks.append(usage_check(config))
+
+    for repository in config.repositories:
+        label = f"repository {repository.name}"
+        if not repository.path.exists():
+            checks.append(Check(label, FAIL, f"{repository.path} does not exist"))
+            continue
+        if not git.is_repo(repository.path):
+            checks.append(Check(label, FAIL, f"{repository.path} is not a git repository"))
+            continue
+        try:
+            repo_config = load_repo_config(repository.path)
+        except ConfigError as exc:
+            checks.append(Check(label, FAIL, str(exc)))
+            continue
+        checks.append(Check(label, OK, f"{repository.path} · base {repo_config.base}"))
+        if not git.ref_exists(repository.path, repo_config.base):
+            checks.append(
+                Check(f"{label} base", WARN, f"{repo_config.base} is not present; fetch first")
+            )
+        for name in repository.roles:
+            role_label = f"{label} role {name}"
+            try:
+                role = roles_mod.load_role(
+                    repository.path, name, repo_config=repo_config,
+                    tracker_type=repository.tracker.type,
+                )
+            except ConfigError as exc:
+                checks.append(Check(role_label, FAIL, str(exc)))
+                continue
+            parts = [f"runtime {role.runtime}"] if role.runtime != roles_mod.DEFAULT_RUNTIME else []
+            if role.permission_mode:
+                parts.append(role.permission_mode)
+            if role.agent:
+                parts.append(f"agent {role.agent}")
+            if role.model:
+                parts.append(f"model {role.model}")
+            if role.effort:
+                parts.append(f"effort {role.effort}")
+            detail = " · ".join(parts)
+            if role.permission_mode == "bypassPermissions":
+                checks.append(
+                    Check(
+                        role_label,
+                        WARN,
+                        detail + " · bypassPermissions is intended for a dedicated machine, "
+                        "user account, or VM",
+                    )
+                )
+            elif not role.start:
+                checks.append(Check(role_label, WARN, detail + " · no start rule, so nothing starts it on its own"))
+            else:
+                checks.append(Check(role_label, OK, detail))
+            if role.status_file:
+                checks.append(
+                    Check(
+                        f"{role_label} status_file",
+                        INFO,
+                        "status_file is deprecated: it still works in this release and goes "
+                        "away in a later one; a worker reports with the report tool and asks "
+                        "with the ask tool",
+                    )
+                )
+        if check_trackers:
+            try:
+                tracker = build_tracker(repository)
+                checks.append(Check(f"{label} tracker", OK, f"{tracker.describe()} as {tracker.whoami()}"))
+            except ElfcrewError as exc:
+                checks.append(Check(f"{label} tracker", FAIL, str(exc)))
+
+    if check_trackers:
+        checks.extend(source_checks(config))
+
+    job: dict[str, object] | None = None
+    if sys.platform == "darwin":
+        plist = paths.launch_agent_plist()
+        if not plist.exists():
+            checks.append(Check("launchd", WARN, f"{plist} not installed; run `elfcrew install`"))
+        elif is_loaded():
+            checks.append(Check("launchd", OK, f"{paths.LAUNCHD_LABEL} is loaded"))
+        else:
+            checks.append(
+                Check("launchd", WARN, f"{plist} exists but is not loaded; run `elfcrew install --load`")
+            )
+        if plist.exists():
+            job = installed_job(plist)
+            if job is None:
+                checks.append(Check("launchd", FAIL, f"{plist} cannot be read as a property list"))
+            else:
+                if is_timer_job(job):
+                    checks.append(
+                        Check("launchd", WARN,
+                              f"{plist} runs a tick on a timer instead of the daemon; "
+                              "re-run `elfcrew install --load`")
+                    )
+                elif not writes_own_log(job):
+                    checks.append(
+                        Check("launchd", WARN,
+                              f"the daemon writes its log through launchd, and nothing rotates "
+                              f"{paths.log_file()}; re-run `elfcrew install --load`")
+                    )
+                checks.extend(job_checks(config, job))
+    else:
+        checks.append(
+            Check("launchd", WARN,
+                  "not macOS: run `elfcrew serve` under your own service manager")
+        )
+    checks.extend(daemon_checks(config))
+    return checks
+
+
+def _age(secs: float) -> str:
+    if secs < 60:
+        return "less than a minute"
+    if secs < 3600:
+        return f"{secs // 60:.0f} min"
+    if secs < 2 * 86400:
+        return f"{secs // 3600:.0f} h"
+    return f"{secs // 86400:.0f} days"
+
+
+def usage_check(config: MachineConfig, now: float | None = None) -> Check:
+    """Which source wrote the last usage reading, how old it is, and what it says.
+
+    A reading older than three poll intervals while the daemon asks Claude Code is a
+    warning: the requests fail, or the daemon does not run.
+    """
+    current = time.time() if now is None else now
+    path = config.serve.usage_file
+    poll = config.usage.poll_secs
+    reading = usage_mod.read_usage(path, current)
+    if not reading["known"]:
+        how = (f"the daemon asks Claude Code every {poll}s" if poll
+               else "poll_secs in [usage] is 0, so only the status line wrapper and the "
+               "worker sessions write one")
+        return Check("usage", INFO, f"no reading in {path} yet; {how}; without a reading there is no reserve")
+    age = max(0.0, current - float(reading["written_at"]))  # type: ignore[arg-type]
+    source = reading["source"] or "unknown"
+    weekly = reading[usage_mod.WINDOWS[0]]
+    used = weekly.get("used_percent") if isinstance(weekly, Mapping) else None
+    resets = weekly.get("resets_at") if isinstance(weekly, Mapping) else None
+    what = (
+        f"weekly {used:.0f}% until {time.strftime('%a %d %b %H:%M', time.localtime(resets))}"
+        if isinstance(used, float) and isinstance(resets, float)
+        else "no current weekly window"
+    )
+    detail = f"{what} · source {source} · {_age(age)} old"
+    if poll and age > 3 * poll:
+        return Check(
+            "usage", WARN,
+            f"{detail}; older than three poll intervals ({poll}s): get_usage gives no "
+            "reading, or the daemon does not run; see the daemon log",
+        )
+    return Check("usage", OK, detail)
+
+
+def import_checks(config: MachineConfig) -> list[Check]:
+    """The manual steps an import left, each one marked done when this machine shows it."""
+    steps_file = (config.source.parent if config.source else paths.config_dir()) / IMPORT_STEPS_FILE
+    try:
+        record = json.loads(steps_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        return [Check("imported setup", WARN, f"{steps_file} cannot be read: {exc}")]
+    steps = record.get("steps") if isinstance(record, dict) else None
+    checks = [
+        Check("imported setup", INFO,
+              f"{steps_file} lists what an import left to do; remove it when the steps are done")
+    ]
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        done = _step_done(config, step)
+        checks.append(
+            Check(str(step.get("name", "imported")),
+                  INFO if done is None else OK if done else WARN,
+                  str(step.get("detail", "")))
+        )
+    return checks
+
+
+def _step_done(config: MachineConfig, step: Mapping[str, object]) -> bool | None:
+    """Whether an imported step is done, or None when this machine cannot show it."""
+    runtime = step.get("runtime")
+    if isinstance(runtime, str):
+        try:
+            return runtime_mod.get(runtime).import_step_done(step)
+        except ConfigError:
+            return None
+    kind = step.get("kind")
+    if kind == "config_key":
+        path = step.get("path")
+        return isinstance(path, list) and _config_has(config, [str(p) for p in path])
+    if kind == "launchd":
+        return is_loaded() if sys.platform == "darwin" else None
+    if kind == "program":
+        program = step.get("program")
+        return isinstance(program, str) and shutil.which(os.path.expanduser(program)) is not None
+    return None
+
+
+def _config_has(config: MachineConfig, path: Sequence[str]) -> bool:
+    """Whether the configuration file sets the key at *path*, as an export names it."""
+    if config.source is None or not path:
+        return False
+    try:
+        with config.source.open("rb") as handle:
+            data: object = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    rest = list(path)
+    if rest[0] in ("repository", "source") and len(rest) > 2 and isinstance(data, Mapping):
+        arrays = ("repository", "route") if rest[0] == "repository" else ("source",)
+        entries = [e for a in arrays for e in (data.get(a) or []) if isinstance(e, Mapping)]
+        data = next((e for e in entries if _entry_name(rest[0], e) == rest[1]), None)
+        rest = rest[2:]
+    for key in rest:
+        if not isinstance(data, Mapping) or key not in data:
+            return False
+        data = data[key]
+    return True
+
+
+def _entry_name(kind: str, entry: Mapping[str, object]) -> object:
+    if kind == "source":
+        return entry.get("name", entry.get("type"))
+    return entry.get("name") or Path(str(entry.get("path", entry.get("repo", "")))).name
+
+
+def source_checks(config: MachineConfig) -> list[Check]:
+    """One check per ``[[source]]`` that can tell whether its events can arrive at all.
+
+    The github source, for example, compares the review requests with the notification
+    threads. The checks call the source's system, so `doctor --no-tracker` skips them.
+    """
+    checks: list[Check] = []
+    for source_config in config.sources:
+        label = f"source {source_config.name}"
+        try:
+            source = build_source(source_config)
+            warnings = source.setup_warnings()
+        except ElfcrewError as exc:
+            checks.append(Check(label, FAIL, str(exc)))
+            continue
+        if warnings is None:
+            continue
+        if not warnings:
+            checks.append(Check(label, OK, source.describe()))
+        checks.extend(Check(label, WARN, warning) for warning in warnings)
+    return checks
+
+
+def worst(checks: Iterable[Check]) -> str:
+    statuses = {check.status for check in checks}
+    if FAIL in statuses:
+        return FAIL
+    if WARN in statuses:
+        return WARN
+    return OK

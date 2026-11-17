@@ -5,20 +5,20 @@ from __future__ import annotations
 import os
 import stat
 
-from chargehand.config import NotifyConfig
-from chargehand.notify import Notification, Notifier
+from elfcrew.config import NotifyConfig
+from elfcrew.notify import Notification, Notifier
 
 
 def test_the_payload_has_no_field_for_free_text():
     env = Notification(item="ABC-1", state="blocked", url="https://x.invalid/ABC-1").env()
 
-    assert env["CHARGEHAND_ISSUE"] == "ABC-1"
-    assert env["CHARGEHAND_STATE"] == "blocked"
-    assert env["CHARGEHAND_URL"] == "https://x.invalid/ABC-1"
+    assert env["ELFCREW_ISSUE"] == "ABC-1"
+    assert env["ELFCREW_STATE"] == "blocked"
+    assert env["ELFCREW_URL"] == "https://x.invalid/ABC-1"
     assert set(env) == {
-        "CHARGEHAND_ITEM", "CHARGEHAND_ROLE", "CHARGEHAND_STATE", "CHARGEHAND_URL",
-        "CHARGEHAND_REPOSITORY", "CHARGEHAND_DETAIL",
-        "CHARGEHAND_ISSUE", "CHARGEHAND_ROUTE", "ISSUE", "STATE", "URL",
+        "ELFCREW_ITEM", "ELFCREW_ROLE", "ELFCREW_STATE", "ELFCREW_URL",
+        "ELFCREW_REPOSITORY", "ELFCREW_DETAIL",
+        "ELFCREW_ISSUE", "ELFCREW_ROUTE", "ISSUE", "STATE", "URL",
     }
 
 
@@ -26,8 +26,8 @@ def test_the_command_receives_the_payload_as_environment(tmp_path):
     script = tmp_path / "notify.sh"
     output = tmp_path / "out"
     script.write_text(
-        f'#!/bin/sh\nprintf "%s %s %s" "$CHARGEHAND_ISSUE" "$CHARGEHAND_STATE" '
-        f'"$CHARGEHAND_DETAIL" > "{output}"\n'
+        f'#!/bin/sh\nprintf "%s %s %s" "$ELFCREW_ISSUE" "$ELFCREW_STATE" '
+        f'"$ELFCREW_DETAIL" > "{output}"\n'
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     notifier = Notifier(NotifyConfig(command=str(script)))
@@ -60,7 +60,7 @@ def test_with_no_command_configured_nothing_is_sent_but_the_call_is_recorded():
 
 
 def test_the_bundled_notify_template_runs(tmp_path):
-    from chargehand import paths
+    from elfcrew import paths
 
     script = tmp_path / "notify.sh"
     script.write_text((paths.templates_dir() / "notify.sh").read_text())
