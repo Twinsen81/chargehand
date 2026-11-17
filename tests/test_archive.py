@@ -545,6 +545,34 @@ def test_an_archive_job_waits_while_the_listing_cannot_be_read(harness, monkeypa
     assert not worker.worktree_path.exists()
 
 
+def test_a_forced_archive_job_says_when_the_listing_could_not_be_read(harness, monkeypatch):
+    from chargehand import tick as tick_mod
+
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target, force=True)
+    runner(harness).run_queued(harness.ledger)
+    other_sessions = tick_mod.Runner._other_sessions
+
+    def listing_fails(self, *args):
+        harness.claude_state.set(agents_fail=True)
+        try:
+            return other_sessions(self, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_other_sessions", listing_fails)
+
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_DONE
+    assert job.progress == (
+        "archived; the session listing could not be read, so other sessions were not "
+        "looked for"
+    )
+    assert not worker.worktree_path.exists()
+
+
 def test_the_jobs_of_a_repository_archive_check_for_other_sessions(harness):
     worker = cancelled(harness)
     assert apply_request(harness, "archive_repository", "test")["ok"] == 1

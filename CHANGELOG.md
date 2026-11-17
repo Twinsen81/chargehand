@@ -350,6 +350,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at DEBUG on later ticks. Before, the line came at INFO on every tick, for hours with a
   dev server. A new hold, after a wake or for another session, logs at INFO again. The
   card and the `wake held -> queued` transition are unchanged.
+- A forced archive job whose session listing could not be read now says so in its
+  progress: "archived; the session listing could not be read, so other sessions were not
+  looked for", as a forced discard and a forced retry do. Before, it said only
+  "archived".
+- A `not-collected` notification that the hook fails to send goes out again at the next
+  collection, as a `daily-cap` notification does. Before, the hold was recorded before
+  the hook ran, so a failed hook meant that the operator never got the notification.
+- A worktree that garbage collection does not remove gives one `not-collected`
+  notification and one WARNING line, also when two finished workers share it. Before,
+  a copy that `claude --resume` started in a worktree, and that chargehand adopted as a
+  second worker of the item, made the two workers hold each other, and each one sent the
+  same notification and its own WARNING line. Both workers are still collected once the
+  copy is gone.
+- When the process of a stopped session still runs at the end of the wait after the stop,
+  the stop now ends and reports nothing of what runs below it, and one WARNING line says
+  so. Before, the processes below it, which then may be only its normal children such as
+  an MCP server, counted as outliving the stop: a final stop signalled them, and
+  `chargehand stop` sent a false `orphan-shell` notification.
+- The pause of a worker whose wake the workspace guard refuses (`wake-fault`) now treats
+  the processes below its session as `chargehand stop` does: it keeps them, logs one
+  WARNING line with their pids, sends one `orphan-shell` notification, and records them,
+  so a later cancel or other final stop ends them. Before, a background shell of the
+  session ran on with no owner and no word to the operator.
 
 ### Added
 

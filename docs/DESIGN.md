@@ -1176,7 +1176,9 @@ each stop, chargehand reads the processes below the session's listed `pid` (`ps`
 the start time of each). Once the stop is confirmed, it waits up to 10 seconds, as a
 resume does, until that `pid` has exited: the listing shows the stop about a second
 before the process ends, and the processes that end with it, such as a stdio MCP server,
-must not count. Then it ends the ones that still run: SIGTERM to each, and to the process
+must not count. When that `pid` still runs at the end of the wait, one WARNING line says
+so, and the stop ends and reports nothing below it: those processes may be only its normal
+children. Otherwise it ends the ones that still run: SIGTERM to each, and to the process
 group of each one that leads its own group, then SIGKILL to what still runs after 3
 seconds. A process counts only with the same pid and
 the same start time, so a pid that a new process got meanwhile is never signalled, and
@@ -1185,12 +1187,13 @@ session's work: cancel, discard, retry, archive, garbage collection, the watchdo
 stop, the close of a worker whose item closed, the stop of a session refresh, the stop of
 another session in the worker's worktree, and the stop before a resume (a reply from the
 board, the resume after a usage limit). The log names the pids it ended, and a WARNING
-names those that did not end. A stop that is not confirmed ends nothing. `chargehand stop`,
-which `continue` undoes, keeps them, because the operator may want the shell, but says
-so: its outcome and one WARNING line name the pids, and one notification goes out with the
-state `orphan-shell` and a count. The runner state keeps them for the worker, and the next
-cancel, discard, retry or other stop that ends the worker's work ends those that still run
-too. The stop before a resume does not.
+names those that did not end. A stop that is not confirmed ends nothing. `chargehand
+stop`, which `continue` undoes, keeps them, because the operator may want the shell, and
+so does the pause of a worker whose wake the workspace guard refuses (`wake-fault`), but
+each says so: one WARNING line names the pids, as does the outcome of `chargehand stop`,
+and one notification goes out with the state `orphan-shell` and a count. The runner state
+keeps them for the worker, and the next cancel, discard, retry or other stop that ends the
+worker's work ends those that still run too. The stop before a resume does not.
 
 **Garbage collection.** When the issue is closed or its pull request is merged or closed, the
 session and its worktree are removed — never when commits are unpushed. Low disk space is
@@ -1203,10 +1206,16 @@ next collection. The first hold logs one WARNING line, adds one line to the tick
 sends one notification with the state `not-collected` and a count; the same sessions on
 later collections log at DEBUG only. The record of the hold is kept in the runner state
 under `not-collected:` and the worker id, and is dropped once the sessions are gone or the
-worker is collected. Retry applies the rules of discard before it removes the worktree:
-without force it refuses with the reasons `other_sessions` or `sessions_unknown`, with
-force it stops and removes those sessions and names them in its outcome, and it never stops
-the current session of another live worker.
+worker is collected. It is dropped too when the hook fails, so the next collection sends
+the notification again, as for the daily cap. Two finished workers can share a worktree,
+such as when a copy that `claude --resume` started there was adopted as a second worker of
+the item, and then hold each other. The operator learns of such a worktree once: a worker
+stays quiet, at DEBUG, while each session that holds it is named in the record of another
+worker of the same worktree that waits for collection, or is that worker's own. Retry
+applies the rules of discard before it removes the worktree: without force it refuses with
+the reasons `other_sessions` or `sessions_unknown`, with force it stops and removes those
+sessions and names them in its outcome, and it never stops the current session of another
+live worker.
 
 ## 7. Control: a CLI and a loopback daemon
 
@@ -1523,8 +1532,10 @@ refusal says which.
   fails the job and keeps the worktree and the zip; a listing that cannot be read leaves the
   job `written`, so the next tick tries again; with force the tick stops and removes the
   other sessions first and the job's progress names them, but a live worker's session still
-  fails the job. The jobs of `archive_repository` get the same check. Garbage
-  collection, discard and retry leave a worker alone while an archive of it is under way.
+  fails the job; a forced job whose listing cannot be read removes the worktree, and its
+  progress says that other sessions were not looked for, as a forced discard does. The
+  jobs of `archive_repository` get the same check. Garbage collection, discard and retry
+  leave a worker alone while an archive of it is under way.
   A stop of the daemon during the zip, or a crash, leaves at most the `.part` file and the
   job `running`; the next start of the job thread deletes every `.part` file and puts
   `running` jobs back in the queue, so the job runs again from the start. `archive_repository`

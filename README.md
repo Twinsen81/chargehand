@@ -379,8 +379,9 @@ The runner calls `~/.config/chargehand/notify.sh` when a worker needs you or end
 blocked, parked, failed, done through a report or the status file, stopped by the
 watchdog, or held by its daily wake cap (`daily-cap`). A worker whose item closed but
 whose worktree other sessions still work in, such as a copy that `claude --resume`
-started there, is not collected; you are notified once (`not-collected`), and the
-worktree is removed at the first collection after those sessions are gone. A
+started there, is not collected; you are notified once (`not-collected`; a hook that
+fails gets it again at the next collection), and the worktree is removed at the first
+collection after those sessions are gone. A
 turn end that waits for events (`idle`) and a worker that ends because its item closed
 are not notified; `chargehand status` shows them. A turn can end while a background shell
 that it started still runs; Claude Code then lists the session as busy, with the state
@@ -392,7 +393,8 @@ launched by this release or a later one. Claude Code does not end such a shell w
 stops the session, so chargehand ends the processes that outlive a stop of a session:
 cancel, discard, retry, archive, garbage collection, the watchdog, a session refresh, and
 a reply that resumes the session. `chargehand stop`, which `continue` undoes, keeps them,
-and you are notified once (`orphan-shell`) with a count; the log names their PIDs. As
+and so does the pause after a `wake-fault`; you are notified once (`orphan-shell`) with a
+count, and the log names their PIDs. As
 shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an

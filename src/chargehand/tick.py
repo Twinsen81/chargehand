@@ -266,7 +266,9 @@ STOP_AND_REMOVE = "Remove them, or re-run with --force to stop and remove them w
 # The other sessions that keep garbage collection from removing a worker's worktree, under
 # this prefix and the worker id: a JSON list of their sorted, scrubbed ids. A WARNING line
 # and a notification go out when it is new or its ids change; the same hold on later
-# collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone.
+# collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone,
+# and when the hook fails, so that the next collection sends the notification again. Two
+# workers that share the worktree send one; see `Runner._hold_told`.
 NOT_COLLECTED_PREFIX = "not-collected:"
 # The processes below a worker's session that a `chargehand stop` kept running, such as a
 # background shell, under this prefix and the worker id: a JSON list of their pid, group
@@ -1254,8 +1256,10 @@ class Runner:
         session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is not None and not runtime.is_stopped(session):
             return False, ()
-        if below and before is not None:
-            runtime.wait_for_exit(before)
+        if below and before is not None and not runtime.wait_for_exit(before):
+            # What runs below it may be only its normal children, such as an MCP server.
+            _log_process_lives_on(worker.handle, worker.session_id)
+            below = ()
         key = f"{KEPT_PROCESSES_PREFIX}{worker.id}"
         kept = self._kept_processes(worker)
         if not end_left:
@@ -1958,20 +1962,30 @@ class Runner:
         self._sync_labels(worker, context, report)
         if not left:
             return True, "session stopped; `chargehand continue` respawns it"
-        pids = processes_mod.pid_list(left)
-        log.warning(
-            "%s: %d process(es) below session %s still run after the stop, such as a "
-            "background shell; no session owns them now: %s",
-            worker.handle, len(left), sanitize.scrub_identifier(worker.session_id)[:8], pids,
-        )
-        self._notify(report, worker.name, "orphan-shell", worker.url, worker.repository,
-                     role=worker.role,
-                     detail=f"{len(left)} process(es) of the stopped session still run")
+        pids = self._report_kept(worker, left, report)
         return True, (
             f"session stopped; `chargehand continue` respawns it. {len(left)} process(es) "
             f"that the session started still run, such as a background shell; end them "
             f"by hand if you do not need them: {pids}"
         )
+
+    def _report_kept(
+        self, worker: Worker, left: tuple[processes_mod.Process, ...], report: TickReport
+    ) -> str:
+        """Tell the operator of the processes that a stop which `continue` undoes kept
+        running: one WARNING line with their pids and one notification with a count.
+        Returns the pids as a list for the outcome."""
+        pids = processes_mod.pid_list(left)
+        log.warning(
+            "%s: %d process(es) below session %s still run after the stop, such as a "
+            "background shell; no session owns them now: %s",
+            worker.handle, len(left), sanitize.scrub_identifier(worker.session_id or "")[:8],
+            pids,
+        )
+        self._notify(report, worker.name, "orphan-shell", worker.url, worker.repository,
+                     role=worker.role,
+                     detail=f"{len(left)} process(es) of the stopped session still run")
+        return pids
 
     def _do_continue(
         self, worker: Worker, context: RepositoryContext | None, force: bool, report: TickReport
@@ -2403,11 +2417,13 @@ class Runner:
             if session is not None and not runtime.is_stopped(session):
                 continue
             if below.get(session_id):
-                runtime.wait_for_exit(before[session_id])
-                processes_mod.end_after_stop(
-                    below[session_id], who="other session",
-                    session=sanitize.scrub_identifier(session_id)[:8],
-                )
+                if runtime.wait_for_exit(before[session_id]):
+                    processes_mod.end_after_stop(
+                        below[session_id], who="other session",
+                        session=sanitize.scrub_identifier(session_id)[:8],
+                    )
+                else:
+                    _log_process_lives_on("other session", session_id)
             if session is not None:
                 runtime.remove(session_id)
         self.invalidate_sessions(runtime_name)
@@ -3705,6 +3721,7 @@ class Runner:
             refresh=lambda worker, message, reply: self._refresh_session(
                 worker, message, report, reply=reply
             ),
+            pause=lambda worker: self._stop(worker, end_left=False)[1],
         ).run()
         report.woken.extend(worker.handle for worker in result.woken)
         report.skipped.extend(result.held)
@@ -3724,6 +3741,8 @@ class Runner:
             self._sync_labels(worker, self.context_for_worker(worker), report)
             self._notify(report, worker.name, "wake-fault", worker.url,
                          worker.repository, role=worker.role, detail=detail)
+        for worker, kept in result.kept:
+            self._report_kept(worker, kept, report)
         for worker, detail in result.capped:
             if not self._notify(report, worker.name, "daily-cap", worker.url,
                                 worker.repository, role=worker.role, detail=detail):
@@ -4882,7 +4901,7 @@ class Runner:
             f"{'work' if len(ids) > 1 else 'works'} in its worktree"
         )
         record = json.dumps(ids)
-        if self.ledger.get_state(key) == record:
+        if self.ledger.get_state(key) == record or set(ids) <= self._hold_told(worker):
             log.debug("%s: not collected, %s: %s", worker.handle, what,
                       ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
             return True
@@ -4890,11 +4909,40 @@ class Runner:
         log.warning("%s: not collected, %s: %s", worker.handle, what,
                     ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
         report.warnings.append(f"{worker.handle}: not collected, {what}")
-        self._notify(
+        if not self._notify(
             report, worker.name, "not-collected", worker.url, worker.repository, role=worker.role,
             detail=f"{what}; it is removed once they are gone",
-        )
+        ):
+            # The next collection tells the operator again, as for the daily cap.
+            self.ledger.delete_state(key)
         return True
+
+    def _hold_told(self, worker: Worker) -> set[str]:
+        """The scrubbed ids of the sessions that the operator already learned hold
+        *worker*'s worktree: those named in the hold record of another worker that waits
+        for collection in the same worktree, and that worker's own sessions. Two such
+        workers hold each other, as when a copy that `claude --resume` started there was
+        adopted as a second worker of the item, and one notification covers the worktree.
+        Only a worker with a record counts, so that a failed notification is sent again.
+        """
+        told: set[str] = set()
+        # An adopted worker keeps the path the listing named, which can be another path
+        # to the same directory.
+        worktree = os.path.realpath(worker.worktree_path)
+        for other in self.ledger.workers_needing_gc():
+            if other.id == worker.id or os.path.realpath(other.worktree_path) != worktree:
+                continue
+            raw = self.ledger.get_state(f"{NOT_COLLECTED_PREFIX}{other.id}")
+            if raw is None:
+                continue
+            try:
+                told.update(str(i) for i in json.loads(raw))
+            except (ValueError, TypeError):
+                continue
+            own = {r.session_id for r in self.ledger.sessions_of(other) if r.session_id}
+            own.add(other.session_id or "")
+            told.update(sanitize.scrub_identifier(i) for i in own if i)
+        return told
 
     def _forget_summary_waits(self) -> None:
         """Drop what an ended summary clone left: its card line, and its request for a
@@ -5030,7 +5078,7 @@ class Runner:
             log.warning("%s: archive job %s does not remove the worktree: %s other session(s) "
                         "work in it", worker.handle, job.id, count)
             return
-        also = self._stop_other_sessions(worker, others, "archive") if others else ""
+        also = self._stop_other_sessions(worker, None if found is None else others, "archive")
         problem = self._collect(worker, report, force=job.force, archived_at=time.time())
         if problem == SESSION_STILL_WORKING:
             # The stop did not take yet; the next tick tries again.
@@ -5183,6 +5231,16 @@ class Runner:
         report.warnings.append(f"notification for {handle} ({state}) failed; see the log")
         return False
 
+
+
+def _log_process_lives_on(who: str, session_id: str) -> None:
+    """A stopped session's process that still runs at the end of the wait after the stop.
+    Nothing below it is ended or reported for this stop: it may be only its normal
+    children, such as an MCP server, which end with it."""
+    log.warning(
+        "%s: the process of session %s still runs after the stop, so the processes below "
+        "it are left alone", who, sanitize.scrub_identifier(session_id)[:8],
+    )
 
 
 def _log_mark(who: str, item: WorkItem, source: Source | None, before: str, after: str) -> None:
