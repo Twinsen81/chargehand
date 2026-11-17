@@ -158,9 +158,10 @@ def end_after_stop(processes: Sequence[Process], *, who: str, session: str) -> t
     own text. Returns the processes that could not be ended.
     """
     found, left = end(processes)
-    if found:
+    ended = tuple(p for p in found if p not in left)
+    if ended:
         log.info("%s: ended %d process(es) that outlived the stop of session %s: %s",
-                 who, len(found), session, pid_list(found))
+                 who, len(ended), session, pid_list(ended))
     if left:
         log.warning("%s: %d process(es) below the stopped session %s did not end: %s",
                     who, len(left), session, pid_list(left))

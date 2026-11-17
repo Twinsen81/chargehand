@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths
+from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths, sanitize
 from conftest import run_git
 from support import daemon as support
 
@@ -490,6 +490,55 @@ def test_a_forced_archive_job_stops_and_removes_a_session_that_started_during_th
     commands = harness.claude_state.commands
     assert commands.index(["stop", "c0b1e5d2"]) < commands.index(["rm", "c0b1e5d2"])
     assert not worker.worktree_path.exists()
+
+
+def test_a_forced_archive_job_warns_when_another_session_could_not_be_removed(harness):
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target, force=True)
+    runner(harness).run_queued(harness.ledger)
+    add_copy(harness, "c0b1e5d3", worker.worktree_path)
+    harness.claude_state.set(rm_returncode=1)
+
+    report = harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_DONE
+    assert "could not be stopped and removed: c0b1e5d3" in job.progress
+    assert (
+        f"{worker.handle}: archived, but other sessions in its worktree could not be stopped "
+        f"and removed; archive job {job.id} names them"
+    ) in report.warnings
+
+
+def test_the_stop_of_other_sessions_returns_the_ids_still_listed(harness):
+    # The archive job warns from the ids, not from the words of the outcome.
+    worker = cancelled(harness)
+    add_copy(harness, "c0b1e5d4", worker.worktree_path)
+    add_copy(harness, "c0b1e5d5", worker.worktree_path)
+    others, _ = harness.runner._other_sessions(worker)
+    harness.claude_state.set(rm_returncode=1)
+
+    also, left = harness.runner._stop_other_sessions(worker, others, "archive")
+
+    assert left == ["c0b1e5d4", "c0b1e5d5"]
+    assert "could not be stopped and removed: c0b1e5d4, c0b1e5d5" in also
+    assert harness.runner._stop_other_sessions(worker, [], "archive") == ("", [])
+    unknown, none_left = harness.runner._stop_other_sessions(worker, None, "archive")
+    assert "could not be read" in unknown and none_left == []
+
+
+def test_the_stop_of_other_sessions_returns_only_scrubbed_ids(harness):
+    # The ids come from the session listing, which is untrusted text.
+    worker = cancelled(harness)
+    raw = "c0b1e5d6\x1b[2J"
+    add_copy(harness, raw, worker.worktree_path)
+    others, _ = harness.runner._other_sessions(worker)
+    harness.claude_state.set(rm_returncode=1)
+
+    also, left = harness.runner._stop_other_sessions(worker, others, "archive")
+
+    assert left == [sanitize.scrub_identifier(raw)] and raw not in left
+    assert "\x1b" not in also
 
 
 def test_an_archive_job_never_stops_the_session_of_another_live_worker(harness):

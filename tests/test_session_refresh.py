@@ -4,6 +4,7 @@ the next wake starts a fresh session for the same worker, which keeps the old on
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -966,40 +967,50 @@ def shell_reason(worker) -> str:
 
 
 @pytest.mark.parametrize("listed_state", ["done", "blocked"])
-def test_a_refresh_waits_while_a_background_shell_of_the_ended_turn_runs(
-    after_two, monkeypatch, listed_state
+def test_a_due_refresh_waits_for_a_background_shell_and_the_wake_goes_in_place(
+    after_two, monkeypatch, caplog, listed_state
 ):
-    # The refresh stops the session, which ends the shell, such as a dev server.
+    # The refresh stops the session, which ends the shell, such as a dev server. The wake
+    # does not wait for the shell: the session takes it from the outbox, as it does when
+    # no refresh is due.
     harness = after_two
     reviewer = start_reviewer(harness)
     wake(harness, reviewer)
     wake(harness, reviewer)
     held = shell_after_turn(harness, reviewer, monkeypatch, listed_state)
-    refreshes = count_checkout_refreshes(monkeypatch)
     fake_source.feed().emit("comment", "PR-7")
     before = len(harness.claude_state.commands)
 
-    for _ in range(3):
+    with caplog.at_level(logging.INFO, logger="chargehand.delivery"):
         report = harness.next_tick()
-        assert report.woken == []
 
     worker = harness.ledger.get(reviewer.id)
-    assert worker.state == ledger_mod.QUEUED and worker.session_id == held.session_id
     assert harness.claude_state.commands[before:] == []
-    assert len(launches(harness)) == 1
-    assert kinds(harness, worker)[-1] == "wake"
-    assert len(harness.ledger.inbox(worker)) == 1
-    assert harness.ledger.outbox_message(worker) is None
-    assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") == (
-        shell_reason(held)
-    )
-    # The held refresh runs no setup step under the shell.
-    assert refreshes == []
+    assert len(launches(harness)) == 1 and len(resumes(harness)) == 2
+    assert worker.session_id == held.session_id and worker.state == ledger_mod.IDLE
+    message = harness.ledger.outbox_message(worker)
+    assert message is not None and message.session_uuid == held.session_uuid
+    assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") is None
+    assert report.skipped == [] and report.warnings == []
+    assert [r.getMessage() for r in caplog.records if "refresh postponed" in r.getMessage()] == [
+        f"reviewer/PR-7: refresh postponed (2 wake(s) in its session, the role's limit is 2), "
+        f"a background shell of session {held.session_id} still runs; the wake continues "
+        f"the session"
+    ]
 
-    # The shell ended: the listing shows the session idle, and the refresh goes out.
+    # The mod submits the wake; its turn ends, and the shell with it.
+    taken = delivery_mod.take_outbox(harness.ledger, worker, worker.session_uuid)
+    delivery_mod.confirm_outbox(harness.ledger, worker, taken.id, submitted=True)
+    assert kinds(harness, worker)[-1] == "wake"
+    current = harness.ledger.get(reviewer.id)
+    harness.runner.apply_hook(
+        current, claude.parse_hook("Stop", {"session_id": current.session_uuid})
+    )
     harness.claude_state.set_session_state(held.session_id, "done", status="idle")
+    fake_source.feed().emit("comment", "PR-7")
     report = harness.next_tick()
 
+    # The first wake after the shell ended refreshes.
     assert report.woken == ["reviewer/PR-7"]
     assert len(launches(harness)) == 2
     assert ["stop", held.session_id] in harness.claude_state.commands
@@ -1009,7 +1020,44 @@ def test_a_refresh_waits_while_a_background_shell_of_the_ended_turn_runs(
     assert harness.ledger.inbox(fresh) == []
 
 
-def test_a_reply_refreshes_at_once_and_ends_the_background_shell(
+def test_a_postponed_refresh_logs_at_info_once_per_outbox_message(
+    after_two, monkeypatch, caplog
+):
+    # Until the mod takes the message, its events wait in the inbox, and each tick tries
+    # the wake again.
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    held = shell_after_turn(harness, reviewer, monkeypatch)
+    fake_source.feed().emit("comment", "PR-7")
+
+    def postponed():
+        return [r.levelno for r in caplog.records if "refresh postponed" in r.getMessage()]
+
+    with caplog.at_level(logging.DEBUG, logger="chargehand.delivery"):
+        for _ in range(3):
+            harness.next_tick()
+        assert postponed() == [logging.INFO, logging.DEBUG, logging.DEBUG]
+
+        # The mod submits the wake; that turn ends while the shell still runs, and a new
+        # event makes a new message.
+        worker = harness.ledger.get(reviewer.id)
+        taken = delivery_mod.take_outbox(harness.ledger, worker, worker.session_uuid)
+        delivery_mod.confirm_outbox(harness.ledger, worker, taken.id, submitted=True)
+        current = harness.ledger.get(reviewer.id)
+        harness.runner.apply_hook(
+            current, claude.parse_hook("Stop", {"session_id": current.session_uuid})
+        )
+        harness.claude_state.set_session_state(held.session_id, "done", status="busy")
+        fake_source.feed().emit("comment", "PR-7")
+        harness.next_tick()
+
+    assert postponed() == [logging.INFO, logging.DEBUG, logging.DEBUG, logging.INFO]
+    assert harness.ledger.get(reviewer.id).session_id == held.session_id
+
+
+def test_a_reply_goes_in_place_and_keeps_the_background_shell_while_a_refresh_is_due(
     after_two, monkeypatch, process_table
 ):
     harness = after_two
@@ -1020,17 +1068,22 @@ def test_a_reply_refreshes_at_once_and_ends_the_background_shell(
     process_table.add(7001, listed(harness, held.session_id)["pid"])
     process_table.add(7002, 7001, group=7001)
     harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="go on")
+    before = len(harness.claude_state.commands)
 
-    report = harness.next_tick()
+    harness.next_tick()
 
-    assert report.woken == ["reviewer/PR-7"]
-    assert len(launches(harness)) == 2
-    assert ["stop", held.session_id] in harness.claude_state.commands
-    assert kinds(harness, reviewer)[-1] == "refresh"
-    assert process_table.pids() == set()
+    worker = harness.ledger.get(reviewer.id)
+    assert harness.claude_state.commands[before:] == []
+    assert len(launches(harness)) == 1
+    assert worker.session_id == held.session_id
+    assert harness.ledger.outbox_message(worker) is not None
+    assert kinds(harness, worker)[-1] == "wake"
+    assert process_table.pids() == {7001, 7002} and process_table.signals == []
 
 
-def test_a_background_shell_that_starts_after_the_listing_holds_the_refresh(after_two):
+def test_a_background_shell_that_starts_after_the_listing_postpones_the_refresh(
+    after_two, caplog
+):
     harness = after_two
     reviewer = start_reviewer(harness)
     wake(harness, reviewer)
@@ -1049,11 +1102,111 @@ def test_a_background_shell_that_starts_after_the_listing_holds_the_refresh(afte
 
     runner._refresh_session = shell_starts_first
     before = len(harness.claude_state.commands)
-    report = runner.tick()
+    with caplog.at_level(logging.INFO, logger="chargehand.delivery"):
+        report = runner.tick()
 
     assert len(launches(harness)) == 1
     assert ["stop", reviewer.session_id] not in harness.claude_state.commands[before:]
-    assert report.skipped == [f"reviewer/PR-7: {shell_reason(reviewer)}"]
-    held = harness.ledger.get(reviewer.id)
-    assert held.state == ledger_mod.QUEUED and held.session_id == reviewer.session_id
-    assert len(harness.ledger.inbox(held)) == 1
+    assert report.skipped == [] and report.warnings == []
+    worker = harness.ledger.get(reviewer.id)
+    assert worker.state == ledger_mod.IDLE and worker.session_id == reviewer.session_id
+    assert harness.ledger.outbox_message(worker) is not None
+    assert any("refresh postponed" in r.getMessage() for r in caplog.records)
+
+
+def shell_without_mod(harness, monkeypatch):
+    """A worker past its refresh limit whose session, which does not run the mod, ended its
+    turn while a background shell of that turn still runs."""
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    monkeypatch.setattr(
+        claude.ClaudeRuntime, "reports_turn_starts", classmethod(lambda cls, worktree: True)
+    )
+    current = harness.ledger.get(reviewer.id)
+    harness.runner.apply_hook(
+        current, claude.parse_hook("Stop", {"session_id": current.session_uuid})
+    )
+    harness.claude_state.set_session_state(current.session_id, "done", status="busy")
+    harness.next_tick()
+    shown = harness.ledger.get(reviewer.id)
+    assert shown.session_state == ledger_mod.SESSION_BACKGROUND
+    assert not delivery_mod.has_mod(shown)
+    return shown
+
+
+def test_a_due_refresh_of_a_session_without_the_mod_still_waits_for_its_shell(
+    after_two, monkeypatch
+):
+    # Its wake would be a stop and a resume, which ends the shell.
+    harness = after_two
+    current = shell_without_mod(harness, monkeypatch)
+    refreshes = count_checkout_refreshes(monkeypatch)
+    fake_source.feed().emit("comment", "PR-7")
+    before = len(harness.claude_state.commands)
+
+    report = harness.next_tick()
+
+    worker = harness.ledger.get(current.id)
+    assert worker.state == ledger_mod.QUEUED and worker.session_id == current.session_id
+    assert harness.claude_state.commands[before:] == []
+    assert len(launches(harness)) == 1
+    assert report.skipped == [f"reviewer/PR-7: {shell_reason(current)}"]
+    assert len(harness.ledger.inbox(worker)) == 1
+    assert refreshes == []
+
+
+def test_a_reply_refreshes_a_session_without_the_mod_at_once_and_ends_its_shell(
+    after_two, monkeypatch, process_table
+):
+    # Its wake is a stop and a resume anyway, and the operator chose to act.
+    harness = after_two
+    held = shell_without_mod(harness, monkeypatch)
+    process_table.add(7001, listed(harness, held.session_id)["pid"])
+    process_table.add(7002, 7001, group=7001)
+    harness.ledger.record_request("reply", harness.ledger.target_for(held), text="go on")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 2
+    assert ["stop", held.session_id] in harness.claude_state.commands
+    fresh = harness.ledger.get(held.id)
+    assert fresh.session_id != held.session_id
+    assert kinds(harness, fresh)[-1] == "refresh"
+    assert process_table.pids() == set()
+
+
+def test_a_refresh_leaves_the_processes_that_chargehand_stop_kept(after_two, process_table):
+    # The refresh does not end the worker's work, so what the operator chose to keep, such
+    # as a dev server, runs on until a stop that does.
+    from chargehand import tick as tick_mod
+
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    current = harness.ledger.get(reviewer.id)
+    process_table.add(7001, listed(harness, current.session_id)["pid"])
+    process_table.add(7002, 7001, group=7001)
+    harness.ledger.record_request("stop", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+    harness.ledger.record_request("continue", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+    process_table.reparent(7001)
+    wake(harness, reviewer)
+    # A shell below the session that the refresh stops is that session's own: it ends.
+    process_table.add(7101, listed(harness, current.session_id)["pid"])
+
+    report, _ = wake(harness, reviewer)
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert kinds(harness, reviewer)[-1] == "refresh"
+    assert process_table.pids() == {7001, 7002}
+    key = f"{tick_mod.KEPT_PROCESSES_PREFIX}{reviewer.id}"
+    assert harness.ledger.get_state(key) is not None
+
+    harness.ledger.record_request("cancel", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+
+    assert process_table.pids() == set()
+    assert harness.ledger.get_state(key) is None

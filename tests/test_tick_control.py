@@ -1326,6 +1326,29 @@ def test_stop_keeps_the_background_shells_and_tells_the_operator_once(
     assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
 
 
+def test_two_stops_keep_the_processes_of_both_and_a_cancel_ends_them_all(
+    harness, process_table
+):
+    attempt = launch(harness)
+    first = shell_below(harness, process_table, attempt.session_id)
+    assert apply_request(harness, "stop", "ABC-1")["ok"] == 1
+    process_table.reparent(7001)
+    assert apply_request(harness, "continue", "ABC-1")["ok"] == 1
+    second = shell_below(harness, process_table, attempt.session_id, pid=7101)
+
+    assert apply_request(harness, "stop", "ABC-1")["ok"] == 1
+
+    key = f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}"
+    record = json.loads(harness.ledger.get_state(key))
+    assert sorted(pid for pid, _, _ in record) == sorted(first | second)
+    assert process_table.signals == []
+
+    process_table.reparent(7101)
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
+    assert process_table.pids() == set()
+    assert harness.ledger.get_state(key) is None
+
+
 def test_stop_does_not_count_a_child_that_ends_with_the_session_process(
     harness, process_table, monkeypatch
 ):

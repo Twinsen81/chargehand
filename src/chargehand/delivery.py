@@ -63,7 +63,9 @@ text, which names the item and the tool that gives the worker's handoff note, th
 role's prompt, then the waiting events as usual. The note itself never reaches the
 prompt: the fresh session reads it as a tool result. The resume of a parked worker, the
 answer to a question that the session asked, and a summary clone's request for a current
-note stay in the session they belong to; the refresh then comes at the next wake.
+note stay in the session they belong to; the refresh then comes at the next wake. So
+does every wake to a session with the mod while a background shell of its ended turn
+runs, because the stop would end the shell.
 """
 
 from __future__ import annotations
@@ -482,8 +484,9 @@ class Refresh:
     for the handoff note; then the wake continues the session as any wake does. *read* is
     the worker as read once the old session stopped: a post that the old session sent
     while it stopped, such as its session end, is older than the fresh session. *shell*
-    is set together with *busy* when the turn ended, but a background shell of it still
-    runs, which the stop would end.
+    is set together with *busy* or *keep* when the turn ended, but a background shell of
+    it still runs, which the stop would end: with *busy* the wake waits for the shell,
+    with *keep* it goes to the session in place and the refresh waits.
     """
 
     session: runtime_mod.Session | None = None
@@ -661,25 +664,24 @@ class Delivery:
         """Whether the wake must wait because the stop would end a background shell.
 
         The tick's listing shows a background shell of the ended turn, the wake would stop
-        the session (no mod takes it from the outbox, or the wake goes to a fresh session,
-        which stops this one), and no reply from the board waits: a reply goes out at once,
-        because the operator chose to act.
+        the session, because no mod takes it from the outbox, and no reply from the board
+        waits: a reply goes out at once, because the operator chose to act. A session with
+        the mod takes the wake in place while the shell runs, also when a refresh is due:
+        the refresh waits for the shell instead (see :meth:`_wake`).
         """
         if worker.session_state != ledger_mod.SESSION_BACKGROUND:
             return False
         if any(is_reply(entry) for entry in entries):
             return False
+        return not self._takes_wake_in_place(worker)
+
+    def _takes_wake_in_place(self, worker: Worker) -> bool:
+        """Whether *worker*'s session takes its wakes from the outbox, with no stop."""
         try:
             in_place = self._runtime(worker.runtime).capabilities.in_place_wake
         except ConfigError:
-            in_place = False
-        if not (in_place and has_mod(worker)):
-            return True
-        return (
-            self._refresh is not None and worker.state in WAKE_STATES
-            and not self._continues_session(worker, entries)
-            and self._refresh_reason(worker) is not None
-        )
+            return False
+        return in_place and has_mod(worker)
 
     def _hold_for_shell(self, worker: Worker, result: DeliveryResult) -> None:
         """Hold *worker*'s wake for a background shell of its session.
@@ -780,7 +782,18 @@ class Delivery:
             and not self._continues_session(worker, entries)
         ):
             why = self._refresh_reason(worker)
-            if why is not None and self._wake_fresh(worker, message, entries, why, result):
+            if (
+                why is not None and worker.session_state == ledger_mod.SESSION_BACKGROUND
+                and self._takes_wake_in_place(worker)
+            ):
+                # The refresh would stop the session, which ends a background shell of its
+                # ended turn, such as a dev server. The wake goes to the session in place,
+                # with the shell running, and the refresh comes at the first wake after
+                # the shell ended. A reply too: it reaches the session without a stop.
+                self._log_postponed(
+                    worker, why, f"a background shell of session {worker.session_id} still runs"
+                )
+            elif why is not None and self._wake_fresh(worker, message, entries, why, result):
                 return
         # A wake through the outbox starts no turn here, so the state stays as it is.
         if self._wake_in_place(worker, message, entries, result):
@@ -947,6 +960,10 @@ class Delivery:
             self.ledger.set_state(reason_key, problem[:300])
             result.errors.append(f"{worker.handle}: {problem}")
             return True
+        if refresh.keep is not None and refresh.shell:
+            # A background shell that started after the tick's listing: as above.
+            self._log_postponed(worker, why, sanitize.one_line(refresh.keep, limit=300))
+            return False
         if refresh.keep is not None:
             result.warnings.append(
                 f"{worker.handle}: no refresh, {sanitize.one_line(refresh.keep, limit=300)}; "
@@ -987,6 +1004,19 @@ class Delivery:
         if refresh.prompted:
             result.woken.append(written)
         return True
+
+    def _log_postponed(self, worker: Worker, why: str, shell: str) -> None:
+        """Log that *worker*'s refresh waits for *shell*, at INFO once per outbox message.
+
+        Until the mod takes the message, its events stay in the inbox, so each tick tries
+        the wake again; while the session's message is open, the line comes at DEBUG.
+        """
+        current = self.ledger.outbox_message(worker)
+        repeat = current is not None and current.session_uuid == worker.session_uuid
+        (log.debug if repeat else log.info)(
+            "%s: refresh postponed (%s), %s; the wake continues the session",
+            worker.handle, why, shell,
+        )
 
     def _wake_in_place(
         self, worker: Worker, message: str, entries: Sequence[InboxEntry], result: DeliveryResult

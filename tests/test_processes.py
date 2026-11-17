@@ -94,8 +94,8 @@ def test_an_end_after_a_stop_logs_the_pids_and_warns_about_the_ones_left(
     assert [p.pid for p in left] == [300]
     messages = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert messages == [
-        (logging.INFO, "impl/ABC-1: ended 2 process(es) that outlived the stop of session "
-                       "abcd1234: 200, 300"),
+        (logging.INFO, "impl/ABC-1: ended 1 process(es) that outlived the stop of session "
+                       "abcd1234: 200"),
         (logging.WARNING, "impl/ABC-1: 1 process(es) below the stopped session abcd1234 did "
                           "not end: 300"),
     ]

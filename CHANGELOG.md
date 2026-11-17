@@ -322,7 +322,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next tick try again. Garbage collection skips a worker whose worktree other sessions
   work in, or while the listing cannot be read, logs one WARNING line, sends one
   notification with the new state `not-collected`, and collects the worker at the first
-  collection after those sessions are gone. `retry --force` says so in its help.
+  collection after those sessions are gone. A worker whose worktree and item checkout
+  are both gone already is collected without this check, so a stale stopped session that
+  still names the removed worktree does not hold it. `retry --force` says so in its help.
 - A stop no longer leaves a background shell of the session running with no owner. Claude
   Code does not end such a shell when the session stops: the shell runs on with PID 1 as
   its parent, such as a dev server that keeps its port. Now cancel, discard, retry,
@@ -336,16 +338,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new process got meanwhile is never signalled. The log names the pids. `chargehand
   stop`, which `continue` undoes, keeps them: the outcome and one WARNING line name the
   pids, and one notification goes out with the new state `orphan-shell` and a count; a
-  later cancel, discard or other such stop ends them.
-- Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake for events no
-  longer stops a session with the mod while a background shell of its ended turn runs.
-  Before, the refresh stopped the session to start a fresh one, which a wake without the
-  refresh never does. Now the wake waits as the wake of a session without the mod does:
-  the worker is `queued`, its card says "wake held, a background shell of session ...
-  still runs", the events stay in the inbox, and no setup step of the role runs. Once the
-  listing shows the session idle, the next tick refreshes it. A reply from the board still
-  refreshes at once. The refresh also looks again right before its stop, so a shell that
-  started after the tick's listing holds the wake too.
+  later cancel, discard or other stop that ends the worker's work ends them. The stop of a
+  session refresh does not: it ends only the processes below the session that it stops.
+- Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake no longer stops
+  a session with the mod while a background shell of its ended turn runs. Before, the
+  refresh stopped the session to start a fresh one, which a wake without the refresh
+  never does, and so ended the shell, such as a dev server. Now the refresh waits and the
+  wake does not: the session takes the wake from its outbox while the shell runs, for
+  events and for a reply from the board alike, and one INFO line per outbox message says
+  that the refresh was postponed (later ticks that try the same message again log it at
+  DEBUG). The refresh comes at the first wake after the shell has ended. The
+  refresh also looks again right before its stop, so a shell that started after the
+  tick's listing postpones it too. A session without the mod, whose wake is a stop and a
+  resume, still waits for the shell, and a reply to it still refreshes at once.
 - A wake held for a background shell logs its `skipped:` line at INFO once per hold, and
   at DEBUG on later ticks. Before, the line came at INFO on every tick, for hours with a
   dev server. A new hold, after a wake or for another session, logs at INFO again. The

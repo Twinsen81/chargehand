@@ -943,13 +943,19 @@ the count, which decides. The ledger keeps no window size, so a percentage alone
 session of a model with a larger window as smaller than it is: the refresh comes later,
 never earlier. A runtime
 whose fresh session would not load the chargehand mod, and so has no tool for the note,
-keeps the session, with a warning. A wake for events to a session whose ended turn left a
-background shell running waits before admission, as any wake does (see **Background
-shells**). The tick reads the listing again and leaves a session alone that started a turn
-or opened a prompt since its listing, or, unless a reply from the board waits, whose turn
-ended while a background shell of it still runs; otherwise it stops the old session and
-confirms the stop, which ends the processes that outlive it (see **Shells after a
-stop**), so two sessions never run in one worktree, drops the
+keeps the session, with a warning. While a background shell of the ended turn runs, the
+refresh waits, not the wake: a session with the mod takes the wake from its outbox, also a
+reply from the board, and the shell runs on; the refresh comes at the first wake after the
+shell has ended. One INFO line per outbox message says that the refresh was postponed;
+later ticks that try the wake again while the message waits for the mod log it at DEBUG
+(see **Background shells**). A session without the mod, whose wake is a stop and a resume, waits for the
+shell before admission, as any such wake does, and a reply to it refreshes at once. The
+tick reads the listing again and leaves a session alone that started a turn or opened a
+prompt since its listing. A session whose turn ended while a background shell of it still
+runs, which the tick's listing did not show yet, gets the wake in place when it has the
+mod, and otherwise waits unless a reply from the board waits. Else the tick stops the old
+session and confirms the stop, which ends the processes that outlive it (see **Shells
+after a stop**), so two sessions never run in one worktree, drops the
 old session's open outbox message, and launches a new one in the same worktree under the
 worker's name, with the mod. Its first prompt is chargehand's own text, which names the
 item and the `read_handoff` tool, then the role's prompt, then the waiting events as the
@@ -1154,11 +1160,13 @@ Two wakes go out at once and do not wait for the shell: a reply from the board, 
 answer to a question that ended its turn while a shell runs, because the operator chose to
 act; and the resume of a parked worker after its usage limit. For an `idle` worker, a reply
 waits too, with the same reason on the card, while the session lists working: at its last
-look the runtime cannot tell a background shell from a turn that the operator started. The
-refresh waits the same way: past the role's `refresh_after_wakes` or
-`refresh_after_tokens`, a wake for events to a `background` session waits also when the
-session has the mod, because the refresh stops the session to start a fresh one (see
-**Session refresh**); a reply refreshes at once. Neither the watchdog nor
+look the runtime cannot tell a background shell from a turn that the operator started.
+Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a session with the mod
+still takes the wake in place, for events and for a reply from the board alike. The
+refresh, which stops the session to start a fresh one, waits instead, and comes at the
+first wake after the shell has ended (see **Session refresh**). So a worker with a dev
+server goes on taking its events, and its session can grow past the limit while the
+shell runs. Neither the watchdog nor
 `max_concurrent` counts the time, because no turn runs and no usage is spent.
 Only sessions launched with the `UserPromptSubmit` hook get this reading, because a resume
 keeps the hooks of the launch: for a session launched before it, a turn that the operator
@@ -1193,7 +1201,9 @@ so does the pause of a worker whose wake the workspace guard refuses (`wake-faul
 each says so: one WARNING line names the pids, as does the outcome of `chargehand stop`,
 and one notification goes out with the state `orphan-shell` and a count. The runner state
 keeps them for the worker, and the next cancel, discard, retry or other stop that ends the
-worker's work ends those that still run too. The stop before a resume does not.
+worker's work ends those that still run too. The stop before a resume and the stop of a
+session refresh do not: neither ends the worker's work, so the kept processes run on, and
+the record stays until such a stop.
 
 **Garbage collection.** When the issue is closed or its pull request is merged or closed, the
 session and its worktree are removed — never when commits are unpushed. Low disk space is
@@ -1202,8 +1212,12 @@ it or in the item checkout, such as a copy that `claude --resume` started there,
 current session of another live worker, or while the session listing cannot be read: such
 a session would lose its directory, and no operator chose that. Garbage collection uses
 the check of discard (the listing, by real path), skips the worker and looks again at the
-next collection. The first hold logs one WARNING line, adds one line to the tick report and
-sends one notification with the state `not-collected` and a count; the same sessions on
+next collection. Once the worktree and the item checkout are both gone, such as after the
+operator removed them by hand, the check does not run: no session can lose a directory
+that is already gone, and a stale stopped session that still names it would otherwise
+hold the collection until the operator removes that session too. The first hold logs
+one WARNING line, adds one line to the tick report and sends one notification with the
+state `not-collected` and a count; the same sessions on
 later collections log at DEBUG only. The record of the hold is kept in the runner state
 under `not-collected:` and the worker id, and is dropped once the sessions are gone or the
 worker is collected. It is dropped too when the hook fails, so the next collection sends
