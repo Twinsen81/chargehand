@@ -1523,7 +1523,8 @@ refusal says which.
   fails the job and keeps the worktree and the zip; a listing that cannot be read leaves the
   job `written`, so the next tick tries again; with force the tick stops and removes the
   other sessions first and the job's progress names them, but a live worker's session still
-  fails the job. The jobs of `archive_repository` get the same check. Garbage
+  fails the job; a forced job whose listing cannot be read removes the worktree, and its
+  progress says that other sessions were not looked for, as a forced discard does. The jobs of `archive_repository` get the same check. Garbage
   collection, discard and retry leave a worker alone while an archive of it is under way.
   A stop of the daemon during the zip, or a crash, leaves at most the `.part` file and the
   job `running`; the next start of the job thread deletes every `.part` file and puts

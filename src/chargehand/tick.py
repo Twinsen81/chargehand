@@ -5030,7 +5030,7 @@ class Runner:
             log.warning("%s: archive job %s does not remove the worktree: %s other session(s) "
                         "work in it", worker.handle, job.id, count)
             return
-        also = self._stop_other_sessions(worker, others, "archive") if others else ""
+        also = self._stop_other_sessions(worker, None if found is None else others, "archive")
         problem = self._collect(worker, report, force=job.force, archived_at=time.time())
         if problem == SESSION_STILL_WORKING:
             # The stop did not take yet; the next tick tries again.

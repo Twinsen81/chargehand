@@ -350,6 +350,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at DEBUG on later ticks. Before, the line came at INFO on every tick, for hours with a
   dev server. A new hold, after a wake or for another session, logs at INFO again. The
   card and the `wake held -> queued` transition are unchanged.
+- A forced archive job whose session listing could not be read now says so in its
+  progress: "archived; the session listing could not be read, so other sessions were not
+  looked for", as a forced discard and a forced retry do. Before, it said only
+  "archived".
 
 ### Added
 
