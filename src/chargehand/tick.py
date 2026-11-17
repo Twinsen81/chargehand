@@ -2176,7 +2176,7 @@ class Runner:
             )
             if refusal is not None:
                 return False, refusal
-            also = self._stop_other_sessions(worker, others, "retry")
+            also, _ = self._stop_other_sessions(worker, others, "retry")
         if worker.worktree_path.exists():
             try:
                 branches_removed = self._remove_worktree(worker, force=True)
@@ -2274,7 +2274,7 @@ class Runner:
                 f"in use. Check it with `{self._attach_command(worker)}`, or re-run with "
                 f"--force."
             ), {"session_running": True})
-        also = self._stop_other_sessions(worker, others, "discard")
+        also, _ = self._stop_other_sessions(worker, others, "discard")
         left = self._remove_sessions(worker)
         try:
             branches_removed = self._remove_worktree(worker, force=True)
@@ -2334,13 +2334,17 @@ class Runner:
 
     def _stop_other_sessions(
         self, worker: Worker, others: list[Session] | None, action: str
-    ) -> str:
-        """Stop and remove *others*, which None gives when the listing could not be read,
-        and return the end of the outcome that names them."""
+    ) -> tuple[str, list[str]]:
+        """Stop and remove *others*, which None gives when the listing could not be read.
+        Returns the end of the outcome that names them, and the ids of those that are
+        still listed afterwards."""
         if others is None:
-            return "; the session listing could not be read, so other sessions were not looked for"
+            return (
+                "; the session listing could not be read, so other sessions were not looked for",
+                [],
+            )
         if not others:
-            return ""
+            return "", []
         ids = [sanitize.scrub_identifier(session.id) for session in others]
         log.info(
             "%s: %s stops and removes %s other session(s) in its worktree: %s",
@@ -2358,7 +2362,7 @@ class Runner:
                 f"; other sessions in its worktree could not be stopped and removed: "
                 f"{_id_list(kept_ids)}; remove them by hand"
             )
-        return also
+        return also, left
 
     def _other_sessions(self, worker: Worker) -> tuple[list[Session], list[Worker]] | None:
         """The listed sessions whose directory is in *worker*'s worktree or its item
@@ -5078,7 +5082,9 @@ class Runner:
             log.warning("%s: archive job %s does not remove the worktree: %s other session(s) "
                         "work in it", worker.handle, job.id, count)
             return
-        also = self._stop_other_sessions(worker, None if found is None else others, "archive")
+        also, left = self._stop_other_sessions(
+            worker, None if found is None else others, "archive"
+        )
         problem = self._collect(worker, report, force=job.force, archived_at=time.time())
         if problem == SESSION_STILL_WORKING:
             # The stop did not take yet; the next tick tries again.
@@ -5095,7 +5101,7 @@ class Runner:
             job, expect=ledger_mod.JOB_WRITTEN, state=ledger_mod.JOB_DONE,
             progress=sanitize.one_line(f"archived{also}", limit=300),
         )
-        if "could not be stopped" in also:
+        if left:
             report.warnings.append(
                 f"{worker.handle}: archived, but other sessions in its worktree could not be "
                 f"stopped and removed; archive job {job.id} names them"
