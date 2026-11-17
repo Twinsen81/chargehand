@@ -1204,10 +1204,15 @@ sends one notification with the state `not-collected` and a count; the same sess
 later collections log at DEBUG only. The record of the hold is kept in the runner state
 under `not-collected:` and the worker id, and is dropped once the sessions are gone or the
 worker is collected. It is dropped too when the hook fails, so the next collection sends
-the notification again, as for the daily cap. Retry applies the rules of discard before it
-removes the worktree: without force it refuses with the reasons `other_sessions` or
-`sessions_unknown`, with force it stops and removes those sessions and names them in its
-outcome, and it never stops the current session of another live worker.
+the notification again, as for the daily cap. Two finished workers can share a worktree,
+such as when a copy that `claude --resume` started there was adopted as a second worker of
+the item, and then hold each other. The operator learns of such a worktree once: a worker
+stays quiet, at DEBUG, while each session that holds it is named in the record of another
+worker of the same worktree that waits for collection, or is that worker's own. Retry
+applies the rules of discard before it removes the worktree: without force it refuses with
+the reasons `other_sessions` or `sessions_unknown`, with force it stops and removes those
+sessions and names them in its outcome, and it never stops the current session of another
+live worker.
 
 ## 7. Control: a CLI and a loopback daemon
 

@@ -267,7 +267,8 @@ STOP_AND_REMOVE = "Remove them, or re-run with --force to stop and remove them w
 # this prefix and the worker id: a JSON list of their sorted, scrubbed ids. A WARNING line
 # and a notification go out when it is new or its ids change; the same hold on later
 # collections logs at DEBUG. Dropped once the worker is collected or the sessions are gone,
-# and when the hook fails, so that the next collection sends the notification again.
+# and when the hook fails, so that the next collection sends the notification again. Two
+# workers that share the worktree send one; see `Runner._hold_told`.
 NOT_COLLECTED_PREFIX = "not-collected:"
 # The processes below a worker's session that a `chargehand stop` kept running, such as a
 # background shell, under this prefix and the worker id: a JSON list of their pid, group
@@ -4883,7 +4884,7 @@ class Runner:
             f"{'work' if len(ids) > 1 else 'works'} in its worktree"
         )
         record = json.dumps(ids)
-        if self.ledger.get_state(key) == record:
+        if self.ledger.get_state(key) == record or set(ids) <= self._hold_told(worker):
             log.debug("%s: not collected, %s: %s", worker.handle, what,
                       ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
             return True
@@ -4898,6 +4899,30 @@ class Runner:
             # The next collection tells the operator again, as for the daily cap.
             self.ledger.delete_state(key)
         return True
+
+    def _hold_told(self, worker: Worker) -> set[str]:
+        """The scrubbed ids of the sessions that the operator already learned hold
+        *worker*'s worktree: those named in the hold record of another worker that waits
+        for collection in the same worktree, and that worker's own sessions. Two such
+        workers hold each other, as when a copy that `claude --resume` started there was
+        adopted as a second worker of the item, and one notification covers the worktree.
+        Only a worker with a record counts, so that a failed notification is sent again.
+        """
+        told: set[str] = set()
+        for other in self.ledger.workers_needing_gc():
+            if other.id == worker.id or other.worktree_path != worker.worktree_path:
+                continue
+            raw = self.ledger.get_state(f"{NOT_COLLECTED_PREFIX}{other.id}")
+            if raw is None:
+                continue
+            try:
+                told.update(str(i) for i in json.loads(raw))
+            except (ValueError, TypeError):
+                continue
+            own = {r.session_id for r in self.ledger.sessions_of(other) if r.session_id}
+            own.add(other.session_id or "")
+            told.update(sanitize.scrub_identifier(i) for i in own if i)
+        return told
 
     def _forget_summary_waits(self) -> None:
         """Drop what an ended summary clone left: its card line, and its request for a
