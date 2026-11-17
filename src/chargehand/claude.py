@@ -2093,6 +2093,19 @@ class ClaudeRuntime(Runtime):
         pid = _listed_pid(session)
         return processes.below(pid) if pid is not None else ()
 
+    def wait_for_exit(self, session: Session) -> bool:
+        """Wait up to ``stop_wait_secs``: the listing drops ``pid`` about a second before
+        the process ends (see :meth:`wake`)."""
+        pid = _listed_pid(session)
+        if pid is None:
+            return True
+        deadline = time.monotonic() + self.stop_wait_secs
+        while self.pid_alive(pid):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self.stop_poll_secs)
+        return True
+
     def wake(
         self,
         session_id: str,

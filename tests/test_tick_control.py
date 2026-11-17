@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from chargehand import claude as claude_mod
 from chargehand import ledger as ledger_mod
 from chargehand import tick as tick_mod
 from chargehand.errors import LaunchAborted
@@ -1322,6 +1323,42 @@ def test_stop_keeps_the_background_shells_and_tells_the_operator_once(
     process_table.reparent(7001)
     assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
     assert process_table.pids() == set()
+    assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
+
+
+def test_stop_does_not_count_a_child_that_ends_with_the_session_process(
+    harness, process_table, monkeypatch
+):
+    attempt = launch(harness)
+    listed = next(s for s in harness.claude_state.sessions if s["id"] == attempt.session_id)
+    # Such as a stdio MCP server: it ends with the session's process, which exits a
+    # moment after the listing shows the stop.
+    process_table.add(7001, listed["pid"])
+    checks = []
+
+    def alive(pid):
+        checks.append(pid)
+        if len(checks) < 3:
+            return True
+        process_table.rows = [r for r in process_table.rows if r.process.pid != 7001]
+        return False
+
+    build = claude_mod.ClaudeRuntime.from_config
+
+    def from_config(config):
+        runtime = build(config)
+        runtime.pid_alive = alive
+        runtime.stop_poll_secs = 0.0
+        return runtime
+
+    monkeypatch.setattr(claude_mod.ClaudeRuntime, "from_config", from_config)
+
+    result = apply_request(harness, "stop", "ABC-1")
+
+    assert result["message"] == "session stopped; `chargehand continue` respawns it"
+    assert checks == [listed["pid"]] * 3
+    assert ("ABC-1", "orphan-shell") not in harness.notifications()
+    assert process_table.signals == []
     assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
 
 

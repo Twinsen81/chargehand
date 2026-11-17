@@ -424,6 +424,32 @@ def test_a_wake_waits_for_the_old_process_to_exit(claude_runtime, claude_state):
     assert len(claude_state.read()["resumes"]) == 1
 
 
+def test_the_wait_after_a_stop_ends_when_the_listed_process_exits(claude_runtime):
+    session = runtime_mod.Session(id="s1", state="done", raw={"pid": 86470})
+    ALIVE.add(86470)
+    checks = []
+
+    def alive(pid):
+        checks.append(pid)
+        if len(checks) >= 2:
+            ALIVE.discard(pid)
+        return pid in ALIVE
+
+    claude_runtime.pid_alive = alive
+    claude_runtime.stop_wait_secs = 60.0
+
+    assert claude_runtime.wait_for_exit(session)
+    assert checks == [86470, 86470]
+
+
+def test_the_wait_after_a_stop_gives_up_on_a_process_that_lives_on(claude_runtime):
+    session = runtime_mod.Session(id="s1", state="done", raw={"pid": 86470})
+    ALIVE.add(86470)
+
+    assert not claude_runtime.wait_for_exit(session)
+    assert claude_runtime.wait_for_exit(runtime_mod.Session(id="s2", state="done"))
+
+
 def test_a_wake_does_not_resume_while_the_old_process_lives(claude_runtime, claude_state):
     claude_state.set(sessions=[live("done", pid=86470)])
     ALIVE.add(86470)

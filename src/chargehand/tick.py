@@ -1217,7 +1217,7 @@ class Runner:
                 self._notify(report, item.key, "blocked", item.url, repository.name,
                              detail="running label without a live worker")
 
-    def _stop_session(self, worker: Worker) -> bool:
+    def _stop_session(self, worker: Worker, *, listed: list[Session] | None = None) -> bool:
         """Stop the session and confirm it stopped, by re-reading the listing.
 
         The exit code alone is not enough: a stop can report success and leave the
@@ -1225,20 +1225,26 @@ class Runner:
         stopping a run — depends on the session really being gone.
         The processes below the session that outlive the confirmed stop, such as a
         background shell of its turn, are ended: no session owns them afterwards.
+        *listed* is a listing that the caller read right before; without it the processes
+        are read from a fresh listing.
         """
-        return self._stop(worker, end_left=True)[0]
+        return self._stop(worker, end_left=True, listed=listed)[0]
 
     def _stop(
-        self, worker: Worker, *, end_left: bool
+        self, worker: Worker, *, end_left: bool, listed: list[Session] | None = None
     ) -> tuple[bool, tuple[processes_mod.Process, ...]]:
         """Stop the session as :meth:`_stop_session` does. Returns whether it stopped, and
         the processes below it that still run after the stop: with *end_left*, those that
         did not end; without it, every one, because the caller keeps them. Kept processes
-        are recorded, and the next stop with *end_left* ends them too."""
+        are recorded, and the next stop with *end_left* ends them too.
+
+        The processes are looked at only once the session's own process has exited, so
+        those that end with it, such as an MCP server, do not count."""
         if not worker.session_id:
             return True, ()
         runtime = self.runtime(worker.runtime)
-        below = self._processes_below(worker)
+        before = self._session_before_stop(worker, listed)
+        below = runtime.session_processes(before) if before is not None else ()
         runtime.stop(worker.session_id)
         self.invalidate_sessions(worker.runtime)
         try:
@@ -1248,6 +1254,8 @@ class Runner:
         session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is not None and not runtime.is_stopped(session):
             return False, ()
+        if below and before is not None:
+            runtime.wait_for_exit(before)
         key = f"{KEPT_PROCESSES_PREFIX}{worker.id}"
         kept = self._kept_processes(worker)
         if not end_left:
@@ -1278,17 +1286,19 @@ class Runner:
         except (ValueError, TypeError):
             return ()
 
-    def _processes_below(self, worker: Worker) -> tuple[processes_mod.Process, ...]:
-        """The processes below *worker*'s session, from a fresh listing, before a stop."""
+    def _session_before_stop(
+        self, worker: Worker, listed: list[Session] | None
+    ) -> Session | None:
+        """*worker*'s live session in *listed*, or in a fresh listing, before a stop."""
         try:
             runtime = self.runtime(worker.runtime)
-            sessions = self.sessions(worker.runtime, refresh=True)
+            sessions = listed if listed is not None else self.sessions(worker.runtime, refresh=True)
         except (AgentRuntimeError, ConfigError):
-            return ()
+            return None
         session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is None or runtime.is_stopped(session):
-            return ()
-        return runtime.session_processes(session)
+            return None
+        return session
 
     def _remove_session(self, worker: Worker) -> bool:
         """Remove the worker's session and each earlier one that a refresh kept."""
@@ -2376,6 +2386,7 @@ class Runner:
         """
         runtime = self.runtime(runtime_name)
         ids = [session.id for session in sessions]
+        before = {session.id: session for session in sessions}
         below = {
             session.id: runtime.session_processes(session)
             for session in sessions if not runtime.is_stopped(session)
@@ -2392,6 +2403,7 @@ class Runner:
             if session is not None and not runtime.is_stopped(session):
                 continue
             if below.get(session_id):
+                runtime.wait_for_exit(before[session_id])
                 processes_mod.end_after_stop(
                     below[session_id], who="other session",
                     session=sanitize.scrub_identifier(session_id)[:8],
@@ -3766,7 +3778,7 @@ class Runner:
                 busy=f"a background shell of session {worker.session_id} still runs",
                 shell=True,
             )
-        if not self._stop_session(worker):
+        if not self._stop_session(worker, listed=listed):
             raise AgentRuntimeError(f"session {worker.session_id} did not stop")
         # What the old session posted while it stopped is older than the fresh session.
         read = self.ledger.get(worker.id) or worker

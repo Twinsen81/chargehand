@@ -414,6 +414,15 @@ class Runtime(ABC):
         """
         return ()
 
+    def wait_for_exit(self, session: Session) -> bool:
+        """After a confirmed stop, wait until the process listed for *session* before the
+        stop has exited. Returns False when it still runs at the end of the wait.
+
+        A listing can show the stop before the process ends, and the processes that end
+        with it, such as an MCP server, would look as if they outlived the stop.
+        """
+        return True
+
     def release(self, worktree: Path) -> None:
         """Delete what the launch in *worktree* kept for its session, once that session is removed."""
 
