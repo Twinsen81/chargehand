@@ -1173,9 +1173,12 @@ This was checked with Claude Code 2.1.322, 2.1.323 and 2.1.325 as the binary tha
 launched the session; the shared background service ran every session with the newest
 installed version, 2.1.325, so the check does not tell older versions apart. So before
 each stop, chargehand reads the processes below the session's listed `pid` (`ps`, with
-the start time of each), and once the stop is confirmed it ends the ones that still run:
-SIGTERM to each, and to the process group of each one that leads its own group, then
-SIGKILL to what still runs after 3 seconds. A process counts only with the same pid and
+the start time of each). Once the stop is confirmed, it waits up to 10 seconds, as a
+resume does, until that `pid` has exited: the listing shows the stop about a second
+before the process ends, and the processes that end with it, such as a stdio MCP server,
+must not count. Then it ends the ones that still run: SIGTERM to each, and to the process
+group of each one that leads its own group, then SIGKILL to what still runs after 3
+seconds. A process counts only with the same pid and
 the same start time, so a pid that a new process got meanwhile is never signalled, and
 chargehand never signals PID 1 or itself. This applies to every stop that ends the
 session's work: cancel, discard, retry, archive, garbage collection, the watchdog's hard
@@ -1186,7 +1189,8 @@ names those that did not end. A stop that is not confirmed ends nothing. `charge
 which `continue` undoes, keeps them, because the operator may want the shell, but says
 so: its outcome and one WARNING line name the pids, and one notification goes out with the
 state `orphan-shell` and a count. The runner state keeps them for the worker, and the next
-stop that ends processes, such as a cancel, ends those that still run too.
+cancel, discard, retry or other stop that ends the worker's work ends those that still run
+too. The stop before a resume does not.
 
 **Garbage collection.** When the issue is closed or its pull request is merged or closed, the
 session and its worktree are removed — never when commits are unpushed. Low disk space is

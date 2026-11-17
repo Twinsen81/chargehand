@@ -330,8 +330,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed, the stop of a session refresh, the stop of another session in the worktree, and
   the stop before a resume (a reply from the board, the resume after a usage limit) read
   the processes below the session's process before the stop, and end those that still run
-  once the stop is confirmed: SIGTERM to each and to the process group of each shell, then
-  SIGKILL after 3 seconds. A process is known by its pid and its start time, so a pid that
+  once the stop is confirmed and the session's process has exited (a process that ends
+  with it, such as an MCP server, does not count): SIGTERM to each and to the process
+  group of each shell, then SIGKILL after 3 seconds. A process is known by its pid and its start time, so a pid that
   a new process got meanwhile is never signalled. The log names the pids. `chargehand
   stop`, which `continue` undoes, keeps them: the outcome and one WARNING line name the
   pids, and one notification goes out with the new state `orphan-shell` and a count; a
