@@ -874,6 +874,28 @@ def test_a_failed_not_collected_notification_goes_again_on_the_next_tick(
     assert worker.worktree_path.is_dir()
 
 
+def test_collection_does_not_wait_for_other_sessions_once_the_worktree_is_gone(
+    harness, repo, tmp_path
+):
+    # Nothing is left that the hold would keep for the copy, such as a stale stopped
+    # session that still names the worktree that the operator removed by hand.
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+    for session in harness.claude_state.sessions:
+        if session["id"] == "c0b1e5d1":
+            session.pop("pid")
+            session.pop("status")
+    harness.claude_state.set(sessions=harness.claude_state.sessions)
+    run_git("worktree", "remove", "--force", str(worker.worktree_path), cwd=repo)
+
+    report = harness.next_tick()
+
+    assert worker.handle in report.collected
+    assert harness.ledger.get(worker.id).gc_done == 1
+    assert ("ABC-1", "not-collected") not in harness.notifications()
+    assert not any("not collected" in line for line in report.warnings)
+    assert ["stop", "c0b1e5d1"] not in harness.claude_state.commands
+
+
 def test_collection_waits_while_the_session_listing_cannot_be_read(
     harness, repo, tmp_path, monkeypatch
 ):

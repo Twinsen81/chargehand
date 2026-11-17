@@ -1202,8 +1202,12 @@ it or in the item checkout, such as a copy that `claude --resume` started there,
 current session of another live worker, or while the session listing cannot be read: such
 a session would lose its directory, and no operator chose that. Garbage collection uses
 the check of discard (the listing, by real path), skips the worker and looks again at the
-next collection. The first hold logs one WARNING line, adds one line to the tick report and
-sends one notification with the state `not-collected` and a count; the same sessions on
+next collection. Once the worktree and the item checkout are both gone, such as after the
+operator removed them by hand, the check does not run: no session can lose a directory
+that is already gone, and a stale stopped session that still names it would otherwise
+hold the collection until the operator removes that session too. The first hold logs
+one WARNING line, adds one line to the tick report and sends one notification with the
+state `not-collected` and a count; the same sessions on
 later collections log at DEBUG only. The record of the hold is kept in the runner state
 under `not-collected:` and the worker id, and is dropped once the sessions are gone or the
 worker is collected. It is dropped too when the hook fails, so the next collection sends

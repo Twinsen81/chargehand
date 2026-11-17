@@ -4868,7 +4868,11 @@ class Runner:
             if blocker:
                 report.warnings.append(f"{worker.handle}: not collected, {blocker}")
                 continue
-            if self._other_sessions_hold(worker, report):
+            # With the worktree and the item checkout gone, a session that still names
+            # them, such as a stale stopped one, has nothing left to lose.
+            if (
+                worker.worktree_path.exists() or item_checkout_path(worker).exists()
+            ) and self._other_sessions_hold(worker, report):
                 continue
             problem = self._collect(worker, report)
             if problem:

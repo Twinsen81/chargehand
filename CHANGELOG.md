@@ -322,7 +322,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next tick try again. Garbage collection skips a worker whose worktree other sessions
   work in, or while the listing cannot be read, logs one WARNING line, sends one
   notification with the new state `not-collected`, and collects the worker at the first
-  collection after those sessions are gone. `retry --force` says so in its help.
+  collection after those sessions are gone. A worker whose worktree and item checkout
+  are both gone already is collected without this check, so a stale stopped session that
+  still names the removed worktree does not hold it. `retry --force` says so in its help.
 - A stop no longer leaves a background shell of the session running with no owner. Claude
   Code does not end such a shell when the session stops: the shell runs on with PID 1 as
   its parent, such as a dev server that keeps its port. Now cancel, discard, retry,
