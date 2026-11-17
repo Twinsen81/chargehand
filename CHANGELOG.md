@@ -338,7 +338,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new process got meanwhile is never signalled. The log names the pids. `chargehand
   stop`, which `continue` undoes, keeps them: the outcome and one WARNING line name the
   pids, and one notification goes out with the new state `orphan-shell` and a count; a
-  later cancel, discard or other such stop ends them.
+  later cancel, discard or other stop that ends the worker's work ends them. The stop of a
+  session refresh does not: it ends only the processes below the session that it stops.
 - Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake for events no
   longer stops a session with the mod while a background shell of its ended turn runs.
   Before, the refresh stopped the session to start a fresh one, which a wake without the

@@ -394,7 +394,8 @@ stops the session, so chargehand ends the processes that outlive a stop of a ses
 cancel, discard, retry, archive, garbage collection, the watchdog, a session refresh, and
 a reply that resumes the session. `chargehand stop`, which `continue` undoes, keeps them,
 and so does the pause after a `wake-fault`; you are notified once (`orphan-shell`) with a
-count, and the log names their PIDs. As
+count, and the log names their PIDs. A later cancel, discard or other stop that ends the
+worker's work ends them; a session refresh does not. As
 shipped it
 only prints, and the runner captures what it prints, so nothing reaches you until you
 enable a method in that file. It has commented examples of a macOS notification, an

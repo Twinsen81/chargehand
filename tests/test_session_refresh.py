@@ -1057,3 +1057,39 @@ def test_a_background_shell_that_starts_after_the_listing_holds_the_refresh(afte
     held = harness.ledger.get(reviewer.id)
     assert held.state == ledger_mod.QUEUED and held.session_id == reviewer.session_id
     assert len(harness.ledger.inbox(held)) == 1
+
+
+
+def test_a_refresh_leaves_the_processes_that_chargehand_stop_kept(after_two, process_table):
+    # The refresh does not end the worker's work, so what the operator chose to keep, such
+    # as a dev server, runs on until a stop that does.
+    from chargehand import tick as tick_mod
+
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    current = harness.ledger.get(reviewer.id)
+    process_table.add(7001, listed(harness, current.session_id)["pid"])
+    process_table.add(7002, 7001, group=7001)
+    harness.ledger.record_request("stop", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+    harness.ledger.record_request("continue", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+    process_table.reparent(7001)
+    wake(harness, reviewer)
+    # A shell below the session that the refresh stops is that session's own: it ends.
+    process_table.add(7101, listed(harness, current.session_id)["pid"])
+
+    report, _ = wake(harness, reviewer)
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert kinds(harness, reviewer)[-1] == "refresh"
+    assert process_table.pids() == {7001, 7002}
+    key = f"{tick_mod.KEPT_PROCESSES_PREFIX}{reviewer.id}"
+    assert harness.ledger.get_state(key) is not None
+
+    harness.ledger.record_request("cancel", harness.ledger.target_for(reviewer))
+    harness.next_tick()
+
+    assert process_table.pids() == set()
+    assert harness.ledger.get_state(key) is None

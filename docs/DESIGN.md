@@ -1193,7 +1193,9 @@ so does the pause of a worker whose wake the workspace guard refuses (`wake-faul
 each says so: one WARNING line names the pids, as does the outcome of `chargehand stop`,
 and one notification goes out with the state `orphan-shell` and a count. The runner state
 keeps them for the worker, and the next cancel, discard, retry or other stop that ends the
-worker's work ends those that still run too. The stop before a resume does not.
+worker's work ends those that still run too. The stop before a resume and the stop of a
+session refresh do not: neither ends the worker's work, so the kept processes run on, and
+the record stays until such a stop.
 
 **Garbage collection.** When the issue is closed or its pull request is merged or closed, the
 session and its worktree are removed — never when commits are unpushed. Low disk space is

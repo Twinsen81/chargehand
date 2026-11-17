@@ -1219,7 +1219,9 @@ class Runner:
                 self._notify(report, item.key, "blocked", item.url, repository.name,
                              detail="running label without a live worker")
 
-    def _stop_session(self, worker: Worker, *, listed: list[Session] | None = None) -> bool:
+    def _stop_session(
+        self, worker: Worker, *, listed: list[Session] | None = None, end_kept: bool = True
+    ) -> bool:
         """Stop the session and confirm it stopped, by re-reading the listing.
 
         The exit code alone is not enough: a stop can report success and leave the
@@ -1228,17 +1230,24 @@ class Runner:
         The processes below the session that outlive the confirmed stop, such as a
         background shell of its turn, are ended: no session owns them afterwards.
         *listed* is a listing that the caller read right before; without it the processes
-        are read from a fresh listing.
+        are read from a fresh listing. With *end_kept*, the processes that an earlier
+        `chargehand stop` kept end too; a stop that does not end the worker's work, such as
+        the stop of a session refresh, leaves them.
         """
-        return self._stop(worker, end_left=True, listed=listed)[0]
+        return self._stop(worker, end_left=True, end_kept=end_kept, listed=listed)[0]
 
     def _stop(
-        self, worker: Worker, *, end_left: bool, listed: list[Session] | None = None
+        self,
+        worker: Worker,
+        *,
+        end_left: bool,
+        end_kept: bool = True,
+        listed: list[Session] | None = None,
     ) -> tuple[bool, tuple[processes_mod.Process, ...]]:
         """Stop the session as :meth:`_stop_session` does. Returns whether it stopped, and
         the processes below it that still run after the stop: with *end_left*, those that
         did not end; without it, every one, because the caller keeps them. Kept processes
-        are recorded, and the next stop with *end_left* ends them too.
+        are recorded, and the next stop with *end_left* and *end_kept* ends them too.
 
         The processes are looked at only once the session's own process has exited, so
         those that end with it, such as an MCP server, do not count."""
@@ -1270,9 +1279,11 @@ class Runner:
                     [[p.pid, p.group, p.started] for p in every.values()]
                 ))
             return True, left
-        if kept:
+        if not end_kept:
+            below = tuple(p for p in below if p not in kept)
+        elif kept:
             self.ledger.delete_state(key)
-        below = (*below, *(p for p in kept if p not in below))
+            below = (*below, *(p for p in kept if p not in below))
         if not below:
             return True, ()
         return True, processes_mod.end_after_stop(
@@ -3801,7 +3812,8 @@ class Runner:
                 busy=f"a background shell of session {worker.session_id} still runs",
                 shell=True,
             )
-        if not self._stop_session(worker, listed=listed):
+        # A refresh does not end the worker's work: what `chargehand stop` kept runs on.
+        if not self._stop_session(worker, listed=listed, end_kept=False):
             raise AgentRuntimeError(f"session {worker.session_id} did not stop")
         # What the old session posted while it stopped is older than the fresh session.
         read = self.ledger.get(worker.id) or worker
