@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from chargehand.errors import AgentRuntimeError, ConfigError
+from chargehand.processes import Process
 
 if TYPE_CHECKING:
     from chargehand.config import MachineConfig
@@ -403,6 +404,24 @@ class Runtime(ABC):
         that cannot tell these apart never says True.
         """
         return False
+
+    def session_processes(self, session: Session) -> tuple[Process, ...]:
+        """The processes below the listed *session*'s own process, such as a background
+        shell of its turn and what that shell started.
+
+        Read before a stop: the stop does not end such a shell, and after it the shell has
+        another parent. Empty when the runtime cannot tell, or the session has no process.
+        """
+        return ()
+
+    def wait_for_exit(self, session: Session) -> bool:
+        """After a confirmed stop, wait until the process listed for *session* before the
+        stop has exited. Returns False when it still runs at the end of the wait.
+
+        A listing can show the stop before the process ends, and the processes that end
+        with it, such as an MCP server, would look as if they outlived the stop.
+        """
+        return True
 
     def release(self, worktree: Path) -> None:
         """Delete what the launch in *worktree* kept for its session, once that session is removed."""

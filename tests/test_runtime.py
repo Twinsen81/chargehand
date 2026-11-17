@@ -6,6 +6,7 @@ import ast
 import dataclasses
 import os
 import re
+import signal
 from pathlib import Path
 
 import pytest
@@ -296,6 +297,36 @@ def test_a_wake_that_may_end_the_shell_stops_and_resumes_the_session(
     assert claude_state.read()["resumes"][0]["target"] == UUID
 
 
+def test_a_wake_ends_the_processes_below_the_session_that_outlive_its_stop(
+    claude_runtime, claude_state, process_table
+):
+    # Observed in Claude Code 2.1.325: the shell of a background command is a child of the
+    # listed pid, in a group of its own, and runs on after the stop with PID 1 as parent.
+    claude_state.set(sessions=[with_shell("done")])
+    process_table.add(86470, 1)
+    shell = process_table.add(86500, 86470)
+    process_table.add(86501, 86500, group=86500)
+    process_table.add(86600, 1)
+
+    result = claude_runtime.wake("s1", "reply from the operator: blue", if_idle=True, end_shell=True)
+
+    assert result.ok
+    assert claude_state.commands == [["stop", "s1"]]
+    assert process_table.pids() == {86470, 86600}
+    assert (shell.pid, signal.SIGTERM, True) in process_table.signals
+    assert {target for target, _, _ in process_table.signals} == {86500, 86501}
+
+
+def test_a_wake_that_holds_for_a_shell_signals_nothing(claude_runtime, claude_state, process_table):
+    claude_state.set(sessions=[with_shell("done")])
+    process_table.add(86500, 86470)
+
+    result = claude_runtime.wake("s1", "new events: 2", if_idle=True)
+
+    assert result.shell
+    assert process_table.signals == [] and process_table.pids() == {86500}
+
+
 def test_a_resume_wakes_a_session_listed_blocked_without_a_dialog(claude_runtime, claude_state):
     claude_state.set(sessions=[live("blocked")])
 
@@ -391,6 +422,32 @@ def test_a_wake_waits_for_the_old_process_to_exit(claude_runtime, claude_state):
     assert claude_runtime.wake("s1", "hello").ok
     assert checks[:3] == [86470, 86470, 86470]
     assert len(claude_state.read()["resumes"]) == 1
+
+
+def test_the_wait_after_a_stop_ends_when_the_listed_process_exits(claude_runtime):
+    session = runtime_mod.Session(id="s1", state="done", raw={"pid": 86470})
+    ALIVE.add(86470)
+    checks = []
+
+    def alive(pid):
+        checks.append(pid)
+        if len(checks) >= 2:
+            ALIVE.discard(pid)
+        return pid in ALIVE
+
+    claude_runtime.pid_alive = alive
+    claude_runtime.stop_wait_secs = 60.0
+
+    assert claude_runtime.wait_for_exit(session)
+    assert checks == [86470, 86470]
+
+
+def test_the_wait_after_a_stop_gives_up_on_a_process_that_lives_on(claude_runtime):
+    session = runtime_mod.Session(id="s1", state="done", raw={"pid": 86470})
+    ALIVE.add(86470)
+
+    assert not claude_runtime.wait_for_exit(session)
+    assert claude_runtime.wait_for_exit(runtime_mod.Session(id="s2", state="done"))
 
 
 def test_a_wake_does_not_resume_while_the_old_process_lives(claude_runtime, claude_state):

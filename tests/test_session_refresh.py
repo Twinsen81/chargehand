@@ -214,9 +214,9 @@ def test_a_session_with_a_turn_is_not_stopped_for_a_refresh(after_two):
     # The operator starts a turn in the session after the tick's own listing.
     original = runner._refresh_session
 
-    def operator_types_first(worker, message, report):
+    def operator_types_first(worker, message, report, **options):
         harness.claude_state.set_session_state(worker.session_id, "working", status="busy")
-        return original(worker, message, report)
+        return original(worker, message, report, **options)
 
     runner._refresh_session = operator_types_first
     before = len(harness.claude_state.commands)
@@ -924,3 +924,136 @@ def test_a_copy_in_the_worktree_of_an_ended_worker_under_a_linked_root_is_not_ad
     else:
         assert said == []
     ledger.close()
+
+
+# ----- a background shell of the ended turn ------------------------------------------
+
+
+def shell_after_turn(harness, worker, monkeypatch, listed_state="done"):
+    """The worker's current session, which runs the mod, ends its turn while a background
+    shell of that turn still runs: its turn-end hook, then a busy listing."""
+    monkeypatch.setattr(
+        claude.ClaudeRuntime, "reports_turn_starts", classmethod(lambda cls, worktree: True)
+    )
+    current = harness.ledger.get(worker.id)
+    current = delivery_mod.record_mod_hello(harness.ledger, current, current.session_uuid)
+    harness.runner.apply_hook(
+        current, claude.parse_hook("Stop", {"session_id": current.session_uuid})
+    )
+    harness.claude_state.set_session_state(current.session_id, listed_state, status="busy")
+    harness.next_tick()
+    shown = harness.ledger.get(worker.id)
+    assert (shown.state, shown.session_state) == (ledger_mod.IDLE, ledger_mod.SESSION_BACKGROUND)
+    assert delivery_mod.has_mod(shown)
+    return shown
+
+
+def count_checkout_refreshes(monkeypatch) -> list[int]:
+    """Count the refreshes of the item checkout before a wake, which run the role's setup."""
+    calls: list[int] = []
+    real = Runner._refresh_item_checkout
+
+    def counting(self, worker):
+        calls.append(worker.id)
+        return real(self, worker)
+
+    monkeypatch.setattr(Runner, "_refresh_item_checkout", counting)
+    return calls
+
+
+def shell_reason(worker) -> str:
+    return f"wake held, a background shell of session {worker.session_id} still runs"
+
+
+@pytest.mark.parametrize("listed_state", ["done", "blocked"])
+def test_a_refresh_waits_while_a_background_shell_of_the_ended_turn_runs(
+    after_two, monkeypatch, listed_state
+):
+    # The refresh stops the session, which ends the shell, such as a dev server.
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    held = shell_after_turn(harness, reviewer, monkeypatch, listed_state)
+    refreshes = count_checkout_refreshes(monkeypatch)
+    fake_source.feed().emit("comment", "PR-7")
+    before = len(harness.claude_state.commands)
+
+    for _ in range(3):
+        report = harness.next_tick()
+        assert report.woken == []
+
+    worker = harness.ledger.get(reviewer.id)
+    assert worker.state == ledger_mod.QUEUED and worker.session_id == held.session_id
+    assert harness.claude_state.commands[before:] == []
+    assert len(launches(harness)) == 1
+    assert kinds(harness, worker)[-1] == "wake"
+    assert len(harness.ledger.inbox(worker)) == 1
+    assert harness.ledger.outbox_message(worker) is None
+    assert harness.ledger.get_state(f"{delivery_mod.QUEUE_REASON_PREFIX}{worker.id}") == (
+        shell_reason(held)
+    )
+    # The held refresh runs no setup step under the shell.
+    assert refreshes == []
+
+    # The shell ended: the listing shows the session idle, and the refresh goes out.
+    harness.claude_state.set_session_state(held.session_id, "done", status="idle")
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 2
+    assert ["stop", held.session_id] in harness.claude_state.commands
+    fresh = harness.ledger.get(reviewer.id)
+    assert fresh.session_id != held.session_id
+    assert kinds(harness, fresh)[-1] == "refresh"
+    assert harness.ledger.inbox(fresh) == []
+
+
+def test_a_reply_refreshes_at_once_and_ends_the_background_shell(
+    after_two, monkeypatch, process_table
+):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    held = shell_after_turn(harness, reviewer, monkeypatch)
+    process_table.add(7001, listed(harness, held.session_id)["pid"])
+    process_table.add(7002, 7001, group=7001)
+    harness.ledger.record_request("reply", harness.ledger.target_for(reviewer), text="go on")
+
+    report = harness.next_tick()
+
+    assert report.woken == ["reviewer/PR-7"]
+    assert len(launches(harness)) == 2
+    assert ["stop", held.session_id] in harness.claude_state.commands
+    assert kinds(harness, reviewer)[-1] == "refresh"
+    assert process_table.pids() == set()
+
+
+def test_a_background_shell_that_starts_after_the_listing_holds_the_refresh(after_two):
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    current = harness.ledger.get(reviewer.id)
+    delivery_mod.record_mod_hello(harness.ledger, current, current.session_uuid)
+    end_turn(harness, reviewer)
+    fake_source.feed().emit("comment", "PR-7")
+    runner = harness.fresh_runner()
+    original = runner._refresh_session
+
+    def shell_starts_first(worker, message, report, **options):
+        # The tick's listing showed the session idle; its own look shows the shell.
+        harness.claude_state.set_session_state(worker.session_id, "done", status="busy")
+        return original(worker, message, report, **options)
+
+    runner._refresh_session = shell_starts_first
+    before = len(harness.claude_state.commands)
+    report = runner.tick()
+
+    assert len(launches(harness)) == 1
+    assert ["stop", reviewer.session_id] not in harness.claude_state.commands[before:]
+    assert report.skipped == [f"reviewer/PR-7: {shell_reason(reviewer)}"]
+    held = harness.ledger.get(reviewer.id)
+    assert held.state == ledger_mod.QUEUED and held.session_id == reviewer.session_id
+    assert len(harness.ledger.inbox(held)) == 1

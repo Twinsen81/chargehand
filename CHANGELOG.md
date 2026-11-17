@@ -323,6 +323,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work in, or while the listing cannot be read, logs one WARNING line, sends one
   notification with the new state `not-collected`, and collects the worker at the first
   collection after those sessions are gone. `retry --force` says so in its help.
+- A stop no longer leaves a background shell of the session running with no owner. Claude
+  Code does not end such a shell when the session stops: the shell runs on with PID 1 as
+  its parent, such as a dev server that keeps its port. Now cancel, discard, retry,
+  archive, garbage collection, the watchdog's hard stop, the close of a worker whose item
+  closed, the stop of a session refresh, the stop of another session in the worktree, and
+  the stop before a resume (a reply from the board, the resume after a usage limit) read
+  the processes below the session's process before the stop, and end those that still run
+  once the stop is confirmed and the session's process has exited (a process that ends
+  with it, such as an MCP server, does not count): SIGTERM to each and to the process
+  group of each shell, then SIGKILL after 3 seconds. A process is known by its pid and its start time, so a pid that
+  a new process got meanwhile is never signalled. The log names the pids. `chargehand
+  stop`, which `continue` undoes, keeps them: the outcome and one WARNING line name the
+  pids, and one notification goes out with the new state `orphan-shell` and a count; a
+  later cancel, discard or other such stop ends them.
+- Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake for events no
+  longer stops a session with the mod while a background shell of its ended turn runs.
+  Before, the refresh stopped the session to start a fresh one, which a wake without the
+  refresh never does. Now the wake waits as the wake of a session without the mod does:
+  the worker is `queued`, its card says "wake held, a background shell of session ...
+  still runs", the events stay in the inbox, and no setup step of the role runs. Once the
+  listing shows the session idle, the next tick refreshes it. A reply from the board still
+  refreshes at once. The refresh also looks again right before its stop, so a shell that
+  started after the tick's listing holds the wake too.
+- A wake held for a background shell logs its `skipped:` line at INFO once per hold, and
+  at DEBUG on later ticks. Before, the line came at INFO on every tick, for hours with a
+  dev server. A new hold, after a wake or for another session, logs at INFO again. The
+  card and the `wake held -> queued` transition are unchanged.
 
 ### Added
 

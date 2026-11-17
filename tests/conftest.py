@@ -13,13 +13,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from chargehand import paths  # noqa: E402
+from chargehand import paths, processes  # noqa: E402
 from chargehand.config import Labels, MachineConfig, NotifyConfig, Repository, TrackerConfig  # noqa: E402
 from chargehand.gitutil import Git  # noqa: E402
 from chargehand.ledger import Ledger  # noqa: E402
 from chargehand.notify import Notifier  # noqa: E402
 from chargehand.tick import Runner  # noqa: E402
 from support import fake_runtime, fake_source, fake_tracker  # noqa: E402
+from support.fake_processes import FakeProcesses  # noqa: E402
 
 FAKE_CLAUDE = Path(__file__).parent / "support" / "fake_claude.py"
 
@@ -175,6 +176,17 @@ def never_touch_launchd(monkeypatch):
         "chargehand.install.launchctl",
         lambda *args: pytest.fail(f"a test tried to run launchctl {' '.join(args)}"),
     )
+
+
+@pytest.fixture(autouse=True)
+def process_table(monkeypatch) -> FakeProcesses:
+    """Keep the suite away from `ps` and from real processes: a stop ends the processes
+    below the session's pid, so a test that wants them adds them here."""
+    table = FakeProcesses()
+    monkeypatch.setattr(processes, "read_table", table.read_table)
+    monkeypatch.setattr(processes, "send_signal", table.send_signal)
+    monkeypatch.setattr(processes, "END_POLL_SECS", 0.0)
+    return table
 
 
 @pytest.fixture(autouse=True)

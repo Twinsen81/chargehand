@@ -5,9 +5,10 @@
 # report or the status file, the watchdog states, the daily wake cap, and a worktree that
 # garbage collection does not remove while other sessions work in it. A turn end that
 # waits for events and a worker whose item closed are not notified; `status` shows them.
-# One exception: a worker whose turn ended while a background shell of that turn still
-# runs is notified once, with the state idle, after background_shell_mins. These
-# variables are set:
+# Two exceptions: a worker whose turn ended while a background shell of that turn still
+# runs is notified once, with the state idle, after background_shell_mins; and a
+# `chargehand stop` that leaves processes of the session running, such as a background
+# shell, is notified once, with the state orphan-shell. These variables are set:
 #
 #   CHARGEHAND_ITEM    the work item (an issue identifier); for a worker started on the
 #                      board, its handle with its id instead, such as implementer/ABC-1#7
@@ -15,7 +16,7 @@
 #   CHARGEHAND_ISSUE   the same as CHARGEHAND_ITEM, kept for older hooks
 #   CHARGEHAND_STATE   blocked | parked | done | failed | cancelled | long-running |
 #                      watchdog-stopped | wake-fault | daily-cap | idle |
-#                      not-collected | ...
+#                      not-collected | orphan-shell | ...
 #   CHARGEHAND_URL     the issue URL, when the tracker provides one
 #   CHARGEHAND_REPOSITORY  the repository name (CHARGEHAND_ROUTE carries the same)
 #   CHARGEHAND_DETAIL  a short chargehand-generated reason
