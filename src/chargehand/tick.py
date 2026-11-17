@@ -2347,8 +2347,8 @@ class Runner:
         self, worker: Worker, others: list[Session] | None, action: str
     ) -> tuple[str, list[str]]:
         """Stop and remove *others*, which None gives when the listing could not be read.
-        Returns the end of the outcome that names them, and the ids of those that are
-        still listed afterwards."""
+        Returns the end of the outcome that names them, and the scrubbed ids of those that
+        are still listed afterwards."""
         if others is None:
             return (
                 "; the session listing could not be read, so other sessions were not looked for",
@@ -2367,13 +2367,14 @@ class Runner:
         gone = [i for session, i in zip(others, ids) if session.id not in left]
         if gone:
             also += f"; other sessions in its worktree stopped and removed: {_id_list(gone)}"
-        if left:
-            kept_ids = [sanitize.scrub_identifier(session_id) for session_id in left]
+        # The ids come from the listing: only scrubbed ones leave this method.
+        kept_ids = [sanitize.scrub_identifier(session_id) for session_id in left]
+        if kept_ids:
             also += (
                 f"; other sessions in its worktree could not be stopped and removed: "
                 f"{_id_list(kept_ids)}; remove them by hand"
             )
-        return also, left
+        return also, kept_ids
 
     def _other_sessions(self, worker: Worker) -> tuple[list[Session], list[Worker]] | None:
         """The listed sessions whose directory is in *worker*'s worktree or its item

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths
+from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths, sanitize
 from conftest import run_git
 from support import daemon as support
 
@@ -525,6 +525,20 @@ def test_the_stop_of_other_sessions_returns_the_ids_still_listed(harness):
     assert harness.runner._stop_other_sessions(worker, [], "archive") == ("", [])
     unknown, none_left = harness.runner._stop_other_sessions(worker, None, "archive")
     assert "could not be read" in unknown and none_left == []
+
+
+def test_the_stop_of_other_sessions_returns_only_scrubbed_ids(harness):
+    # The ids come from the session listing, which is untrusted text.
+    worker = cancelled(harness)
+    raw = "c0b1e5d6\x1b[2J"
+    add_copy(harness, raw, worker.worktree_path)
+    others, _ = harness.runner._other_sessions(worker)
+    harness.claude_state.set(rm_returncode=1)
+
+    also, left = harness.runner._stop_other_sessions(worker, others, "archive")
+
+    assert left == [sanitize.scrub_identifier(raw)] and raw not in left
+    assert "\x1b" not in also
 
 
 def test_an_archive_job_never_stops_the_session_of_another_live_worker(harness):
