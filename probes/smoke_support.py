@@ -8,9 +8,9 @@ that world looks like afterwards.
 Three pieces:
 
 ``Sandbox``
-    A throwaway chargehand instance. Config, ledger, logs and worktrees all live under
-    one directory, reached through the ``CHARGEHAND_*`` path overrides, so the probe can
-    run on a machine that already has a real chargehand configured without touching it.
+    A throwaway elfcrew instance. Config, ledger, logs and worktrees all live under
+    one directory, reached through the ``ELFCREW_*`` path overrides, so the probe can
+    run on a machine that already has a real elfcrew configured without touching it.
     The repository it launches into is a local clone of a local bare repository, so
     ``origin/main`` resolves and "does this worktree hold unpushed work" has a real
     answer rather than a degenerate one.
@@ -52,9 +52,9 @@ LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 # Distinct from the defaults on purpose. A stray tick belonging to a real route must not
 # be able to pick up a smoke issue, and this probe must not pick up a real one.
 SMOKE_LABELS = {
-    "queued": "chargehand-smoke",
-    "running": "chargehand-smoke-running",
-    "blocked": "chargehand-smoke-blocked",
+    "queued": "elfcrew-smoke",
+    "running": "elfcrew-smoke-running",
+    "blocked": "elfcrew-smoke-blocked",
 }
 
 # Cheap, deterministic, and slow enough that a tick immediately after the launch still
@@ -98,7 +98,7 @@ class TrackerAdmin:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": self.api_key,
-                "User-Agent": "chargehand-smoke-probe",
+                "User-Agent": "elfcrew-smoke-probe",
             },
             method="POST",
         )
@@ -361,7 +361,7 @@ class FaultProxy:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": authorization,
-                "User-Agent": "chargehand-smoke-probe",
+                "User-Agent": "elfcrew-smoke-probe",
             },
             method="POST",
         )
@@ -404,7 +404,7 @@ class TickResult:
 
 
 class Sandbox:
-    """A throwaway chargehand instance, isolated by the path overrides it was given."""
+    """A throwaway elfcrew instance, isolated by the path overrides it was given."""
 
     def __init__(
         self,
@@ -464,15 +464,15 @@ class Sandbox:
     @property
     def marker_file(self) -> Path:
         """Proof that this directory is a sandbox and not somebody's work."""
-        return self.root / ".chargehand-smoke-sandbox"
+        return self.root / ".elfcrew-smoke-sandbox"
 
     @property
     def env(self) -> dict[str, str]:
         return {
             **os.environ,
-            "CHARGEHAND_CONFIG": str(self.config_file),
-            "CHARGEHAND_STATE_DIR": str(self.state_dir),
-            "CHARGEHAND_LOG_FILE": str(self.root / "chargehand.log"),
+            "ELFCREW_CONFIG": str(self.config_file),
+            "ELFCREW_STATE_DIR": str(self.state_dir),
+            "ELFCREW_LOG_FILE": str(self.root / "elfcrew.log"),
             "PYTHONPATH": str(REPO_ROOT / "src"),
         }
 
@@ -513,12 +513,12 @@ class Sandbox:
         self._git("init", "--quiet", "--bare", "-b", "main", str(self.origin))
         self._git("init", "--quiet", "-b", "main", str(seed))
         self._git("config", "user.email", "smoke@example.invalid", cwd=seed)
-        self._git("config", "user.name", "chargehand smoke probe", cwd=seed)
+        self._git("config", "user.name", "elfcrew smoke probe", cwd=seed)
         (seed / "README.md").write_text(
-            "# scratch\n\nA throwaway repository the chargehand smoke probe launches into.\n",
+            "# scratch\n\nA throwaway repository the elfcrew smoke probe launches into.\n",
             encoding="utf-8",
         )
-        (seed / ".chargehand.toml").write_text(self._repo_config(), encoding="utf-8")
+        (seed / ".elfcrew.toml").write_text(self._repo_config(), encoding="utf-8")
         self._git("add", "-A", cwd=seed)
         self._git("commit", "--quiet", "-m", "seed the scratch repository", cwd=seed)
         self._git("remote", "add", "origin", str(self.origin), cwd=seed)
@@ -526,14 +526,14 @@ class Sandbox:
         shutil.rmtree(seed)
         self._git("clone", "--quiet", str(self.origin), str(self.repo))
         self._git("config", "user.email", "smoke@example.invalid", cwd=self.repo)
-        self._git("config", "user.name", "chargehand smoke probe", cwd=self.repo)
+        self._git("config", "user.name", "elfcrew smoke probe", cwd=self.repo)
 
     def _repo_config(self) -> str:
         return (
             "base = \"origin/main\"\n"
             f"prompt = {json.dumps(self.prompt)}\n"
             f"permission_mode = {json.dumps(self.permission_mode)}\n"
-            "branch_prefix = \"chargehand/\"\n"
+            "branch_prefix = \"elfcrew/\"\n"
         )
 
     def _write_notify_hook(self) -> None:
@@ -542,8 +542,8 @@ class Sandbox:
             "#!/bin/sh\n"
             "# Records what the runner would have sent, so the probe can assert on it.\n"
             'printf \'{"issue":"%s","state":"%s","url":"%s","route":"%s","detail":"%s"}\\n\' \\\n'
-            '  "$CHARGEHAND_ISSUE" "$CHARGEHAND_STATE" "$CHARGEHAND_URL" '
-            '"$CHARGEHAND_ROUTE" "$CHARGEHAND_DETAIL" \\\n'
+            '  "$ELFCREW_ISSUE" "$ELFCREW_STATE" "$ELFCREW_URL" '
+            '"$ELFCREW_ROUTE" "$ELFCREW_DETAIL" \\\n'
             f'  >> "{self.notify_log}"\n',
             encoding="utf-8",
         )
@@ -589,18 +589,18 @@ class Sandbox:
     def set_repo_prompt(self, prompt: str | None) -> None:
         """Swap the repository's prompt between checks.
 
-        The runner reads `.chargehand.toml` from the clone, not from the worktree, so
+        The runner reads `.elfcrew.toml` from the clone, not from the worktree, so
         this takes effect on the next launch without a commit. Checks that need a run to
         still be working when a control command reaches it use a longer one.
         """
         self.prompt = prompt or SMOKE_PROMPT
-        (self.repo / ".chargehand.toml").write_text(self._repo_config(), encoding="utf-8")
+        (self.repo / ".elfcrew.toml").write_text(self._repo_config(), encoding="utf-8")
 
     # ----- driving it -------------------------------------------------------
 
     def cli(self, *args: str, timeout: float = 300.0) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, "-m", "chargehand", *args],
+            [sys.executable, "-m", "elfcrew", *args],
             capture_output=True,
             text=True,
             env=self.env,
@@ -759,7 +759,7 @@ def is_sandbox(root: Path) -> bool:
     otherwise take the answer with it, and this tool refuses to destroy unpushed work
     everywhere else it might.
     """
-    return (root / ".chargehand-smoke-sandbox").is_file()
+    return (root / ".elfcrew-smoke-sandbox").is_file()
 
 
 def keychain_key(service: str, account: str | None = None) -> str | None:

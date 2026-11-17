@@ -1,6 +1,6 @@
-# Contributing to chargehand
+# Contributing to elfcrew
 
-Thanks for your interest in improving chargehand. This guide covers setup, tests, the
+Thanks for your interest in improving elfcrew. This guide covers setup, tests, the
 project layout, coding standards, the sign-off requirement, and the pull-request process.
 By contributing you agree your work is licensed under the project's
 [Apache License 2.0](LICENSE).
@@ -27,7 +27,7 @@ after each step and assert that the next tick adopts, resumes, or fails loudly.
 
 ## Project layout
 
-- `src/chargehand/` — the package. `cli.py` is the entry point.
+- `src/elfcrew/` — the package. `cli.py` is the entry point.
 - `tests/` — pytest suite.
 - `docs/DESIGN.md` — architecture and behavior. Read it before proposing structural changes.
 - `DECISIONS.md` — resolved design decisions and how to change them.
@@ -52,7 +52,7 @@ interface with one module that knows the pool's CLI, and notifications.
 
 ## Developer Certificate of Origin (DCO)
 
-All commits must be signed off. chargehand uses the
+All commits must be signed off. elfcrew uses the
 [Developer Certificate of Origin 1.1](https://developercertificate.org/): by adding a
 `Signed-off-by` line you certify that you wrote the contribution or otherwise have the
 right to submit it under the project's open-source license.
@@ -85,7 +85,7 @@ request must carry a sign-off line.
 
 ## Compatibility expectations
 
-chargehand follows [Semantic Versioning](https://semver.org/). Before `1.0.0` anything may
+elfcrew follows [Semantic Versioning](https://semver.org/). Before `1.0.0` anything may
 change between minor versions. The surfaces that will be treated as public API are the CLI
 (commands, flags, `status --json` output), the configuration files, the status-file
 protocol, and the [command-source JSON contract](docs/command-source.md).

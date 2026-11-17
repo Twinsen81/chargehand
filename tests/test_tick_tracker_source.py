@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 
-from chargehand import ledger as ledger_mod
-from chargehand.sources import AUTHORSHIP_MARKER
+from elfcrew import ledger as ledger_mod
+from elfcrew.sources import AUTHORSHIP_MARKER
 from test_tick_roles import harness_with, write_role
 
 
@@ -21,7 +21,7 @@ def marks(harness):
 def test_a_comment_on_an_issue_with_a_live_implementer_lands_in_its_inbox(harness):
     harness.board.add("ABC-1")
     harness.tick()
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
 
     harness.board.comment("ABC-1", author="reviewer@example.invalid")
     harness.next_tick()
@@ -129,7 +129,7 @@ def test_a_second_worker_on_the_issue_never_writes_the_label(tmp_path, repo, cla
 
     assert harness.worker("ABC-1", "helper").state == ledger_mod.IDLE
     assert marks(harness) == before
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
     harness.ledger.close()
 
 
@@ -160,7 +160,7 @@ def test_a_waiting_queue_start_launches_when_a_slot_frees(harness):
 
     assert report.launched == ["implementer/ABC-2"]
     assert harness.worker("ABC-2").owns_label
-    assert harness.labels("ABC-2") == ("chargehand-running",)
+    assert harness.labels("ABC-2") == ("elfcrew-running",)
 
 
 def test_a_closed_issue_ends_its_worker_and_clears_the_labels(harness):
@@ -177,7 +177,7 @@ def test_a_closed_issue_ends_its_worker_and_clears_the_labels(harness):
 
 
 def test_a_queued_issue_starts_once_a_broken_role_file_is_fixed(harness):
-    role_file = harness.repo / ".chargehand" / "roles" / "implementer.toml"
+    role_file = harness.repo / ".elfcrew" / "roles" / "implementer.toml"
     role_file.parent.mkdir(parents=True)
     role_file.write_text("prompt = 1\n")
     harness.board.add("ABC-1")
@@ -225,7 +225,7 @@ def test_a_waiting_start_is_tried_once_per_tick(harness):
 
 
 def test_waiting_starts_make_no_tracker_call_while_the_poll_fails(harness, monkeypatch):
-    from chargehand.errors import TrackerError
+    from elfcrew.errors import TrackerError
     from support import fake_tracker
 
     for index in range(5):
@@ -258,7 +258,7 @@ def test_waiting_starts_make_no_tracker_call_while_the_poll_fails(harness, monke
 def test_a_source_with_the_trackers_name_reads_the_followed_issues(
     tmp_path, repo, claude_state, board
 ):
-    from chargehand.config import SourceConfig
+    from elfcrew.config import SourceConfig
 
     source = SourceConfig(name="fake", type="fake", options={"board": "default", "repository": "test"})
     harness = harness_with(tmp_path, repo, claude_state, board, sources=(source,))

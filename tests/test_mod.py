@@ -1,7 +1,7 @@
-"""The chargehand mod: it ships with the package, every launch loads it, and it does only what it says.
+"""The elfcrew mod: it ships with the package, every launch loads it, and it does only what it says.
 
 The mod's own behaviour is tested with `claude plugin test` in its folder. Here: what
-chargehand passes to it, how its posts read, and a static check of what the module hooks
+elfcrew passes to it, how its posts read, and a static check of what the module hooks
 and calls, so that this suite needs no `claude`.
 """
 
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude, ledger as ledger_mod, runtime as runtime_mod, worker_tokens
-from chargehand.config import ServeConfig
+from elfcrew import claude, ledger as ledger_mod, runtime as runtime_mod, worker_tokens
+from elfcrew.config import ServeConfig
 from conftest import FAKE_CLAUDE
 
 MODULE = claude.MOD_DIR / "hooks" / "register.ts"
@@ -62,10 +62,10 @@ def test_the_mod_ships_with_the_package_under_its_plugin_name():
     manifest = json.loads((claude.MOD_DIR / ".claude-plugin" / "plugin.json").read_text())
     hooks = json.loads((claude.MOD_DIR / "hooks" / "hooks.json").read_text())
 
-    assert manifest["name"] == claude.MOD_NAME == "chargehand"
+    assert manifest["name"] == claude.MOD_NAME == "elfcrew"
     assert hooks == {"modules": ["./register.ts"]}
     assert MODULE.is_file()
-    assert claude.MOD_TOOL_RULE == "mcp__chargehand__*"
+    assert claude.MOD_TOOL_RULE == "mcp__elfcrew__*"
 
 
 def test_the_wheel_takes_the_mod_with_its_dot_directory():
@@ -74,11 +74,11 @@ def test_the_wheel_takes_the_mod_with_its_dot_directory():
     # The templates glob takes `.claude-plugin` too. The types that Claude Code writes beside
     # the manifest stay out of git and of the wheel: an artifact is taken even when ignored.
     assert (
-        'artifacts = ["src/chargehand/templates/**", '
-        '"!src/chargehand/templates/mod/.claude-plugin/types/**"]'
+        'artifacts = ["src/elfcrew/templates/**", '
+        '"!src/elfcrew/templates/mod/.claude-plugin/types/**"]'
     ) in text
     ignored = (Path(__file__).parents[1] / ".gitignore").read_text()
-    assert "src/chargehand/templates/mod/.claude-plugin/types/" in ignored
+    assert "src/elfcrew/templates/mod/.claude-plugin/types/" in ignored
 
 
 def test_every_launch_loads_the_mod_and_allows_its_tools(harness, tmp_path):
@@ -234,7 +234,7 @@ def test_the_module_hooks_and_calls_only_what_it_is_allowed_to():
     # The only prompt it submits is the outbox message's text.
     assert re.findall(r"\$\.prompt\.submit\(([^)]*)\)", source) == ["{ text, asUser: true }"]
     # The one tool.call hook serves the mod's own tools.
-    assert re.findall(r"on\(\s*'tool\.call',\s*\{\s*tool:\s*/([^/]+)/", source) == ["^mcp__chargehand__"]
+    assert re.findall(r"on\(\s*'tool\.call',\s*\{\s*tool:\s*/([^/]+)/", source) == ["^mcp__elfcrew__"]
     # No default address: the port comes from the launch settings or nothing is posted.
     assert "7878" not in source and "localhost" not in source
 

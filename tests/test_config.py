@@ -6,11 +6,11 @@ import tomllib
 
 import pytest
 
-from chargehand import config as config_mod
-from chargehand import roles as roles_mod
-from chargehand import sources as sources_mod
-from chargehand.config import MachineConfig, RepoConfig, render, render_argv
-from chargehand.errors import ConfigError
+from elfcrew import config as config_mod
+from elfcrew import roles as roles_mod
+from elfcrew import sources as sources_mod
+from elfcrew.config import MachineConfig, RepoConfig, render, render_argv
+from elfcrew.errors import ConfigError
 
 MINIMAL = {
     "route": [{"repo": "~/code/app", "tracker": {"type": "linear", "team": "ABC"}}],
@@ -24,7 +24,7 @@ def test_a_minimal_machine_config_gets_sensible_defaults():
     assert config.max_open_workers == 4
     assert config.repositories[0].name == "app"
     assert config.repositories[0].tracker.type == "linear"
-    assert config.labels.queued == "chargehand"
+    assert config.labels.queued == "elfcrew"
     assert config.pass_deny_rules_at_launch is True
     assert config.ignored_keys == ()
 
@@ -39,7 +39,7 @@ def test_a_binary_in_the_home_directory_can_be_written_with_a_tilde(monkeypatch,
 
 
 def test_the_lease_tools_command_is_accepted_and_ignored():
-    """chargehand no longer runs a lease tool; a configuration that names one still loads."""
+    """elfcrew no longer runs a lease tool; a configuration that names one still loads."""
     assert MachineConfig.parse({**MINIMAL, "pool_bin": "/opt/bin/banksman"}).ignored_keys == (
         "pool_bin",
     )
@@ -139,14 +139,14 @@ def test_render_argv_does_not_let_a_value_become_more_arguments():
 def test_the_available_template_variables_exclude_issue_text():
     assert "title" not in config_mod.TEMPLATE_VARS
     assert "body" not in config_mod.TEMPLATE_VARS
-    # Every variable is an identifier, a URL or a path that chargehand writes.
+    # Every variable is an identifier, a URL or a path that elfcrew writes.
     assert set(config_mod.TEMPLATE_VARS) == {
         "item", "item_url", "item_checkout", "worktree", "branch", "repo", "issue", "url",
     }
 
 
 def test_loading_a_missing_repo_config_names_the_fix(tmp_path):
-    with pytest.raises(ConfigError, match="chargehand init"):
+    with pytest.raises(ConfigError, match="elfcrew init"):
         config_mod.load_repo_config(tmp_path)
 
 
@@ -158,12 +158,12 @@ def test_a_bad_toml_file_reports_the_file(tmp_path):
 
 
 def test_the_bundled_templates_parse(tmp_path):
-    from chargehand import paths
+    from elfcrew import paths
 
     machine = (paths.templates_dir() / "config.toml").read_text()
-    repo = (paths.templates_dir() / "chargehand.toml").read_text()
+    repo = (paths.templates_dir() / "elfcrew.toml").read_text()
     (tmp_path / "config.toml").write_text(machine)
-    (tmp_path / ".chargehand.toml").write_text(repo)
+    (tmp_path / ".elfcrew.toml").write_text(repo)
 
     assert config_mod.load_machine_config(tmp_path / "config.toml").repositories
     assert config_mod.load_repo_config(tmp_path).base
@@ -196,7 +196,7 @@ def test_a_valid_template_still_parses():
         "base": "origin/main",
         "prompt": "/work {issue} {url}",
         "setup": "scripts/setup.sh {worktree} {branch}",
-        "status_file": "/tmp/chargehand/{issue}/status.json",
+        "status_file": "/tmp/elfcrew/{issue}/status.json",
     })
 
     assert config.setup.startswith("scripts/setup.sh")

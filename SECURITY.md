@@ -1,13 +1,13 @@
 # Security Policy
 
-chargehand starts coding agents on your machine in response to issue-tracker activity and
+elfcrew starts coding agents on your machine in response to issue-tracker activity and
 lets them run unattended. That is a sensitive thing to automate, so the security posture is
 part of the design, not an afterthought. This document describes what is supported, how to
 report a vulnerability, and the threat model.
 
 ## Supported Versions
 
-chargehand is pre-1.0 and under active development. Until `1.0.0`, only the latest
+elfcrew is pre-1.0 and under active development. Until `1.0.0`, only the latest
 published version receives security fixes.
 
 ## Reporting a Vulnerability
@@ -27,9 +27,9 @@ public location.
 
 ### What is trusted
 
-- The operator: the person who installs chargehand, owns the machine, and owns the tracker
+- The operator: the person who installs elfcrew, owns the machine, and owns the tracker
   credentials it uses.
-- The repository's own configuration and instructions (its chargehand config, its agent
+- The repository's own configuration and instructions (its elfcrew config, its agent
   instruction files, its permission rules), as the base branch the operator configured
   holds them.
 
@@ -50,13 +50,13 @@ public location.
   not leave the source. The marker filter is a convenience against workers waking each
   other, not a defense: anyone can quote the marker, and it only drops comments by the
   signed-in account.
-- **Posts of the chargehand mod.** The mod runs in the worker's session, so what it posts
+- **Posts of the elfcrew mod.** The mod runs in the worker's session, so what it posts
   (tool arguments, the last answer, the rate limits) is session output. The daemon cleans
   and caps it like a hook post, and it changes a worker only through the hook transitions.
   The worker tools keep what they are given as untrusted text: a question and its options,
   a report's summary and links (only plain http(s) URLs, and only a pull request link
   becomes the card's link), and the handoff note. The board renders them as text, and no
-  notification carries them. No prompt that chargehand writes includes them, and no log
+  notification carries them. No prompt that elfcrew writes includes them, and no log
   line carries them, with one exception that the operator makes: an option that the
   operator clicks is sent as the operator's answer, so it reaches the session that wrote
   it as the reply line of its next wake, and the log line of that wake. A question and
@@ -68,10 +68,10 @@ public location.
   data, not as a prompt.
   A report of `done` or `failed` can end the worker whose token the post carries, as its
   status file could. A timer from `request_wake` is a wake with
-  chargehand's own pointer, under the same caps as any wake. The answer to a question is
+  elfcrew's own pointer, under the same caps as any wake. The answer to a question is
   the operator's line, or the option that the operator clicked, sent as a reply.
 - **Command source output.** The commands of a `command` source are the operator's own,
-  but what they print comes from the system they poll. chargehand runs them without a
+  but what they print comes from the system they poll. elfcrew runs them without a
   shell, with a timeout and a cap on the output, and checks every line against a closed
   event shape: an item key must be a safe path name and a URL a plain http(s) URL. A
   line that does not fit is skipped. The log names the reason and, for an unknown field,
@@ -82,7 +82,7 @@ public location.
 
 - **The human gate.** A run starts only for an issue that is assigned to the operator and
   carries the queue label. On a public tracker, only people with triage rights can do
-  either. chargehand never picks up unassigned or unlabelled work.
+  either. elfcrew never picks up unassigned or unlabelled work.
 - **Issue text never enters the launch prompt.** The prompt carries only the issue
   identifier and URL; the agent fetches the issue itself. Where a tracker builds its
   URLs from the issue title — Linear appends a slug — the adapter shortens the URL to
@@ -92,7 +92,7 @@ public location.
   attacker-controlled text on the untrusted side of that boundary.
 - **A pull request head is never a session's workspace.** A role with `checkout = "item"`,
   such as the shipped `pr-reviewer`, starts its session in a fresh checkout of the base
-  branch, the only directory chargehand marks as a trusted workspace. Its agent file must
+  branch, the only directory elfcrew marks as a trusted workspace. Its agent file must
   be committed there or be in `~/.claude/agents`; the launch checks that checkout, not
   the main one. The pull request head goes into a second, detached checkout outside that
   directory, under `<worktree_root>/.items/`, which the role's setup step fills and the
@@ -106,12 +106,12 @@ public location.
   session has worked in it since the launch and a program there may be the session's.
   Git runs with hooks and the fsmonitor turned off for the whole step (`core.hooksPath`
   and `core.fsmonitor` through git's environment configuration), and so does every git
-  call chargehand itself makes (`-c` on the command line): a repository with a relative
+  call elfcrew itself makes (`-c` on the command line): a repository with a relative
   `core.hooksPath`, as husky sets it, or a `core.fsmonitor` set to a program, would
   otherwise run that program when git checks the head out or reads the worktree. A wake
   whose step fails waits.
 - **A changed workspace is not resumed.** Before each wake, and before `continue`, of such
-  a worker, chargehand checks that its working directory is still on the worker's own
+  a worker, elfcrew checks that its working directory is still on the worker's own
   branch and that the files Claude Code loads from it (`.claude/` and `CLAUDE.md` and
   `CLAUDE.local.md` at any depth, `.mcp.json`) are as they were when the session started,
   after the setup step. Tracked, untracked and ignored files count by their content, a
@@ -127,9 +127,9 @@ public location.
   rather than acted on. The check runs again after the refresh step, so a step that moved
   the head into the session's own worktree shows as a worktree off its branch before the
   resume. An operator who has looked at the
-  worktree accepts a file change with `chargehand continue <item> --force`, which records
+  worktree accepts a file change with `elfcrew continue <item> --force`, which records
   the files as they are now; a worktree that left its branch, or whose item checkout is
-  gone or redirected, is not accepted, and `chargehand discard` removes the worker.
+  gone or redirected, is not accepted, and `elfcrew discard` removes the worker.
 
   What this does not cover: the session itself. During a turn it can run any command the
   classifier or a prompt lets through, including git commands in the head checkout,
@@ -145,9 +145,9 @@ public location.
   own worktree and against an accident, not against a session that already holds that
   power. Git filters that the operator configured, such as
   Git LFS, still run on the files the head selects through `.gitattributes`, and a
-  session that the operator resumes by hand, outside chargehand, is not checked.
+  session that the operator resumes by hand, outside elfcrew, is not checked.
 - **A wake carries kinds and pointers only.** The message that wakes a worker is a fixed
-  line that chargehand writes, followed by one line per event with its kind and its
+  line that elfcrew writes, followed by one line per event with its kind and its
   pointer. A pointer that is not a plain http(s) URL or a plain identifier is left out. A
   kind comes from a source, so it must match `[a-z][a-z0-9_]{0,63}`, or the line names
   `event` instead. No actor name, title or body is added, so the wake crosses the same
@@ -163,7 +163,7 @@ public location.
   is an explicit opt-in intended for a dedicated machine, user account, or VM. Deny rules
   apply in every mode, including `bypassPermissions`, and unlike the classifier they are
   deterministic - but see below for what they are deterministic *about*.
-- **A loopback daemon with a token.** The daemon (`chargehand serve`) listens on
+- **A loopback daemon with a token.** The daemon (`elfcrew serve`) listens on
   127.0.0.1 only, on the `[serve]` port, and no setting binds another address. Reads
   (`GET`) need no token and return what `status --json` returns: identifiers, states,
   timings and URLs. Every other method needs `Authorization: Bearer <token>`, compared in
@@ -176,7 +176,7 @@ public location.
   which is why every mutating method needs the token. Request bodies are capped at 1 MiB.
 - **A token per session.** Each launch and each fork writes a new token for its session,
   in a file of mode 0600 in a directory of mode 0700 under the state directory
-  (`worker-tokens/`). The session's hooks and its chargehand mod send that token, and the
+  (`worker-tokens/`). The session's hooks and its elfcrew mod send that token, and the
   daemon maps the token, not the session id or the working directory that a post names,
   to the worker, comparing in constant time. A session never gets the board's token: its
   settings hold its own token, and the mod's environment names its own token file. The
@@ -317,7 +317,7 @@ public location.
   AppleScript as an argument, never inside the script's source, so no text in it can
   change the script. macOS asks once whether the daemon's process may control iTerm2
   (Privacy & Security, Automation). macOS gives that grant to the Python interpreter
-  binary, not to chargehand: every background job that runs on that Python can then read
+  binary, not to elfcrew: every background job that runs on that Python can then read
   and type into every iTerm2 session, and a Python upgrade asks again. Terminal.app, the
   default, needs no grant. The board embeds no chat: a conversation with a session happens
   in that terminal.
@@ -338,15 +338,15 @@ public location.
   Code ask whatever runs the session. A hook, a script or an app that answers permission
   prompts automatically leaves no person to see the prompt, and then the rule protects
   nothing.
-- **Agents are discouraged from steering the runner.** Sessions that chargehand launches
-  get deny rules for the chargehand CLI, for stopping, killing, removing or respawning
+- **Agents are discouraged from steering the runner.** Sessions that elfcrew launches
+  get deny rules for the elfcrew CLI, for stopping, killing, removing or respawning
   other sessions, for the operator commands of the lease tool banksman (`banksman admin`),
   for the daemon's port (`127.0.0.1:<port>` and `localhost:<port>` in a command, and
   `WebFetch` to either host), and for the
   flags that would start a fresh session without these rules. Read that as a guardrail
   and not as a boundary. A Claude Code `Bash` rule matches the command text the model
   writes, not the program it ends up running, which its documentation states plainly:
-  such a rule "isn't a security boundary around the program". chargehand's patterns
+  such a rule "isn't a security boundary around the program". elfcrew's patterns
   therefore lead with a wildcard so that an absolute path to the binary and a
   `sh -c '...'` wrapper are covered as well as the bare name, which closes the forms a
   session reaches by accident. It does not close the forms a session reaches on purpose:
@@ -357,23 +357,23 @@ public location.
 - **One writer of side effects.** Mutating commands record a request; only the daemon's
   tick acts on it, under the tick lock. Control actions cannot race a launch in progress.
 - **Only a session's own processes are ended.** A stop of a session does not end a
-  background shell that its turn started, so after a confirmed stop chargehand ends the
+  background shell that its turn started, so after a confirmed stop elfcrew ends the
   processes that were below the session's process just before the stop, once that
   process has exited; while it still runs, they are left alone. It signals no
   other process: a process counts only with the pid and the start time it had then, so a
-  pid that a new process got meanwhile is never signalled, and PID 1 and chargehand itself
-  never are. `chargehand stop`, which `continue` undoes, ends none of them, and neither
+  pid that a new process got meanwhile is never signalled, and PID 1 and elfcrew itself
+  never are. `elfcrew stop`, which `continue` undoes, ends none of them, and neither
   does the pause of a worker whose wake the workspace guard refuses.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
-  issue URL, and a short reason chargehand itself writes — never question text, agent
+  issue URL, and a short reason elfcrew itself writes — never question text, agent
   output, issue titles, a status file's `stop_reason`, or a setup script's output —
   because it usually crosses a third-party relay. Stripping terminal escapes would not
   make that text safe to forward; it is kept local instead, in the ledger, and reached
   through `status --verbose-titles` and `logs`.
-- **Export carries no secret.** `chargehand export` never puts the token in the archive
+- **Export carries no secret.** `elfcrew export` never puts the token in the archive
   and never reads the Keychain. It leaves out every configuration key that can carry a
   credential, and it refuses to write an archive in which a file still contains the home
-  directory or the token. `chargehand import` treats the archive as input it checks: it
+  directory or the token. `elfcrew import` treats the archive as input it checks: it
   refuses a newer format, a file name outside the archive's layout, a symlink and a file
   the manifest does not list; it writes no file and no board setting that exists without
   `--force`; it cleans board names and icons as the board does; and it writes a new token
@@ -392,23 +392,23 @@ public location.
   removed only after the zip is complete and has passed its check, and only by the tick,
   with the guard of discard applied again, which includes the check for other sessions in
   the worktree. Retry and garbage collection apply that check too, so no path of
-  chargehand deletes a worktree under a session that is not the worker's own unless the
+  elfcrew deletes a worktree under a session that is not the worker's own unless the
   operator forces it; garbage collection never forces it and waits instead.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
-- **The chargehand mod does only what it says.** Every worker session loads it, so what it
+- **The elfcrew mod does only what it says.** Every worker session loads it, so what it
   may do is checked in the test suite against its source, and against `claude plugin
   validate` where Claude Code is installed: it hooks the session start, the turn end, the
   session end and the calls of its own tools; it reads two environment variables, the
   token file and the session's id, working directory and usage; it posts to the daemon,
   registers tools and submits a prompt. It never answers a permission prompt, never
   writes a file or the environment and runs no process. The only text it submits is the
-  outbox message the daemon handed it, which is chargehand's wake message of kinds and
+  outbox message the daemon handed it, which is elfcrew's wake message of kinds and
   pointers. It posts only to the port that the launch settings name, with the session's own token
   from the token file that they name; the settings name the file, not the token.
 - **The usage request holds no credential.** To read the weekly usage window, the daemon
   sends Claude Code's `get_usage` control request to a short `claude -p` process. Claude
-  Code fetches the usage with its own sign-in; chargehand reads no token and no Keychain
+  Code fetches the usage with its own sign-in; elfcrew reads no token and no Keychain
   item and makes no network call. The process runs in an empty private directory under
   the state directory, with all hooks and your MCP servers turned off and no session
   file, runs no turn, and is killed after a timeout. Only the percentage and the reset time of its answer are kept.
@@ -424,8 +424,8 @@ public location.
   do is refuse a list of spellings. Treat a run that is misbehaving as able to cancel its
   siblings, and reach for a separate user account when that is not acceptable.
 - Prompt injection through issue text is mitigated, not eliminated. Draft pull requests and
-  human review remain the final gate; chargehand never merges.
-- The machine running chargehand holds tracker credentials and an authenticated Claude Code
+  human review remain the final gate; elfcrew never merges.
+- The machine running elfcrew holds tracker credentials and an authenticated Claude Code
   install. Treat it as you would a CI worker with write access.
 - A session runs as the operator's user, so it can read the daemon's token file and the
   ledger. The deny rules for the port are a guardrail against the careless path; a session

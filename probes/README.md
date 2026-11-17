@@ -43,7 +43,7 @@ It creates its own issues, assigned to whoever owns the API key, under labels th
 deliberately not the default ones, and trashes them afterwards. The runner it drives is
 a throwaway instance: configuration, ledger, logs, scratch repository and worktrees all
 live under one directory (`.context/smoke` by default), reached through the
-`CHARGEHAND_*` path overrides, so a machine with a real chargehand installed is not
+`ELFCREW_*` path overrides, so a machine with a real elfcrew installed is not
 touched. Sessions it started are stopped and removed on the way out, scoped by working
 directory so one interrupted mid-launch is caught too.
 

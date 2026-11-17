@@ -25,7 +25,7 @@ from typing import Any
 
 SCRIPT = Path(__file__).resolve()
 VIEWER = "tester@example.invalid"
-LABELS = {"queued": "chargehand", "running": "chargehand-running", "blocked": "chargehand-blocked"}
+LABELS = {"queued": "elfcrew", "running": "elfcrew-running", "blocked": "elfcrew-blocked"}
 EXIT_AMBIGUOUS = 3
 
 
@@ -92,7 +92,7 @@ class CommandBoard:
 
     @property
     def followed(self) -> list[str | None]:
-        """What each poll found in CHARGEHAND_REFS."""
+        """What each poll found in ELFCREW_REFS."""
         return self.read()["followed"]
 
     @property
@@ -107,7 +107,7 @@ def _url(key: str) -> str:
 def poll(board: CommandBoard, cursor: str) -> list[str]:
     state = board.read()
     state["cursors"].append(cursor)
-    state["followed"].append(os.environ.get("CHARGEHAND_REFS"))
+    state["followed"].append(os.environ.get("ELFCREW_REFS"))
     board.write(state)
     start = int(cursor) if cursor.isdigit() else 0
     lines = list(state["garbage"])

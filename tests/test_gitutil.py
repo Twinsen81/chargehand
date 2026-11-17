@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from conftest import run_git
-from chargehand.gitutil import Git
+from elfcrew.gitutil import Git
 
 PATHSPECS = (":(glob)**/.claude", ":(glob)**/.claude/**", ".mcp.json", ":(glob)**/CLAUDE.md")
 

@@ -1,0 +1,5 @@
+{
+  "name": "elfcrew",
+  "version": "0.1.0",
+  "description": "The elfcrew worker channel: its tools, wakes from the outbox, turn reports and usage readings."
+}

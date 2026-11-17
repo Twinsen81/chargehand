@@ -12,19 +12,19 @@ from pathlib import Path
 import pytest
 
 from conftest import Harness, make_config
-from chargehand import board as board_mod
-from chargehand import claude
-from chargehand import channel
-from chargehand import delivery as delivery_mod
-from chargehand import ledger as ledger_mod
-from chargehand.config import SourceConfig
-from chargehand.delivery import MESSAGE_HEADER
-from chargehand.errors import DeliveryAborted
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.sources.base import Event, WorkItem
-from chargehand.tick import HANDOFF_TOOL, Runner, TickReport
+from elfcrew import board as board_mod
+from elfcrew import claude
+from elfcrew import channel
+from elfcrew import delivery as delivery_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew.config import SourceConfig
+from elfcrew.delivery import MESSAGE_HEADER
+from elfcrew.errors import DeliveryAborted
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.sources.base import Event, WorkItem
+from elfcrew.tick import HANDOFF_TOOL, Runner, TickReport
 from support import fake_source
 
 FAKE_SOURCE = SourceConfig(name="fake", type="fake", options={"board": "default", "repository": "test"})
@@ -41,7 +41,7 @@ NOTE = "Open points: answer the second review thread; rerun the flaky test."
 
 
 def write_role(repo: Path, text: str) -> None:
-    target = repo / ".chargehand" / "roles" / "reviewer.toml"
+    target = repo / ".elfcrew" / "roles" / "reviewer.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
 
@@ -165,7 +165,7 @@ def test_the_wake_after_the_limit_starts_a_fresh_session_and_keeps_the_old_one(a
     assert ["rm", reviewer.session_id] not in harness.claude_state.commands
     assert listed(harness, reviewer.session_id) is not None
     assert len(resumes(harness)) == 2
-    # The first prompt: chargehand's note with the item and the tool, the role's prompt,
+    # The first prompt: elfcrew's note with the item and the tool, the role's prompt,
     # then the waiting event. The handoff note is never in it.
     prompt = fresh["argv"][-1]
     note, role_prompt, message = prompt.split("\n\n")
@@ -497,7 +497,7 @@ def test_a_runtime_that_would_not_load_the_mod_continues_the_session(after_two, 
     report, pointer = wake(harness, reviewer)
 
     assert report.woken == ["reviewer/PR-7"]
-    assert any("no refresh, a fresh session would not load the chargehand mod" in line
+    assert any("no refresh, a fresh session would not load the elfcrew mod" in line
                for line in report.warnings)
     assert len(launches(harness)) == 1
     assert resumes(harness)[-1]["target"] == reviewer.session_uuid
@@ -981,7 +981,7 @@ def test_a_due_refresh_waits_for_a_background_shell_and_the_wake_goes_in_place(
     fake_source.feed().emit("comment", "PR-7")
     before = len(harness.claude_state.commands)
 
-    with caplog.at_level(logging.INFO, logger="chargehand.delivery"):
+    with caplog.at_level(logging.INFO, logger="elfcrew.delivery"):
         report = harness.next_tick()
 
     worker = harness.ledger.get(reviewer.id)
@@ -1035,7 +1035,7 @@ def test_a_postponed_refresh_logs_at_info_once_per_outbox_message(
     def postponed():
         return [r.levelno for r in caplog.records if "refresh postponed" in r.getMessage()]
 
-    with caplog.at_level(logging.DEBUG, logger="chargehand.delivery"):
+    with caplog.at_level(logging.DEBUG, logger="elfcrew.delivery"):
         for _ in range(3):
             harness.next_tick()
         assert postponed() == [logging.INFO, logging.DEBUG, logging.DEBUG]
@@ -1102,7 +1102,7 @@ def test_a_background_shell_that_starts_after_the_listing_postpones_the_refresh(
 
     runner._refresh_session = shell_starts_first
     before = len(harness.claude_state.commands)
-    with caplog.at_level(logging.INFO, logger="chargehand.delivery"):
+    with caplog.at_level(logging.INFO, logger="elfcrew.delivery"):
         report = runner.tick()
 
     assert len(launches(harness)) == 1
@@ -1177,10 +1177,10 @@ def test_a_reply_refreshes_a_session_without_the_mod_at_once_and_ends_its_shell(
     assert process_table.pids() == set()
 
 
-def test_a_refresh_leaves_the_processes_that_chargehand_stop_kept(after_two, process_table):
+def test_a_refresh_leaves_the_processes_that_elfcrew_stop_kept(after_two, process_table):
     # The refresh does not end the worker's work, so what the operator chose to keep, such
     # as a dev server, runs on until a stop that does.
-    from chargehand import tick as tick_mod
+    from elfcrew import tick as tick_mod
 
     harness = after_two
     reviewer = start_reviewer(harness)

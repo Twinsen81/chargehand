@@ -12,10 +12,10 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from chargehand.errors import AmbiguousWrite, TrackerError
-from chargehand.sources import is_marked
-from chargehand.trackers import register
-from chargehand.trackers.base import Comment, Issue, Status, Tracker, TrackerPoll
+from elfcrew.errors import AmbiguousWrite, TrackerError
+from elfcrew.sources import is_marked
+from elfcrew.trackers import register
+from elfcrew.trackers.base import Comment, Issue, Status, Tracker, TrackerPoll
 
 _BOARDS: dict[str, "Board"] = {}
 _COUNTER = itertools.count(1)
@@ -58,7 +58,7 @@ class Board:
         self,
         identifier: str,
         *,
-        labels: tuple[str, ...] = ("chargehand",),
+        labels: tuple[str, ...] = ("elfcrew",),
         title: str = "Do the thing",
         closed: bool = False,
     ) -> Issue:

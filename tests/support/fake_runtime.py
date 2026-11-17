@@ -2,7 +2,7 @@
 
 It keeps the interface honest: a tick test that passes on both this and the claude
 runtime does not depend on anything only Claude Code offers. Its sessions live in
-memory, as a process chargehand hosts would, and a test drives them through
+memory, as a process elfcrew hosts would, and a test drives them through
 :func:`world`, with the same calls ``FakeClaudeState`` offers for the fake binary.
 """
 
@@ -11,8 +11,8 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from chargehand.errors import AgentRuntimeError, ConfigError
-from chargehand.runtime import (
+from elfcrew.errors import AgentRuntimeError, ConfigError
+from elfcrew.runtime import (
     DONE,
     FAILED,
     STOPPED,
@@ -114,7 +114,7 @@ def _result(*argv: str, returncode: int = 0, stdout: str = "", stderr: str = "")
 class FakeRuntime(Runtime):
     name = NAME
     # No live attach, no in-place wake, no board permissions, no usage readings, and
-    # chargehand hosts the process.
+    # elfcrew hosts the process.
     capabilities = Capabilities(fork=True)
     role_keys = ("sandbox",)
 

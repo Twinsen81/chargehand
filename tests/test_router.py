@@ -10,16 +10,16 @@ from pathlib import Path
 import pytest
 
 from conftest import Harness, make_config
-from chargehand import ledger as ledger_mod
-from chargehand import roles as roles_mod
-from chargehand import sources as sources_mod
-from chargehand.config import SourceConfig
-from chargehand.errors import LaunchAborted
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.roles import StartRule
-from chargehand.router import (
+from elfcrew import ledger as ledger_mod
+from elfcrew import roles as roles_mod
+from elfcrew import sources as sources_mod
+from elfcrew.config import SourceConfig
+from elfcrew.errors import LaunchAborted
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.roles import StartRule
+from elfcrew.router import (
     START_ALLOWANCE_SECS,
     Router,
     deliver_to_holders,
@@ -27,8 +27,8 @@ from chargehand.router import (
     suitable_worker_exists,
     worker_start,
 )
-from chargehand.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
-from chargehand.tick import Runner
+from elfcrew.sources import AUTHORSHIP_MARKER, Event, Source, WorkItem, is_marked
+from elfcrew.tick import Runner
 from support import fake_source
 from support.fake_source import FakeSource
 
@@ -75,12 +75,13 @@ def test_an_event_has_no_body():
     "body,marked",
     (
         (f"Fixed.\n\n{AUTHORSHIP_MARKER}", True),
+        ("Fixed.\n\n<!-- chargehand-worker -->", True),
         ("Fixed.\n\n<!-- chargehand -->", True),
-        ("chargehand fixed it", False),
+        ("elfcrew fixed it", False),
         (None, False),
     ),
 )
-def test_both_marker_spellings_are_read_as_marked(body, marked):
+def test_every_marker_spelling_is_read_as_marked(body, marked):
     assert is_marked(body) is marked
 
 
@@ -289,7 +290,7 @@ def test_a_follower_counts_as_having_the_item(ledger):
 
 
 def write_role(repo, name, text):
-    target = repo / ".chargehand" / "roles" / f"{name}.toml"
+    target = repo / ".elfcrew" / "roles" / f"{name}.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
 
@@ -444,7 +445,7 @@ def test_the_queue_label_still_starts_its_workers_and_labeled_events_start_nothi
 
     assert report.launched == ["implementer/ABC-1"]
     assert [w.role for w in routed.ledger.live_workers_for("ABC-1")] == ["implementer"]
-    assert routed.labels("ABC-1") == ("chargehand-running",)
+    assert routed.labels("ABC-1") == ("elfcrew-running",)
     # The queue's worker follows its issue too, for the kinds its rule names.
     (subscription,) = routed.ledger.subscriptions_of(routed.worker("ABC-1"))
     assert (subscription.source, subscription.kinds, subscription.is_primary) == (
@@ -469,11 +470,11 @@ def test_an_unexpected_source_failure_keeps_its_traceback(routed, caplog, monkey
         raise RuntimeError("unforeseen")
 
     monkeypatch.setattr(FakeSource, "poll", broken)
-    with caplog.at_level(logging.WARNING, logger="chargehand"):
+    with caplog.at_level(logging.WARNING, logger="elfcrew"):
         report = routed.tick()
 
     assert report.errors == ["source fake: unforeseen"]
-    (record,) = [r for r in caplog.records if r.name == "chargehand.tick"]
+    (record,) = [r for r in caplog.records if r.name == "elfcrew.tick"]
     assert record.levelno == logging.ERROR and record.exc_info is not None
 
 
@@ -730,7 +731,7 @@ def test_an_orphan_with_no_previous_row_owns_the_label_only_when_the_queue_start
 ):
     routed.board.add("ABC-5", labels=())
     worktree = routed.worktree_root / role / "ABC-5"
-    routed.runner.git.add_worktree(routed.repo, worktree, f"chargehand/{role}/ABC-5", "origin/main")
+    routed.runner.git.add_worktree(routed.repo, worktree, f"elfcrew/{role}/ABC-5", "origin/main")
     routed.claude_state.set(
         sessions=[{"id": "orphan", "uuid": "u9", "name": f"{role}/ABC-5", "cwd": str(worktree),
                    "state": "working"}]

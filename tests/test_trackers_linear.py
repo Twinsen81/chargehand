@@ -8,19 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from chargehand.config import Labels, Repository, TrackerConfig
-from chargehand.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
-from chargehand.sources import AUTHORSHIP_MARKER, WorkItem
-from chargehand.sources.tracker import TrackerSource
-from chargehand.trackers.base import Issue, Status
-from chargehand.trackers.linear import OVERLAP_SECS, LinearTracker
+from elfcrew.config import Labels, Repository, TrackerConfig
+from elfcrew.errors import AmbiguousWrite, ConfigError, TrackerAuthError, TrackerError
+from elfcrew.sources import AUTHORSHIP_MARKER, WorkItem
+from elfcrew.sources.tracker import TrackerSource
+from elfcrew.trackers.base import Issue, Status
+from elfcrew.trackers.linear import OVERLAP_SECS, LinearTracker
 
-LABELS = {"queued": "chargehand", "running": "chargehand-running", "blocked": "chargehand-blocked"}
+LABELS = {"queued": "elfcrew", "running": "elfcrew-running", "blocked": "elfcrew-blocked"}
 
 LABEL_IDS = {
-    "chargehand": "lbl-q",
-    "chargehand-running": "lbl-r",
-    "chargehand-blocked": "lbl-b",
+    "elfcrew": "lbl-q",
+    "elfcrew-running": "lbl-r",
+    "elfcrew-blocked": "lbl-b",
     "unrelated": "lbl-u",
 }
 
@@ -123,7 +123,7 @@ def test_whoami_identifies_the_key_owner(tracker_and_transport):
 
 
 def test_the_queue_filters_by_assignee_label_team_and_state(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, state="Todo")
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)}, state="Todo")
     captured = {}
 
     original = transport.__call__
@@ -140,7 +140,7 @@ def test_the_queue_filters_by_assignee_label_team_and_state(tracker_and_transpor
     assert [issue.identifier for issue in issues] == ["ABC-1"]
     assert captured["assignee"] == {"isMe": {"eq": True}}
     assert captured["team"] == {"key": {"eq": "ABC"}}
-    assert captured["labels"] == {"name": {"eq": "chargehand"}}
+    assert captured["labels"] == {"name": {"eq": "elfcrew"}}
     assert captured["state"] == {"name": {"eq": "Todo"}}
 
 
@@ -162,12 +162,12 @@ def test_the_state_filter_does_not_apply_when_looking_for_running_issues(tracker
 
 
 def test_marking_running_swaps_the_labels_and_keeps_unrelated_ones(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand", "unrelated")})
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand", "unrelated"))
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew", "unrelated")})
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew", "unrelated"))
 
     updated = tracker.mark(issue, Status.RUNNING)
 
-    assert set(updated.labels) == {"chargehand-running", "unrelated"}
+    assert set(updated.labels) == {"elfcrew-running", "unrelated"}
     assert transport.calls.count("add") == 1
     assert transport.calls.count("remove") == 1
     # Every write is followed by a re-read.
@@ -175,8 +175,8 @@ def test_marking_running_swaps_the_labels_and_keeps_unrelated_ones(tracker_and_t
 
 
 def test_marking_done_clears_every_managed_label(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand-running", "unrelated")})
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand-running", "unrelated"))
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew-running", "unrelated")})
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew-running", "unrelated"))
 
     updated = tracker.mark(issue, Status.DONE)
 
@@ -184,8 +184,8 @@ def test_marking_done_clears_every_managed_label(tracker_and_transport):
 
 
 def test_a_write_that_is_already_correct_does_nothing(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand-running",)})
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand-running",))
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew-running",)})
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew-running",))
 
     tracker.mark(issue, Status.RUNNING)
 
@@ -194,51 +194,51 @@ def test_a_write_that_is_already_correct_does_nothing(tracker_and_transport):
 
 def test_a_write_that_landed_behind_a_reported_failure_is_accepted(tracker_and_transport):
     """A 502 after the last mutation applied must not be treated as a failure."""
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
     transport.fail_on = "remove"
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     updated = tracker.mark(issue, Status.RUNNING)
 
-    assert updated.labels == ("chargehand-running",)
+    assert updated.labels == ("elfcrew-running",)
 
 
 def test_a_half_applied_label_swap_is_ambiguous(tracker_and_transport):
     """The add and the remove run serially, not atomically, so one can land alone."""
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
     transport.fail_on = "add"
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(AmbiguousWrite):
         tracker.mark(issue, Status.RUNNING)
 
     # Both labels are present: the caller must leave this for reconciliation.
-    assert set(transport.issues["ABC-1"]) == {"chargehand", "chargehand-running"}
+    assert set(transport.issues["ABC-1"]) == {"elfcrew", "elfcrew-running"}
 
 
 def test_a_write_that_reported_success_without_landing_is_ambiguous(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
     transport.mutation_lands = False
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(AmbiguousWrite, match="re-read"):
         tracker.mark(issue, Status.RUNNING)
 
 
 def test_a_write_that_failed_and_did_not_land_is_ambiguous(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
     transport.mutation_lands = False
     transport.fail_on = "add"
     transport.failure = TrackerError("linear: HTTP 500")
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(AmbiguousWrite, match="did not land"):
         tracker.mark(issue, Status.RUNNING)
 
 
 def test_an_issue_deleted_mid_write_is_ambiguous(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     def vanish(query, variables=None):
         if query.strip().startswith("query Issue"):
@@ -252,9 +252,9 @@ def test_an_issue_deleted_mid_write_is_ambiguous(tracker_and_transport):
 
 
 def test_a_missing_label_names_the_fix(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
-    transport.labels = [n for n in transport.labels if n["name"] != "chargehand-running"]
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
+    transport.labels = [n for n in transport.labels if n["name"] != "elfcrew-running"]
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(TrackerError, match="create it"):
         tracker.mark(issue, Status.RUNNING)
@@ -267,21 +267,21 @@ def test_a_label_is_looked_up_by_name_not_by_enumerating_the_workspace(tracker_a
     because the listing comes back newest first, the one that disappears is whichever has
     been in use longest. Asking for the name cannot go stale that way.
     """
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     tracker.mark(issue, Status.RUNNING)
 
     looked_up = [call for call in transport.calls if call.startswith("labels:")]
-    assert looked_up == ["labels:chargehand-running@ABC", "labels:chargehand@ABC"]
+    assert looked_up == ["labels:elfcrew-running@ABC", "labels:elfcrew@ABC"]
 
 
 def test_a_resolved_label_is_not_looked_up_twice(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",), "ABC-2": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",), "ABC-2": ("elfcrew",)})
 
-    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",)), Status.RUNNING)
+    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",)), Status.RUNNING)
     before = len([call for call in transport.calls if call.startswith("labels:")])
-    tracker.mark(Issue(id="id-ABC-2", identifier="ABC-2", labels=("chargehand",)), Status.RUNNING)
+    tracker.mark(Issue(id="id-ABC-2", identifier="ABC-2", labels=("elfcrew",)), Status.RUNNING)
 
     assert before == len([call for call in transport.calls if call.startswith("labels:")])
 
@@ -293,29 +293,29 @@ def test_the_route_team_narrows_the_lookup_on_the_server(tracker_and_transport):
     Asking for the name alone and choosing from what came back would miss the right
     label for anyone whose queue label is an ordinary word.
     """
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
     transport.labels.insert(
-        0, {"id": "lbl-other", "name": "chargehand-running",
+        0, {"id": "lbl-other", "name": "elfcrew-running",
             "team": {"id": "t-XYZ", "key": "XYZ"}}
     )
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     tracker.mark(issue, Status.RUNNING)
 
-    assert tracker._label_ids["chargehand-running"] == "lbl-r"
+    assert tracker._label_ids["elfcrew-running"] == "lbl-r"
     assert any(call.endswith("@ABC") for call in transport.calls)
 
 
 def test_a_full_page_of_labels_is_reported_rather_than_chosen_from(tracker_and_transport):
     """Truncation is silent, and picking from a partial list is how the wrong one wins."""
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team=None)
-    from chargehand.trackers.linear import _LABEL_PAGE
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)}, team=None)
+    from elfcrew.trackers.linear import _LABEL_PAGE
 
     transport.labels = [
-        {"id": f"lbl-{n}", "name": "chargehand-running", "team": {"id": f"t{n}", "key": f"T{n}"}}
+        {"id": f"lbl-{n}", "name": "elfcrew-running", "team": {"id": f"t{n}", "key": f"T{n}"}}
         for n in range(_LABEL_PAGE + 5)
     ]
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(TrackerError, match="more than"):
         tracker.mark(issue, Status.RUNNING)
@@ -330,54 +330,54 @@ def test_the_route_team_wins_among_whatever_came_back(tracker_and_transport):
     """
     tracker, _ = tracker_and_transport({})
     candidates = [
-        {"id": "lbl-other", "name": "chargehand-running", "team": {"id": "t-XYZ", "key": "XYZ"}},
-        {"id": "lbl-r", "name": "chargehand-running", "team": {"id": "t-ABC", "key": "ABC"}},
+        {"id": "lbl-other", "name": "elfcrew-running", "team": {"id": "t-XYZ", "key": "XYZ"}},
+        {"id": "lbl-r", "name": "elfcrew-running", "team": {"id": "t-ABC", "key": "ABC"}},
     ]
 
-    assert tracker._pick_label("chargehand-running", candidates)["id"] == "lbl-r"
+    assert tracker._pick_label("elfcrew-running", candidates)["id"] == "lbl-r"
 
 
 def test_a_workspace_label_is_used_when_no_team_owns_the_name(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team=None)
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)}, team=None)
     transport.labels = [
-        {"id": "lbl-ws", "name": "chargehand-running", "team": None},
-        *[n for n in transport.labels if n["name"] != "chargehand-running"],
+        {"id": "lbl-ws", "name": "elfcrew-running", "team": None},
+        *[n for n in transport.labels if n["name"] != "elfcrew-running"],
     ]
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     tracker.mark(issue, Status.RUNNING)
 
-    assert tracker._label_ids["chargehand-running"] == "lbl-ws"
+    assert tracker._label_ids["elfcrew-running"] == "lbl-ws"
 
 
 def test_an_unresolvable_label_name_is_reported_rather_than_guessed(tracker_and_transport):
     """With no team on the route there is nothing to prefer, so the ambiguity is named."""
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)}, team=None)
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)}, team=None)
     transport.labels.insert(
-        0, {"id": "lbl-other", "name": "chargehand-running",
+        0, {"id": "lbl-other", "name": "elfcrew-running",
             "team": {"id": "t-XYZ", "key": "XYZ"}}
     )
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(TrackerError, match="several teams"):
         tracker.mark(issue, Status.RUNNING)
 
 
 def test_a_route_pointed_at_a_team_without_the_label_says_so(tracker_and_transport):
-    tracker, _ = tracker_and_transport({"ABC-1": ("chargehand",)}, team="NOPE")
-    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",))
+    tracker, _ = tracker_and_transport({"ABC-1": ("elfcrew",)}, team="NOPE")
+    issue = Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",))
 
     with pytest.raises(TrackerError, match="create it"):
         tracker.mark(issue, Status.RUNNING)
 
 
 def test_refresh_labels_drops_the_cache(tracker_and_transport):
-    tracker, transport = tracker_and_transport({"ABC-1": ("chargehand",)})
-    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand",)), Status.RUNNING)
+    tracker, transport = tracker_and_transport({"ABC-1": ("elfcrew",)})
+    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew",)), Status.RUNNING)
     before = len([call for call in transport.calls if call.startswith("labels:")])
 
     tracker.refresh_labels()
-    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("chargehand-running",)),
+    tracker.mark(Issue(id="id-ABC-1", identifier="ABC-1", labels=("elfcrew-running",)),
                  Status.BLOCKED)
 
     assert len([call for call in transport.calls if call.startswith("labels:")]) > before
@@ -386,14 +386,14 @@ def test_refresh_labels_drops_the_cache(tracker_and_transport):
 def test_a_completed_issue_reads_as_closed(tracker_and_transport):
     tracker, transport = tracker_and_transport({})
     tracker._post = lambda q, v=None: {
-        "issue": node("ABC-1", ("chargehand",), state="Done", state_type="completed")
+        "issue": node("ABC-1", ("elfcrew",), state="Done", state_type="completed")
     }
 
     assert tracker.get("id-ABC-1").closed is True
 
 
 def test_the_runner_never_receives_an_issue_body(tracker_and_transport):
-    tracker, _ = tracker_and_transport({"ABC-1": ("chargehand",)})
+    tracker, _ = tracker_and_transport({"ABC-1": ("elfcrew",)})
 
     issue = tracker.list(Status.QUEUED)[0]
 
@@ -407,8 +407,8 @@ def test_unknown_adapter_options_are_rejected():
 
 
 def test_a_missing_api_key_explains_every_way_to_supply_one(monkeypatch):
-    monkeypatch.delenv("CHARGEHAND_LINEAR_API_KEY", raising=False)
-    monkeypatch.setattr("chargehand.trackers.linear._lookup_keychain", lambda *a: None)
+    monkeypatch.delenv("ELFCREW_LINEAR_API_KEY", raising=False)
+    monkeypatch.setattr("elfcrew.trackers.linear._lookup_keychain", lambda *a: None)
 
     # A TrackerError, not a ConfigError: an unreadable credential is transient, and the
     # tick must not treat it like a broken configuration file.
@@ -417,7 +417,7 @@ def test_a_missing_api_key_explains_every_way_to_supply_one(monkeypatch):
 
 
 def test_the_api_key_is_read_from_the_environment(monkeypatch):
-    monkeypatch.setenv("CHARGEHAND_LINEAR_API_KEY", "lin_api_test")
+    monkeypatch.setenv("ELFCREW_LINEAR_API_KEY", "lin_api_test")
 
     assert LinearTracker({}, LABELS).api_key() == "lin_api_test"
 
@@ -515,7 +515,7 @@ class PollTransport:
         }
 
 
-def poll_node(identifier, *, updated, labels=("chargehand",), state_type="unstarted", comments=()):
+def poll_node(identifier, *, updated, labels=("elfcrew",), state_type="unstarted", comments=()):
     entry = node(identifier, labels, state_type=state_type)
     entry["updatedAt"] = iso(updated)
     entry["comments"] = {"nodes": list(comments)}
@@ -546,7 +546,7 @@ def test_the_poll_reads_the_queue_with_its_last_change_time(polling):
     assert result.queued[1].updated_at == NOW - 10
     ((name, variables),) = transport.calls
     assert name == "Poll"
-    assert variables["filter"]["labels"] == {"name": {"eq": "chargehand"}}
+    assert variables["filter"]["labels"] == {"name": {"eq": "elfcrew"}}
     assert variables["filter"]["assignee"] == {"isMe": {"eq": True}}
     assert variables["filter"]["team"] == {"key": {"eq": "ABC"}}
 
@@ -591,7 +591,7 @@ def test_followed_issues_give_their_new_comments_and_their_state(polling):
     first = tracker.poll(None, []).cursor
     transport.followed = [
         poll_node(
-            "ABC-1", updated=NOW, labels=("chargehand-running",),
+            "ABC-1", updated=NOW, labels=("elfcrew-running",),
             comments=[
                 comment("c-old", created=NOW - 3 * OVERLAP_SECS),
                 comment("c-new", created=NOW - 5),

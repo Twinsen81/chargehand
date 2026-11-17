@@ -21,17 +21,17 @@ from pathlib import Path
 import pytest
 
 from conftest import Harness, make_config, run_git
-from chargehand import config as config_mod
-from chargehand import ledger as ledger_mod
-from chargehand import paths
-from chargehand.cli import EXIT_OK, main
-from chargehand.config import SourceConfig
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.roles import Role
-from chargehand.sources import AUTHORSHIP_MARKER
-from chargehand.tick import CHECKOUT_HEAD_PREFIX, Runner, item_checkout_path
+from elfcrew import config as config_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew import paths
+from elfcrew.cli import EXIT_OK, main
+from elfcrew.config import SourceConfig
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.roles import Role
+from elfcrew.sources import AUTHORSHIP_MARKER
+from elfcrew.tick import CHECKOUT_HEAD_PREFIX, Runner, item_checkout_path
 from support.fake_gh import GhState
 
 FAKE_GH = Path(__file__).parent / "support" / "fake_gh.py"
@@ -61,7 +61,7 @@ def gh(tmp_path, monkeypatch) -> GhState:
 def reviewing(tmp_path, repo, claude_state, board, gh):
     assert main(["init", "--repo", str(repo), "--role", "pr-reviewer"]) == EXIT_OK
     # These tests wake the reviewer at the next tick; test_delivery covers the debounce.
-    role_file = repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    role_file = repo / ".elfcrew" / "roles" / "pr-reviewer.toml"
     text = role_file.read_text(encoding="utf-8")
     assert "\ndebounce_secs = 120\n" in text
     role_file.write_text(text.replace("\ndebounce_secs = 120\n", "\ndebounce_secs = 0\n"))
@@ -291,7 +291,7 @@ def test_a_reply_wakes_the_reviewer_once_and_its_own_comments_do_not(reviewing, 
 def test_an_unmarked_comment_of_the_account_wakes_once_and_the_daily_cap_stops_a_loop(
     reviewing, gh
 ):
-    role_file = reviewing.repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    role_file = reviewing.repo / ".elfcrew" / "roles" / "pr-reviewer.toml"
     role_file.write_text(
         role_file.read_text().replace("max_wakes_per_day = 12", "max_wakes_per_day = 1")
     )
@@ -527,7 +527,7 @@ def test_the_heads_git_hooks_do_not_run_in_the_setup_step(reviewing, gh, tmp_pat
 
 
 def test_a_setup_program_is_never_taken_from_the_head(reviewing, gh, tmp_path):
-    role_file = reviewing.repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    role_file = reviewing.repo / ".elfcrew" / "roles" / "pr-reviewer.toml"
     role_file.write_text(role_file.read_text().replace(
         'setup = "gh pr checkout {item_url} --detach"', 'setup = "tools/prepare.sh"'
     ))
@@ -569,7 +569,7 @@ def test_a_setup_program_is_never_taken_from_the_head(reviewing, gh, tmp_path):
 def test_a_setup_program_is_found_only_where_the_operators_files_are(
     tmp_path, monkeypatch, program, found
 ):
-    from chargehand.tick import trusted_program
+    from elfcrew.tick import trusted_program
 
     head = tmp_path / "head"
     (head / "tools").mkdir(parents=True)
@@ -587,7 +587,7 @@ def test_a_setup_program_is_found_only_where_the_operators_files_are(
 
 
 def test_a_trusted_relative_program_comes_from_the_worktree(tmp_path):
-    from chargehand.tick import trusted_program
+    from elfcrew.tick import trusted_program
 
     (tmp_path / "worktree" / "tools").mkdir(parents=True)
     (tmp_path / "worktree" / "tools" / "prepare.sh").write_text("")
@@ -598,7 +598,7 @@ def test_a_trusted_relative_program_comes_from_the_worktree(tmp_path):
 
 
 def test_git_hooks_and_fsmonitor_are_turned_off_on_top_of_existing_configuration():
-    from chargehand.tick import hardened_git_env
+    from elfcrew.tick import hardened_git_env
 
     env = hardened_git_env({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "a.b",
                             "GIT_CONFIG_VALUE_0": "c"})
@@ -693,7 +693,7 @@ def test_a_setup_that_writes_local_agent_files_does_not_fault_the_wake(reviewing
         'echo "local notes" > "$1/CLAUDE.local.md"\n'
     )
     script.chmod(0o755)
-    config = reviewing.repo / ".chargehand.toml"
+    config = reviewing.repo / ".elfcrew.toml"
     config.write_text('setup = "setup.sh {worktree}"\n' + config.read_text())
     fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
     reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
@@ -733,7 +733,7 @@ def test_continue_force_accepts_the_agents_files_as_they_are(reviewing, gh, tmp_
 
     (outcome,) = [line for line in report.requests if line.startswith("continue")]
     assert "refused" in outcome and ".claude/settings.json (new)" in outcome, outcome
-    assert f"chargehand continue {PR_KEY} --force" in outcome
+    assert f"elfcrew continue {PR_KEY} --force" in outcome
 
     reviewing.ledger.record_request("continue", PR_KEY, force=True)
     report = reviewing.next_tick()
@@ -833,7 +833,7 @@ def test_a_program_the_session_wrote_in_its_worktree_does_not_run_at_a_wake(
 
 
 def test_a_setup_program_only_in_the_worktree_holds_the_wake(reviewing, gh, tmp_path):
-    role_file = reviewing.repo / ".chargehand" / "roles" / "pr-reviewer.toml"
+    role_file = reviewing.repo / ".elfcrew" / "roles" / "pr-reviewer.toml"
     role_file.write_text(role_file.read_text().replace(
         'setup = "gh pr checkout {item_url} --detach"', 'setup = "tools/prepare.sh"'
     ))
@@ -943,7 +943,7 @@ def test_a_refresh_that_poisons_the_session_worktree_faults_the_wake(
     reviewing, gh, tmp_path, monkeypatch
 ):
     """The guard runs again after the refresh: a refresh that moved the worktree is caught."""
-    import chargehand.tick as tick_mod
+    import elfcrew.tick as tick_mod
 
     fork, head = a_fork_with_the_head(tmp_path, reviewing.origin)
     reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
@@ -1002,7 +1002,7 @@ def test_a_reviewer_whose_item_checkout_is_gone_is_not_woken(reviewing, gh, tmp_
 
 
 def test_the_continue_refusal_fits_what_the_cli_prints(reviewing, gh, tmp_path):
-    from chargehand.tick import REQUEST_MESSAGE_LIMIT
+    from elfcrew.tick import REQUEST_MESSAGE_LIMIT
 
     fork, _ = a_fork_with_the_head(tmp_path, reviewing.origin)
     reviewer = start_reviewer(reviewing, gh, branch="feature", checkout_from=str(fork))
@@ -1018,7 +1018,7 @@ def test_the_continue_refusal_fits_what_the_cli_prints(reviewing, gh, tmp_path):
 
     message = reviewing.ledger.get_request(request_id)["message"]
     assert len(message) <= REQUEST_MESSAGE_LIMIT
-    assert message.endswith(f"`chargehand discard {PR_KEY} --yes`.")
+    assert message.endswith(f"`elfcrew discard {PR_KEY} --yes`.")
     assert "an-agent-file-with-a-rather-long-name-0.md (new)" in message
 
 
@@ -1056,7 +1056,7 @@ def test_an_agent_file_that_is_not_on_the_base_branch_fails_the_launch(reviewing
 
 def test_a_parked_reviewer_whose_session_runs_again_gets_no_setup_step(reviewing, gh):
     """A due resume looks at the tick's listing before it refreshes the item checkout."""
-    from chargehand import claude
+    from elfcrew import claude
 
     reviewer = start_reviewer(reviewing, gh)
     hook = claude.parse_hook("StopFailure", {

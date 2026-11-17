@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand.config import DEFAULT_DENY_RULES, serve_deny_rules
+from elfcrew.config import DEFAULT_DENY_RULES, serve_deny_rules
 from deny_rules import (
     ALLOWED,
     BLOCKED,
@@ -70,12 +70,12 @@ def test_the_colon_star_suffix_is_a_trailing_wildcard():
 
 
 def test_a_deny_rule_matches_any_subcommand():
-    assert rule_matches("Bash(*chargehand *)", "cd /tmp && chargehand cancel ABC-1")
+    assert rule_matches("Bash(*elfcrew *)", "cd /tmp && elfcrew cancel ABC-1")
 
 
 def test_a_deny_rule_matches_past_a_wrapper_and_an_assignment():
-    assert rule_matches("Bash(*chargehand *)", "timeout 30 chargehand cancel ABC-1")
-    assert rule_matches("Bash(*chargehand *)", "FOO=bar chargehand cancel ABC-1")
+    assert rule_matches("Bash(*elfcrew *)", "timeout 30 elfcrew cancel ABC-1")
+    assert rule_matches("Bash(*elfcrew *)", "FOO=bar elfcrew cancel ABC-1")
 
 
 # ----- the shipped rule set -------------------------------------------------
@@ -96,7 +96,7 @@ def test_the_control_survives_a_scratch_path_that_mentions_the_tool(tmp_path):
     A scratch directory named after the tool would deny the control command, the probe
     would call itself broken, and the real verdicts would never be reached.
     """
-    scratch = tmp_path / "chargehand-scratch"
+    scratch = tmp_path / "elfcrew-scratch"
     scratch.mkdir()
     control = next(a for a in battery(scratch) if not a.expect_blocked)
     assert first_matching_rule(LAUNCH_RULES, control.command) is None
@@ -105,10 +105,10 @@ def test_the_control_survives_a_scratch_path_that_mentions_the_tool(tmp_path):
 @pytest.mark.parametrize(
     "command",
     (
-        "chargehand cancel ABC-1",
-        "/usr/local/bin/chargehand cancel ABC-1",
-        "sh -c 'chargehand cancel ABC-1'",
-        "python3 -m chargehand cancel ABC-1",
+        "elfcrew cancel ABC-1",
+        "/usr/local/bin/elfcrew cancel ABC-1",
+        "sh -c 'elfcrew cancel ABC-1'",
+        "python3 -m elfcrew cancel ABC-1",
     ),
 )
 def test_the_cli_is_denied_however_it_is_spelled(command):
@@ -122,10 +122,10 @@ def test_an_anchored_rule_would_have_missed_the_path_and_the_wrapper():
     anchored rule stops the spelling a session usually produces and no other. This is
     the gap the leading wildcard closes, and the reason it is not cosmetic.
     """
-    anchored = ("Bash(chargehand:*)",)
-    assert first_matching_rule(anchored, "chargehand cancel ABC-1")
-    assert first_matching_rule(anchored, "/usr/local/bin/chargehand cancel ABC-1") is None
-    assert first_matching_rule(anchored, "sh -c 'chargehand cancel ABC-1'") is None
+    anchored = ("Bash(elfcrew:*)",)
+    assert first_matching_rule(anchored, "elfcrew cancel ABC-1")
+    assert first_matching_rule(anchored, "/usr/local/bin/elfcrew cancel ABC-1") is None
+    assert first_matching_rule(anchored, "sh -c 'elfcrew cancel ABC-1'") is None
 
 
 @pytest.mark.parametrize(
@@ -176,7 +176,7 @@ def test_the_decoys_record_that_they_ran(tmp_path):
     marker = tmp_path / "marker.log"
     assert not marker.exists()
 
-    subprocess.run([str(bin_dir / "chargehand"), "cancel", "ABC-1"], check=True)
+    subprocess.run([str(bin_dir / "elfcrew"), "cancel", "ABC-1"], check=True)
 
     assert "cancel ABC-1" in marker.read_text()
     assert os.access(bin_dir / "claude", os.X_OK)
@@ -184,7 +184,7 @@ def test_the_decoys_record_that_they_ran(tmp_path):
 
 
 def test_the_module_form_records_that_it_ran(tmp_path):
-    """`python3 -m chargehand` never reaches the script on PATH.
+    """`python3 -m elfcrew` never reaches the script on PATH.
 
     Without a decoy package it fails for its own reasons in both arms, which reads as
     an inconclusive verdict rather than the unobservable attempt it actually is.
@@ -193,7 +193,7 @@ def test_the_module_form_records_that_it_ran(tmp_path):
     marker = tmp_path / "marker.log"
 
     subprocess.run(
-        [sys.executable, "-m", "chargehand", "cancel", "ABC-1"],
+        [sys.executable, "-m", "elfcrew", "cancel", "ABC-1"],
         check=True,
         env={**os.environ, "PYTHONPATH": str(tmp_path / "pymod")},
     )
@@ -224,7 +224,7 @@ def test_the_probe_ships_outside_the_wheel():
     """It drives a real Claude Code install, so it is a repository tool, not a feature."""
     root = Path(__file__).resolve().parent.parent
     assert (root / "probes" / "deny_rules.py").exists()
-    assert not (root / "src" / "chargehand" / "deny_rules.py").exists()
+    assert not (root / "src" / "elfcrew" / "deny_rules.py").exists()
 
 
 # ----- configuration --------------------------------------------------------
@@ -236,8 +236,8 @@ def test_a_malformed_rule_is_rejected_when_the_config_is_read():
     Claude Code ignores a settings file that fails validation without a word in a
     non-interactive run, and every session the runner starts is non-interactive.
     """
-    from chargehand.config import MachineConfig
-    from chargehand.errors import ConfigError
+    from elfcrew.config import MachineConfig
+    from elfcrew.errors import ConfigError
 
     data = {
         "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
@@ -248,7 +248,7 @@ def test_a_malformed_rule_is_rejected_when_the_config_is_read():
 
 
 def test_the_shipped_rules_pass_their_own_validation():
-    from chargehand.config import validate_deny_rule
+    from elfcrew.config import validate_deny_rule
 
     for rule in DEFAULT_DENY_RULES:
         validate_deny_rule(rule)
@@ -259,7 +259,7 @@ def test_the_template_ships_the_same_rules_the_runner_passes():
     has drifted from the code hands out a weaker rule set than the runner uses."""
     import json
 
-    from chargehand import paths
+    from elfcrew import paths
 
     shipped = json.loads((paths.templates_dir() / "launch-deny-rules.json").read_text())
     assert shipped["permissions"]["deny"] == list(LAUNCH_RULES)
@@ -295,7 +295,7 @@ def test_a_session_keeps_its_own_local_servers(command):
 
 
 def test_the_port_rules_follow_the_configured_port():
-    from chargehand.config import MachineConfig
+    from elfcrew.config import MachineConfig
 
     data = {
         "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
@@ -312,18 +312,18 @@ def test_the_port_rules_follow_the_configured_port():
 
 def test_an_operators_own_rule_list_still_gets_the_port_rules():
     """A list written before the daemon existed must not leave its port open to sessions."""
-    from chargehand.config import MachineConfig
+    from elfcrew.config import MachineConfig
 
     data = {
         "route": [{"repo": "/x", "tracker": {"type": "linear", "team": "ABC"}}],
-        "deny_rules": ["Bash(*chargehand *)"],
+        "deny_rules": ["Bash(*elfcrew *)"],
     }
 
-    assert MachineConfig.parse(data).deny_rules == ("Bash(*chargehand *)", *serve_deny_rules(7878))
+    assert MachineConfig.parse(data).deny_rules == ("Bash(*elfcrew *)", *serve_deny_rules(7878))
 
 
 def test_the_port_rules_pass_their_own_validation():
-    from chargehand.config import validate_deny_rule
+    from elfcrew.config import validate_deny_rule
 
     for rule in serve_deny_rules(7878):
         validate_deny_rule(rule)
@@ -333,9 +333,9 @@ def test_the_port_rules_pass_their_own_validation():
 @pytest.mark.parametrize(
     "command",
     (
-        'gh pr comment 1 --body "Fixed.\n\n<!-- chargehand-worker -->"',
-        "gh pr review https://github.com/o/r/pull/1 --comment --body 'Looks fine. <!-- chargehand-worker -->'",
-        'gh pr create --base main --title "Note" --body "Test.\n\n<!-- chargehand-worker -->"',
+        'gh pr comment 1 --body "Fixed.\n\n<!-- elfcrew-worker -->"',
+        "gh pr review https://github.com/o/r/pull/1 --comment --body 'Looks fine. <!-- elfcrew-worker -->'",
+        'gh pr create --base main --title "Note" --body "Test.\n\n<!-- elfcrew-worker -->"',
     ),
 )
 def test_a_worker_may_post_a_comment_that_carries_the_marker(command):
@@ -346,7 +346,7 @@ def test_a_worker_may_post_a_comment_that_carries_the_marker(command):
 
 def test_the_first_marker_spelling_is_refused_on_a_command_line():
     # Why the marker changed: the name followed by a space is what the rules refuse.
-    assert first_matching_rule(DEFAULT_DENY_RULES, 'gh pr comment 1 --body "ok <!-- chargehand -->"')
+    assert first_matching_rule(DEFAULT_DENY_RULES, 'gh pr comment 1 --body "ok <!-- elfcrew -->"')
 
 
 # ----- posting from a body file ---------------------------------------------
@@ -355,8 +355,8 @@ def test_the_first_marker_spelling_is_refused_on_a_command_line():
 def _shipped_role(name: str):
     import tomllib
 
-    from chargehand import paths
-    from chargehand.roles import Role
+    from elfcrew import paths
+    from elfcrew.roles import Role
 
     text = (paths.templates_dir() / "roles" / f"{name}.toml").read_text(encoding="utf-8")
     return Role.parse(name, tomllib.loads(text))
@@ -424,7 +424,7 @@ def test_a_reply_rule_for_gh_api_would_also_allow_a_merge():
     (
         "This changes the bypassPermissions rule.",
         "Run claude stop on the old session first.",
-        "The chargehand status output is wrong here.",
+        "The elfcrew status output is wrong here.",
         "Keep the dangerously-skip-permissions flag out of the launcher.",
     ),
 )

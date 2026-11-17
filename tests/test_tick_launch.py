@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 
-from chargehand import claude as claude_mod
-from chargehand import ledger as ledger_mod
-from chargehand import worker_tokens
-from chargehand.config import DEFAULT_DENY_RULES, RepoConfig
-from chargehand.ledger import LAST_STEP
+from elfcrew import claude as claude_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew import worker_tokens
+from elfcrew.config import DEFAULT_DENY_RULES, RepoConfig
+from elfcrew.ledger import LAST_STEP
 
 
 def test_a_queued_issue_becomes_a_supervised_session(harness):
@@ -22,8 +22,8 @@ def test_a_queued_issue_becomes_a_supervised_session(harness):
     assert attempt.step == LAST_STEP
     assert attempt.session_id
     assert attempt.session_uuid
-    assert attempt.branch == "chargehand/implementer/ABC-1"
-    assert harness.labels("ABC-1") == ("chargehand-running",)
+    assert attempt.branch == "elfcrew/implementer/ABC-1"
+    assert harness.labels("ABC-1") == ("elfcrew-running",)
     assert (harness.worktree("ABC-1")).is_dir()
     assert (harness.worktree("ABC-1") / "README.md").exists()
 
@@ -65,7 +65,7 @@ def test_deny_rules_can_be_left_out_of_the_launch(harness):
     argv = harness.claude_state.launches[0]["argv"]
     # Only the denies that no configuration drops, of AskUserQuestion, of the board's
     # token file and of the token directory (a launch without hooks too), and the allow
-    # rule for the chargehand mod's tools are left.
+    # rule for the elfcrew mod's tools are left.
     settings = json.loads(argv[argv.index("--settings") + 1])
     board_token = harness.config.serve.token_file
     assert settings == {
@@ -101,10 +101,10 @@ def test_the_launch_throttle_caps_working_runs(harness):
 
 def test_a_route_limit_applies_on_top_of_the_global_one(tmp_path, repo, claude_state, board):
     from conftest import Harness, make_config
-    from chargehand.gitutil import Git
-    from chargehand.ledger import Ledger
-    from chargehand.notify import Notifier
-    from chargehand.tick import Runner
+    from elfcrew.gitutil import Git
+    from elfcrew.ledger import Ledger
+    from elfcrew.notify import Notifier
+    from elfcrew.tick import Runner
 
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
@@ -159,7 +159,7 @@ def test_open_attempts_bound_the_resume_burst(harness):
 def test_a_failing_setup_script_fails_the_attempt_loudly(harness, repo):
     (repo / "setup.sh").write_text("#!/bin/sh\nexit 7\n")
     (repo / "setup.sh").chmod(0o755)
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         'base = "origin/main"\nprompt = "{issue}"\nsetup = "setup.sh {worktree}"\n'
     )
     harness.board.add("ABC-1")
@@ -169,7 +169,7 @@ def test_a_failing_setup_script_fails_the_attempt_loudly(harness, repo):
     attempt = harness.worker("ABC-1")
     assert attempt.state == ledger_mod.FAILED
     assert "exited 7" in attempt.last_error
-    assert harness.labels("ABC-1") == ("chargehand-blocked",)
+    assert harness.labels("ABC-1") == ("elfcrew-blocked",)
     assert ("ABC-1", "failed") in harness.notifications()
     assert report.launched == []
 
@@ -177,7 +177,7 @@ def test_a_failing_setup_script_fails_the_attempt_loudly(harness, repo):
 def test_the_setup_script_runs_in_the_worktree(harness, repo):
     (repo / "setup.sh").write_text('#!/bin/sh\npwd > "$1/where"\n')
     (repo / "setup.sh").chmod(0o755)
-    (repo / ".chargehand.toml").write_text(
+    (repo / ".elfcrew.toml").write_text(
         'base = "origin/main"\nprompt = "{issue}"\nsetup = "setup.sh {worktree}"\n'
     )
     harness.board.add("ABC-1")
@@ -213,7 +213,7 @@ def test_status_file_is_not_required(harness):
 
 
 def test_a_re_armed_issue_waits_until_its_old_worktree_is_gone(harness):
-    """`chargehand` promises a fresh worktree; reusing the last one is not that."""
+    """`elfcrew` promises a fresh worktree; reusing the last one is not that."""
     harness.board.add("ABC-1")
     harness.tick()
     harness.ledger.record_request("cancel", "ABC-1")
@@ -223,13 +223,13 @@ def test_a_re_armed_issue_waits_until_its_old_worktree_is_gone(harness):
     # Re-arm by hand, as the label lifecycle documents.
     issue = harness.board.by_identifier("ABC-1")
     harness.board.issues[issue.id] = issue.__class__(
-        **{**issue.__dict__, "labels": ("chargehand",)}
+        **{**issue.__dict__, "labels": ("elfcrew",)}
     )
     report = harness.next_tick()
 
     assert report.launched == []
     assert any("worktree is still at" in note for note in report.skipped)
-    assert any("chargehand retry" in note for note in report.skipped)
+    assert any("elfcrew retry" in note for note in report.skipped)
 
 
 def test_a_re_armed_issue_launches_once_the_worktree_is_gone(harness):
@@ -242,7 +242,7 @@ def test_a_re_armed_issue_launches_once_the_worktree_is_gone(harness):
 
     issue = harness.board.by_identifier("ABC-1")
     harness.board.issues[issue.id] = issue.__class__(
-        **{**issue.__dict__, "labels": ("chargehand",)}
+        **{**issue.__dict__, "labels": ("elfcrew",)}
     )
     report = harness.next_tick()
 
@@ -300,7 +300,7 @@ def test_a_trust_entry_dropped_before_the_launch_is_written_again_in_the_same_ti
 
 
 def test_a_launch_refused_as_untrusted_every_time_is_left_to_the_next_tick(harness):
-    from chargehand.claude import TRUST_LAUNCH_ATTEMPTS
+    from elfcrew.claude import TRUST_LAUNCH_ATTEMPTS
 
     harness.claude_state.set(require_trust=True, drop_trust_at_launches=list(range(1, 10)))
     harness.board.add("ABC-1")

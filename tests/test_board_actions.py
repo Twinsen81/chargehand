@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import board, ledger as ledger_mod, terminal
-from chargehand import tick as tick_mod
-from chargehand.cli import EXIT_OK, main
-from chargehand.config import NotifyConfig
+from elfcrew import board, ledger as ledger_mod, terminal
+from elfcrew import tick as tick_mod
+from elfcrew.cli import EXIT_OK, main
+from elfcrew.config import NotifyConfig
 from conftest import run_git
 from support import daemon as support
 
@@ -189,7 +189,7 @@ def test_a_board_action_records_the_row_of_its_command(daemon, harness, config_f
     worker = harness.ledger.create_worker(
         role="implementer", item="ABC-1", item_id="id-1", url=None, repository="test",
         repo=harness.repo, worktree=harness.worktree_root / "implementer" / "ABC-1-1",
-        branch="chargehand/implementer/ABC-1-1", origin=ledger_mod.ORIGIN_BOARD,
+        branch="elfcrew/implementer/ABC-1-1", origin=ledger_mod.ORIGIN_BOARD,
     )
     values = {"handle": worker.handle, "id": worker.id}
 
@@ -221,12 +221,12 @@ def test_a_source_workers_card_names_it_by_role_and_item(daemon, harness):
 def test_an_older_worker_of_the_same_role_and_item_is_named_by_its_id(daemon, harness):
     first = harness.ledger.create_worker(
         role="implementer", item="ABC-1", item_id="id-1", url=None, repository="test",
-        repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="chargehand/implementer/ABC-1",
+        repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="elfcrew/implementer/ABC-1",
     )
     first = harness.ledger.update(first, state=ledger_mod.CANCELLED)
     harness.ledger.create_worker(
         role="implementer", item="ABC-1", item_id="id-1", url=None, repository="test",
-        repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="chargehand/implementer/ABC-1",
+        repo=harness.repo, worktree=harness.worktree("ABC-1"), branch="elfcrew/implementer/ABC-1",
     )
 
     assert board.target_of(first) == f"implementer/ABC-1#{first.id}"
@@ -299,7 +299,7 @@ def test_new_worker_starts_board_workers_on_one_item_within_the_caps(daemon, har
     assert first.handle == f"implementer/ABC-1#{first.id}"
     assert first.worktree != second.worktree and first.branch != second.branch
     assert first.worktree.endswith(f"implementer/ABC-1-{first.id}")
-    assert first.branch == f"chargehand/implementer/ABC-1-{first.id}"
+    assert first.branch == f"elfcrew/implementer/ABC-1-{first.id}"
     assert first.start_rule is None and first.owns_label == ledger_mod.LABEL_NONE
     # No label write: a board worker never drives the queue label.
     assert harness.labels("ABC-1") == ()
@@ -411,7 +411,7 @@ def test_a_source_start_is_not_held_by_a_board_workers_worktree(harness):
     worker = board_worker(harness)
     harness.ledger.update(worker, state=ledger_mod.CANCELLED)
     issue = harness.board.by_identifier("ABC-1")
-    harness.board.issues[issue.id] = dataclasses.replace(issue, labels=("chargehand",))
+    harness.board.issues[issue.id] = dataclasses.replace(issue, labels=("elfcrew",))
 
     harness.next_tick()
 
@@ -606,7 +606,7 @@ def asked_in_the_status_file(harness, tmp_path):
     """The status file says needs-input, and the listing shows the turn ended; it blocks."""
     status_dir = tmp_path / "status"
     status_dir.mkdir()
-    (harness.repo / ".chargehand.toml").write_text(
+    (harness.repo / ".elfcrew.toml").write_text(
         f'base = "origin/main"\nprompt = "{{issue}}"\n'
         f'status_file = "{status_dir}/{{issue}}.json"\n'
     )
@@ -690,7 +690,7 @@ def test_a_reply_waits_while_the_session_shows_a_prompt(daemon, harness, listed,
 
 
 def test_a_source_named_like_the_board_replies_is_refused(harness):
-    from chargehand.config import SourceConfig
+    from elfcrew.config import SourceConfig
 
     harness.config = dataclasses.replace(
         harness.config, sources=(SourceConfig(name="board", type="fake"),)
@@ -1043,7 +1043,7 @@ const document = {
 };
 const window = { confirm: () => true };
 const CSS = { escape: (s) => s };
-const store = new Map([['chargehand.token', 'tok']]);
+const store = new Map([['elfcrew.token', 'tok']]);
 const localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k),
@@ -1357,7 +1357,7 @@ dismiss();
 out.afterDismiss = statusLine();
 page.render(model(closed({ last_refusal: refused(4, 'its worktree has uncommitted changes') })));
 out.afterPoll = statusLine();
-out.stored = JSON.parse(sessionStorage.getItem('chargehand.dismissedRefusals'));
+out.stored = JSON.parse(sessionStorage.getItem('elfcrew.dismissedRefusals'));
 page.render(model(closed({ last_refusal: refused(6, 'its worktree has 1 unpushed commit') })));
 out.newer = statusLine();
 page.render(model(closed({ last_refusal: null })));
@@ -1793,7 +1793,7 @@ def item_less_worker(harness):
 def test_an_item_less_worker_is_notified_through_a_notify_command(harness, tmp_path):
     seen = tmp_path / "notified.txt"
     hook = tmp_path / "notify.sh"
-    hook.write_text(f'#!/bin/sh\necho "$CHARGEHAND_ITEM $CHARGEHAND_STATE" >> "{seen}"\n')
+    hook.write_text(f'#!/bin/sh\necho "$ELFCREW_ITEM $ELFCREW_STATE" >> "{seen}"\n')
     hook.chmod(0o755)
     harness.notifier.config = NotifyConfig(command=str(hook))
     worker = item_less_worker(harness)
@@ -1837,9 +1837,9 @@ def test_a_working_session_of_a_finished_board_worker_is_reported_not_adopted(ha
 
 
 def test_a_start_event_of_a_kind_a_board_worker_did_not_choose_starts_a_worker(harness):
-    from chargehand import router
-    from chargehand.roles import StartRule
-    from chargehand.sources import Event, WorkItem
+    from elfcrew import router
+    from elfcrew.roles import StartRule
+    from elfcrew.sources import Event, WorkItem
 
     unqueued(harness)
     worker = board_worker(harness, subscribe=["comment"])
@@ -1855,7 +1855,7 @@ def test_a_start_event_of_a_kind_a_board_worker_did_not_choose_starts_a_worker(h
 
 
 def test_holds_for_counts_a_board_worker_only_for_its_kinds(harness):
-    from chargehand import router
+    from elfcrew import router
 
     unqueued(harness)
     worker = board_worker(harness, subscribe=["comment"])
@@ -1867,7 +1867,7 @@ def test_holds_for_counts_a_board_worker_only_for_its_kinds(harness):
 
 
 def test_an_item_less_worker_of_a_role_that_checks_out_its_item_is_refused(harness):
-    roles = harness.repo / ".chargehand" / "roles"
+    roles = harness.repo / ".elfcrew" / "roles"
     roles.mkdir(parents=True)
     (roles / "implementer.toml").write_text(
         'prompt = "review {item}"\ncheckout = "item"\npermission_mode = "auto"\n'
@@ -1883,8 +1883,8 @@ def test_an_item_less_worker_of_a_role_that_checks_out_its_item_is_refused(harne
 
 
 def test_a_launch_that_stops_part_way_answers_created_and_resumes(harness, monkeypatch):
-    from chargehand.errors import GitError
-    from chargehand.gitutil import Git
+    from elfcrew.errors import GitError
+    from elfcrew.gitutil import Git
 
     calls = []
     real_fetch = Git.fetch

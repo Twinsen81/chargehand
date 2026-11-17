@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import board, claude, hooks, ledger as ledger_mod
-from chargehand.claude import ClaudeRuntime
-from chargehand.runtime import LaunchSpec
+from elfcrew import board, claude, hooks, ledger as ledger_mod
+from elfcrew.claude import ClaudeRuntime
+from elfcrew.runtime import LaunchSpec
 from support import daemon as support
 
 AUTH = {"Authorization": f"Bearer {support.TOKEN}", "Content-Type": "application/json"}

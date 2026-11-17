@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import ledger as ledger_mod
-from chargehand.ledger import Ledger
-from chargehand.sources import Event, WorkItem
+from elfcrew import ledger as ledger_mod
+from elfcrew.ledger import Ledger
+from elfcrew.sources import Event, WorkItem
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def make(ledger: Ledger, item: str = "ABC-1", worktree: str = "/w/ABC-1", role: 
         repository="test",
         repo=Path("/repo"),
         worktree=Path(worktree),
-        branch=f"chargehand/{role}/{item}",
+        branch=f"elfcrew/{role}/{item}",
     )
 
 
@@ -151,7 +151,7 @@ def test_a_newer_schema_is_refused_rather_than_corrupted(tmp_path):
     connection.execute(f"PRAGMA user_version={ledger_mod.SCHEMA_VERSION + 1}")
     connection.close()
 
-    with pytest.raises(RuntimeError, match="upgrade chargehand"):
+    with pytest.raises(RuntimeError, match="upgrade elfcrew"):
         Ledger(path)
 
 
@@ -197,7 +197,7 @@ def test_a_version_one_ledger_is_migrated_to_workers(tmp_path):
         "INSERT INTO attempts (id, issue_id, identifier, url, route, repo, worktree, branch, "
         "session_id, session_uuid, state, step, created_at, updated_at) "
         "VALUES (7, 'uuid-1', 'ABC-1', 'https://t.invalid/ABC-1', 'main', '/repo', '/w/ABC-1', "
-        "'chargehand/ABC-1', 's1', 'u1', 'running', 4, 1.0, 2.0)"
+        "'elfcrew/ABC-1', 's1', 'u1', 'running', 4, 1.0, 2.0)"
     )
     conn.execute("INSERT INTO runner_state VALUES ('notify-pending:7', 'x', 1.0)")
     conn.commit()
@@ -294,7 +294,7 @@ def test_workers_created_by_hand_are_not_held_to_one_per_role_and_item(ledger):
 def test_a_worker_may_have_no_work_item(ledger):
     worker = ledger.create_worker(
         role="scratch", item=None, item_id=None, url=None, repository="test",
-        repo=Path("/repo"), worktree=Path("/w/scratch"), branch="chargehand/scratch",
+        repo=Path("/repo"), worktree=Path("/w/scratch"), branch="elfcrew/scratch",
         origin=ledger_mod.ORIGIN_BOARD,
     )
 
@@ -736,7 +736,7 @@ LIVE, FINISHED = "live", "finished"
 @pytest.mark.parametrize("board_state", [None, LIVE, FINISHED])
 @pytest.mark.parametrize("board_role", ["implementer", "reviewer"])
 @pytest.mark.parametrize("second_board", [False, True])
-def test_every_handle_chargehand_prints_resolves_back_to_its_worker(
+def test_every_handle_elfcrew_prints_resolves_back_to_its_worker(
     ledger, earlier, source_state, board_state, board_role, second_board
 ):
     """Start-rule and board workers, live or finished, in one or two roles, on one item."""

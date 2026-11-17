@@ -12,9 +12,9 @@ import time
 
 import pytest
 
-from chargehand import board, cli, ledger as ledger_mod
-from chargehand.cli import EXIT_OK, main
-from chargehand.ledger import Ledger
+from elfcrew import board, cli, ledger as ledger_mod
+from elfcrew.cli import EXIT_OK, main
+from elfcrew.ledger import Ledger
 from support import daemon as support
 
 AUTH = {"Authorization": f"Bearer {support.TOKEN}", "Content-Type": "application/json"}
@@ -45,7 +45,7 @@ def page(daemon, query=""):
 def seed(harness, item, *, repository="test", updated_at=None, state=ledger_mod.RUNNING):
     worker = harness.ledger.create_worker(
         role="implementer", item=item, item_id=f"id-{item}", url=None, repository=repository,
-        repo=harness.repo, worktree=harness.worktree(item), branch=f"chargehand/{item}",
+        repo=harness.repo, worktree=harness.worktree(item), branch=f"elfcrew/{item}",
     )
     worker = harness.ledger.update(worker, state=state)
     if updated_at is not None:

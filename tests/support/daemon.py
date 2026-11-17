@@ -14,11 +14,11 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
-from chargehand import cli, serve
-from chargehand.config import MachineConfig, ServeConfig
-from chargehand.gitutil import Git
-from chargehand.notify import Notifier
-from chargehand.tick import Runner
+from elfcrew import cli, serve
+from elfcrew.config import MachineConfig, ServeConfig
+from elfcrew.gitutil import Git
+from elfcrew.notify import Notifier
+from elfcrew.tick import Runner
 
 TOKEN = "test-token-0123456789"
 
@@ -37,7 +37,7 @@ def build(
     token: str | None = TOKEN,
     **kwargs,
 ) -> serve.Daemon:
-    """A daemon wired the way `chargehand serve` wires it, with the test's collaborators."""
+    """A daemon wired the way `elfcrew serve` wires it, with the test's collaborators."""
 
     def runner(cfg: MachineConfig, ledger) -> Runner:
         return Runner(cfg, ledger, git=Git(cfg.git_bin), notifier=notifier or Notifier(cfg.notify))

@@ -9,22 +9,22 @@ from datetime import datetime, timezone
 
 import pytest
 
-from chargehand import board as board_mod
-from chargehand import claude
-from chargehand import delivery as delivery_mod
-from chargehand import ledger as ledger_mod
-from chargehand import sanitize
-from chargehand import usage as usage_mod
-from chargehand.config import MachineConfig, UsageConfig
-from chargehand.delivery import (
+from elfcrew import board as board_mod
+from elfcrew import claude
+from elfcrew import delivery as delivery_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew import sanitize
+from elfcrew import usage as usage_mod
+from elfcrew.config import MachineConfig, UsageConfig
+from elfcrew.delivery import (
     QUEUE_REASON_PREFIX,
     RESUME_MESSAGE,
     UsageReading,
     UsageWindow,
     new_worker_admits,
 )
-from chargehand.errors import ConfigError
-from chargehand.tick import MODEL_LIMIT_KEY, TickReport, reset_clock
+from elfcrew.errors import ConfigError
+from elfcrew.tick import MODEL_LIMIT_KEY, TickReport, reset_clock
 from conftest import FAKE_CLAUDE
 from test_delivery import REVIEWER, build, emit_three, end_turn, resumes, start_reviewer, write_role
 
@@ -126,7 +126,7 @@ def test_a_bad_usage_table_is_an_error(table, message):
 
 
 def test_the_bundled_configuration_names_both_reserves():
-    from chargehand import paths
+    from elfcrew import paths
 
     text = (paths.templates_dir() / "config.toml").read_text()
 
@@ -554,7 +554,7 @@ def test_the_card_says_why_the_listing_holds_a_resume(harness, listed_as, reason
 
 
 def test_a_resume_held_by_a_failed_listing_reports_the_error(harness, monkeypatch):
-    from chargehand.tick import Runner
+    from elfcrew.tick import Runner
 
     worker = launch(harness)
     park(harness, worker, time.time() + 3600)
@@ -601,7 +601,7 @@ def test_a_resume_held_by_a_runtime_this_build_lacks_says_so(harness):
 
 def test_a_turn_that_starts_while_a_resume_prepares_is_not_stopped(harness, monkeypatch):
     """The check and the stop use one listing: the operator can start a turn in between."""
-    from chargehand.tick import Runner
+    from elfcrew.tick import Runner
 
     worker = launch(harness)
     park(harness, worker, time.time() + 3600)

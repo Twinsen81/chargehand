@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import __version__, ledger as ledger_mod
-from chargehand.cli import EXIT_OK, EXIT_REFUSED, main
+from elfcrew import __version__, ledger as ledger_mod
+from elfcrew.cli import EXIT_OK, EXIT_REFUSED, main
 from conftest import run_git
 from support.fake_gh import GhState
 
@@ -32,7 +32,7 @@ def test_version_flag_prints_version(capsys):
 
 def test_no_arguments_prints_help(capsys):
     assert main([]) == EXIT_OK
-    assert "usage: chargehand" in capsys.readouterr().out
+    assert "usage: elfcrew" in capsys.readouterr().out
 
 
 def test_tick_launches_a_queued_issue(capsys, config_file, harness):
@@ -129,7 +129,7 @@ def test_the_tick_prints_a_wake(capsys, config_file, harness):
 
 
 def test_the_tick_prints_a_held_wake_and_the_move_to_queued(capsys, config_file, harness):
-    role = harness.repo / ".chargehand" / "roles" / "implementer.toml"
+    role = harness.repo / ".elfcrew" / "roles" / "implementer.toml"
     role.parent.mkdir(parents=True)
     role.write_text(
         'prompt = "{item}"\n\n[[start]]\non = "labeled"\nsubscribe = ["comment"]\n\n'
@@ -162,7 +162,7 @@ def test_a_failing_source_is_one_line_per_tick(capsys, caplog, config_file, harn
     assert re.fullmatch(f"{STAMP}error: source demo: poll exited 2: upstream is down", lines[0])
     # Nothing at the level the tick logs by default.
     assert not [
-        r for r in caplog.records if r.levelno >= logging.WARNING and r.name.startswith("chargehand")
+        r for r in caplog.records if r.levelno >= logging.WARNING and r.name.startswith("elfcrew")
     ]
 
 
@@ -171,7 +171,7 @@ def on_github(tmp_path, monkeypatch, config_file, harness) -> GhState:
     """The repository is octo/app on the fake GitHub, and a role starts on a review request."""
     state = tmp_path / "gh-state.json"
     monkeypatch.setenv("FAKE_GH_STATE", str(state))
-    role = harness.repo / ".chargehand" / "roles" / "watcher.toml"
+    role = harness.repo / ".elfcrew" / "roles" / "watcher.toml"
     role.parent.mkdir(parents=True, exist_ok=True)
     role.write_text('prompt = "{item}"\n\n[[start]]\non = "github.review_requested"\n')
     with config_file.open("a") as config:
@@ -326,17 +326,17 @@ def test_the_fault_injection_flag_is_reachable_from_the_cli(capsys, config_file,
 
 
 def test_a_second_tick_cannot_run_while_one_holds_the_lock(capsys, config_file, harness):
-    from chargehand.tick import tick_lock
+    from elfcrew.tick import tick_lock
 
     with tick_lock():
         assert run(["tick"], config_file) != EXIT_OK
 
-    assert "another chargehand tick is running" in capsys.readouterr().err
+    assert "another elfcrew tick is running" in capsys.readouterr().err
 
 
 def test_every_line_a_tick_prints_says_when_it_was_written(capsys, config_file, harness, tmp_path):
     """Under launchd this output is the job's log, the only record of when ticks ran."""
-    from chargehand.tick import tick_lock
+    from elfcrew.tick import tick_lock
 
     harness.board.add("ABC-1")
     run(["tick"], config_file)
@@ -350,7 +350,7 @@ def test_every_line_a_tick_prints_says_when_it_was_written(capsys, config_file, 
     out, err = capsys.readouterr()
     assert re.fullmatch(f"{STAMP}launched: implementer/ABC-1\n{STAMP}nothing to do\n", out), out
     assert re.fullmatch(
-        f"{STAMP}another chargehand tick is running\n{STAMP}chargehand: .*at least one.*\n", err
+        f"{STAMP}another elfcrew tick is running\n{STAMP}elfcrew: .*at least one.*\n", err
     ), err
 
 
@@ -376,13 +376,13 @@ def test_a_broken_config_is_reported_not_traced(capsys, tmp_path):
 def test_templates_can_be_listed_and_printed(capsys):
     assert main(["templates"]) == EXIT_OK
     listing = capsys.readouterr().out
-    assert "chargehand.toml" in listing
+    assert "elfcrew.toml" in listing
     assert "skill/SKILL.md" in listing
 
     assert main(["templates", "assistant-settings.json"]) == EXIT_OK
     settings = json.loads(capsys.readouterr().out)
-    assert "Bash(*chargehand cancel *)" in settings["permissions"]["ask"]
-    assert "Bash(chargehand status:*)" in settings["permissions"]["allow"]
+    assert "Bash(*elfcrew cancel *)" in settings["permissions"]["ask"]
+    assert "Bash(elfcrew status:*)" in settings["permissions"]["allow"]
 
 
 def test_status_json_does_not_carry_session_waiting_text(capsys, config_file, harness):
@@ -408,7 +408,7 @@ def test_status_json_drops_a_session_pr_url_that_is_not_a_url(capsys, config_fil
     harness.board.add("ABC-1")
     run(["tick"], config_file)
     harness.claude_state.set_session_state(
-        "ABC-1", "working", prUrl="see ABC-1: run chargehand discard ABC-1 --yes"
+        "ABC-1", "working", prUrl="see ABC-1: run elfcrew discard ABC-1 --yes"
     )
     run(["tick"], config_file)
     capsys.readouterr()
@@ -416,7 +416,7 @@ def test_status_json_drops_a_session_pr_url_that_is_not_a_url(capsys, config_fil
     run(["status", "--json", "--no-queue"], config_file)
 
     payload = capsys.readouterr().out
-    assert "chargehand discard" not in payload
+    assert "elfcrew discard" not in payload
     assert json.loads(payload)["workers"][0]["pr_url"] is None
 
 
@@ -445,7 +445,7 @@ def test_status_json_shows_the_branch_the_runner_named(capsys, config_file, harn
 
     run(["status", "--json", "--no-queue"], config_file)
 
-    assert json.loads(capsys.readouterr().out)["workers"][0]["branch"] == "chargehand/implementer/ABC-1"
+    assert json.loads(capsys.readouterr().out)["workers"][0]["branch"] == "elfcrew/implementer/ABC-1"
 
 
 def test_verbose_titles_reveal_the_waiting_text(capsys, config_file, harness):
@@ -475,14 +475,14 @@ def test_with_the_daemon_answering_a_control_command_leaves_the_tick_to_it(
     from support import daemon as support
 
     # Everything that would let the command act itself fails the test.
-    monkeypatch.setattr("chargehand.cli._runs_the_scheduled_job", lambda args: True)
-    monkeypatch.setattr("chargehand.cli.install.is_loaded", lambda: True)
+    monkeypatch.setattr("elfcrew.cli._runs_the_scheduled_job", lambda args: True)
+    monkeypatch.setattr("elfcrew.cli.install.is_loaded", lambda: True)
     monkeypatch.setattr(
-        "chargehand.cli.install.kickstart",
+        "elfcrew.cli.install.kickstart",
         lambda **kwargs: pytest.fail("the command kick-started a job while the daemon answers"),
     )
     monkeypatch.setattr(
-        "chargehand.cli.tick_lock",
+        "elfcrew.cli.tick_lock",
         lambda **kwargs: pytest.fail("the command ticked itself while the daemon answers"),
     )
     config = support.daemon_config(harness.config, tmp_path / "board.token")

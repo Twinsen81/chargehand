@@ -24,4 +24,4 @@ htmlcov/
 *.sqlite-shm
 
 # Written by Claude Code when it loads the mod from this checkout
-src/chargehand/templates/mod/.claude-plugin/types/
+src/elfcrew/templates/mod/.claude-plugin/types/

@@ -7,16 +7,16 @@ import json
 import stat
 
 from conftest import FAKE_CLAUDE, Harness, make_config, run_git
-from chargehand import ledger as ledger_mod
-from chargehand.config import DEFAULT_DENY_RULES
-from chargehand.gitutil import Git
-from chargehand.ledger import Ledger
-from chargehand.notify import Notifier
-from chargehand.tick import Runner
+from elfcrew import ledger as ledger_mod
+from elfcrew.config import DEFAULT_DENY_RULES
+from elfcrew.gitutil import Git
+from elfcrew.ledger import Ledger
+from elfcrew.notify import Notifier
+from elfcrew.tick import Runner
 
 
 def write_role(repo, name, text):
-    target = repo / ".chargehand" / "roles" / f"{name}.toml"
+    target = repo / ".elfcrew" / "roles" / f"{name}.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
 
@@ -68,13 +68,13 @@ on = "labeled"
     assert argv[argv.index("--effort") + 1] == "low"
     assert argv[-1] == "/work ABC-1 at https://tracker.invalid/ABC-1"
     settings = json.loads(argv[argv.index("--settings") + 1])
-    assert settings["permissions"]["allow"] == ["Bash(gh pr *)", "mcp__chargehand__*"]
+    assert settings["permissions"]["allow"] == ["Bash(gh pr *)", "mcp__elfcrew__*"]
     assert set(DEFAULT_DENY_RULES) <= set(settings["permissions"]["deny"])
     worker = harness.worker("ABC-1")
     assert worker.role == "implementer"
     assert (worker.origin, worker.start_rule, worker.runtime) == ("source", "labeled", "claude")
     assert worker.worktree_path == harness.worktree_root / "implementer" / "ABC-1"
-    assert worker.branch == "chargehand/implementer/ABC-1"
+    assert worker.branch == "elfcrew/implementer/ABC-1"
     assert [s.kind for s in harness.ledger.sessions_of(worker)] == [ledger_mod.SESSION_INITIAL]
 
 
@@ -93,7 +93,7 @@ def test_the_roles_setup_runs_after_the_repositorys(harness, tmp_path):
     script = tmp_path / "mark.sh"
     script.write_text('#!/bin/sh\necho "$1" >> "$2/order.txt"\n')
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    (harness.repo / ".chargehand.toml").write_text(
+    (harness.repo / ".elfcrew.toml").write_text(
         f'base = "origin/main"\nsetup = "{script} repo {{worktree}}"\n'
     )
     write_role(harness.repo, "implementer", f"""\
@@ -162,7 +162,7 @@ def test_a_control_command_needs_the_role_when_several_roles_hold_the_item(harne
     second = harness.ledger.create_worker(
         role="second", item="ABC-1", item_id=first.item_id, url=first.url, repository="test",
         repo=harness.repo, worktree=harness.worktree("ABC-1", "second"),
-        branch="chargehand/second/ABC-1",
+        branch="elfcrew/second/ABC-1",
     )
     harness.ledger.update(second, state=ledger_mod.RUNNING, session_id="other", session_uuid="u-other")
 
@@ -226,7 +226,7 @@ unless_subscribed = "any"
     # A worker of another role already has the item.
     other = harness.ledger.create_worker(
         role="implementer", item="ABC-1", item_id="id-ABC-1", url=None, repository="test",
-        repo=repo, worktree=harness.worktree("ABC-1"), branch="chargehand/implementer/ABC-1",
+        repo=repo, worktree=harness.worktree("ABC-1"), branch="elfcrew/implementer/ABC-1",
         origin=ledger_mod.ORIGIN_BOARD,
     )
     harness.ledger.update(other, state=ledger_mod.RUNNING)
@@ -269,7 +269,7 @@ def test_re_adding_the_queue_label_does_not_start_another_role_on_a_held_issue(
     # The label comes back while the implementer still runs: the issue now carries both
     # the queue label and the running label, and the tracker lists it as queued.
     issue = board.by_identifier("ABC-1")
-    board.issues[issue.id] = dataclasses.replace(issue, labels=(*issue.labels, "chargehand"))
+    board.issues[issue.id] = dataclasses.replace(issue, labels=(*issue.labels, "elfcrew"))
 
     report = harness.next_tick()
 

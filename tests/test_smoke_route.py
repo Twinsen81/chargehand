@@ -15,9 +15,9 @@ import sqlite3
 
 import pytest
 
-from chargehand import ledger as ledger_mod
-from chargehand.config import MachineConfig, RepoConfig
-from chargehand.trackers import linear as linear_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew.config import MachineConfig, RepoConfig
+from elfcrew.trackers import linear as linear_mod
 
 import smoke_route
 import smoke_support
@@ -129,13 +129,13 @@ def test_the_sandbox_writes_configuration_the_package_accepts(sandbox):
     assert machine.repositories[0].tracker.options["keychain_service"] == "probe-key"
     assert machine.worktree_root == sandbox.worktree_root
 
-    repo = RepoConfig.parse(tomllib.loads((sandbox.repo / ".chargehand.toml").read_text()))
+    repo = RepoConfig.parse(tomllib.loads((sandbox.repo / ".elfcrew.toml").read_text()))
     assert repo.base == "origin/main"
     assert "{issue}" in repo.prompt
 
 
 def test_the_smoke_labels_cannot_collide_with_the_defaults():
-    from chargehand.config import DEFAULT_LABELS
+    from elfcrew.config import DEFAULT_LABELS
 
     assert not set(smoke_support.SMOKE_LABELS.values()) & set(DEFAULT_LABELS.values())
 
@@ -149,14 +149,14 @@ def test_the_scratch_repository_has_a_resolvable_base(sandbox):
 
 def test_swapping_the_prompt_rewrites_the_repository_config(sandbox):
     sandbox.set_repo_prompt("a different prompt for {issue}")
-    assert "a different prompt" in (sandbox.repo / ".chargehand.toml").read_text()
+    assert "a different prompt" in (sandbox.repo / ".elfcrew.toml").read_text()
     sandbox.set_repo_prompt(None)
-    assert smoke_support.SMOKE_PROMPT in (sandbox.repo / ".chargehand.toml").read_text()
+    assert smoke_support.SMOKE_PROMPT in (sandbox.repo / ".elfcrew.toml").read_text()
 
 
 def test_the_sandbox_points_every_path_override_inside_itself(sandbox):
     env = sandbox.env
-    for key in ("CHARGEHAND_CONFIG", "CHARGEHAND_STATE_DIR", "CHARGEHAND_LOG_FILE"):
+    for key in ("ELFCREW_CONFIG", "ELFCREW_STATE_DIR", "ELFCREW_LOG_FILE"):
         assert env[key].startswith(str(sandbox.root)), key
 
 
@@ -165,7 +165,7 @@ def test_attempts_reads_rows_the_real_ledger_wrote(sandbox):
     ledger.create_worker(
         role="implementer", item="ABC-1", item_id="uuid-1", url=None, repository="smoke",
         repo=sandbox.repo, worktree=sandbox.worktree_root / "implementer" / "ABC-1",
-        branch="chargehand/implementer/ABC-1",
+        branch="elfcrew/implementer/ABC-1",
     )
     ledger.close()
     rows = sandbox.workers()
@@ -192,9 +192,9 @@ def test_the_notification_hook_records_what_the_runner_sends(sandbox):
 
     subprocess.run(
         [str(sandbox.root / "notify.sh")],
-        env={"CHARGEHAND_ISSUE": "ABC-9", "CHARGEHAND_STATE": "blocked",
-             "CHARGEHAND_URL": "", "CHARGEHAND_ROUTE": "smoke",
-             "CHARGEHAND_DETAIL": "needs input", "PATH": "/usr/bin:/bin"},
+        env={"ELFCREW_ISSUE": "ABC-9", "ELFCREW_STATE": "blocked",
+             "ELFCREW_URL": "", "ELFCREW_ROUTE": "smoke",
+             "ELFCREW_DETAIL": "needs input", "PATH": "/usr/bin:/bin"},
         check=True,
     )
     assert sandbox.notifications() == [

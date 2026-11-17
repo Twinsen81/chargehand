@@ -14,9 +14,9 @@ import time
 
 import pytest
 
-from chargehand import board, delivery, ledger as ledger_mod, serve, trackers, usage
-from chargehand.claude import ClaudeRuntime
-from chargehand.sources import Event, WorkItem
+from elfcrew import board, delivery, ledger as ledger_mod, serve, trackers, usage
+from elfcrew.claude import ClaudeRuntime
+from elfcrew.sources import Event, WorkItem
 from support import daemon as support
 from support import fake_tracker
 
@@ -38,7 +38,7 @@ def seed(harness, item, state=ledger_mod.RUNNING, **changes):
     worker = harness.ledger.create_worker(
         role="implementer", item=item, item_id=f"id-{item}", url=f"https://tracker.example/{item}",
         repository="test", repo=harness.repo, worktree=harness.worktree(item),
-        branch=f"chargehand/{item}",
+        branch=f"elfcrew/{item}",
     )
     return harness.ledger.update(worker, state=state, **changes)
 
@@ -128,7 +128,7 @@ def test_the_throttle_counts_working_and_open_workers_against_the_caps(harness):
 
 
 def test_a_card_before_any_wake_shows_the_role_prompt_model_effort_and_attach(harness):
-    roles = harness.repo / ".chargehand" / "roles"
+    roles = harness.repo / ".elfcrew" / "roles"
     roles.mkdir(parents=True)
     (roles / "implementer.toml").write_text(
         'prompt = "work on {item} ({item_url})"\nmodel = "opus"\neffort = "high"\n'
@@ -140,7 +140,7 @@ def test_a_card_before_any_wake_shows_the_role_prompt_model_effort_and_attach(ha
 
     assert card["role"] == "implementer"
     assert card["item_url"] == "https://tracker.example/ABC-1"
-    assert card["branch"] == "chargehand/ABC-1"
+    assert card["branch"] == "elfcrew/ABC-1"
     assert card["worktree"] == worker.worktree
     assert (card["model"], card["effort"]) == ("opus", "high")
     assert card["last_prompt"] == "work on ABC-1 (https://tracker.example/ABC-1)"
@@ -277,7 +277,7 @@ def test_untrusted_text_never_reaches_the_output_unescaped_or_as_a_link(daemon, 
     worker = seed(
         harness, "ABC-1", ledger_mod.PAUSED,
         last_answer=HOSTILE, waiting_for=HOSTILE, last_error=HOSTILE,
-        pr_url="javascript:alert(1)", branch=f"chargehand/{HOSTILE}",
+        pr_url="javascript:alert(1)", branch=f"elfcrew/{HOSTILE}",
     )
     harness.ledger.update(worker, url="javascript:alert(document.cookie)")
     harness.ledger.record_permission_prompt(worker, tool_name=HOSTILE, tool_input=HOSTILE)

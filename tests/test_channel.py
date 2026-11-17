@@ -1,4 +1,4 @@
-"""The agent channel: the posts of a worker session's chargehand mod, and the tools it serves.
+"""The agent channel: the posts of a worker session's elfcrew mod, and the tools it serves.
 
 The daemon here serves on 127.0.0.1 on a port the kernel picks, runs no loop, and is shut
 down in the test. The posts are the ones the mod sends; sessions are the fake `claude`'s.
@@ -13,13 +13,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from chargehand import board, channel, worker_tokens
-from chargehand import delivery as delivery_mod
-from chargehand import ledger as ledger_mod
-from chargehand import runtime as runtime_mod
-from chargehand import tick as tick_mod
-from chargehand.config import SourceConfig
-from chargehand.delivery import OUTBOX_POLL_SECS
+from elfcrew import board, channel, worker_tokens
+from elfcrew import delivery as delivery_mod
+from elfcrew import ledger as ledger_mod
+from elfcrew import runtime as runtime_mod
+from elfcrew import tick as tick_mod
+from elfcrew.config import SourceConfig
+from elfcrew.delivery import OUTBOX_POLL_SECS
 from support import daemon as support
 
 AUTH = {"Authorization": f"Bearer {support.TOKEN}", "Content-Type": "application/json"}
@@ -362,7 +362,7 @@ def test_each_question_and_each_prompt_is_notified_once(
     status_dir = tmp_path / "status"
     if status_file:
         status_dir.mkdir()
-        (harness.repo / ".chargehand.toml").write_text(
+        (harness.repo / ".elfcrew.toml").write_text(
             f'base = "origin/main"\nprompt = "{{issue}}"\n'
             f'status_file = "{status_dir}/{{issue}}.json"\n'
         )
@@ -547,7 +547,7 @@ def test_a_question_is_cancelled_when_the_worker_leaves_blocked_by_another_path(
 @pytest.mark.parametrize("state, ended, label", [
     ("done", ledger_mod.DONE, ()),
     # As the status file's `aborted`: the label asks the operator for a look.
-    ("failed", ledger_mod.FAILED, ("chargehand-blocked",)),
+    ("failed", ledger_mod.FAILED, ("elfcrew-blocked",)),
 ])
 def test_a_report_of_done_or_failed_ends_the_worker_at_the_turn_end(daemon, harness, state, ended, label):
     worker = launch(harness)
@@ -599,7 +599,7 @@ class _PullRequests:
     has_pull_requests = True
 
     def item_for(self, text):
-        from chargehand.sources.base import WorkItem
+        from elfcrew.sources.base import WorkItem
 
         if text == "https://github.com/o/r/pull/7":
             return WorkItem(source="gh", key="o/r#7", ref="o/r#7", url=text)
@@ -607,7 +607,7 @@ class _PullRequests:
 
 
 def test_a_pull_request_link_becomes_the_card_link_and_is_followed(daemon, harness, monkeypatch):
-    from chargehand import tick
+    from elfcrew import tick
 
     monkeypatch.setattr(
         tick.Runner, "source", lambda self, name: _PullRequests() if name == "cmd" else None
@@ -1003,7 +1003,7 @@ def test_the_last_turn_of_a_worker_that_ended_is_taken_quietly(daemon, harness, 
         assert post(daemon, "usage", usage_post) == (200, {"recorded": True})
 
     assert "refused" not in caplog.text
-    assert all(r.levelname == "DEBUG" for r in caplog.records if r.name.startswith("chargehand"))
+    assert all(r.levelname == "DEBUG" for r in caplog.records if r.name.startswith("elfcrew"))
     after = harness.ledger.get(ended.id)
     assert after == dataclasses.replace(ended, context_tokens=12000, context_percent=6.0)
     assert harness.notifications() == notified

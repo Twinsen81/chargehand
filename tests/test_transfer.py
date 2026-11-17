@@ -12,18 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import install, paths, serve, transfer
-from chargehand.cli import EXIT_OK, EXIT_REFUSED, main
-from chargehand.config import MachineConfig, load_machine_config
-from chargehand.ledger import BOARD_REPOSITORY, BOARD_WORKER, open_ledger
+from elfcrew import install, paths, serve, transfer
+from elfcrew.cli import EXIT_OK, EXIT_REFUSED, main
+from elfcrew.config import MachineConfig, load_machine_config
+from elfcrew.ledger import BOARD_REPOSITORY, BOARD_WORKER, open_ledger
 
 
 class Machine:
-    """One user account: a home directory with chargehand's and Claude Code's files in it."""
+    """One user account: a home directory with elfcrew's and Claude Code's files in it."""
 
     def __init__(self, root: Path) -> None:
         self.home = root
-        self.config_dir = root / ".config" / "chargehand"
+        self.config_dir = root / ".config" / "elfcrew"
         self.config = self.config_dir / "config.toml"
         self.state = root / "state"
         self.claude = root / ".claude"
@@ -43,23 +43,23 @@ class Machine:
 
 def _config_text(home: Path) -> str:
     return f"""\
-# chargehand on the old machine; repositories live in {home}/code
+# elfcrew on the old machine; repositories live in {home}/code
 poll_interval_secs = 120
 max_run_hours = 5
 worktree_root = "{home}/worktrees"
 claude_bin = "{home}/.local/bin/claude"
 deny_rules = [
-  "Bash(*chargehand *)",
+  "Bash(*elfcrew *)",
   "Bash(*claude stop*)",
 ]
 
 [serve]
 port = 7990
-token_file = "{home}/.config/chargehand/board.token"
+token_file = "{home}/.config/elfcrew/board.token"
 usage_file = "{home}/.cache/other-usage.json"
 
 [notify]
-command = "~/.config/chargehand/notify.sh --quiet"
+command = "~/.config/elfcrew/notify.sh --quiet"
 
 [labels]
 queued = "queue-me"
@@ -90,13 +90,13 @@ def old(tmp_path, monkeypatch) -> Machine:
     machine.config_dir.mkdir(parents=True)
     machine.config.write_text(_config_text(machine.home))
     notify = machine.config_dir / "notify.sh"
-    notify.write_text("#!/bin/sh\necho \"$CHARGEHAND_ITEM\"\n")
+    notify.write_text("#!/bin/sh\necho \"$ELFCREW_ITEM\"\n")
     notify.chmod(0o755)
     (machine.config_dir / "roles").mkdir()
     (machine.config_dir / "roles" / "helper.toml").write_text(
         'prompt = "help with {item}"\nagent = "helper"\n'
     )
-    repo_roles = machine.home / "code" / "app" / ".chargehand" / "roles"
+    repo_roles = machine.home / "code" / "app" / ".elfcrew" / "roles"
     repo_roles.mkdir(parents=True)
     (repo_roles / "implementer.toml").write_text('prompt = "work on {item}"\nagent = "builder"\n')
     agents = machine.claude / "agents"
@@ -107,7 +107,7 @@ def old(tmp_path, monkeypatch) -> Machine:
         "theme": "dark",
         "statusLine": {
             "type": "command",
-            "command": f"{machine.home}/.local/bin/chargehand statusline -- '~/.claude/line.sh'",
+            "command": f"{machine.home}/.local/bin/elfcrew statusline -- '~/.claude/line.sh'",
         },
     }))
     serve.ensure_token(machine.config_dir / "board.token")
@@ -178,9 +178,9 @@ def test_the_exported_configuration_keeps_what_it_does_not_rewrite(old, tmp_path
 
     text = _members(archive)["config.toml"].decode()
     data = tomllib.loads(text)
-    assert text.startswith("# chargehand on the old machine; repositories live in ~/code\n")
+    assert text.startswith("# elfcrew on the old machine; repositories live in ~/code\n")
     assert data["poll_interval_secs"] == 120 and data["max_run_hours"] == 5
-    assert data["deny_rules"] == ["Bash(*chargehand *)", "Bash(*claude stop*)"]
+    assert data["deny_rules"] == ["Bash(*elfcrew *)", "Bash(*claude stop*)"]
     assert data["labels"] == {"queued": "queue-me", "running": "running-now", "blocked": "help-me"}
     assert data["worktree_root"] == "~/worktrees"
     assert data["claude_bin"] == "~/.local/bin/claude"
@@ -239,7 +239,7 @@ def test_an_import_restores_the_setup_in_another_home(old, tmp_path, monkeypatch
     assert 'path = "~/src/app"' in text
     assert "api_key_command" not in text
     notify = new.config_dir / "notify.sh"
-    assert config.notify.command == "~/.config/chargehand/notify.sh --quiet"
+    assert config.notify.command == "~/.config/elfcrew/notify.sh --quiet"
     assert notify.read_text() == (old.config_dir / "notify.sh").read_text()
     assert stat.S_IMODE(notify.stat().st_mode) == 0o755
     assert (new.config_dir / "roles" / "helper.toml").is_file()
@@ -417,14 +417,14 @@ def test_doctor_lists_the_steps_an_import_left(old, tmp_path, monkeypatch, capsy
     assert any("statusLine" in d and s == install.WARN for d, s in by_detail.items())
     assert any("Linear tracker its API key" in d and s == install.INFO for d, s in by_detail.items())
     assert any("notify.sh came from the other machine" in d for d in by_detail)
-    assert any("chargehand install --load" in d or "chargehand serve" in d for d in by_detail)
+    assert any("elfcrew install --load" in d or "elfcrew serve" in d for d in by_detail)
 
     text = new.config.read_text().replace(
         'keychain_service = "svc"', 'keychain_service = "svc", api_key_command = "op read x"'
     )
     new.config.write_text(text)
     (new.claude / "settings.json").write_text(json.dumps(
-        {"statusLine": {"type": "command", "command": "chargehand statusline -- ~/line.sh"}}
+        {"statusLine": {"type": "command", "command": "elfcrew statusline -- ~/line.sh"}}
     ))
 
     steps = [c for c in _doctor(capsys) if c["name"].startswith("imported")]
@@ -477,7 +477,7 @@ def test_an_archive_that_is_not_a_zip_is_refused(tmp_path, monkeypatch, capsys):
 
 def test_a_notify_program_outside_home_stays_where_it_is(old, tmp_path, monkeypatch):
     text = old.config.read_text().replace(
-        'command = "~/.config/chargehand/notify.sh --quiet"', 'command = "/bin/echo chargehand"'
+        'command = "~/.config/elfcrew/notify.sh --quiet"', 'command = "/bin/echo elfcrew"'
     )
     old.config.write_text(text)
     archive = tmp_path / "setup.zip"
@@ -486,10 +486,10 @@ def test_a_notify_program_outside_home_stays_where_it_is(old, tmp_path, monkeypa
 
     members = _members(archive)
     assert not [name for name in members if name.startswith("notify/")]
-    assert tomllib.loads(members["config.toml"].decode())["notify"]["command"] == "/bin/echo chargehand"
+    assert tomllib.loads(members["config.toml"].decode())["notify"]["command"] == "/bin/echo elfcrew"
     new = Machine(tmp_path / "new").enter(monkeypatch)
     assert _import(new, archive, monkeypatch) == EXIT_OK
-    assert load_machine_config().notify.command == "/bin/echo chargehand"
+    assert load_machine_config().notify.command == "/bin/echo elfcrew"
     assert not (new.config_dir / "echo").exists()
 
 
@@ -513,7 +513,7 @@ def test_a_program_installed_outside_home_is_a_step_until_it_is_installed(
         link.symlink_to(program)
         named = "~/.local/bin/pushnotifier"
     old.config.write_text(old.config.read_text().replace(
-        'command = "~/.config/chargehand/notify.sh --quiet"', f'command = "{named} --topic x"'
+        'command = "~/.config/elfcrew/notify.sh --quiet"', f'command = "{named} --topic x"'
     ))
     archive = tmp_path / "setup.zip"
 
@@ -612,7 +612,7 @@ def test_a_notify_program_that_cannot_travel_is_named_and_left_as_a_step(
     program.write_bytes(content or f"#!{old.home}/.local/share/tool/bin/python\nimport ntfy\n".encode())
     program.chmod(0o755)
     old.config.write_text(old.config.read_text().replace(
-        'command = "~/.config/chargehand/notify.sh --quiet"', f'command = "~/{where} send"'
+        'command = "~/.config/elfcrew/notify.sh --quiet"', f'command = "~/{where} send"'
     ))
     archive = tmp_path / "setup.zip"
 
@@ -639,7 +639,7 @@ def test_a_notify_script_with_a_name_an_archive_cannot_hold_says_so(old, tmp_pat
     program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
     old.config.write_text(old.config.read_text().replace(
-        'command = "~/.config/chargehand/notify.sh --quiet"', "command = \"'~/bin/my notify'\""
+        'command = "~/.config/elfcrew/notify.sh --quiet"', "command = \"'~/bin/my notify'\""
     ))
 
     assert _export(old, tmp_path / "setup.zip") == EXIT_OK

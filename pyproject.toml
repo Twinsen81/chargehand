@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "chargehand"
+name = "elfcrew"
 dynamic = ["version"]
 description = "Label an issue, get a supervised Claude Code session in a fresh git worktree on your own machine."
 readme = "README.md"
@@ -32,20 +32,20 @@ Repository = "https://github.com/Twinsen81/chargehand"
 test = ["pytest>=7"]
 
 [project.scripts]
-chargehand = "chargehand.cli:main"
+elfcrew = "elfcrew.cli:main"
 
 [tool.hatch.version]
-path = "src/chargehand/__init__.py"
+path = "src/elfcrew/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/chargehand"]
+packages = ["src/elfcrew"]
 # Claude Code writes its API types beside the mod's manifest when it loads the mod from a
 # checkout; they belong to that machine's Claude Code, not to the package.
-artifacts = ["src/chargehand/templates/**", "!src/chargehand/templates/mod/.claude-plugin/types/**"]
+artifacts = ["src/elfcrew/templates/**", "!src/elfcrew/templates/mod/.claude-plugin/types/**"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/chargehand",
+    "src/elfcrew",
     "tests",
     "docs",
     "README.md",

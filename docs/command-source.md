@@ -1,14 +1,14 @@
 # The command source
 
-The `command` source connects chargehand to a system that has no built-in source: Jira,
+The `command` source connects elfcrew to a system that has no built-in source: Jira,
 GitLab, YouTrack, a spreadsheet, a cron job. You write an executable that prints events as
-JSON lines, and chargehand runs it on every tick.
+JSON lines, and elfcrew runs it on every tick.
 
 This contract is a stable, public surface. A change to it that breaks an existing command
 is a breaking change, as for the CLI and the configuration files (see
 [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
-There is no plugin framework. chargehand does not import your code and does not load entry
+There is no plugin framework. elfcrew does not import your code and does not load entry
 points. Each command runs as a subprocess, with a timeout and without a shell, and its
 output is checked against the closed shapes below. Everything a command prints is
 untrusted, as the text from any other source is.
@@ -38,7 +38,7 @@ timeout_secs = 30                       # optional, default 30
 | `repositories` | The configured repositories that this source's start events may start workers in. |
 | `timeout_secs` | How long each command may run. A command that runs longer is killed together with its child processes. |
 
-Each command is an argument template. chargehand splits it into arguments first and
+Each command is an argument template. elfcrew splits it into arguments first and
 substitutes the variables after that, so a value with spaces or shell characters stays one
 argument. Nothing is run through a shell; use `sh -c '...'` yourself if you need one, and
 quote with care. The variables are `{source}` (the source's name) in every command, `{item}`
@@ -46,14 +46,14 @@ and `{ref}` in `mark` and `item_open`, and `{status}` in `mark`. An unknown vari
 configuration error.
 
 A relative program is looked up in the directory of the machine configuration first, then
-on `PATH`. The commands run in that directory, with chargehand's environment, so a
+on `PATH`. The commands run in that directory, with elfcrew's environment, so a
 credential can come from an environment variable or from a file next to the
 configuration.
 
 ## poll
 
-chargehand writes the cursor that the previous poll printed to the command's stdin, without
-a newline. The first poll gets an empty stdin. The environment variable `CHARGEHAND_REFS`
+elfcrew writes the cursor that the previous poll printed to the command's stdin, without
+a newline. The first poll gets an empty stdin. The environment variable `ELFCREW_REFS`
 holds the `ref` of each item from this source that a live worker follows, one per line, and
 is empty when no worker follows any. A system that must be asked item by item, for example
 for the comments on an issue, reads it; any other command can ignore it. The command prints
@@ -66,7 +66,7 @@ one JSON object per line and exits 0:
 ```
 
 The last line is the cursor: an object with the one key `cursor`, a string or `null`.
-chargehand stores it after it has routed the events and gives it back on the next poll. Its
+elfcrew stores it after it has routed the events and gives it back on the next poll. Its
 content is yours. When the last line is not a valid cursor line, the poll keeps the old
 cursor, and the events are routed anyway.
 
@@ -79,13 +79,13 @@ skipped:
 | `item` | yes | The work item's key. It becomes a worker's item, its worktree and branch name, and its session name, so it is 1 to 64 characters of letters, digits, `.`, `_` and `-`, starting with a letter or digit. |
 | `actor` | yes | Who did it, as text; may be empty. Used only for the authorship filter. |
 | `occurred_at` | yes | When it happened: seconds since the epoch, or an ISO 8601 time with a time zone. Report the time of the event itself, not an approximation such as the item's last update: an event that occurred more than a minute before a worker started is not delivered to that worker. |
-| `dedupe_id` | yes | A non-empty id, unique within this source for this event. chargehand drops an event whose id it has seen before, so a poll may report the same event again. |
+| `dedupe_id` | yes | A non-empty id, unique within this source for this event. elfcrew drops an event whose id it has seen before, so a poll may report the same event again. |
 | `pointer` | yes | Where the worker looks: a URL or an identifier. A wake lists only pointers that are plain http(s) URLs or plain identifiers. |
 | `source` | no | The source's name. An event that names another source is skipped. |
 | `ref` | no | The item in the system's own terms, given to `mark` and `item_open` as `{ref}`. Defaults to `item`. |
 | `url` | no | The item's web page, given to the launch prompt as `{item_url}`. Must be a plain http(s) URL. |
 | `repository` | no | Which of the source's `repositories` a start event belongs to. Without it, a source with exactly one repository uses that one, and a source with several starts nothing on the event. |
-| `marked` | no | `true` when the event is a comment that carries chargehand's authorship marker, `<!-- chargehand-worker -->`, or its older spelling `<!-- chargehand -->`. Default `false`. |
+| `marked` | no | `true` when the event is a comment that carries elfcrew's authorship marker, `<!-- elfcrew-worker -->`, or one of its spellings from before the rename, `<!-- chargehand-worker -->` or `<!-- chargehand -->`. Default `false`. |
 
 An event never has a body. Read a comment's text in your command at most to find the
 marker, and do not print it.
@@ -107,7 +107,7 @@ happened:
 | Exit code | Meaning |
 |---|---|
 | 0 | The write landed. |
-| 3 | The write may or may not have landed, for example a timeout after the request was sent. chargehand leaves it for reconciliation and does not assume either outcome. |
+| 3 | The write may or may not have landed, for example a timeout after the request was sent. elfcrew leaves it for reconciliation and does not assume either outcome. |
 | any other | The write failed. |
 
 Verify the write in the command, by reading the item again, before you exit 0.

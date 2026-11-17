@@ -15,16 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import claude, cli, paths, usage
-from chargehand.config import ServeConfig, load_machine_config
-from chargehand.delivery import (
+from elfcrew import claude, cli, paths, usage
+from elfcrew.config import ServeConfig, load_machine_config
+from elfcrew.delivery import (
     WEEKLY_WINDOW,
     UsageReading,
     UsageWindow,
     new_worker_admits,
     usage_admits,
 )
-from chargehand.errors import ConfigError
+from elfcrew.errors import ConfigError
 from conftest import write_machine_config
 from support import daemon as support
 
@@ -358,7 +358,7 @@ def test_levels(percent, level):
 def test_the_serve_table_names_the_usage_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    assert REAL_USAGE_FILE() == tmp_path / ".cache" / "chargehand" / "usage.json"
+    assert REAL_USAGE_FILE() == tmp_path / ".cache" / "elfcrew" / "usage.json"
     assert ServeConfig().usage_file == paths.usage_file() == tmp_path / "usage-cache" / "usage.json"
     assert ServeConfig.parse({}).usage_file == ServeConfig().usage_file
     assert ServeConfig.parse({"usage_file": "~/u.json"}).usage_file == tmp_path / "u.json"
