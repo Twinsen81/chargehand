@@ -1256,8 +1256,10 @@ class Runner:
         session = next((s for s in sessions if s.id == worker.session_id), None)
         if session is not None and not runtime.is_stopped(session):
             return False, ()
-        if below and before is not None:
-            runtime.wait_for_exit(before)
+        if below and before is not None and not runtime.wait_for_exit(before):
+            # What runs below it may be only its normal children, such as an MCP server.
+            _log_process_lives_on(worker.handle, worker.session_id)
+            below = ()
         key = f"{KEPT_PROCESSES_PREFIX}{worker.id}"
         kept = self._kept_processes(worker)
         if not end_left:
@@ -2405,11 +2407,13 @@ class Runner:
             if session is not None and not runtime.is_stopped(session):
                 continue
             if below.get(session_id):
-                runtime.wait_for_exit(before[session_id])
-                processes_mod.end_after_stop(
-                    below[session_id], who="other session",
-                    session=sanitize.scrub_identifier(session_id)[:8],
-                )
+                if runtime.wait_for_exit(before[session_id]):
+                    processes_mod.end_after_stop(
+                        below[session_id], who="other session",
+                        session=sanitize.scrub_identifier(session_id)[:8],
+                    )
+                else:
+                    _log_process_lives_on("other session", session_id)
             if session is not None:
                 runtime.remove(session_id)
         self.invalidate_sessions(runtime_name)
@@ -5211,6 +5215,16 @@ class Runner:
         report.warnings.append(f"notification for {handle} ({state}) failed; see the log")
         return False
 
+
+
+def _log_process_lives_on(who: str, session_id: str) -> None:
+    """A stopped session's process that still runs at the end of the wait after the stop.
+    Nothing below it is ended or reported for this stop: it may be only its normal
+    children, such as an MCP server, which end with it."""
+    log.warning(
+        "%s: the process of session %s still runs after the stop, so the processes below "
+        "it are left alone", who, sanitize.scrub_identifier(session_id)[:8],
+    )
 
 
 def _log_mark(who: str, item: WorkItem, source: Source | None, before: str, after: str) -> None:

@@ -1362,6 +1362,71 @@ def test_stop_does_not_count_a_child_that_ends_with_the_session_process(
     assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
 
 
+@pytest.fixture
+def process_lives_on(monkeypatch):
+    """The process of a stopped session still runs at the end of the wait after the stop,
+    so what runs below it may only be its normal children, such as an MCP server."""
+    build = claude_mod.ClaudeRuntime.from_config
+
+    def from_config(config):
+        runtime = build(config)
+        runtime.pid_alive = lambda pid: True
+        runtime.stop_wait_secs = 0.0
+        runtime.stop_poll_secs = 0.0
+        return runtime
+
+    monkeypatch.setattr(claude_mod.ClaudeRuntime, "from_config", from_config)
+
+
+def test_stop_reports_nothing_while_the_session_process_lives_on(
+    harness, process_table, process_lives_on, caplog
+):
+    attempt = launch(harness)
+    shell_below(harness, process_table, attempt.session_id)
+
+    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+        result = apply_request(harness, "stop", "ABC-1")
+
+    assert result["message"] == "session stopped; `chargehand continue` respawns it"
+    assert ("ABC-1", "orphan-shell") not in harness.notifications()
+    assert harness.ledger.get_state(f"{tick_mod.KEPT_PROCESSES_PREFIX}{attempt.id}") is None
+    [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning == (
+        f"implementer/ABC-1: the process of session {attempt.session_id[:8]} still runs "
+        f"after the stop, so the processes below it are left alone"
+    )
+
+
+def test_cancel_ends_nothing_while_the_session_process_lives_on(
+    harness, process_table, process_lives_on
+):
+    attempt = launch(harness)
+    shells = shell_below(harness, process_table, attempt.session_id)
+
+    assert apply_request(harness, "cancel", "ABC-1")["ok"] == 1
+
+    assert process_table.pids() == shells and process_table.signals == []
+
+
+def test_discard_ends_nothing_of_another_session_whose_process_lives_on(
+    harness, process_table, process_lives_on, caplog
+):
+    attempt = launch(harness)
+    add_listed_session(harness, "47076c61", attempt.worktree_path, pid=4242)
+    shells = shell_below(harness, process_table, "47076c61", pid=7101)
+
+    with caplog.at_level(logging.WARNING, logger="chargehand.tick"):
+        result = apply_request(harness, "discard", "ABC-1", force=True)
+
+    assert result["ok"] == 1, result["message"]
+    assert ["rm", "47076c61"] in harness.claude_state.commands
+    assert process_table.pids() == shells and process_table.signals == []
+    assert (
+        "other session: the process of session 47076c61 still runs after the stop, so the "
+        "processes below it are left alone"
+    ) in [r.getMessage() for r in caplog.records]
+
+
 def test_stop_without_a_background_shell_says_nothing_more(harness, process_table):
     launch(harness)
 

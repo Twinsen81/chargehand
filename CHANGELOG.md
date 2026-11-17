@@ -363,6 +363,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second worker of the item, made the two workers hold each other, and each one sent the
   same notification and its own WARNING line. Both workers are still collected once the
   copy is gone.
+- When the process of a stopped session still runs at the end of the wait after the stop,
+  the stop now ends and reports nothing of what runs below it, and one WARNING line says
+  so. Before, the processes below it, which then may be only its normal children such as
+  an MCP server, counted as outliving the stop: a final stop signalled them, and
+  `chargehand stop` sent a false `orphan-shell` notification.
 
 ### Added
 

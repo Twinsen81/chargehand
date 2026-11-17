@@ -1176,7 +1176,9 @@ each stop, chargehand reads the processes below the session's listed `pid` (`ps`
 the start time of each). Once the stop is confirmed, it waits up to 10 seconds, as a
 resume does, until that `pid` has exited: the listing shows the stop about a second
 before the process ends, and the processes that end with it, such as a stdio MCP server,
-must not count. Then it ends the ones that still run: SIGTERM to each, and to the process
+must not count. When that `pid` still runs at the end of the wait, one WARNING line says
+so, and the stop ends and reports nothing below it: those processes may be only its normal
+children. Otherwise it ends the ones that still run: SIGTERM to each, and to the process
 group of each one that leads its own group, then SIGKILL to what still runs after 3
 seconds. A process counts only with the same pid and
 the same start time, so a pid that a new process got meanwhile is never signalled, and
