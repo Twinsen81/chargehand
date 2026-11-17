@@ -356,6 +356,14 @@ public location.
   list; see the first known limit below.
 - **One writer of side effects.** Mutating commands record a request; only the daemon's
   tick acts on it, under the tick lock. Control actions cannot race a launch in progress.
+- **Only a session's own processes are ended.** A stop of a session does not end a
+  background shell that its turn started, so after a confirmed stop chargehand ends the
+  processes that were below the session's process just before the stop, once that
+  process has exited; while it still runs, they are left alone. It signals no
+  other process: a process counts only with the pid and the start time it had then, so a
+  pid that a new process got meanwhile is never signalled, and PID 1 and chargehand itself
+  never are. `chargehand stop`, which `continue` undoes, ends none of them, and neither
+  does the pause of a worker whose wake the workspace guard refuses.
 - **Minimal notifications.** A notification carries the issue identifier, the state, the
   issue URL, and a short reason chargehand itself writes — never question text, agent
   output, issue titles, a status file's `stop_reason`, or a setup script's output —
@@ -382,7 +390,10 @@ public location.
   Code's `projects` directory is read. The settings file of a session, which holds the
   session's own token, is not in the worktree and so not in the archive. The worktree is
   removed only after the zip is complete and has passed its check, and only by the tick,
-  with the guard of discard applied again.
+  with the guard of discard applied again, which includes the check for other sessions in
+  the worktree. Retry and garbage collection apply that check too, so no path of
+  chargehand deletes a worktree under a session that is not the worker's own unless the
+  operator forces it; garbage collection never forces it and waits instead.
 - **Small supply chain.** No runtime dependencies beyond the Python standard library.
 
 - **The chargehand mod does only what it says.** Every worker session loads it, so what it

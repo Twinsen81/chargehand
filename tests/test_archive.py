@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths
+from chargehand import archive, board, claude as claude_mod, ledger as ledger_mod, paths, sanitize
 from conftest import run_git
 from support import daemon as support
 
@@ -390,6 +390,250 @@ def test_work_that_appears_during_the_zip_keeps_the_worktree(harness):
     assert worker.worktree_path.is_dir() and Path(job.result_path).is_file()
     assert harness.ledger.get(worker.id).archived_at is None
     assert any("archived, but not removed" in line for line in report.warnings)
+
+
+def add_copy(harness, session_id, cwd, **extra):
+    """A session that only the listing shows, such as a copy that `claude --resume` started.
+    It is idle: a working one in the worktree of an ended worker would be adopted."""
+    sessions = harness.claude_state.sessions
+    sessions.append({
+        "id": session_id, "uuid": f"uuid-{session_id}", "cwd": str(cwd),
+        "state": "done", "status": "idle", "pid": 4242, **extra,
+    })
+    harness.claude_state.set(sessions=sessions)
+
+
+def drop_copy(harness, session_id):
+    harness.claude_state.set(
+        sessions=[s for s in harness.claude_state.sessions if s["id"] != session_id]
+    )
+
+
+def test_an_archive_refuses_other_sessions_in_the_worktree_unless_forced(harness):
+    worker = cancelled(harness)
+    add_copy(harness, "47076c61", worker.worktree_path)
+
+    refused = apply_request(harness, "archive", worker.target)
+
+    assert refused["ok"] == 0
+    assert "other sessions are in its worktree: 47076c61" in refused["message"]
+    assert "archive with force" in refused["message"]
+    assert refused["reason"] == {"needs_force": True, "other_sessions": ["47076c61"]}
+    assert jobs(harness, worker) == []
+
+    assert apply_request(harness, "archive", worker.target, force=True)["ok"] == 1
+    assert ["stop", "47076c61"] not in harness.claude_state.commands, "only the job removes it"
+    runner(harness).run_queued(harness.ledger)
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_DONE
+    assert job.progress == "archived; other sessions in its worktree stopped and removed: 47076c61"
+    commands = harness.claude_state.commands
+    assert commands.index(["stop", "47076c61"]) < commands.index(["rm", "47076c61"])
+    assert "47076c61" not in [s["id"] for s in harness.claude_state.sessions]
+    assert not worker.worktree_path.exists() and Path(job.result_path).is_file()
+
+
+def test_an_archive_refuses_without_force_when_the_listing_cannot_be_read(harness, monkeypatch):
+    from chargehand import tick as tick_mod
+
+    worker = cancelled(harness)
+    other_sessions = tick_mod.Runner._other_sessions
+
+    def listing_fails(self, *args):
+        harness.claude_state.set(agents_fail=True)
+        try:
+            return other_sessions(self, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_other_sessions", listing_fails)
+
+    refused = apply_request(harness, "archive", worker.target)
+
+    assert refused["ok"] == 0 and "listing could not be read" in refused["message"]
+    assert refused["reason"] == {"needs_force": True, "sessions_unknown": True}
+    assert jobs(harness, worker) == []
+
+
+def test_a_session_that_starts_in_the_worktree_during_the_zip_keeps_it(harness):
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target)
+    runner(harness).run_queued(harness.ledger)
+    add_copy(harness, "c0b1e5d1", worker.worktree_path)
+
+    report = harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_FAILED
+    assert "not removed: other sessions are in its worktree: c0b1e5d1" in job.error
+    assert job.result_path in job.error
+    assert worker.worktree_path.is_dir() and Path(job.result_path).is_file()
+    assert ["stop", "c0b1e5d1"] not in harness.claude_state.commands
+    assert harness.ledger.get(worker.id).archived_at is None
+    assert f"{worker.handle}: archived, but not removed: 1 other session(s) work in its " \
+        "worktree" in report.warnings
+
+
+def test_a_forced_archive_job_stops_and_removes_a_session_that_started_during_the_zip(harness):
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target, force=True)
+    runner(harness).run_queued(harness.ledger)
+    add_copy(harness, "c0b1e5d2", worker.worktree_path)
+
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_DONE
+    assert "stopped and removed: c0b1e5d2" in job.progress
+    commands = harness.claude_state.commands
+    assert commands.index(["stop", "c0b1e5d2"]) < commands.index(["rm", "c0b1e5d2"])
+    assert not worker.worktree_path.exists()
+
+
+def test_a_forced_archive_job_warns_when_another_session_could_not_be_removed(harness):
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target, force=True)
+    runner(harness).run_queued(harness.ledger)
+    add_copy(harness, "c0b1e5d3", worker.worktree_path)
+    harness.claude_state.set(rm_returncode=1)
+
+    report = harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_DONE
+    assert "could not be stopped and removed: c0b1e5d3" in job.progress
+    assert (
+        f"{worker.handle}: archived, but other sessions in its worktree could not be stopped "
+        f"and removed; archive job {job.id} names them"
+    ) in report.warnings
+
+
+def test_the_stop_of_other_sessions_returns_the_ids_still_listed(harness):
+    # The archive job warns from the ids, not from the words of the outcome.
+    worker = cancelled(harness)
+    add_copy(harness, "c0b1e5d4", worker.worktree_path)
+    add_copy(harness, "c0b1e5d5", worker.worktree_path)
+    others, _ = harness.runner._other_sessions(worker)
+    harness.claude_state.set(rm_returncode=1)
+
+    also, left = harness.runner._stop_other_sessions(worker, others, "archive")
+
+    assert left == ["c0b1e5d4", "c0b1e5d5"]
+    assert "could not be stopped and removed: c0b1e5d4, c0b1e5d5" in also
+    assert harness.runner._stop_other_sessions(worker, [], "archive") == ("", [])
+    unknown, none_left = harness.runner._stop_other_sessions(worker, None, "archive")
+    assert "could not be read" in unknown and none_left == []
+
+
+def test_the_stop_of_other_sessions_returns_only_scrubbed_ids(harness):
+    # The ids come from the session listing, which is untrusted text.
+    worker = cancelled(harness)
+    raw = "c0b1e5d6\x1b[2J"
+    add_copy(harness, raw, worker.worktree_path)
+    others, _ = harness.runner._other_sessions(worker)
+    harness.claude_state.set(rm_returncode=1)
+
+    also, left = harness.runner._stop_other_sessions(worker, others, "archive")
+
+    assert left == [sanitize.scrub_identifier(raw)] and raw not in left
+    assert "\x1b" not in also
+
+
+def test_an_archive_job_never_stops_the_session_of_another_live_worker(harness):
+    worker = cancelled(harness)
+    live = launch(harness, "ABC-2")
+    apply_request(harness, "archive", worker.target, force=True)
+    runner(harness).run_queued(harness.ledger)
+    sessions = harness.claude_state.sessions
+    for session in sessions:
+        if session["id"] == live.session_id:
+            session["cwd"] = str(worker.worktree_path)
+    harness.claude_state.set(sessions=sessions)
+
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_FAILED
+    assert f"the session of live worker {live.id_handle} works in its worktree" in job.error
+    assert ["stop", live.session_id] not in harness.claude_state.commands
+    assert worker.worktree_path.is_dir()
+
+
+def test_an_archive_job_waits_while_the_listing_cannot_be_read(harness, monkeypatch):
+    from chargehand import tick as tick_mod
+
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target)
+    runner(harness).run_queued(harness.ledger)
+    other_sessions = tick_mod.Runner._other_sessions
+    failing = [True]
+
+    def listing_fails(self, *args):
+        # The tick reads the listing first; only this look fails.
+        harness.claude_state.set(agents_fail=failing[0])
+        try:
+            return other_sessions(self, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_other_sessions", listing_fails)
+
+    report = harness.next_tick()
+
+    assert job_of(harness, worker).state == ledger_mod.JOB_WRITTEN
+    assert worker.worktree_path.is_dir()
+    assert f"{worker.handle}: archive written, but not removed: the session listing could " \
+        "not be read" in report.warnings
+
+    failing[0] = False
+    harness.next_tick()
+
+    assert job_of(harness, worker).state == ledger_mod.JOB_DONE
+    assert not worker.worktree_path.exists()
+
+
+def test_a_forced_archive_job_says_when_the_listing_could_not_be_read(harness, monkeypatch):
+    from chargehand import tick as tick_mod
+
+    worker = cancelled(harness)
+    apply_request(harness, "archive", worker.target, force=True)
+    runner(harness).run_queued(harness.ledger)
+    other_sessions = tick_mod.Runner._other_sessions
+
+    def listing_fails(self, *args):
+        harness.claude_state.set(agents_fail=True)
+        try:
+            return other_sessions(self, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_other_sessions", listing_fails)
+
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_DONE
+    assert job.progress == (
+        "archived; the session listing could not be read, so other sessions were not "
+        "looked for"
+    )
+    assert not worker.worktree_path.exists()
+
+
+def test_the_jobs_of_a_repository_archive_check_for_other_sessions(harness):
+    worker = cancelled(harness)
+    assert apply_request(harness, "archive_repository", "test")["ok"] == 1
+    runner(harness).run_queued(harness.ledger)
+    add_copy(harness, "c0b1e5d3", worker.worktree_path)
+
+    harness.next_tick()
+
+    job = job_of(harness, worker)
+    assert job.state == ledger_mod.JOB_FAILED and "c0b1e5d3" in job.error
+    assert worker.worktree_path.is_dir()
+    drop_copy(harness, "c0b1e5d3")
 
 
 def test_discard_retry_and_garbage_collection_wait_for_an_archive(harness):

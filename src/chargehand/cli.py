@@ -1024,7 +1024,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     retry = add("retry", cmd_retry, "start a new worker for a failed or cancelled one")
     add_item(retry)
-    retry.add_argument("--force", action="store_true", help="discard an unpushed worktree first")
+    retry.add_argument(
+        "--force", action="store_true",
+        help="discard an unpushed worktree first; stop and remove other sessions in the worktree",
+    )
     _add_request_flags(retry)
 
     discard = add("discard", cmd_discard, "remove the session, worktree, and local branch")

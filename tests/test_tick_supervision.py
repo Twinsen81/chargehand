@@ -455,6 +455,33 @@ def test_the_watchdog_stops_a_run_past_the_hard_limit(harness):
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
 
 
+def _shell_below(harness, process_table, session_id, pid=7001):
+    """A background shell below the pid the listing names for *session_id*, in a group of
+    its own, and the command it runs. The pids of both."""
+    listed = next(s for s in harness.claude_state.sessions if s["id"] == session_id)
+    process_table.add(pid, listed["pid"])
+    process_table.add(pid + 1, pid, group=pid)
+    return {pid, pid + 1}
+
+
+def test_the_watchdog_hard_stop_ends_the_processes_below_the_working_session(
+    harness, process_table
+):
+    attempt = launch(harness)
+    _shell_below(harness, process_table, attempt.session_id)
+    # A tool that the working turn runs in the foreground, in the session's own group.
+    listed = next(s for s in harness.claude_state.sessions if s["id"] == attempt.session_id)
+    process_table.add(7101, listed["pid"], group=listed["pid"])
+    process_table.add(9000, 1)
+    harness.ledger.update(attempt, working_since=time.time() - 12 * 3600)
+
+    harness.next_tick()
+
+    assert ["stop", attempt.session_id] in harness.claude_state.commands
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert process_table.pids() == {9000}
+
+
 def test_a_finished_run_is_collected_once_the_issue_closes(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)
@@ -469,6 +496,45 @@ def test_a_finished_run_is_collected_once_the_issue_closes(harness, repo, tmp_pa
     assert "implementer/ABC-1" in report.collected
     assert not (harness.worktree("ABC-1")).exists()
     assert harness.claude_state.sessions == []
+
+
+def test_collection_stops_the_session_with_the_listing_of_its_session_check(
+    harness, repo, tmp_path, monkeypatch, process_table
+):
+    # The check for other sessions has just read the listing; the stop reads it again
+    # only to confirm the stop, and the removal to confirm the removal.
+    from chargehand import tick as tick_mod
+
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    worker = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    listed = harness.claude_state.sessions[0]
+    process_table.add(listed["pid"], 1)
+    process_table.add(7001, listed["pid"])
+    harness.board.close("ABC-1")
+    runner = harness.fresh_runner()
+    calls: list[str] = []
+    real_list = claude.ClaudeRuntime.list_sessions
+    monkeypatch.setattr(
+        claude.ClaudeRuntime, "list_sessions",
+        lambda self: calls.append("list") or real_list(self),
+    )
+    real_collect = tick_mod.Runner._collect
+
+    def collect(self, *args, **kwargs):
+        calls.append("collect")
+        return real_collect(self, *args, **kwargs)
+
+    monkeypatch.setattr(tick_mod.Runner, "_collect", collect)
+
+    report = runner.tick()
+
+    assert worker.handle in report.collected
+    assert calls[calls.index("collect"):] == ["collect", "list", "list"]
+    # The processes below the session came from that listing, and the stop ended them.
+    assert 7001 not in process_table.pids()
 
 
 def test_collection_refuses_to_destroy_unpushed_work(harness, repo, tmp_path):
@@ -688,8 +754,8 @@ def test_collection_leaves_a_worktree_alone_when_its_session_will_not_stop(harne
     harness.claude_state.set_session_state("ABC-1", "done")
     harness.next_tick()
     harness.board.close("ABC-1")
-    # The session goes back to working and refuses to stop.
-    harness.claude_state.set_session_state("ABC-1", "working")
+    # The idle session refuses to stop. A session that went back to working would be
+    # adopted by a new live worker; see the test below.
     harness.claude_state.set(stop_returncode=3)
 
     report = harness.next_tick()
@@ -697,6 +763,279 @@ def test_collection_leaves_a_worktree_alone_when_its_session_will_not_stop(harne
     assert report.collected == []
     assert (harness.worktree("ABC-1")).is_dir()
     assert any("still working" in warning for warning in report.warnings)
+
+
+def test_collection_never_stops_the_session_of_a_live_worker_that_adopted_it(
+    harness, repo, tmp_path
+):
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    first = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    harness.board.close("ABC-1")
+    # The session goes back to working, so the tick adopts it as a new live worker.
+    harness.claude_state.set_session_state("ABC-1", "working")
+
+    report = harness.next_tick()
+
+    adopted = harness.worker("ABC-1")
+    assert adopted.id != first.id and adopted.session_id == first.session_id
+    assert report.collected == []
+    assert harness.ledger.get(first.id).gc_done == 0
+    assert (harness.worktree("ABC-1")).is_dir()
+    assert ["stop", first.session_id] not in harness.claude_state.commands
+    assert f"{first.handle}: not collected, 1 other session works in its worktree" in report.warnings
+
+
+def _finished_with_a_copy(harness, repo, tmp_path):
+    """A finished worker whose item closed while a copy that `claude --resume` started
+    is in its worktree. Only the listing shows the copy. It is idle: a working one would
+    be adopted as a new live worker."""
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    worker = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    sessions = harness.claude_state.sessions
+    sessions.append({
+        "id": "c0b1e5d1", "uuid": "uuid-c0b1e5d1", "cwd": str(worker.worktree_path / "src"),
+        "state": "done", "status": "idle", "pid": 4242,
+    })
+    harness.claude_state.set(sessions=sessions)
+    harness.board.close("ABC-1")
+    return harness.ledger.get(worker.id)
+
+
+def test_collection_waits_while_another_session_works_in_the_worktree(
+    harness, repo, tmp_path, caplog
+):
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger="chargehand.tick"):
+        reports = [harness.next_tick() for _ in range(3)]
+
+    assert worker.worktree_path.is_dir()
+    assert harness.ledger.get(worker.id).gc_done == 0
+    assert harness.ledger.live_workers() == []
+    assert all(report.collected == [] for report in reports)
+    assert ["stop", "c0b1e5d1"] not in harness.claude_state.commands
+    assert ["stop", worker.session_id] not in harness.claude_state.commands
+    held = [w for report in reports for w in report.warnings if "not collected" in w]
+    assert held == [f"{worker.handle}: not collected, 1 other session works in its worktree"]
+    assert harness.notifications().count(("ABC-1", "not-collected")) == 1
+    (sent,) = [n for n in harness.notifier.sent if n.state == "not-collected"]
+    assert sent.detail == "1 other session works in its worktree; it is removed once they are gone"
+    lines = [r for r in caplog.records if "not collected, 1 other session" in r.getMessage()]
+    assert [r.levelno for r in lines] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert all(r.getMessage().endswith(": c0b1e5d1") for r in lines)
+
+    harness.claude_state.set(
+        sessions=[s for s in harness.claude_state.sessions if s["id"] != "c0b1e5d1"]
+    )
+    report = harness.next_tick()
+
+    assert worker.handle in report.collected
+    assert not worker.worktree_path.exists()
+    assert harness.ledger.get(worker.id).gc_done == 1
+    assert not any(key.startswith("not-collected:") for key in harness.ledger.all_state())
+
+
+def test_collection_notifies_again_when_other_sessions_hold_the_worktree(harness, repo, tmp_path):
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+    harness.next_tick()
+    sessions = harness.claude_state.sessions
+    sessions.append({
+        "id": "c0b1e5d2", "uuid": "uuid-c0b1e5d2", "cwd": str(worker.worktree_path),
+        "state": "done", "status": "idle", "pid": 4243,
+    })
+    harness.claude_state.set(sessions=sessions)
+
+    report = harness.next_tick()
+
+    assert f"{worker.handle}: not collected, 2 other sessions work in its worktree" in report.warnings
+    assert harness.notifications().count(("ABC-1", "not-collected")) == 2
+    assert worker.worktree_path.is_dir()
+
+
+@pytest.mark.parametrize("named", ["as stored", "through a link"])
+def test_two_workers_that_share_a_held_worktree_notify_once(
+    harness, repo, tmp_path, caplog, named
+):
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    first = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    cwd = first.worktree_path
+    if named == "through a link":
+        # The listing can name the worktree by another path, such as /private/tmp for
+        # /tmp on macOS, and the adopted worker keeps that path.
+        link = tmp_path / "linked-root"
+        link.symlink_to(harness.worktree_root)
+        cwd = link / first.worktree_path.relative_to(harness.worktree_root)
+    # A copy that `claude --resume` started in the worktree works, so the tick adopts it
+    # as a second worker of the item, which then ends as well.
+    sessions = harness.claude_state.sessions
+    sessions.append({
+        "id": "c0b1e5d1", "uuid": "uuid-c0b1e5d1", "cwd": str(cwd),
+        "state": "working", "status": "busy", "pid": 4242,
+    })
+    harness.claude_state.set(sessions=sessions)
+    harness.next_tick()
+    second = harness.ledger.live_worker_for("ABC-1", None)
+    assert second is not None and second.id != first.id
+    assert second.session_id == "c0b1e5d1"
+    harness.claude_state.set_session_state("c0b1e5d1", "done", status="idle")
+    harness.board.close("ABC-1")
+
+    with caplog.at_level(logging.DEBUG, logger="chargehand.tick"):
+        reports = [harness.next_tick() for _ in range(3)]
+
+    assert harness.ledger.get(second.id).is_terminal
+    assert first.worktree_path.is_dir()
+    assert all(report.collected == [] for report in reports)
+    assert harness.notifications().count(("ABC-1", "not-collected")) == 1
+    held = [w for report in reports for w in report.warnings if "not collected" in w]
+    assert held == [f"{first.handle}: not collected, 1 other session works in its worktree"]
+    warnings = [
+        r for r in caplog.records
+        if "not collected" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1 and warnings[0].getMessage().endswith(": c0b1e5d1")
+
+    harness.claude_state.set(
+        sessions=[s for s in harness.claude_state.sessions if s["id"] != "c0b1e5d1"]
+    )
+    report = harness.next_tick()
+
+    assert report.collected == [first.handle, second.handle]
+    assert harness.ledger.get(first.id).gc_done == 1
+    assert harness.ledger.get(second.id).gc_done == 1
+    assert not first.worktree_path.exists()
+    assert not any(key.startswith("not-collected:") for key in harness.ledger.all_state())
+
+
+def test_a_failed_not_collected_notification_goes_again_on_the_next_tick(
+    harness, repo, tmp_path
+):
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+    failing = [True]
+    dispatch = harness.notifier.dispatch
+
+    def flaky(notification):
+        outcome = dispatch(notification)
+        return dataclasses.replace(outcome, failed=failing[0], sent=not failing[0])
+
+    harness.notifier.dispatch = flaky
+    harness.next_tick()
+    assert harness.ledger.get_state(f"not-collected:{worker.id}") is None
+
+    failing[0] = False
+    harness.next_tick()
+    harness.next_tick()
+
+    assert harness.notifications().count(("ABC-1", "not-collected")) == 2
+    assert harness.ledger.get_state(f"not-collected:{worker.id}") == '["c0b1e5d1"]'
+    assert worker.worktree_path.is_dir()
+
+
+def test_collection_does_not_wait_for_other_sessions_once_the_worktree_is_gone(
+    harness, repo, tmp_path
+):
+    # Nothing is left that the hold would keep for the copy, such as a stale stopped
+    # session that still names the worktree that the operator removed by hand.
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+    for session in harness.claude_state.sessions:
+        if session["id"] == "c0b1e5d1":
+            session.pop("pid")
+            session.pop("status")
+    harness.claude_state.set(sessions=harness.claude_state.sessions)
+    run_git("worktree", "remove", "--force", str(worker.worktree_path), cwd=repo)
+
+    report = harness.next_tick()
+
+    assert worker.handle in report.collected
+    assert harness.ledger.get(worker.id).gc_done == 1
+    assert ("ABC-1", "not-collected") not in harness.notifications()
+    assert not any("not collected" in line for line in report.warnings)
+    assert ["stop", "c0b1e5d1"] not in harness.claude_state.commands
+
+
+def test_collection_waits_while_the_session_listing_cannot_be_read(
+    harness, repo, tmp_path, monkeypatch
+):
+    from chargehand import tick as tick_mod
+
+    worker = _finished_with_a_copy(harness, repo, tmp_path)
+    harness.claude_state.set(
+        sessions=[s for s in harness.claude_state.sessions if s["id"] != "c0b1e5d1"]
+    )
+    other_sessions = tick_mod.Runner._other_sessions
+    failing = [True]
+
+    def listing_fails(self, *args):
+        # The tick applies no garbage collection when its own first listing fails.
+        harness.claude_state.set(agents_fail=failing[0])
+        try:
+            return other_sessions(self, *args)
+        finally:
+            harness.claude_state.set(agents_fail=False)
+
+    monkeypatch.setattr(tick_mod.Runner, "_other_sessions", listing_fails)
+
+    report = harness.next_tick()
+
+    assert report.collected == []
+    assert worker.worktree_path.is_dir()
+    assert harness.ledger.get(worker.id).gc_done == 0
+    assert ("ABC-1", "not-collected") not in harness.notifications()
+
+    failing[0] = False
+    assert worker.handle in harness.next_tick().collected
+
+
+def test_collection_ends_the_processes_below_the_session_and_those_a_stop_kept(
+    harness, repo, tmp_path, process_table
+):
+    from chargehand import tick as tick_mod
+
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    worker = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    _shell_below(harness, process_table, worker.session_id)
+    kept = process_table.add(8001, 1)
+    key = f"{tick_mod.KEPT_PROCESSES_PREFIX}{worker.id}"
+    harness.ledger.set_state(key, json.dumps([[kept.pid, kept.group, kept.started]]))
+    harness.board.close("ABC-1")
+
+    report = harness.next_tick()
+
+    assert worker.handle in report.collected
+    assert process_table.pids() == set()
+    assert harness.ledger.get_state(key) is None
+
+
+def test_the_close_of_a_closed_item_ends_the_processes_below_its_session(
+    harness, process_table
+):
+    from chargehand.tick import TickReport
+
+    attempt = launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+    harness.next_tick()
+    _shell_below(harness, process_table, attempt.session_id)
+    harness.board.close("ABC-1")
+    report = TickReport()
+    harness.fresh_runner()
+
+    harness.runner._close_out_finished_issues(report)
+
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
+    assert ["stop", attempt.session_id] in harness.claude_state.commands
+    assert process_table.pids() == set()
 
 
 def test_a_closed_issue_does_not_end_a_run_whose_session_will_not_stop(harness):

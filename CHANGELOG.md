@@ -309,6 +309,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the daemon applies the action and can hold work that the daemon refuses to lose
   without force. Before, that dialog gave no warning, because the tick looks at a live
   worker's worktree only after a refusal.
+- Retry, archive and garbage collection no longer delete a worktree under a session that
+  is not the worker's own, such as a copy that `claude --resume` started there. Before,
+  only discard looked for such sessions; the other three paths deleted the worktree and
+  left the copy running in a deleted directory, with no message. Retry and archive now
+  apply the rules of discard: without force they refuse and name those sessions (on the
+  board with the same words as discard), or refuse because the session listing cannot be
+  read; with force they stop and remove those sessions first, and the outcome names them;
+  they never stop the current session of another live worker. The archive job looks again
+  before it removes the worktree: a session that started there after the request fails a
+  job without force and keeps the worktree, and a listing that cannot be read makes the
+  next tick try again. Garbage collection skips a worker whose worktree other sessions
+  work in, or while the listing cannot be read, logs one WARNING line, sends one
+  notification with the new state `not-collected`, and collects the worker at the first
+  collection after those sessions are gone. A worker whose worktree and item checkout
+  are both gone already is collected without this check, so a stale stopped session that
+  still names the removed worktree does not hold it. `retry --force` says so in its help.
+- A stop no longer leaves a background shell of the session running with no owner. Claude
+  Code does not end such a shell when the session stops: the shell runs on with PID 1 as
+  its parent, such as a dev server that keeps its port. Now cancel, discard, retry,
+  archive, garbage collection, the watchdog's hard stop, the close of a worker whose item
+  closed, the stop of a session refresh, the stop of another session in the worktree, and
+  the stop before a resume (a reply from the board, the resume after a usage limit) read
+  the processes below the session's process before the stop, and end those that still run
+  once the stop is confirmed and the session's process has exited (a process that ends
+  with it, such as an MCP server, does not count): SIGTERM to each and to the process
+  group of each shell, then SIGKILL after 3 seconds. A process is known by its pid and its start time, so a pid that
+  a new process got meanwhile is never signalled. The log names the pids. `chargehand
+  stop`, which `continue` undoes, keeps them: the outcome and one WARNING line name the
+  pids, and one notification goes out with the new state `orphan-shell` and a count; a
+  later cancel, discard or other stop that ends the worker's work ends them. The stop of a
+  session refresh does not: it ends only the processes below the session that it stops.
+- Past the role's `refresh_after_wakes` or `refresh_after_tokens`, a wake no longer stops
+  a session with the mod while a background shell of its ended turn runs. Before, the
+  refresh stopped the session to start a fresh one, which a wake without the refresh
+  never does, and so ended the shell, such as a dev server. Now the refresh waits and the
+  wake does not: the session takes the wake from its outbox while the shell runs, for
+  events and for a reply from the board alike, and one INFO line per outbox message says
+  that the refresh was postponed (later ticks that try the same message again log it at
+  DEBUG). The refresh comes at the first wake after the shell has ended. The
+  refresh also looks again right before its stop, so a shell that started after the
+  tick's listing postpones it too. A session without the mod, whose wake is a stop and a
+  resume, still waits for the shell, and a reply to it still refreshes at once.
+- A wake held for a background shell logs its `skipped:` line at INFO once per hold, and
+  at DEBUG on later ticks. Before, the line came at INFO on every tick, for hours with a
+  dev server. A new hold, after a wake or for another session, logs at INFO again. The
+  card and the `wake held -> queued` transition are unchanged.
+- A forced archive job whose session listing could not be read now says so in its
+  progress: "archived; the session listing could not be read, so other sessions were not
+  looked for", as a forced discard and a forced retry do. Before, it said only
+  "archived".
+- A `not-collected` notification that the hook fails to send goes out again at the next
+  collection, as a `daily-cap` notification does. Before, the hold was recorded before
+  the hook ran, so a failed hook meant that the operator never got the notification.
+- A worktree that garbage collection does not remove gives one `not-collected`
+  notification and one WARNING line, also when two finished workers share it. Before,
+  a copy that `claude --resume` started in a worktree, and that chargehand adopted as a
+  second worker of the item, made the two workers hold each other, and each one sent the
+  same notification and its own WARNING line. Both workers are still collected once the
+  copy is gone.
+- When the process of a stopped session still runs at the end of the wait after the stop,
+  the stop now ends and reports nothing of what runs below it, and one WARNING line says
+  so. Before, the processes below it, which then may be only its normal children such as
+  an MCP server, counted as outliving the stop: a final stop signalled them, and
+  `chargehand stop` sent a false `orphan-shell` notification.
+- The pause of a worker whose wake the workspace guard refuses (`wake-fault`) now treats
+  the processes below its session as `chargehand stop` does: it keeps them, logs one
+  WARNING line with their pids, sends one `orphan-shell` notification, and records them,
+  so a later cancel or other final stop ends them. Before, a background shell of the
+  session ran on with no owner and no word to the operator.
 
 ### Added
 
