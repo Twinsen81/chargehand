@@ -1020,6 +1020,43 @@ def test_a_due_refresh_waits_for_a_background_shell_and_the_wake_goes_in_place(
     assert harness.ledger.inbox(fresh) == []
 
 
+def test_a_postponed_refresh_logs_at_info_once_per_outbox_message(
+    after_two, monkeypatch, caplog
+):
+    # Until the mod takes the message, its events wait in the inbox, and each tick tries
+    # the wake again.
+    harness = after_two
+    reviewer = start_reviewer(harness)
+    wake(harness, reviewer)
+    wake(harness, reviewer)
+    held = shell_after_turn(harness, reviewer, monkeypatch)
+    fake_source.feed().emit("comment", "PR-7")
+
+    def postponed():
+        return [r.levelno for r in caplog.records if "refresh postponed" in r.getMessage()]
+
+    with caplog.at_level(logging.DEBUG, logger="chargehand.delivery"):
+        for _ in range(3):
+            harness.next_tick()
+        assert postponed() == [logging.INFO, logging.DEBUG, logging.DEBUG]
+
+        # The mod submits the wake; that turn ends while the shell still runs, and a new
+        # event makes a new message.
+        worker = harness.ledger.get(reviewer.id)
+        taken = delivery_mod.take_outbox(harness.ledger, worker, worker.session_uuid)
+        delivery_mod.confirm_outbox(harness.ledger, worker, taken.id, submitted=True)
+        current = harness.ledger.get(reviewer.id)
+        harness.runner.apply_hook(
+            current, claude.parse_hook("Stop", {"session_id": current.session_uuid})
+        )
+        harness.claude_state.set_session_state(held.session_id, "done", status="busy")
+        fake_source.feed().emit("comment", "PR-7")
+        harness.next_tick()
+
+    assert postponed() == [logging.INFO, logging.DEBUG, logging.DEBUG, logging.INFO]
+    assert harness.ledger.get(reviewer.id).session_id == held.session_id
+
+
 def test_a_reply_goes_in_place_and_keeps_the_background_shell_while_a_refresh_is_due(
     after_two, monkeypatch, process_table
 ):

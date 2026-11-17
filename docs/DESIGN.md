@@ -946,8 +946,9 @@ whose fresh session would not load the chargehand mod, and so has no tool for th
 keeps the session, with a warning. While a background shell of the ended turn runs, the
 refresh waits, not the wake: a session with the mod takes the wake from its outbox, also a
 reply from the board, and the shell runs on; the refresh comes at the first wake after the
-shell has ended, and one INFO line says that it was postponed (see **Background
-shells**). A session without the mod, whose wake is a stop and a resume, waits for the
+shell has ended. One INFO line per outbox message says that the refresh was postponed;
+later ticks that try the wake again while the message waits for the mod log it at DEBUG
+(see **Background shells**). A session without the mod, whose wake is a stop and a resume, waits for the
 shell before admission, as any such wake does, and a reply to it refreshes at once. The
 tick reads the listing again and leaves a session alone that started a turn or opened a
 prompt since its listing. A session whose turn ended while a background shell of it still

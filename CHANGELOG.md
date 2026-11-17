@@ -345,8 +345,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refresh stopped the session to start a fresh one, which a wake without the refresh
   never does, and so ended the shell, such as a dev server. Now the refresh waits and the
   wake does not: the session takes the wake from its outbox while the shell runs, for
-  events and for a reply from the board alike, and one INFO line says that the refresh
-  was postponed. The refresh comes at the first wake after the shell has ended. The
+  events and for a reply from the board alike, and one INFO line per outbox message says
+  that the refresh was postponed (later ticks that try the same message again log it at
+  DEBUG). The refresh comes at the first wake after the shell has ended. The
   refresh also looks again right before its stop, so a shell that started after the
   tick's listing postpones it too. A session without the mod, whose wake is a stop and a
   resume, still waits for the shell, and a reply to it still refreshes at once.

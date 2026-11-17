@@ -790,9 +790,9 @@ class Delivery:
                 # ended turn, such as a dev server. The wake goes to the session in place,
                 # with the shell running, and the refresh comes at the first wake after
                 # the shell ended. A reply too: it reaches the session without a stop.
-                log.info("%s: refresh postponed (%s), a background shell of session %s "
-                         "still runs; the wake continues the session", worker.handle, why,
-                         worker.session_id)
+                self._log_postponed(
+                    worker, why, f"a background shell of session {worker.session_id} still runs"
+                )
             elif why is not None and self._wake_fresh(worker, message, entries, why, result):
                 return
         # A wake through the outbox starts no turn here, so the state stays as it is.
@@ -962,8 +962,7 @@ class Delivery:
             return True
         if refresh.keep is not None and refresh.shell:
             # A background shell that started after the tick's listing: as above.
-            log.info("%s: refresh postponed (%s), %s; the wake continues the session",
-                     worker.handle, why, sanitize.one_line(refresh.keep, limit=300))
+            self._log_postponed(worker, why, sanitize.one_line(refresh.keep, limit=300))
             return False
         if refresh.keep is not None:
             result.warnings.append(
@@ -1005,6 +1004,19 @@ class Delivery:
         if refresh.prompted:
             result.woken.append(written)
         return True
+
+    def _log_postponed(self, worker: Worker, why: str, shell: str) -> None:
+        """Log that *worker*'s refresh waits for *shell*, at INFO once per outbox message.
+
+        Until the mod takes the message, its events stay in the inbox, so each tick tries
+        the wake again; while the session's message is open, the line comes at DEBUG.
+        """
+        current = self.ledger.outbox_message(worker)
+        repeat = current is not None and current.session_uuid == worker.session_uuid
+        (log.debug if repeat else log.info)(
+            "%s: refresh postponed (%s), %s; the wake continues the session",
+            worker.handle, why, shell,
+        )
 
     def _wake_in_place(
         self, worker: Worker, message: str, entries: Sequence[InboxEntry], result: DeliveryResult
