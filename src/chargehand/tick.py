@@ -4870,11 +4870,13 @@ class Runner:
                 continue
             # With the worktree and the item checkout gone, a session that still names
             # them, such as a stale stopped one, has nothing left to lose.
-            if (
-                worker.worktree_path.exists() or item_checkout_path(worker).exists()
-            ) and self._other_sessions_hold(worker, report):
-                continue
-            problem = self._collect(worker, report)
+            listed: list[Session] | None = None
+            if worker.worktree_path.exists() or item_checkout_path(worker).exists():
+                held, listed = self._other_sessions_hold(worker, report)
+                if held:
+                    continue
+            # The stop takes the listing that the hold just read, instead of another call.
+            problem = self._collect(worker, report, listed=listed)
             if problem:
                 report.warnings.append(f"{worker.handle}: {problem}")
         self._record_work_at_risk()
@@ -4882,11 +4884,14 @@ class Runner:
         self._forget_checkout_heads()
         self._forget_summary_waits()
 
-    def _other_sessions_hold(self, worker: Worker, report: TickReport) -> bool:
+    def _other_sessions_hold(
+        self, worker: Worker, report: TickReport
+    ) -> tuple[bool, list[Session] | None]:
         """Whether a session that is not *worker*'s own keeps garbage collection from
         removing its worktree, by the rules of discard without force: such a session would
         lose its directory, and no operator chose that. So does a listing that cannot be
-        read. The next collection looks again.
+        read. The next collection looks again. Also returns the listing that the check
+        read, None when it could not be read.
 
         The operator learns of a hold once, through a WARNING line, the tick report and a
         notification, and again only when other sessions hold it; see `NOT_COLLECTED_PREFIX`.
@@ -4895,7 +4900,9 @@ class Runner:
         found = self._other_sessions(worker)
         if found is None:
             log.debug("%s: not collected, the session listing could not be read", worker.handle)
-            return True
+            return True, None
+        # The listing that _other_sessions just read, from the cache: no new call.
+        listed = self.sessions(worker.runtime)
         others, holders = found
         ids = sorted(
             {sanitize.scrub_identifier(session.id) for session in others}
@@ -4903,7 +4910,7 @@ class Runner:
         )
         if not ids:
             self.ledger.delete_state(key)
-            return False
+            return False, listed
         what = (
             f"{len(ids)} other session{'s' if len(ids) > 1 else ''} "
             f"{'work' if len(ids) > 1 else 'works'} in its worktree"
@@ -4912,7 +4919,7 @@ class Runner:
         if self.ledger.get_state(key) == record or set(ids) <= self._hold_told(worker):
             log.debug("%s: not collected, %s: %s", worker.handle, what,
                       ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
-            return True
+            return True, listed
         self.ledger.set_state(key, record)
         log.warning("%s: not collected, %s: %s", worker.handle, what,
                     ", ".join(i[:8] for i in ids[:OTHER_SESSIONS_SHOWN]))
@@ -4923,7 +4930,7 @@ class Runner:
         ):
             # The next collection tells the operator again, as for the daily cap.
             self.ledger.delete_state(key)
-        return True
+        return True, listed
 
     def _hold_told(self, worker: Worker) -> set[str]:
         """The scrubbed ids of the sessions that the operator already learned hold
@@ -4970,11 +4977,18 @@ class Runner:
             self.ledger.delete_state(key)
 
     def _collect(
-        self, worker: Worker, report: TickReport, *, force: bool = False, **changes: object
+        self,
+        worker: Worker,
+        report: TickReport,
+        *,
+        force: bool = False,
+        listed: list[Session] | None = None,
+        **changes: object,
     ) -> str | None:
         """Remove a finished worker's session, worktree and branch, and mark it collected,
-        with *changes*. Why it did not, or None. The caller has applied the guard."""
-        if worker.session_id and not self._stop_session(worker):
+        with *changes*. Why it did not, or None. The caller has applied the guard. *listed*
+        is a listing that the caller read right before, for the stop."""
+        if worker.session_id and not self._stop_session(worker, listed=listed):
             return SESSION_STILL_WORKING
         self._remove_session(worker)
         try:

@@ -471,6 +471,45 @@ def test_a_finished_run_is_collected_once_the_issue_closes(harness, repo, tmp_pa
     assert harness.claude_state.sessions == []
 
 
+def test_collection_stops_the_session_with_the_listing_of_its_session_check(
+    harness, repo, tmp_path, monkeypatch, process_table
+):
+    # The check for other sessions has just read the listing; the stop reads it again
+    # only to confirm the stop, and the removal to confirm the removal.
+    from chargehand import tick as tick_mod
+
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    worker = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    listed = harness.claude_state.sessions[0]
+    process_table.add(listed["pid"], 1)
+    process_table.add(7001, listed["pid"])
+    harness.board.close("ABC-1")
+    runner = harness.fresh_runner()
+    calls: list[str] = []
+    real_list = claude.ClaudeRuntime.list_sessions
+    monkeypatch.setattr(
+        claude.ClaudeRuntime, "list_sessions",
+        lambda self: calls.append("list") or real_list(self),
+    )
+    real_collect = tick_mod.Runner._collect
+
+    def collect(self, *args, **kwargs):
+        calls.append("collect")
+        return real_collect(self, *args, **kwargs)
+
+    monkeypatch.setattr(tick_mod.Runner, "_collect", collect)
+
+    report = runner.tick()
+
+    assert worker.handle in report.collected
+    assert calls[calls.index("collect"):] == ["collect", "list", "list"]
+    # The processes below the session came from that listing, and the stop ended them.
+    assert 7001 not in process_table.pids()
+
+
 def test_collection_refuses_to_destroy_unpushed_work(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)
