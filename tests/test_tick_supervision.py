@@ -455,6 +455,33 @@ def test_the_watchdog_stops_a_run_past_the_hard_limit(harness):
     assert harness.labels("ABC-1") == ("chargehand-blocked",)
 
 
+def _shell_below(harness, process_table, session_id, pid=7001):
+    """A background shell below the pid the listing names for *session_id*, in a group of
+    its own, and the command it runs. The pids of both."""
+    listed = next(s for s in harness.claude_state.sessions if s["id"] == session_id)
+    process_table.add(pid, listed["pid"])
+    process_table.add(pid + 1, pid, group=pid)
+    return {pid, pid + 1}
+
+
+def test_the_watchdog_hard_stop_ends_the_processes_below_the_working_session(
+    harness, process_table
+):
+    attempt = launch(harness)
+    _shell_below(harness, process_table, attempt.session_id)
+    # A tool that the working turn runs in the foreground, in the session's own group.
+    listed = next(s for s in harness.claude_state.sessions if s["id"] == attempt.session_id)
+    process_table.add(7101, listed["pid"], group=listed["pid"])
+    process_table.add(9000, 1)
+    harness.ledger.update(attempt, working_since=time.time() - 12 * 3600)
+
+    harness.next_tick()
+
+    assert ["stop", attempt.session_id] in harness.claude_state.commands
+    assert harness.worker("ABC-1").state == ledger_mod.BLOCKED
+    assert process_table.pids() == {9000}
+
+
 def test_a_finished_run_is_collected_once_the_issue_closes(harness, repo, tmp_path):
     status_dir = _with_status_file(harness, repo, tmp_path)
     launch(harness)
@@ -966,6 +993,49 @@ def test_collection_waits_while_the_session_listing_cannot_be_read(
 
     failing[0] = False
     assert worker.handle in harness.next_tick().collected
+
+
+def test_collection_ends_the_processes_below_the_session_and_those_a_stop_kept(
+    harness, repo, tmp_path, process_table
+):
+    from chargehand import tick as tick_mod
+
+    status_dir = _with_status_file(harness, repo, tmp_path)
+    worker = launch(harness)
+    (status_dir / "ABC-1.json").write_text(json.dumps({"state": "complete"}))
+    harness.claude_state.set_session_state("ABC-1", "done")
+    harness.next_tick()
+    _shell_below(harness, process_table, worker.session_id)
+    kept = process_table.add(8001, 1)
+    key = f"{tick_mod.KEPT_PROCESSES_PREFIX}{worker.id}"
+    harness.ledger.set_state(key, json.dumps([[kept.pid, kept.group, kept.started]]))
+    harness.board.close("ABC-1")
+
+    report = harness.next_tick()
+
+    assert worker.handle in report.collected
+    assert process_table.pids() == set()
+    assert harness.ledger.get_state(key) is None
+
+
+def test_the_close_of_a_closed_item_ends_the_processes_below_its_session(
+    harness, process_table
+):
+    from chargehand.tick import TickReport
+
+    attempt = launch(harness)
+    harness.claude_state.set_session_state("ABC-1", "blocked")
+    harness.next_tick()
+    _shell_below(harness, process_table, attempt.session_id)
+    harness.board.close("ABC-1")
+    report = TickReport()
+    harness.fresh_runner()
+
+    harness.runner._close_out_finished_issues(report)
+
+    assert harness.worker("ABC-1").state == ledger_mod.DONE
+    assert ["stop", attempt.session_id] in harness.claude_state.commands
+    assert process_table.pids() == set()
 
 
 def test_a_closed_issue_does_not_end_a_run_whose_session_will_not_stop(harness):
